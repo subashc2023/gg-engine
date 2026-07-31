@@ -1,0 +1,54 @@
+# Golden Game Engine workspace. PLAN.md §3 is the authority on layout, lints,
+# profiles, and tier features; §6 headings are the milestone ledger.
+
+[workspace]
+resolver = "3"
+members = ["crates/gg-runtime", "crates/gg-shaders", "xtask"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.92"
+
+[workspace.dependencies]
+# Rented layers (§2, Locked Decisions).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+profiling = "1"
+tracy-client = "0.18"
+tracing-tracy = "0.11"
+thiserror = "2"
+anyhow = "1"
+shader-slang = "0.1"
+ash = "0.38"
+
+[workspace.lints.clippy]
+# Error-handling policy (§2): unwrap/expect forbidden in engine crates. Tools and
+# xtask do not inherit workspace lints; tests carry an explicit #[allow].
+unwrap_used = "deny"
+expect_used = "deny"
+# Determinism mechanism (§3): the method list lives in clippy.toml. Workspace-wide
+# (stricter than required) until M0B scopes it to determinism-critical crates.
+disallowed_methods = "deny"
+
+# `#![deny(warnings)]` is CI-only (§3): xtask ci passes -D warnings; local builds warn.
+
+[profile.dev]
+opt-level = 1              # debug builds must hit interactive framerates
+[profile.dev.package."*"]
+opt-level = 3              # dependencies always optimized
+
+[profile.instrumented]     # the profiling build: real codegen, zones still in
+inherits = "release"
+debug = true               # Tracy and crash dumps need symbols
+lto = "thin"
+
+[profile.dist]             # the shipping build
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"          # split-debug artifact archived per release, not shipped
+
+[profile.bench]
+inherits = "instrumented"

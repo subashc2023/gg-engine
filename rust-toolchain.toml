@@ -1,0 +1,4 @@
+[toolchain]
+# Pinned per PLAN.md §2 (Determinism Contract v1: rustc = the pinned toolchain).
+# Bumping this is a deliberate compatibility event gated by the M0B FP baseline (§4.2.1).
+channel = "1.92.0"

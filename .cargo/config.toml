@@ -1,0 +1,3 @@
+# `cargo xtask` — the only runner §9 guarantees on both OSes (§6 M0A).
+[alias]
+xtask = "run --quiet --package xtask --"

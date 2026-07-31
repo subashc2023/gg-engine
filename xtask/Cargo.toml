@@ -1,0 +1,20 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+description = "Local-first CI and repo automation (PLAN.md §5): cargo xtask ci/shaders/assets/bench/capture/probe/dist"
+publish = false
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# No [lints] workspace inheritance on purpose: xtask is a tool, and the
+# error-handling policy (§2) permits unwrap/expect in tools (anyhow is still
+# the style). It must remain clippy-clean under -D warnings like everything else.
+
+[dependencies]
+anyhow.workspace = true
+# Spike 2 probe (§6 M0A) queries device capabilities directly; xtask sits
+# outside the §3 containment seam and deny.toml's ash wrappers name it.
+ash.workspace = true
+sha2 = "0.10"
+toml = "0.8"

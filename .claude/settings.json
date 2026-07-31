@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo xtask ci --fast --hook",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

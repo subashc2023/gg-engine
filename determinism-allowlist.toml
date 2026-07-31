@@ -1,0 +1,15 @@
+# Per-use parallelism exemptions in determinism-critical crates (§4.1).
+# Empty until a system earns one; each entry is a reviewed decision, not a default.
+#
+# Entry shape:
+#   [[exemptions]]
+#   crate = "gg-scene"            # the determinism-critical crate taking the exemption
+#   dependency = "rayon"          # what it is allowed to use
+#   scope = "parallel transform propagation, ordered reduce only"
+#   why = "measured need; result is order-independent by construction"
+#   reviewed = "PR #NN"
+#
+# The `rayon` ban's `wrappers` list in deny.toml must contain every crate named
+# here (plus rayon's chartered render/tools users); `xtask ci` cross-checks.
+
+exemptions = []

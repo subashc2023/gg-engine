@@ -1,0 +1,17 @@
+[package]
+name = "gg-shaders"
+version = "0.1.0"
+description = "Slang compilation, reflection, hot reload, codegen (PLAN.md §4.4). M0A scope: spike 1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# Spike 1 (§6 M0A): in-process Slang via the shader-slang bindings, linking the
+# Slang shipped inside the LunarG Vulkan SDK (§2, Shader language row). Binding
+# maturity is the named §8 risk; the spike test is its canary.
+shader-slang.workspace = true

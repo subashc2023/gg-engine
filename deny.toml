@@ -1,0 +1,45 @@
+# cargo-deny: licenses, advisories, duplicate deps, and the §3 ban mechanisms.
+# Live from the first commit, before the crates they contain even exist (§6 M0A).
+# The gg-runtime *dist-graph* bans (no tools/harness/notify/Tracy in what ships)
+# are enforced by the dist gate in `xtask dist` (§5.8), which resolves the exact
+# tier-dist feature set — a per-feature-set graph cargo-deny does not model.
+
+[graph]
+# Default features only: the ban rules below are feature-independent, and the four
+# named tier combinations are built (not powerset-tested) by CI (§3, §5.8).
+all-features = false
+
+[licenses]
+# §2, License row: no copyleft surprises in the tree.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+]
+
+[advisories]
+yanked = "deny"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    # API containment (§3): ash appears in exactly one engine crate — gg-rhi.
+    # xtask is a tool outside the seam; its `probe` (spike 2, §6 M0A) queries
+    # device capabilities directly. The companion grep in `xtask ci` rejects
+    # vk::/ash:: tokens in every other crate's source.
+    { crate = "ash", wrappers = ["gg-rhi", "xtask"] },
+    # Determinism (§3): sim crates never see glam. gg-math wraps it as
+    # gg_math::render; gg-extract is the one membrane crate allowed both sides.
+    { crate = "glam", wrappers = ["gg-math", "gg-extract"] },
+    # Determinism (§4.1): no work-stealing near the state hash. Exemptions only
+    # via determinism-allowlist.toml; this wrappers list must mirror that file
+    # plus the render/tools crates rayon is chartered for — xtask ci cross-checks.
+    { crate = "rayon", wrappers = [] },
+]
