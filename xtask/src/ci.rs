@@ -51,6 +51,7 @@ fn push() -> anyhow::Result<()> {
     allowlist_crosscheck()?;
     line_budgets()?;
     tests(&All)?;
+    fp_baseline_dist_profile()?;
     crate::shaders::build_all()?;
     for feats in ["tier-dist", "tier-dist-verify"] {
         exec(
@@ -73,10 +74,39 @@ fn nightly() -> anyhow::Result<()> {
     push()?;
     crate::dist::gate()?;
     crate::probe::run(false)?;
+    aarch64_leg()?;
     println!(
         "xtask ci --nightly: green (golden suite M7, GPU tests M1, demo runs M1, \
-         aarch64 leg M0B, chaos replays M4B — each lands with its milestone)"
+         chaos replays M4B — each lands with its milestone)"
     );
+    Ok(())
+}
+
+/// The third architecture of the §5 matrix (§6 M0B): gg-math — the FP baseline
+/// and its unit tests — cross-compiled to aarch64 and run under qemu-user, in
+/// both the dev and dist profiles (§5.6d). Linker and runner come from
+/// .cargo/config.toml; the leg runs from the WSL lane, so on Windows it defers
+/// rather than pretending.
+fn aarch64_leg() -> anyhow::Result<()> {
+    if cfg!(windows) {
+        println!("xtask: aarch64 qemu leg runs in the WSL lane (§5) — skipped on Windows");
+        return Ok(());
+    }
+    for profile in ["dev", "dist"] {
+        exec(
+            cargo().args([
+                "nextest",
+                "run",
+                "-p",
+                "gg-math",
+                "--target",
+                "aarch64-unknown-linux-gnu",
+                "--cargo-profile",
+                profile,
+            ]),
+            &format!("gg-math tests on aarch64 under qemu ({profile} profile)"),
+        )?;
+    }
     Ok(())
 }
 
@@ -123,6 +153,16 @@ fn tests(crates: &dyn CrateSet) -> anyhow::Result<()> {
     cmd.args(["nextest", "run", "--no-tests=pass"])
         .args(crates.args());
     exec(&mut cmd, "cargo nextest run")
+}
+
+/// §5.6d: the FP baseline must hold under dist codegen (fat LTO,
+/// codegen-units=1), not just dev — optimization level may not touch sim bits.
+/// The dev-profile run is already part of the workspace test pass.
+fn fp_baseline_dist_profile() -> anyhow::Result<()> {
+    exec(
+        cargo().args(["nextest", "run", "-p", "gg-math", "--cargo-profile", "dist"]),
+        "gg-math tests under the dist profile (§5.6d)",
+    )
 }
 
 /// Dirty paths that can affect a build. Docs, hook config, and logs cannot;

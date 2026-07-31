@@ -1,0 +1,92 @@
+# The M0 FP determinism baseline (PLAN.md §6 spike 3, §4.2.1) - Determinism
+# Contract v1. Bit patterns of a fixed gg_math::sim operation sequence; must
+# be identical on x86_64 Windows, x86_64 Linux, and aarch64 under qemu, under
+# both the dev and dist profiles. The @arch-tagged NaN lines are the sole
+# permitted per-architecture divergence (hazard 6).
+# No --bless exists: edits to this file must name their cause (toolchain bump,
+# libm bump, hardware change - each a Determinism Contract event).
+# Initial creation: 2026-07-31, rustc 1.92.0 pinned, libm 0.2, on the x86_64
+# Windows host; Linux legs verified identical before commit.
+f32/sin = 0x3F157682
+f32/cos = 0x3F4FD6A7
+f32/sin_cos.s = 0x3F157682
+f32/sin_cos.c = 0x3F4FD6A7
+f32/tan = 0x3F3818EB
+f32/asin = 0x3F2C5365
+f32/acos = 0x3F65CC50
+f32/atan = 0x3F0EB744
+f32/atan2 = 0x403290CB
+f32/sinh = 0x3F2A2536
+f32/cosh = 0x3F99B143
+f32/tanh = 0x3F0DB3DA
+f32/exp = 0x3FEEC3DE
+f32/exp2 = 0x3FC530E6
+f32/exp_m1 = 0x3F5D87BC
+f32/ln = 0x3E57C73A
+f32/ln_1p = 0x3EF81766
+f32/log2 = 0x3E9BA6AD
+f32/log10 = 0x3DBB6C2E
+f32/log = 0x3FEEFBAF
+f32/powf = 0x3FD1D559
+f32/cbrt = 0x3F895065
+f32/hypot = 0x40A70B7E
+f32/sqrt.2 = 0x3FB504F3
+f32/sqrt.big = 0x42DE38E3
+f32/mul_add = 0x34800000
+f32/unfused_mul_add = 0x34800000
+f32/chain.arith = 0x40E5AADC
+f32/chain.dot = 0x3FD9999A
+f32/chain.cross.x = 0x3D4CCCD0
+f32/chain.length = 0x4091C456
+f32/chain.quat.x = 0x3F0391CE
+f32/chain.quat.w = 0x3F526A2E
+f32/chain.rotate.y = 0xC08C727A
+f32/chain.mat.p.x = 0x40FF784F
+f32/chain.mat.p.y = 0xC0A47B60
+f32/chain.mat.p.z = 0x40B1B43B
+f32/chain.mat.det = 0x3F7FFFFF
+f32/nan_div@x86_64 = 0xFFC00000
+# aarch64 lines recorded 2026-07-31 from the first qemu-user run (cause: the
+# third architecture joining Determinism Contract v1). SSE2 0/0 is negative
+# quiet NaN, AArch64 positive — the documented hazard-6 divergence, pinned.
+f32/nan_div@aarch64 = 0x7FC00000
+f64/sin = 0x3FE2AED05692F337
+f64/cos = 0x3FE9FAD4CB03A032
+f64/sin_cos.s = 0x3FE2AED05692F337
+f64/sin_cos.c = 0x3FE9FAD4CB03A032
+f64/tan = 0x3FE7031D692E19D0
+f64/asin = 0x3FE58A6CAA1169BA
+f64/acos = 0x3FECB989FE76F077
+f64/atan = 0x3FE1D6E88B072E4F
+f64/atan2 = 0x40065219534457F4
+f64/sinh = 0x3FE544A6DC0F2DB8
+f64/cosh = 0x3FF33628593CD93A
+f64/tanh = 0x3FE1B67B36EB4392
+f64/exp = 0x3FFDD87BC7447016
+f64/exp2 = 0x3FF8A61CC9952999
+f64/exp_m1 = 0x3FEBB0F78E88E02B
+f64/ln = 0x3FCAF8E770F246D8
+f64/ln_1p = 0x3FDF02ECBE681698
+f64/log2 = 0x3FD374D5DE980BE1
+f64/log10 = 0x3FB76D86020EA762
+f64/log = 0x3FFDDF75E4DD59B1
+f64/powf = 0x3FFA3AAB5383E755
+f64/cbrt = 0x3FF12A0CA1EDB952
+f64/hypot = 0x4014E16FDACFF937
+f64/sqrt.2 = 0x3FF6A09E667F3BCD
+f64/sqrt.big = 0x405BC71C6FA84664
+f64/mul_add = 0x3E8AD7F2B1849B87
+f64/unfused_mul_add = 0x3E8AD7F2B1800000
+f64/chain.arith = 0x401CB55BAE1D11E8
+f64/chain.dot = 0x3FFB333333333334
+f64/chain.cross.x = 0x3FA9999999999990
+f64/chain.length = 0x4012388AC0059C28
+f64/chain.quat.x = 0x3FE07239DE07BC93
+f64/chain.quat.w = 0x3FEA4D45B07588B4
+f64/chain.rotate.y = 0xC0118E4F482D292F
+f64/chain.mat.p.x = 0x401FEF0A16784EFB
+f64/chain.mat.p.y = 0xC0148F6C5019E12C
+f64/chain.mat.p.z = 0x401636870AF1E705
+f64/chain.mat.det = 0x3FF0000000000000
+f64/nan_div@x86_64 = 0xFFF8000000000000
+f64/nan_div@aarch64 = 0x7FF8000000000000

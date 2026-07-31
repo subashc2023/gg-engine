@@ -1,8 +1,10 @@
 # Determinism mechanism (§3, §4.2.1 hazard 1): std float transcendentals are not
 # correctly rounded by IEEE 754 and differ between MSVC's CRT, glibc, musl, and
 # glibc versions. Sim code takes them from the `libm` crate via gg_math::sim (M0B).
-# This list applies workspace-wide until M0B scopes enforcement to
-# determinism-critical crates; nothing outside sim should need them either.
+# The lists apply workspace-wide (stricter than §3 requires): render-side code
+# that legitimately needs an entry allows it at the use site with a reason, so
+# the deterministic choice is the default one. gg_math::sim itself calls libm
+# directly, which these bans never touch.
 disallowed-methods = [
     { path = "f32::sin", reason = "not correctly rounded; use gg_math::sim (libm) — PLAN.md §4.2.1" },
     { path = "f32::cos", reason = "not correctly rounded; use gg_math::sim (libm)" },
@@ -48,4 +50,12 @@ disallowed-methods = [
     { path = "f64::powf", reason = "not correctly rounded; use gg_math::sim (libm)" },
     { path = "f64::cbrt", reason = "not correctly rounded; use gg_math::sim (libm)" },
     { path = "f64::hypot", reason = "not correctly rounded; use gg_math::sim (libm)" },
+]
+
+# Determinism mechanism (§3, §4.2.1 hazard 3): randomly-seeded hash iteration
+# order is a likelier divergence source than floats. Sim state uses IndexMap
+# with a fixed hasher, sorted Vecs, or dense archetype iteration (gg-ecs).
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is randomly seeded; use IndexMap/sorted Vec/dense iteration — PLAN.md §4.2.1 hazard 3" },
+    { path = "std::collections::HashSet", reason = "iteration order is randomly seeded; use IndexSet/sorted Vec/dense iteration — PLAN.md §4.2.1 hazard 3" },
 ]

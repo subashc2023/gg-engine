@@ -1,3 +1,10 @@
 # `cargo xtask` — the only runner §9 guarantees on both OSes (§6 M0A).
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# The third architecture of the §5 execution matrix: aarch64 under qemu-user,
+# run from WSL in the nightly tier (§6 M0B). qemu-user is how cross-rs tests
+# ARM without ARM hardware; qemu-not-silicon is a named §8 residual.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+runner = ["qemu-aarch64", "-L", "/usr/aarch64-linux-gnu"]
