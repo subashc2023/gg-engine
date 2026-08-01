@@ -109,9 +109,15 @@ fn interactive_resize_minimize_spam_1000() {
                     resizes_seen += 1;
                     rhi.resize(w, h);
                 }
-                // Pump never emits Exiting (it has no event loop to end); the
-                // arm exists so this match stays exhaustive.
-                Event::CloseRequested | Event::WindowReady | Event::Frame | Event::Exiting => {}
+                // Pump never emits Exiting (it has no event loop to end), and
+                // nothing types at an off-screen window; the arms exist so this
+                // match stays exhaustive.
+                Event::CloseRequested
+                | Event::WindowReady
+                | Event::Frame
+                | Event::Exiting
+                | Event::Key { .. }
+                | Event::MouseMotion { .. } => {}
             }
         }
         match rhi.render_clear_frame([0.3, 0.2, 0.1, 1.0]).expect("frame") {

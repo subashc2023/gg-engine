@@ -1,0 +1,7 @@
+error[E0046]: not all trait items implemented, missing: `FIELDS`
+  --> tests/reject/missing_schema.rs:18:1
+   |
+18 | impl gg_ecs::Component for Unfingerprinted {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `FIELDS` in implementation
+   |
+   = help: implement the missing item: `const FIELDS: &'static [FieldDesc] = &[];`

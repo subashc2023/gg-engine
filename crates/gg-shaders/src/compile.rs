@@ -39,8 +39,9 @@ pub struct CompiledEntryPoint {
     pub spirv: Vec<u8>,
 }
 
-/// Scalar component type codegen supports (32-bit only, deliberately: 16/64-bit
-/// join with a consumer that needs them).
+/// Scalar component type codegen supports. 16-bit joins with a consumer that
+/// needs it; `uint64_t` arrived with M4A's buffer device addresses (§4.3),
+/// which are the one 64-bit quantity a push-constant block carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scalar {
     /// `float`
@@ -49,6 +50,8 @@ pub enum Scalar {
     U32,
     /// `int`
     I32,
+    /// `uint64_t` — a buffer device address.
+    U64,
 }
 
 /// A field's shape, restricted to what maps 1:1 onto a `repr(C)` Rust type.
@@ -81,8 +84,8 @@ impl FieldType {
     /// Size of the generated Rust type in bytes.
     pub fn cpu_size(&self) -> usize {
         match self {
-            FieldType::Scalar(_) => 4,
-            FieldType::Vector(_, n) => 4 * *n as usize,
+            FieldType::Scalar(s) => s.size(),
+            FieldType::Vector(s, n) => s.size() * *n as usize,
             FieldType::Matrix { rows, cols } => 4 * (*rows as usize) * (*cols as usize),
         }
     }
@@ -94,6 +97,14 @@ impl Scalar {
             Scalar::F32 => "f32",
             Scalar::U32 => "u32",
             Scalar::I32 => "i32",
+            Scalar::U64 => "u64",
+        }
+    }
+
+    fn size(self) -> usize {
+        match self {
+            Scalar::F32 | Scalar::U32 | Scalar::I32 => 4,
+            Scalar::U64 => 8,
         }
     }
 }
@@ -421,8 +432,9 @@ fn scalar(context: &str, st: Option<slang::ScalarType>) -> Result<Scalar, Shader
         Some(slang::ScalarType::Float32) => Ok(Scalar::F32),
         Some(slang::ScalarType::Uint32) => Ok(Scalar::U32),
         Some(slang::ScalarType::Int32) => Ok(Scalar::I32),
+        Some(slang::ScalarType::Uint64) => Ok(Scalar::U64),
         other => Err(ShaderError::Unsupported(format!(
-            "field `{context}`: scalar type {other:?} — codegen covers 32-bit float/uint/int"
+            "field `{context}`: scalar type {other:?} — codegen covers 32-bit float/uint/int              and uint64_t"
         ))),
     }
 }
@@ -446,7 +458,7 @@ fn field_type(name: &str, tl: &slang::reflection::TypeLayout) -> Result<FieldTyp
                     "field `{name}`: matrix without a shape"
                 )));
             };
-            if scalar(name, tl.scalar_type()).is_err() {
+            if !matches!(scalar(name, tl.scalar_type()), Ok(Scalar::F32)) {
                 return Err(ShaderError::Unsupported(format!(
                     "field `{name}`: non-f32 matrix — codegen covers float matrices"
                 )));

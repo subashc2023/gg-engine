@@ -1,0 +1,5 @@
+error: field `cursor`: `usize` is platform-width, so its encoding would differ between a 32-bit and a 64-bit target and its meaning differs across the §4.2.2 boundary (§4.2.1). Use an explicit width — `u32`/`u64` — chosen for the range the field actually needs.
+ --> tests/reject/side_table_usize_field.rs:9:13
+  |
+9 |     cursor: usize,
+  |             ^^^^^

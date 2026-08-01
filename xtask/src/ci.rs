@@ -55,6 +55,7 @@ fn push() -> anyhow::Result<()> {
     greps()?;
     allowlist_crosscheck()?;
     line_budgets()?;
+    crate::public_api::check()?;
     tests(&All)?;
     fp_baseline_dist_profile()?;
     // Gate 3 (§5): entry points compile + reflection codegen diff-clean. Check
@@ -65,6 +66,7 @@ fn push() -> anyhow::Result<()> {
         ("gg-runtime", "tier-dist-verify"),
         ("demo-00-clear", "tier-dist"),
         ("demo-01-triangle", "tier-dist"),
+        ("demo-02-mesh", "tier-dist"),
     ] {
         exec(
             cargo().args([
@@ -86,6 +88,7 @@ fn nightly() -> anyhow::Result<()> {
     push()?;
     crate::dist::gate()?;
     crate::probe::run(false)?;
+    stress_and_miri()?;
     aarch64_leg()?;
     gpu_tests()?;
     golden_suite()?;
@@ -94,6 +97,47 @@ fn nightly() -> anyhow::Result<()> {
          `cargo xtask interactive`, manual; golden suite grows to v1 at M7, chaos replays M4B)"
     );
     Ok(())
+}
+
+/// M3's two slow gates (§4.2): the 10k-tick archetype-churn stress, and Miri
+/// over `gg-ecs`'s `unsafe`.
+///
+/// Nightly rather than push because the churn run is minutes, not seconds, and
+/// Miri is an order of magnitude slower still. Both are cheap to run and
+/// expensive to skip: the churn digest is the cross-architecture claim, and Miri
+/// is the only thing that reads the aliasing argument in `view.rs` rather than
+/// trusting its comment.
+fn stress_and_miri() -> anyhow::Result<()> {
+    exec(
+        cargo().args([
+            "nextest",
+            "run",
+            "-p",
+            "gg-ecs",
+            "--run-ignored",
+            "all",
+            "-E",
+            "test(churn_at_full_scale_neither_leaks_nor_diverges)",
+        ]),
+        "gg-ecs archetype-churn stress (100k entities, 50 archetypes, 10k ticks)",
+    )?;
+    // `views`/`query` only: they hold every raw pointer in the crate. `churn`
+    // installs a global allocator and `reject` shells out to cargo — neither is
+    // something Miri should be asked to interpret.
+    exec(
+        cargo().env("MIRIFLAGS", "-Zmiri-strict-provenance").args([
+            &format!("+{}", crate::public_api::NIGHTLY),
+            "miri",
+            "test",
+            "-p",
+            "gg-ecs",
+            "--test",
+            "views",
+            "--test",
+            "query",
+        ]),
+        "miri over gg-ecs column views",
+    )
 }
 
 /// `cargo xtask interactive` — the manual windowed suite (§1.5): everything
@@ -193,7 +237,7 @@ fn golden_suite() -> anyhow::Result<()> {
 /// errors or leaks — the demo binaries exit nonzero on either. Creates
 /// windows, so never part of an automated tier (§1.5).
 fn demo_runs() -> anyhow::Result<()> {
-    for demo in ["demo-00-clear", "demo-01-triangle"] {
+    for demo in ["demo-00-clear", "demo-01-triangle", "demo-02-mesh"] {
         let mut cmd = cargo();
         cmd.args(["run", "-p", demo, "--", "--frames", "100"]);
         cmd.env("GG_HEADLESS", "1");
@@ -217,18 +261,25 @@ fn aarch64_leg() -> anyhow::Result<()> {
         return Ok(());
     }
     for profile in ["dev", "dist"] {
+        // gg-ecs joins at M3: the canonical hash and the churn digest are
+        // cross-architecture claims, so the leg that proves aarch64 has to run
+        // them. The full-scale churn stays `#[ignore]`d here — under qemu-user
+        // it would cost most of an hour to prove what the moderate-scale frozen
+        // digest already proves.
         exec(
             cargo().args([
                 "nextest",
                 "run",
                 "-p",
                 "gg-math",
+                "-p",
+                "gg-ecs",
                 "--target",
                 "aarch64-unknown-linux-gnu",
                 "--cargo-profile",
                 profile,
             ]),
-            &format!("gg-math tests on aarch64 under qemu ({profile} profile)"),
+            &format!("gg-math + gg-ecs tests on aarch64 under qemu ({profile} profile)"),
         )?;
     }
     Ok(())
@@ -335,6 +386,17 @@ fn crates_touched(paths: &[String]) -> BTreeSet<String> {
 
 // ---- gate 1 extras: greps, cross-checks, budgets (§3) -------------------
 
+/// `needle` as a whole path segment, not as a suffix of a longer identifier.
+///
+/// The distinction is not pedantry: `gg_ecs::hash::` ends in `ash::`, and a
+/// plain substring search reports every file in the crate. The gate means the
+/// *crate* `ash`, so a preceding identifier character disqualifies the hit.
+fn contains_path(text: &str, needle: &str) -> bool {
+    let bytes = text.as_bytes();
+    text.match_indices(needle)
+        .any(|(at, _)| at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_'))
+}
+
 fn greps() -> anyhow::Result<()> {
     let root = workspace_root();
     let mut files = Vec::new();
@@ -349,9 +411,11 @@ fn greps() -> anyhow::Result<()> {
 
         // API containment (§3): vk::/ash:: tokens live in gg-rhi alone.
         if !rel_str.starts_with("crates/gg-rhi/")
-            && (text.contains("ash::") || text.contains("vk::"))
+            && let Some(tok) = ["ash::", "vk::"]
+                .into_iter()
+                .find(|t| contains_path(&text, t))
         {
-            violations.push(format!("{rel_str}: vk::/ash:: token outside gg-rhi (§3)"));
+            violations.push(format!("{rel_str}: `{tok}` token outside gg-rhi (§3)"));
         }
 
         // Float-time fields (§2 Sim time row). Scoped to hashed components for
@@ -374,6 +438,33 @@ fn greps() -> anyhow::Result<()> {
                         ));
                     }
                 }
+            }
+        }
+
+        // Every `unsafe` block and `unsafe impl` carries a `// SAFETY:` within
+        // the preceding 8 lines (§4.2 M3 exit, and the standing rule for
+        // gg-rhi). `unsafe fn` *declarations* are exempt: their obligation is on
+        // the caller and belongs in the doc comment, not in a SAFETY note.
+        let lines: Vec<&str> = text.lines().collect();
+        for (lineno, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            let is_site = t.contains("unsafe impl")
+                || line
+                    .split("unsafe")
+                    .skip(1)
+                    .any(|rest| rest.trim_start().starts_with('{'));
+            if is_site
+                && !lines[lineno.saturating_sub(8)..lineno]
+                    .iter()
+                    .any(|l| l.contains("SAFETY"))
+            {
+                violations.push(format!(
+                    "{rel_str}:{}: unsafe without a `// SAFETY:` note (§4.2)",
+                    lineno + 1
+                ));
             }
         }
 

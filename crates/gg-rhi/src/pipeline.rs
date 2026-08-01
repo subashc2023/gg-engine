@@ -1,8 +1,13 @@
-//! Graphics pipelines (§4.4, M2): SPIR-V in, dynamic-rendering pipeline out —
-//! no render passes, no descriptor sets yet (bindless lands at M4A; M2's one
-//! resource path is push constants). The pipeline cache is serialized to disk
+//! Graphics pipelines (§4.4): SPIR-V in, dynamic-rendering pipeline out — no
+//! render passes, and exactly one descriptor set layout in the whole engine
+//! (the bindless global set, §4.3). The pipeline cache is serialized to disk
 //! and every creation is timed and logged, so cold/warm cost is a printed
 //! fact instead of a feeling.
+//!
+//! There is still no vertex input state: geometry is *pulled* in the vertex
+//! shader through a buffer device address (§4.3), so the only fixed-function
+//! stream a pipeline can have is the index one, and that is per-draw rather
+//! than per-pipeline.
 
 use crate::RhiError;
 use crate::deletion::{Deferred, DeletionQueue};
@@ -11,9 +16,8 @@ use ash::vk;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// What a graphics pipeline is made of at M2: one vertex + one fragment entry
-/// point and a push-constant block. Vertex data comes from the shader itself
-/// (`SV_VertexID`); vertex buffers arrive with real geometry (M4A).
+/// What a graphics pipeline is made of: one vertex + one fragment entry point,
+/// a push-constant block, and whether it participates in depth.
 pub struct PipelineDesc<'a> {
     /// Debug name (§1.6) — shows up in validation messages and logs.
     pub name: &'a str,
@@ -28,6 +32,12 @@ pub struct PipelineDesc<'a> {
     /// Push-constant block size in bytes (0 for none). Draws must pass
     /// exactly this many bytes — checked, not assumed.
     pub push_constant_size: u32,
+    /// Test and write depth. Reverse-Z (§2, Math row): the buffer clears to
+    /// `0.0` and the comparison is *greater*-or-equal, so a fragment survives
+    /// by being nearer. A pipeline that sets this `false` still declares the
+    /// depth format — dynamic rendering requires the pipeline and the pass to
+    /// agree on attachment formats whether or not the pipeline reads them.
+    pub depth: bool,
 }
 
 /// An opaque handle to a created pipeline. Plain data on purpose: handles
@@ -100,6 +110,7 @@ impl PipelineStore {
         device: &Device,
         desc: &PipelineDesc<'_>,
         color_format: vk::Format,
+        set_layout: vk::DescriptorSetLayout,
     ) -> Result<PipelineHandle, RhiError> {
         let started = std::time::Instant::now();
         let vs = create_shader_module(device, desc.vs_spirv, desc.name)?;
@@ -112,7 +123,7 @@ impl PipelineStore {
             }
         };
 
-        let result = self.create_with_modules(device, desc, color_format, vs, fs);
+        let result = self.create_with_modules(device, desc, color_format, set_layout, vs, fs);
         // SAFETY: pipeline creation retains no reference to the modules.
         unsafe {
             device.raw().destroy_shader_module(vs, None);
@@ -132,6 +143,7 @@ impl PipelineStore {
         device: &Device,
         desc: &PipelineDesc<'_>,
         color_format: vk::Format,
+        set_layout: vk::DescriptorSetLayout,
         vs: vk::ShaderModule,
         fs: vk::ShaderModule,
     ) -> Result<PipelineHandle, RhiError> {
@@ -139,7 +151,12 @@ impl PipelineStore {
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
             .offset(0)
             .size(desc.push_constant_size)];
-        let mut layout_info = vk::PipelineLayoutCreateInfo::default();
+        // Every pipeline carries the one global set (§4.3), whether or not its
+        // shaders index it: one layout means a bound set stays bound across
+        // pipeline switches, which is the property that deletes descriptor
+        // management from the rest of the engine.
+        let set_layouts = [set_layout];
+        let mut layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
         if desc.push_constant_size > 0 {
             layout_info = layout_info.push_constant_ranges(&push_ranges);
         }
@@ -184,9 +201,19 @@ impl PipelineStore {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
+        // Reverse-Z: clear to 0.0, keep the *greater* fragment. Equal passes so
+        // a depth prepass can re-draw the same geometry (§4.5 v1 targets).
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(desc.depth)
+            .depth_write_enable(desc.depth)
+            .depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL)
+            .min_depth_bounds(0.0)
+            .max_depth_bounds(1.0);
+
         let color_formats = [color_format];
-        let mut rendering =
-            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&color_formats);
+        let mut rendering = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&color_formats)
+            .depth_attachment_format(crate::resource::ImageFormat::Depth32.vk());
 
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
@@ -195,6 +222,7 @@ impl PipelineStore {
             .viewport_state(&viewport_state)
             .rasterization_state(&rasterization)
             .multisample_state(&multisample)
+            .depth_stencil_state(&depth_stencil)
             .color_blend_state(&blend)
             .dynamic_state(&dynamic)
             .layout(layout)
@@ -306,26 +334,39 @@ impl PipelineStore {
     }
 }
 
+/// A draw resolved down to Vulkan handles, so `render_frame` can look
+/// everything up *before* it acquires a swapchain image and this function
+/// cannot fail on a dead handle (see the resolve site in `Rhi::render_frame`).
+#[derive(Clone, Copy)]
+pub(crate) struct ResolvedDraw<'a> {
+    pub entry: PipelineEntry,
+    pub push_constants: &'a [u8],
+    pub count: u32,
+    pub index_buffer: Option<vk::Buffer>,
+}
+
 /// Record one draw inside an active dynamic-rendering pass: full-target
-/// viewport/scissor, push constants, `vk::CmdDraw`. Shared by the swapchain
-/// and offscreen paths so a draw means the same thing everywhere.
+/// viewport/scissor, the global bindless set, push constants, and an indexed
+/// or non-indexed draw. Shared by the swapchain and offscreen paths so a draw
+/// means the same thing everywhere.
 ///
 /// # Safety
-/// `cmd` must be recording inside `cmd_begin_rendering`, and `entry` must be
-/// a live pipeline compatible with the pass's color format.
+/// `cmd` must be recording inside `cmd_begin_rendering`; the pipeline must be
+/// live and compatible with the pass's attachment formats; and `set` must be
+/// the global set, which every pipeline layout declares.
 pub(crate) unsafe fn record_draw(
     device: &Device,
     cmd: vk::CommandBuffer,
     extent: (u32, u32),
-    entry: &PipelineEntry,
-    push_constants: &[u8],
-    vertex_count: u32,
+    set: vk::DescriptorSet,
+    draw: &ResolvedDraw<'_>,
 ) -> Result<(), RhiError> {
-    if push_constants.len() != entry.push_constant_size as usize {
+    let entry = &draw.entry;
+    if draw.push_constants.len() != entry.push_constant_size as usize {
         return Err(RhiError::Loader(format!(
             "draw passed {} push-constant bytes; the pipeline declares {} (§4.4: layouts are \
              checked, not assumed)",
-            push_constants.len(),
+            draw.push_constants.len(),
             entry.push_constant_size
         )));
     }
@@ -342,21 +383,36 @@ pub(crate) unsafe fn record_draw(
             height: extent.1,
         },
     }];
-    // SAFETY: caller contract — recording command buffer, live pipeline.
+    // SAFETY: caller contract — recording command buffer, live pipeline, and a
+    // set whose layout every pipeline layout declares at index 0.
     unsafe {
         device.cmd_set_viewport(cmd, 0, &viewport);
         device.cmd_set_scissor(cmd, 0, &scissor);
         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, entry.pipeline);
-        if !push_constants.is_empty() {
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::GRAPHICS,
+            entry.layout,
+            0,
+            &[set],
+            &[],
+        );
+        if !draw.push_constants.is_empty() {
             device.cmd_push_constants(
                 cmd,
                 entry.layout,
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 0,
-                push_constants,
+                draw.push_constants,
             );
         }
-        device.cmd_draw(cmd, vertex_count, 1, 0, 0);
+        match draw.index_buffer {
+            Some(buffer) => {
+                device.cmd_bind_index_buffer(cmd, buffer, 0, vk::IndexType::UINT32);
+                device.cmd_draw_indexed(cmd, draw.count, 1, 0, 0, 0);
+            }
+            None => device.cmd_draw(cmd, draw.count, 1, 0, 0),
+        }
     }
     Ok(())
 }

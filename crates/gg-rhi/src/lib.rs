@@ -1,52 +1,67 @@
 //! `gg-rhi` — the only crate that speaks raw Vulkan (§4.3), a machine-enforced
 //! property: `ash` is deny-banned elsewhere and vk:: tokens outside this crate
-//! fail the §3 grep. The public API is safe, small, and engine-shaped — at M1
-//! that shape is [`Rhi`]: bring the device up with a precise report, clear and
-//! present frames with 2 frames in flight on timeline semaphores, treat
-//! swapchain recreation as a normal event, and account for every byte and
-//! every validation message at shutdown.
+//! fail the §3 grep. The public API is safe, small, and engine-shaped: bring
+//! the device up with a precise report, clear and present frames with 2 frames
+//! in flight on timeline semaphores, treat swapchain recreation as a normal
+//! event, upload through a staging ring on the transfer queue, reach every
+//! texture through one global bindless set and every buffer through its device
+//! address — and account for every byte and every validation message at
+//! shutdown.
 //!
 //! Complexity budget (§3): no backend abstraction, no render concepts (meshes,
 //! materials live above), resource newtypes only.
 
 #![warn(missing_docs)]
 
+mod bindless;
 mod deletion;
 mod device;
 mod frame;
+mod gpu;
 mod instance;
 mod offscreen;
 mod pipeline;
+mod resource;
 mod suppressions;
 mod surface;
 mod swapchain;
+mod upload;
 
+pub use bindless::{StorageImageIndex, TextureIndex};
 pub use device::{Candidate, DeviceReport};
 pub use frame::FRAMES_IN_FLIGHT;
 pub use instance::validation_message_count;
 pub use offscreen::OffscreenRhi;
 pub use pipeline::{PipelineDesc, PipelineHandle};
+pub use resource::{
+    BufferDesc, BufferHandle, BufferKind, DeviceAddress, ImageDesc, ImageFormat, ImageHandle,
+    ImageUse, Sampler,
+};
 pub use suppressions::{parse as parse_suppressions, validated as validated_suppressions};
 
 use ash::vk;
-use deletion::DeletionQueue;
-use device::Device;
 use frame::Frames;
+use gpu::Gpu;
 use instance::Instance;
-use pipeline::PipelineStore;
+use pipeline::ResolvedDraw;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use surface::Surface;
 use swapchain::{Acquired, Swapchain};
 
-/// One draw call at M2 scope: a pipeline, its push constants, and a vertex
-/// count (geometry comes from the shader; vertex buffers land at M4A).
+/// One draw call: a pipeline, its push constants, and how many vertices — or,
+/// with `index_buffer` set, how many indices. Vertex *data* is never bound:
+/// the shader pulls it through a device address it receives in the push
+/// constants (§4.3).
 pub struct DrawSpec<'a> {
     /// The pipeline to draw with.
     pub pipeline: PipelineHandle,
     /// Push-constant bytes; length must equal the pipeline's declared size.
     pub push_constants: &'a [u8],
-    /// Number of vertices to draw.
-    pub vertex_count: u32,
+    /// Vertices to draw, or indices to consume when `index_buffer` is set.
+    pub count: u32,
+    /// Index stream for an indexed draw (`u32` indices from byte 0). `None`
+    /// draws non-indexed, as shader-generated geometry does.
+    pub index_buffer: Option<BufferHandle>,
 }
 
 /// Errors from the RHI. Vulkan result codes surface as their spec names; the
@@ -101,19 +116,21 @@ impl ShutdownReport {
     }
 }
 
-/// The M1 RHI: one window, one device, one swapchain, clear-and-present
-/// frames. Grows engine-shaped surface with its consumers (§9) — pipelines at
-/// M2, bindless and uploads at M4A.
+/// The windowed RHI: one window, one device, one swapchain, frames that clear,
+/// draw, and present. Grows engine-shaped surface with its consumers (§9).
 pub struct Rhi {
     frame_index: u64,
     desired_extent: (u32, u32),
     pending_recreate: bool,
     dead: bool,
-    deletions: DeletionQueue,
-    pipelines: PipelineStore,
+    /// Transfer timeline value the graphics queue has already waited on, so a
+    /// flush is ordered before the first frame that reads it exactly once.
+    transfer_waited: u64,
+    depth: ImageHandle,
+    depth_extent: (u32, u32),
+    gpu: Gpu,
     frames: Frames,
     swapchain: Swapchain,
-    device: Device,
     surface: Surface,
     instance: Instance,
 }
@@ -149,39 +166,43 @@ impl Rhi {
                 return Err(e);
             }
         };
-        let mut device = match Device::new(&instance, Some(&surface)) {
-            Ok(d) => d,
+        let mut gpu = match Gpu::new(&instance, Some(&surface)) {
+            Ok(g) => g,
             Err(e) => {
                 surface.destroy();
                 instance.destroy();
                 return Err(e);
             }
         };
-        let mut swapchain = match Swapchain::new(&device, &surface, extent) {
+        let mut swapchain = match Swapchain::new(&gpu.device, &surface, extent) {
             Ok(s) => s,
             Err(e) => {
-                device.destroy();
+                gpu.destroy();
                 surface.destroy();
                 instance.destroy();
                 return Err(e);
             }
         };
-        let mut frames = match Frames::new(&device) {
+        let mut frames = match Frames::new(&gpu.device) {
             Ok(f) => f,
             Err(e) => {
-                swapchain.destroy(&device);
-                device.destroy();
+                swapchain.destroy(&gpu.device);
+                gpu.destroy();
                 surface.destroy();
                 instance.destroy();
                 return Err(e);
             }
         };
-        let pipelines = match PipelineStore::new(&device) {
-            Ok(p) => p,
+        // The depth target follows the swapchain's extent, not the requested
+        // one: a minimized surface clamps to a nonzero swapchain extent, and
+        // the attachment has to match what the pass renders into.
+        let depth_extent = swapchain.extent();
+        let depth = match gpu.create_depth(depth_extent) {
+            Ok(d) => d,
             Err(e) => {
-                frames.destroy(&device);
-                swapchain.destroy(&device);
-                device.destroy();
+                frames.destroy(&gpu.device);
+                swapchain.destroy(&gpu.device);
+                gpu.destroy();
                 surface.destroy();
                 instance.destroy();
                 return Err(e);
@@ -192,11 +213,12 @@ impl Rhi {
             desired_extent: extent,
             pending_recreate: false,
             dead: false,
-            deletions: DeletionQueue::default(),
-            pipelines,
+            transfer_waited: 0,
+            depth,
+            depth_extent,
+            gpu,
             frames,
             swapchain,
-            device,
             surface,
             instance,
         })
@@ -205,21 +227,86 @@ impl Rhi {
     /// Create a graphics pipeline targeting this window's swapchain format
     /// (§4.4: dynamic rendering, disk-backed cache, creation timed + logged).
     pub fn create_pipeline(&mut self, desc: &PipelineDesc<'_>) -> Result<PipelineHandle, RhiError> {
-        let format = self.swapchain.format(&self.device, &self.surface)?;
-        self.pipelines.create(&self.device, desc, format)
+        let format = self.swapchain.format(&self.gpu.device, &self.surface)?;
+        let set_layout = self.gpu.bindless.layout();
+        self.gpu
+            .pipelines
+            .create(&self.gpu.device, desc, format, set_layout)
     }
 
     /// Retire a pipeline behind the frame timeline — safe to call while
     /// frames using it are still in flight; destruction is deferred (§4.4:
     /// hot reload rebuilds behind the timeline, never mid-frame).
     pub fn destroy_pipeline(&mut self, handle: PipelineHandle) -> Result<(), RhiError> {
-        self.pipelines
-            .retire(handle, &mut self.deletions, self.frame_index)
+        self.gpu
+            .pipelines
+            .retire(handle, &mut self.gpu.deletions, self.frame_index)
+    }
+
+    /// Allocate a buffer (§4.3: reached by device address, never by descriptor).
+    pub fn create_buffer(&mut self, desc: &BufferDesc<'_>) -> Result<BufferHandle, RhiError> {
+        self.gpu.create_buffer(desc)
+    }
+
+    /// The GPU pointer a shader reaches `handle` by — what goes in the push
+    /// constant or scene buffer.
+    pub fn buffer_address(&self, handle: BufferHandle) -> Result<DeviceAddress, RhiError> {
+        self.gpu.buffer_address(handle)
+    }
+
+    /// Allocate an image.
+    pub fn create_image(&mut self, desc: &ImageDesc<'_>) -> Result<ImageHandle, RhiError> {
+        self.gpu.create_image(desc)
+    }
+
+    /// Record a buffer upload into the staging batch (§4.3).
+    pub fn upload_buffer(
+        &mut self,
+        handle: BufferHandle,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), RhiError> {
+        self.gpu.upload_buffer(handle, offset, bytes)
+    }
+
+    /// Record an image upload into the staging batch. `bytes` is the whole
+    /// image, tightly packed for its format.
+    pub fn upload_image(&mut self, handle: ImageHandle, bytes: &[u8]) -> Result<(), RhiError> {
+        self.gpu.upload_image(handle, bytes)
+    }
+
+    /// Submit the staging batch and wait for it — the §4.3 "upload now" path.
+    /// The next frame records the graphics-side ownership acquires.
+    pub fn flush_uploads(&mut self) -> Result<(), RhiError> {
+        self.gpu.flush_uploads_blocking()
+    }
+
+    /// Give an image a slot in the global sampled-image array; the returned
+    /// index is what a material stores and a shader indexes (§4.3).
+    pub fn register_texture(&mut self, handle: ImageHandle) -> Result<TextureIndex, RhiError> {
+        self.gpu.register_texture(handle)
+    }
+
+    /// Retire a buffer behind the frame timeline.
+    pub fn destroy_buffer(&mut self, handle: BufferHandle) -> Result<(), RhiError> {
+        self.gpu.retire_buffer(handle, self.frame_index)
+    }
+
+    /// Retire an image behind the frame timeline.
+    pub fn destroy_image(&mut self, handle: ImageHandle) -> Result<(), RhiError> {
+        self.gpu.retire_image(handle, self.frame_index)
+    }
+
+    /// Whether uploads cross a queue-family boundary on this device (§4.3).
+    /// `false` on single-family devices such as lavapipe — a fact tests assert
+    /// on rather than assume.
+    pub fn transfer_crosses_queue_families(&self) -> bool {
+        self.gpu.device.transfer_crosses_families()
     }
 
     /// The device-selection report (§4.3: a diagnostic document, kept).
     pub fn device_report(&self) -> &DeviceReport {
-        self.device.report()
+        self.gpu.device.report()
     }
 
     /// Note a new surface size; the swapchain recreates on the next frame.
@@ -258,8 +345,8 @@ impl Rhi {
     }
 
     /// Record, submit, and present one frame: clear to `color`, then run
-    /// `draw` if given (M2's one-pass world; the render graph owns passes
-    /// from M6). Resize/minimize/out-of-date handled as in
+    /// `draw` if given (the one-pass world; the render graph owns passes from
+    /// M6). Resize/minimize/out-of-date handled as in
     /// [`Rhi::render_clear_frame`].
     pub fn render_frame(
         &mut self,
@@ -271,19 +358,20 @@ impl Rhi {
             // in flight hold the retired per-image semaphores with no signal
             // to key their deletion to, so this path — and only this path —
             // waits the queue idle before retiring (see wait_graphics_idle).
-            self.device.wait_graphics_idle();
+            self.gpu.device.wait_graphics_idle();
             let retire = self.frame_index;
             let rebuilt = self.swapchain.recreate(
-                &self.device,
+                &self.gpu.device,
                 &self.surface,
                 self.desired_extent,
-                &mut self.deletions,
+                &mut self.gpu.deletions,
                 retire,
             )?;
             self.pending_recreate = false;
             if !rebuilt {
                 return Ok(FrameOutcome::SkippedSuspended);
             }
+            self.resize_depth(retire)?;
         }
         if self.swapchain.suspended() {
             return Ok(FrameOutcome::SkippedSuspended);
@@ -293,28 +381,24 @@ impl Rhi {
         // timeline >= frame_index - 1 (submit N signals value N + 1).
         let horizon = self.frame_index.saturating_sub(FRAMES_IN_FLIGHT - 1);
         if horizon > 0 {
-            self.device.wait_graphics_timeline(horizon)?;
+            self.gpu.device.wait_graphics_timeline(horizon)?;
         }
-        let completed = self.device.graphics_timeline_value()?;
-        self.deletions.collect(&self.device, completed);
+        let completed = self.gpu.device.graphics_timeline_value()?;
+        self.gpu.collect(completed);
 
-        // Resolve the draw's pipeline handle BEFORE acquiring. A stale handle
-        // (retired by hot reload) is a normal, caller-reachable error, and
-        // acquire signals `slot.acquire` — so returning between the two would
-        // leave a signaled semaphore with no waiter, which the next frame to
-        // reuse this slot trips over as a validation error, permanently failing
-        // the §4.3 zero-message shutdown report. Nothing may fail in between.
-        let draw = draw
-            .map(|d| {
-                self.pipelines
-                    .get(d.pipeline)
-                    .map(|entry| (*entry, d.push_constants, d.vertex_count))
-            })
-            .transpose()?;
+        // Resolve the draw's handles BEFORE acquiring. A stale handle (retired
+        // by hot reload) is a normal, caller-reachable error, and acquire
+        // signals `slot.acquire` — so returning between the two would leave a
+        // signaled semaphore with no waiter, which the next frame to reuse this
+        // slot trips over as a validation error, permanently failing the §4.3
+        // zero-message shutdown report. Nothing may fail in between.
+        let draw = self.resolve_draw(draw)?;
+        let depth = self.gpu.resources.image(self.depth)?;
+        let (depth_image, depth_view) = (depth.raw, depth.view);
 
         let slot = &self.frames.slots[(self.frame_index % FRAMES_IN_FLIGHT) as usize];
         let (image_index, acquire_suboptimal) =
-            match self.swapchain.acquire(&self.device, slot.acquire)? {
+            match self.swapchain.acquire(&self.gpu.device, slot.acquire)? {
                 Acquired::Image { index, suboptimal } => (index, suboptimal),
                 Acquired::OutOfDate => {
                     self.pending_recreate = true;
@@ -322,15 +406,36 @@ impl Rhi {
                 }
             };
 
-        self.record_pass(slot.pool, slot.cmd, image_index, color, draw)?;
+        let acquires = self.gpu.take_acquires();
+        self.record_pass(
+            slot.pool,
+            slot.cmd,
+            image_index,
+            color,
+            (depth_image, depth_view),
+            &acquires,
+            draw.as_ref(),
+        )?;
 
-        // Submit: wait the acquire binary, signal the per-image render-done
-        // binary (for present) and the graphics timeline (frame pacing and
-        // the deletion queue's clock).
+        // Submit: wait the acquire binary (and the transfer timeline when an
+        // upload has been flushed since the last frame), signal the per-image
+        // render-done binary (for present) and the graphics timeline (frame
+        // pacing and the deletion queue's clock).
         let signal_value = self.frame_index + 1;
-        let wait = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(slot.acquire)
-            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
+        let mut wait = vec![
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(slot.acquire)
+                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
+        ];
+        let transfer_value = self.gpu.uploader.timeline_value();
+        if transfer_value > self.transfer_waited {
+            wait.push(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(self.gpu.device.transfer.timeline)
+                    .value(transfer_value)
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+            );
+        }
         let signal = [
             // ALL_COMMANDS, not COLOR_ATTACHMENT_OUTPUT: the present-layout
             // transition happens outside that stage, and the present must
@@ -339,7 +444,7 @@ impl Rhi {
                 .semaphore(self.swapchain.render_done(image_index))
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
             vk::SemaphoreSubmitInfo::default()
-                .semaphore(self.device.graphics.timeline)
+                .semaphore(self.gpu.device.graphics.timeline)
                 .value(signal_value)
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
         ];
@@ -349,13 +454,16 @@ impl Rhi {
             .command_buffer_infos(&cmd_infos)
             .signal_semaphore_infos(&signal);
         // SAFETY: queue, semaphores, and command buffer are live; the buffer
-        // finished recording in record_clear.
+        // finished recording in record_pass.
         unsafe {
-            self.device
-                .raw()
-                .queue_submit2(self.device.graphics.raw, &[submit], vk::Fence::null())
+            self.gpu.device.raw().queue_submit2(
+                self.gpu.device.graphics.raw,
+                &[submit],
+                vk::Fence::null(),
+            )
         }
         .map_err(RhiError::Vk)?;
+        self.transfer_waited = transfer_value;
 
         // Present, waiting the per-image render-done semaphore.
         let wait_semaphores = [self.swapchain.render_done(image_index)];
@@ -367,9 +475,10 @@ impl Rhi {
             .image_indices(&indices);
         // SAFETY: swapchain and queue are live; image_index came from acquire.
         let present_result = unsafe {
-            self.device
+            self.gpu
+                .device
                 .swapchain_fns()
-                .queue_present(self.device.graphics.raw, &present)
+                .queue_present(self.gpu.device.graphics.raw, &present)
         };
         self.frame_index += 1;
 
@@ -389,21 +498,59 @@ impl Rhi {
         }
     }
 
-    /// Record the frame's pass: undefined → color-attachment barrier, dynamic
-    /// rendering with a clear load op (plus the draw, when given), then
-    /// color-attachment → present.
-    /// `draw` arrives already resolved: the caller looks the pipeline handle up
-    /// before acquiring an image, so this function cannot fail on a dead handle
-    /// (see the note at the resolve site in `render_frame`).
+    /// Resolve a draw's handles to Vulkan objects, so the record path cannot
+    /// fail. See the call site for why this must happen before acquire.
+    fn resolve_draw<'a>(
+        &self,
+        draw: Option<&DrawSpec<'a>>,
+    ) -> Result<Option<ResolvedDraw<'a>>, RhiError> {
+        draw.map(|d| {
+            let entry = *self.gpu.pipelines.get(d.pipeline)?;
+            let index_buffer = d
+                .index_buffer
+                .map(|h| self.gpu.resources.buffer(h).map(|b| b.raw))
+                .transpose()?;
+            Ok(ResolvedDraw {
+                entry,
+                push_constants: d.push_constants,
+                count: d.count,
+                index_buffer,
+            })
+        })
+        .transpose()
+    }
+
+    /// Rebuild the depth target to match a recreated swapchain. The old one is
+    /// retired behind the timeline like any other resource — the queue-idle
+    /// wait above has already proven it unused, but the deletion queue is the
+    /// one path that accounts for it in the leak report.
+    fn resize_depth(&mut self, retire_at: u64) -> Result<(), RhiError> {
+        let extent = self.swapchain.extent();
+        if extent == self.depth_extent {
+            return Ok(());
+        }
+        let old = self.depth;
+        self.depth = self.gpu.create_depth(extent)?;
+        self.depth_extent = extent;
+        self.gpu.retire_image(old, retire_at)
+    }
+
+    /// Record the frame's pass: the ownership acquires an upload left owing,
+    /// the color and depth layout barriers, dynamic rendering with clear load
+    /// ops (plus the draw, when given), then color-attachment → present.
+    /// `draw` arrives already resolved (see `resolve_draw`).
+    #[expect(clippy::too_many_arguments, reason = "one frame's recording inputs")]
     fn record_pass(
         &self,
         pool: vk::CommandPool,
         cmd: vk::CommandBuffer,
         image_index: u32,
         color: [f32; 4],
-        draw: Option<(pipeline::PipelineEntry, &[u8], u32)>,
+        depth: (vk::Image, vk::ImageView),
+        acquires: &[upload::Acquire],
+        draw: Option<&ResolvedDraw<'_>>,
     ) -> Result<(), RhiError> {
-        let device = self.device.raw();
+        let device = self.gpu.device.raw();
         // SAFETY: the timeline wait proved this slot's previous frame retired,
         // so its pool and command buffer are free to reset and rerecord.
         unsafe {
@@ -416,21 +563,28 @@ impl Rhi {
                 .begin_command_buffer(cmd, &begin)
                 .map_err(RhiError::Vk)?;
 
+            // SAFETY: cmd records on the graphics family and this submit waits
+            // on the transfer timeline value the releases signaled.
+            upload::Uploader::record_acquires(&self.gpu.device, cmd, acquires);
+
             let subresource = vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .level_count(1)
                 .layer_count(1);
             let image = self.swapchain.image(image_index);
 
-            let to_attachment = [vk::ImageMemoryBarrier2::default()
-                .image(image)
-                .subresource_range(subresource)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .src_access_mask(vk::AccessFlags2::NONE)
-                .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)];
+            let to_attachment = [
+                vk::ImageMemoryBarrier2::default()
+                    .image(image)
+                    .subresource_range(subresource)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(vk::AccessFlags2::NONE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE),
+                depth_barrier(depth.0),
+            ];
             device.cmd_pipeline_barrier2(
                 cmd,
                 &vk::DependencyInfo::default().image_memory_barriers(&to_attachment),
@@ -445,6 +599,7 @@ impl Rhi {
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(clear)];
+            let depth_attachment = depth_attachment_info(depth.1);
             let extent = self.swapchain.extent();
             let rendering = vk::RenderingInfo::default()
                 .render_area(vk::Rect2D {
@@ -455,12 +610,20 @@ impl Rhi {
                     },
                 })
                 .layer_count(1)
-                .color_attachments(&attachment);
+                .color_attachments(&attachment)
+                .depth_attachment(&depth_attachment);
             device.cmd_begin_rendering(cmd, &rendering);
-            if let Some((entry, push, vertex_count)) = draw {
-                // SAFETY: cmd is recording inside the rendering pass; the
-                // entry came from the live store and targets this format.
-                pipeline::record_draw(&self.device, cmd, extent, &entry, push, vertex_count)?;
+            if let Some(draw) = draw {
+                // SAFETY: cmd is recording inside the rendering pass; the entry
+                // came from the live store and targets these formats, and the
+                // set is the one every pipeline layout declares.
+                pipeline::record_draw(
+                    &self.gpu.device,
+                    cmd,
+                    extent,
+                    self.gpu.bindless.set(),
+                    draw,
+                )?;
             }
             device.cmd_end_rendering(cmd);
 
@@ -496,19 +659,13 @@ impl Rhi {
                 leaked_allocations: Vec::new(),
             };
         }
-        self.device.wait_idle();
-        self.frames.destroy(&self.device);
-        self.deletions.drain_all(&self.device);
-        self.pipelines.destroy(&self.device);
-        self.swapchain.destroy(&self.device);
+        self.gpu.device.wait_idle();
+        self.frames.destroy(&self.gpu.device);
+        self.swapchain.destroy(&self.gpu.device);
         let report = ShutdownReport {
-            leaked_allocations: self.device.leak_report(),
+            leaked_allocations: self.gpu.destroy(),
             validation_messages: validation_message_count(),
         };
-        if !report.leaked_allocations.is_empty() {
-            tracing::error!(leaks = ?report.leaked_allocations, "GPU allocations leaked (§4.3)");
-        }
-        self.device.destroy();
         self.surface.destroy();
         self.instance.destroy();
         self.dead = true;
@@ -521,4 +678,41 @@ impl Drop for Rhi {
         // Backstop for early-exit paths; the accountable path is shutdown().
         self.teardown();
     }
+}
+
+/// Depth attachments are cleared every frame, so the previous contents are
+/// discarded: `UNDEFINED` as the old layout is the cheap, correct answer, not
+/// a shortcut.
+pub(crate) fn depth_barrier(image: vk::Image) -> vk::ImageMemoryBarrier2<'static> {
+    vk::ImageMemoryBarrier2::default()
+        .image(image)
+        .subresource_range(
+            vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                .level_count(1)
+                .layer_count(1),
+        )
+        .old_layout(vk::ImageLayout::UNDEFINED)
+        .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+        .src_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
+        .src_access_mask(vk::AccessFlags2::NONE)
+        .dst_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
+        .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+}
+
+/// Reverse-Z (§2, Math row): clear to `0.0` — the far plane — and let nearer
+/// fragments win by comparing *greater*. Nothing reads depth after the pass at
+/// M4A, so it is never stored.
+pub(crate) fn depth_attachment_info(view: vk::ImageView) -> vk::RenderingAttachmentInfo<'static> {
+    vk::RenderingAttachmentInfo::default()
+        .image_view(view)
+        .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .clear_value(vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: 0.0,
+                stencil: 0,
+            },
+        })
 }

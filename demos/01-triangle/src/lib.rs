@@ -30,6 +30,9 @@ pub fn pipeline_desc() -> gg_rhi::PipelineDesc<'static> {
         fs_spirv: shader::FS_MAIN_SPIRV,
         fs_entry: shader::FS_MAIN_ENTRY,
         push_constant_size: core::mem::size_of::<shader::TrianglePush>() as u32,
+        // One triangle, nothing behind it: the depth attachment exists (every
+        // pass has one since M4A) and this pipeline ignores it.
+        depth: false,
     }
 }
 

@@ -270,9 +270,10 @@ impl HasDisplayHandle for Window {
     }
 }
 
-/// Platform events, reduced to what the engine reacts to. Raw input joins at
-/// its milestone via `gg-input`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Platform events, reduced to what the engine reacts to. Raw keyboard and
+/// pointer motion land here; the action maps that turn them into game verbs
+/// are `gg-input`'s at M4B (§4.7).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Event {
     /// The window exists; create GPU state now.
     WindowReady,
@@ -284,6 +285,27 @@ pub enum Event {
     /// to invisible windows, and every automated run uses one (§1.5). OS
     /// redraw requests also map here.
     Frame,
+    /// A key changed state, identified by physical position — never by the
+    /// character it produces, which depends on the user's layout (§4.7: game
+    /// code never sees keycodes, but the layer that maps them has to see
+    /// *something* stable).
+    ///
+    /// Auto-repeat is filtered out: a held key reports pressed exactly once.
+    Key {
+        /// Which key.
+        key: Key,
+        /// `true` on press, `false` on release.
+        pressed: bool,
+    },
+    /// Relative pointer motion in device units, for mouse look. Not a cursor
+    /// position: the fly camera wants deltas, and deltas survive the cursor
+    /// hitting the edge of the screen.
+    MouseMotion {
+        /// Horizontal delta, right positive.
+        dx: f32,
+        /// Vertical delta, down positive.
+        dy: f32,
+    },
     /// The user asked the window to close.
     CloseRequested,
     /// The loop is over and the window is about to be destroyed — the last
@@ -299,6 +321,204 @@ pub enum Event {
     /// down only on [`Event::CloseRequested`] misses every failure path. Doing
     /// it after [`run`] returns is too late: the window is already gone.
     Exiting,
+}
+
+/// A key by **physical position** on a US-QWERTY reference layout — the
+/// stable identity a rebindable action map needs (§4.7). The set is the
+/// ordinary keyboard rather than the keys today's demo happens to use: a
+/// partial list would be a blocklist, and the layer above would grow
+/// workarounds for its gaps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+#[expect(missing_docs, reason = "one variant per key; the names are the docs")]
+pub enum Key {
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Digit0,
+    Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    Left,
+    Right,
+    Up,
+    Down,
+    Space,
+    Enter,
+    Escape,
+    Tab,
+    Backspace,
+    Delete,
+    Minus,
+    Equal,
+    BracketLeft,
+    BracketRight,
+    Backslash,
+    Semicolon,
+    Quote,
+    Comma,
+    Period,
+    Slash,
+    Backquote,
+    ShiftLeft,
+    ShiftRight,
+    ControlLeft,
+    ControlRight,
+    AltLeft,
+    AltRight,
+    SuperLeft,
+    SuperRight,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Insert,
+}
+
+impl Key {
+    fn from_winit(code: winit::keyboard::KeyCode) -> Option<Self> {
+        use winit::keyboard::KeyCode as K;
+        Some(match code {
+            K::KeyA => Key::A,
+            K::KeyB => Key::B,
+            K::KeyC => Key::C,
+            K::KeyD => Key::D,
+            K::KeyE => Key::E,
+            K::KeyF => Key::F,
+            K::KeyG => Key::G,
+            K::KeyH => Key::H,
+            K::KeyI => Key::I,
+            K::KeyJ => Key::J,
+            K::KeyK => Key::K,
+            K::KeyL => Key::L,
+            K::KeyM => Key::M,
+            K::KeyN => Key::N,
+            K::KeyO => Key::O,
+            K::KeyP => Key::P,
+            K::KeyQ => Key::Q,
+            K::KeyR => Key::R,
+            K::KeyS => Key::S,
+            K::KeyT => Key::T,
+            K::KeyU => Key::U,
+            K::KeyV => Key::V,
+            K::KeyW => Key::W,
+            K::KeyX => Key::X,
+            K::KeyY => Key::Y,
+            K::KeyZ => Key::Z,
+            K::Digit0 => Key::Digit0,
+            K::Digit1 => Key::Digit1,
+            K::Digit2 => Key::Digit2,
+            K::Digit3 => Key::Digit3,
+            K::Digit4 => Key::Digit4,
+            K::Digit5 => Key::Digit5,
+            K::Digit6 => Key::Digit6,
+            K::Digit7 => Key::Digit7,
+            K::Digit8 => Key::Digit8,
+            K::Digit9 => Key::Digit9,
+            K::F1 => Key::F1,
+            K::F2 => Key::F2,
+            K::F3 => Key::F3,
+            K::F4 => Key::F4,
+            K::F5 => Key::F5,
+            K::F6 => Key::F6,
+            K::F7 => Key::F7,
+            K::F8 => Key::F8,
+            K::F9 => Key::F9,
+            K::F10 => Key::F10,
+            K::F11 => Key::F11,
+            K::F12 => Key::F12,
+            K::ArrowLeft => Key::Left,
+            K::ArrowRight => Key::Right,
+            K::ArrowUp => Key::Up,
+            K::ArrowDown => Key::Down,
+            K::Space => Key::Space,
+            K::Enter => Key::Enter,
+            K::Escape => Key::Escape,
+            K::Tab => Key::Tab,
+            K::Backspace => Key::Backspace,
+            K::Delete => Key::Delete,
+            K::Minus => Key::Minus,
+            K::Equal => Key::Equal,
+            K::BracketLeft => Key::BracketLeft,
+            K::BracketRight => Key::BracketRight,
+            K::Backslash => Key::Backslash,
+            K::Semicolon => Key::Semicolon,
+            K::Quote => Key::Quote,
+            K::Comma => Key::Comma,
+            K::Period => Key::Period,
+            K::Slash => Key::Slash,
+            K::Backquote => Key::Backquote,
+            K::ShiftLeft => Key::ShiftLeft,
+            K::ShiftRight => Key::ShiftRight,
+            K::ControlLeft => Key::ControlLeft,
+            K::ControlRight => Key::ControlRight,
+            K::AltLeft => Key::AltLeft,
+            K::AltRight => Key::AltRight,
+            K::SuperLeft => Key::SuperLeft,
+            K::SuperRight => Key::SuperRight,
+            K::Home => Key::Home,
+            K::End => Key::End,
+            K::PageUp => Key::PageUp,
+            K::PageDown => Key::PageDown,
+            K::Insert => Key::Insert,
+            _ => return None,
+        })
+    }
+}
+
+/// Translate a winit key event, dropping auto-repeat and keys outside [`Key`].
+fn key_event(event: &winit::event::KeyEvent) -> Option<Event> {
+    if event.repeat {
+        return None;
+    }
+    let winit::keyboard::PhysicalKey::Code(code) = event.physical_key else {
+        return None;
+    };
+    Key::from_winit(code).map(|key| Event::Key {
+        key,
+        pressed: event.state.is_pressed(),
+    })
 }
 
 /// Handler verdict for [`run`].
@@ -362,6 +582,10 @@ impl ApplicationHandler for App<'_> {
             WindowEvent::Resized(size) => Event::Resized(size.width, size.height),
             WindowEvent::CloseRequested => Event::CloseRequested,
             WindowEvent::RedrawRequested => Event::Frame,
+            WindowEvent::KeyboardInput { event, .. } => match key_event(&event) {
+                Some(event) => event,
+                None => return,
+            },
             // §1.5: an invisible window that moved is a window whose parking
             // the OS just undid — re-park it. Not reported upward: nothing
             // above gg-platform has any business knowing where a window that
@@ -379,6 +603,26 @@ impl ApplicationHandler for App<'_> {
             _ => return,
         };
         self.dispatch(event_loop, event);
+    }
+
+    /// Raw device motion rather than `WindowEvent::CursorMoved`: mouse look
+    /// wants a delta, and a cursor delta stops arriving the moment the pointer
+    /// reaches the edge of the screen.
+    fn device_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let winit::event::DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            self.dispatch(
+                event_loop,
+                Event::MouseMotion {
+                    dx: dx as f32,
+                    dy: dy as f32,
+                },
+            );
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {

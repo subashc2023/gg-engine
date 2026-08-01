@@ -21,3 +21,4 @@ png.workspace = true
 bytemuck.workspace = true
 gg-rhi = { path = "../../crates/gg-rhi" }
 demo-01-triangle = { path = "../../demos/01-triangle", default-features = false }
+demo-02-mesh = { path = "../../demos/02-mesh", default-features = false }

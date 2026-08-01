@@ -28,17 +28,65 @@ struct Scene {
 
 /// The v0 roster. Scenes register here; M7 replaces this with replay-driven
 /// discovery.
-const SCENES: &[Scene] = &[Scene {
-    name: "triangle",
-    // Lavapipe is deterministic on one box, but edge rasterization may move a
-    // pixel across driver updates: tolerate nothing per-channel beyond 2, and
-    // at most 16 stray pixels of a 640x360 frame (§4.10 per-test config).
-    policy: Policy {
-        tolerance: 2,
-        max_diff_pixels: 16,
+const SCENES: &[Scene] = &[
+    Scene {
+        name: "triangle",
+        // Lavapipe is deterministic on one box, but edge rasterization may move
+        // a pixel across driver updates: tolerate nothing per-channel beyond 2,
+        // and at most 16 stray pixels of a 640x360 frame (§4.10 per-test config).
+        policy: Policy {
+            tolerance: 2,
+            max_diff_pixels: 16,
+        },
+        render: render_triangle,
     },
-    render: render_triangle,
-}];
+    Scene {
+        name: "mesh",
+        // Looser than the triangle by design: this frame has three silhouette
+        // edges per face, a BC7 decoder whose interpolation is fixed-point but
+        // whose *filtering* is not bit-specified, and a depth test deciding
+        // pixels along every crease. Per-channel 3 still catches a wrong
+        // texture index, a lost transfer, or a flipped depth comparison, which
+        // is what this scene is for.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+        },
+        render: render_mesh,
+    },
+];
+
+/// Render demo 02's scene — the same buffers, the same upload path through
+/// the transfer queue, and the same bindless texture index the demo draws with
+/// (§4.10: the golden guards the demo, not a lookalike). Tick 0 is the frozen
+/// pose; the mesh's rotation is a pure function of it (§2, Sim time row).
+fn render_mesh() -> Render {
+    let extent = demo_02_mesh::GOLDEN_EXTENT;
+    let mut rhi = gg_rhi::OffscreenRhi::new(extent)?;
+    tracing::info!(
+        device = %rhi.device_report().chosen,
+        transfer_crosses_families = rhi.transfer_crosses_queue_families(),
+        "offscreen device"
+    );
+    let scene = demo_02_mesh::upload(&mut rhi)?;
+    let push = demo_02_mesh::push_for(&demo_02_mesh::Camera::GOLDEN, extent, 0, &scene);
+    let draw = gg_rhi::DrawSpec {
+        pipeline: scene.pipeline,
+        push_constants: bytemuck::bytes_of(&push),
+        count: scene.index_count,
+        index_buffer: Some(scene.indices),
+    };
+    let pixels = rhi.render(demo_02_mesh::CLEAR, Some(&draw))?;
+    let report = rhi.shutdown();
+    anyhow::ensure!(
+        report.clean(),
+        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
+        report.validation_messages,
+        report.leaked_allocations.len(),
+        report.leaked_allocations,
+    );
+    Ok((pixels, extent))
+}
 
 /// Render demo 01's scene — the same SPIR-V and push constants the demo draws
 /// with (§4.10: the golden guards the demo, not a lookalike).
@@ -51,7 +99,8 @@ fn render_triangle() -> Render {
     let draw = gg_rhi::DrawSpec {
         pipeline,
         push_constants: bytemuck::bytes_of(&push),
-        vertex_count: demo_01_triangle::VERTEX_COUNT,
+        count: demo_01_triangle::VERTEX_COUNT,
+        index_buffer: None,
     };
     let pixels = rhi.render(demo_01_triangle::CLEAR, Some(&draw))?;
     let report = rhi.shutdown();

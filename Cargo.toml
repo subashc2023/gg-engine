@@ -4,6 +4,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/gg-ecs",
+    "crates/gg-ecs-derive",
     "crates/gg-math",
     "crates/gg-platform",
     "crates/gg-rhi",
@@ -11,6 +13,7 @@ members = [
     "crates/gg-shaders",
     "demos/00-clear",
     "demos/01-triangle",
+    "demos/02-mesh",
     "tools/gg-golden",
     "xtask",
 ]
@@ -46,6 +49,20 @@ ash = "0.38"
 # silently, with Cargo.lock as the only thing standing in the way.
 libm = "=0.2.16"
 bytemuck = { version = "1", features = ["derive"] }
+# M3 (§4.2, §4.2.1): the one hash primitive behind component ids, schema hashes
+# and the canonical state hash. Exact-pinned like libm, but for a different
+# reason — blake3's output is a frozen published spec, so a patch release cannot
+# move result bits the way libm's can; the pin guards the crate's *API*, and the
+# spec guards the numbers. `pure` forces the portable backend: spec says every
+# backend agrees, but runtime CPUID dispatch inside the determinism path is the
+# exact shape §4.2.1 hazard 1 refuses for libm's fma, so it stays out.
+blake3 = { version = "=1.8.5", default-features = false, features = ["pure"] }
+# gg-ecs-derive's build-time trio. Never in a runtime dependency graph.
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+# Compile-fail harness for the M3 derive rejections. Dev-dependency only.
+trybuild = "1"
 # Render-side only, and deny.toml keeps it that way; judged by gg-golden, never
 # by a hash. Never enable `fast-math` — it is the one glam feature that would
 # disturb blessed golden images.

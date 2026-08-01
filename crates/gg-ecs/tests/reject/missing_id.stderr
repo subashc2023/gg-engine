@@ -1,0 +1,5 @@
+error: missing `#[component(id = "…")]` (§4.2). The id is the type's *persisted* identity, deliberately decoupled from the Rust type path so that moving or renaming the type is free and changing the id is the visible, deliberate act a schema change ought to be. It is mandatory so the choice is made once, at birth, when it costs nothing.
+ --> tests/reject/missing_id.rs:7:8
+  |
+7 | struct Nameless {
+  |        ^^^^^^^^

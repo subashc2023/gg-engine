@@ -6,6 +6,7 @@
 mod ci;
 mod dist;
 mod probe;
+mod public_api;
 mod shaders;
 mod util;
 
@@ -21,8 +22,9 @@ fn main() {
         Some("probe") => probe::run(rest.contains(&"--system")),
         Some("shaders") => shaders::build_all(rest.contains(&"--check")),
         Some("dist") => dist::gate(),
+        Some("public-api") => public_api::run(&rest),
         Some("assets") => stub("assets", "M9 (asset pipeline; `ggc` does not exist yet)"),
-        Some("bench") => stub("bench", "M3 (first benches arrive with gg-ecs)"),
+        Some("bench") => bench(),
         Some("capture") => stub("capture", "M8 (RenderDoc in-application API)"),
         _ => usage(),
     };
@@ -33,6 +35,16 @@ fn main() {
         // to the agent (§6 M0A); plain failures exit 1.
         std::process::exit(if hook { 2 } else { 1 });
     }
+}
+
+/// `cargo xtask bench` — the gg-ecs baseline (§4.2). Release, harness-free, and
+/// self-asserting: it fails if column-view iteration drifts away from parity
+/// with a native loop, which is the §4.2.2 claim M5 budgets against.
+fn bench() -> anyhow::Result<()> {
+    util::run(
+        util::cargo().args(["bench", "-p", "gg-ecs"]),
+        "cargo bench -p gg-ecs",
+    )
 }
 
 fn stub(name: &str, lands: &str) -> anyhow::Result<()> {
@@ -49,6 +61,6 @@ fn usage() -> anyhow::Result<()> {
          probe [--system]                                 capability table vs pinned lavapipe (spike 2)\n\
          shaders [--check]                                offline shader build + codegen (in-process Slang)\n\
          dist                                             dist gate: build+run tier-dist, symbol absence (§5.8)\n\
-         assets | bench | capture                         stubs until their milestone"
+         assets | capture                                 stubs until their milestone"
     )
 }

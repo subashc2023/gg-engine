@@ -83,7 +83,7 @@ pub fn gate() -> anyhow::Result<()> {
     // tier-dist combination builds, and the binary passes the absence/presence
     // byte checks. Running it presents to a window, so the run itself is
     // `cargo xtask interactive` (§1.5).
-    for demo in ["demo-00-clear", "demo-01-triangle"] {
+    for demo in ["demo-00-clear", "demo-01-triangle", "demo-02-mesh"] {
         // Graph absence per demo (§4.4): no compiler, no watcher, no harness
         // in what ships — dist embeds SPIR-V and nothing that makes it.
         let tree = run_capture(
@@ -182,7 +182,7 @@ pub fn gate() -> anyhow::Result<()> {
 /// real window's swapchain on the pinned lavapipe, exiting nonzero on
 /// validation messages or leaks.
 pub fn demo_runs() -> anyhow::Result<()> {
-    for demo in ["demo-00-clear", "demo-01-triangle"] {
+    for demo in ["demo-00-clear", "demo-01-triangle", "demo-02-mesh"] {
         exec(
             cargo().args([
                 "build",

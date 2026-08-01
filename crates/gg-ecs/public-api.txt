@@ -1,0 +1,693 @@
+pub mod gg_ecs
+pub use gg_ecs::Component
+pub use gg_ecs::SideTable
+pub use gg_ecs::StateHash
+pub mod gg_ecs::archetype
+pub struct gg_ecs::archetype::ArchetypeId(_)
+impl gg_ecs::archetype::ArchetypeId
+pub const fn gg_ecs::archetype::ArchetypeId::index(self) -> u32
+pub mod gg_ecs::chunked
+pub struct gg_ecs::chunked::ChunkedHash<const VERSION: u64>(_)
+impl<const VERSION: u64> gg_ecs::chunked::ChunkedHash<VERSION>
+pub const fn gg_ecs::chunked::ChunkedHash<VERSION>::get(self) -> u128
+pub const fn gg_ecs::chunked::ChunkedHash<VERSION>::new(u128) -> Self
+pub const fn gg_ecs::chunked::ChunkedHash<VERSION>::version(self) -> u64
+pub const gg_ecs::chunked::CHUNK_ROWS: usize
+pub const gg_ecs::chunked::LOCAL_VERSION: u64
+pub type gg_ecs::chunked::Local = gg_ecs::chunked::ChunkedHash<LOCAL_VERSION>
+pub mod gg_ecs::component
+pub struct gg_ecs::component::FieldDesc
+pub gg_ecs::component::FieldDesc::name: &'static str
+pub gg_ecs::component::FieldDesc::offset: usize
+pub gg_ecs::component::FieldDesc::size: usize
+pub gg_ecs::component::FieldDesc::ty: &'static str
+pub trait gg_ecs::component::Component: bytemuck::pod::Pod + gg_ecs::state_hash::StateHash + core::marker::Send + core::marker::Sync + 'static
+pub const gg_ecs::component::Component::DECLARED_ID: &'static str
+pub const gg_ecs::component::Component::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::component::Component::TYPE_NAME: &'static str
+pub fn gg_ecs::component::component_id<T: gg_ecs::component::Component>() -> gg_ecs::hash::ComponentId
+pub fn gg_ecs::component::schema_hash<T: gg_ecs::component::Component>() -> gg_ecs::hash::SchemaHash
+pub mod gg_ecs::entity
+pub struct gg_ecs::entity::Entities
+impl gg_ecs::entity::Entities
+pub fn gg_ecs::entity::Entities::alloc(&mut self) -> gg_ecs::entity::Entity
+pub fn gg_ecs::entity::Entities::free(&mut self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::entity::Entities::hash_into(&self, &mut gg_ecs::hash::StateHasher)
+pub fn gg_ecs::entity::Entities::is_alive(&self, gg_ecs::entity::Entity) -> bool
+pub const fn gg_ecs::entity::Entities::is_empty(&self) -> bool
+pub fn gg_ecs::entity::Entities::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = gg_ecs::entity::Entity> + '_
+pub const fn gg_ecs::entity::Entities::len(&self) -> u32
+pub fn gg_ecs::entity::Entities::new() -> Self
+#[repr(C)] pub struct gg_ecs::entity::Entity
+impl gg_ecs::entity::Entity
+pub const gg_ecs::entity::Entity::NONE: Self
+pub const fn gg_ecs::entity::Entity::from_bits(u64) -> Self
+pub const fn gg_ecs::entity::Entity::generation(self) -> u32
+pub const fn gg_ecs::entity::Entity::index(self) -> u32
+pub const fn gg_ecs::entity::Entity::is_none(self) -> bool
+pub const fn gg_ecs::entity::Entity::to_bits(self) -> u64
+impl bytemuck::pod::Pod for gg_ecs::entity::Entity
+impl bytemuck::zeroable::Zeroable for gg_ecs::entity::Entity
+impl core::fmt::Debug for gg_ecs::entity::Entity
+pub fn gg_ecs::entity::Entity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl gg_ecs::state_hash::StateHash for gg_ecs::entity::Entity
+pub fn gg_ecs::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+pub mod gg_ecs::hash
+pub struct gg_ecs::hash::CanonicalHash(_)
+impl gg_ecs::hash::CanonicalHash
+pub const fn gg_ecs::hash::CanonicalHash::get(self) -> u128
+impl core::fmt::Debug for gg_ecs::hash::CanonicalHash
+pub fn gg_ecs::hash::CanonicalHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for gg_ecs::hash::CanonicalHash
+pub fn gg_ecs::hash::CanonicalHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::hash::ComponentId(_)
+impl gg_ecs::hash::ComponentId
+pub const fn gg_ecs::hash::ComponentId::from_raw(u64) -> Self
+pub const fn gg_ecs::hash::ComponentId::get(self) -> u64
+pub fn gg_ecs::hash::ComponentId::of(&str) -> Self
+impl core::fmt::Debug for gg_ecs::hash::ComponentId
+pub fn gg_ecs::hash::ComponentId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
+pub fn gg_ecs::hash::ComponentId::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+pub struct gg_ecs::hash::SchemaHash(_)
+impl gg_ecs::hash::SchemaHash
+pub const fn gg_ecs::hash::SchemaHash::from_raw(u128) -> Self
+pub const fn gg_ecs::hash::SchemaHash::get(self) -> u128
+impl core::fmt::Debug for gg_ecs::hash::SchemaHash
+pub fn gg_ecs::hash::SchemaHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::hash::SideTableId(_)
+impl gg_ecs::hash::SideTableId
+pub const fn gg_ecs::hash::SideTableId::get(self) -> u64
+pub fn gg_ecs::hash::SideTableId::of(&str) -> Self
+impl core::fmt::Debug for gg_ecs::hash::SideTableId
+pub fn gg_ecs::hash::SideTableId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::hash::StateHasher
+impl gg_ecs::hash::StateHasher
+pub fn gg_ecs::hash::StateHasher::bool(&mut self, bool)
+pub fn gg_ecs::hash::StateHasher::bytes(&mut self, &[u8])
+pub fn gg_ecs::hash::StateHasher::canonical() -> Self
+pub fn gg_ecs::hash::StateHasher::delimited(&mut self, &[u8])
+pub fn gg_ecs::hash::StateHasher::f32(&mut self, f32)
+pub fn gg_ecs::hash::StateHasher::f64(&mut self, f64)
+pub fn gg_ecs::hash::StateHasher::finish_canonical(self) -> gg_ecs::hash::CanonicalHash
+pub fn gg_ecs::hash::StateHasher::finish_schema(self) -> gg_ecs::hash::SchemaHash
+pub fn gg_ecs::hash::StateHasher::i128(&mut self, i128)
+pub fn gg_ecs::hash::StateHasher::i16(&mut self, i16)
+pub fn gg_ecs::hash::StateHasher::i32(&mut self, i32)
+pub fn gg_ecs::hash::StateHasher::i64(&mut self, i64)
+pub fn gg_ecs::hash::StateHasher::i8(&mut self, i8)
+pub fn gg_ecs::hash::StateHasher::raw_column(&mut self, usize, usize, &[u8])
+pub fn gg_ecs::hash::StateHasher::schema() -> Self
+pub fn gg_ecs::hash::StateHasher::str(&mut self, &str)
+pub fn gg_ecs::hash::StateHasher::u128(&mut self, u128)
+pub fn gg_ecs::hash::StateHasher::u16(&mut self, u16)
+pub fn gg_ecs::hash::StateHasher::u32(&mut self, u32)
+pub fn gg_ecs::hash::StateHasher::u64(&mut self, u64)
+pub fn gg_ecs::hash::StateHasher::u8(&mut self, u8)
+pub mod gg_ecs::query
+pub struct gg_ecs::query::Query<D: gg_ecs::query::QueryData>
+impl<D: gg_ecs::query::QueryData> gg_ecs::query::Query<D>
+pub fn gg_ecs::query::Query<D>::access(&self) -> &gg_ecs::view::QueryAccess
+pub fn gg_ecs::query::Query<D>::new() -> core::result::Result<Self, gg_ecs::view::AliasError>
+impl<D: gg_ecs::query::QueryData> core::fmt::Debug for gg_ecs::query::Query<D>
+pub fn gg_ecs::query::Query<D>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub trait gg_ecs::query::QueryData
+pub type gg_ecs::query::QueryData::Columns<'w>
+pub type gg_ecs::query::QueryData::Item<'r>
+pub fn gg_ecs::query::QueryData::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn gg_ecs::query::QueryData::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn gg_ecs::query::QueryData::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData, D: gg_ecs::query::QueryData, E: gg_ecs::query::QueryData, F: gg_ecs::query::QueryData, G: gg_ecs::query::QueryData, H: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C, D, E, F, G, H)
+pub type (A, B, C, D, E, F, G, H)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns, <D as gg_ecs::query::QueryData>::Columns, <E as gg_ecs::query::QueryData>::Columns, <F as gg_ecs::query::QueryData>::Columns, <G as gg_ecs::query::QueryData>::Columns, <H as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C, D, E, F, G, H)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item, <D as gg_ecs::query::QueryData>::Item, <E as gg_ecs::query::QueryData>::Item, <F as gg_ecs::query::QueryData>::Item, <G as gg_ecs::query::QueryData>::Item, <H as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C, D, E, F, G, H)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C, D, E, F, G, H)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C, D, E, F, G, H)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData, D: gg_ecs::query::QueryData, E: gg_ecs::query::QueryData, F: gg_ecs::query::QueryData, G: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C, D, E, F, G)
+pub type (A, B, C, D, E, F, G)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns, <D as gg_ecs::query::QueryData>::Columns, <E as gg_ecs::query::QueryData>::Columns, <F as gg_ecs::query::QueryData>::Columns, <G as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C, D, E, F, G)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item, <D as gg_ecs::query::QueryData>::Item, <E as gg_ecs::query::QueryData>::Item, <F as gg_ecs::query::QueryData>::Item, <G as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C, D, E, F, G)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C, D, E, F, G)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C, D, E, F, G)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData, D: gg_ecs::query::QueryData, E: gg_ecs::query::QueryData, F: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C, D, E, F)
+pub type (A, B, C, D, E, F)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns, <D as gg_ecs::query::QueryData>::Columns, <E as gg_ecs::query::QueryData>::Columns, <F as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C, D, E, F)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item, <D as gg_ecs::query::QueryData>::Item, <E as gg_ecs::query::QueryData>::Item, <F as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C, D, E, F)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C, D, E, F)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C, D, E, F)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData, D: gg_ecs::query::QueryData, E: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C, D, E)
+pub type (A, B, C, D, E)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns, <D as gg_ecs::query::QueryData>::Columns, <E as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C, D, E)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item, <D as gg_ecs::query::QueryData>::Item, <E as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C, D, E)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C, D, E)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C, D, E)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData, D: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C, D)
+pub type (A, B, C, D)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns, <D as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C, D)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item, <D as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C, D)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C, D)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C, D)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C)
+pub type (A, B, C)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B)
+pub type (A, B)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns)
+pub type (A, B)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item)
+pub fn (A, B)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A)
+pub type (A)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns)
+pub type (A)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item)
+pub fn (A)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<T: gg_ecs::component::Component> gg_ecs::query::QueryData for &T
+pub type &T::Columns<'w> = &'w [T]
+pub type &T::Item<'r> = &'r T
+pub fn &T::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn &T::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn &T::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<T: gg_ecs::component::Component> gg_ecs::query::QueryData for &mut T
+pub type &mut T::Columns<'w> = &'w mut [T]
+pub type &mut T::Item<'r> = &'r mut T
+pub fn &mut T::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn &mut T::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn &mut T::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+pub mod gg_ecs::registry
+pub enum gg_ecs::registry::RegistryError
+pub gg_ecs::registry::RegistryError::DuplicateDeclaration
+pub gg_ecs::registry::RegistryError::DuplicateDeclaration::declared: &'static str
+pub gg_ecs::registry::RegistryError::DuplicateDeclaration::first_type: &'static str
+pub gg_ecs::registry::RegistryError::DuplicateDeclaration::second_type: &'static str
+pub gg_ecs::registry::RegistryError::IdCollision
+pub gg_ecs::registry::RegistryError::IdCollision::first_declared: &'static str
+pub gg_ecs::registry::RegistryError::IdCollision::first_type: &'static str
+pub gg_ecs::registry::RegistryError::IdCollision::id: gg_ecs::hash::ComponentId
+pub gg_ecs::registry::RegistryError::IdCollision::second_declared: &'static str
+pub gg_ecs::registry::RegistryError::IdCollision::second_type: &'static str
+pub gg_ecs::registry::RegistryError::OverAligned
+pub gg_ecs::registry::RegistryError::OverAligned::align: usize
+pub gg_ecs::registry::RegistryError::OverAligned::type_name: &'static str
+pub struct gg_ecs::registry::ComponentInfo
+pub gg_ecs::registry::ComponentInfo::align: usize
+pub gg_ecs::registry::ComponentInfo::declared_id: &'static str
+pub gg_ecs::registry::ComponentInfo::fields: &'static [gg_ecs::component::FieldDesc]
+pub gg_ecs::registry::ComponentInfo::id: gg_ecs::hash::ComponentId
+pub gg_ecs::registry::ComponentInfo::protocol_hash: gg_ecs::registry::ProtocolHashFn
+pub gg_ecs::registry::ComponentInfo::schema: gg_ecs::hash::SchemaHash
+pub gg_ecs::registry::ComponentInfo::size: usize
+pub gg_ecs::registry::ComponentInfo::type_name: &'static str
+pub struct gg_ecs::registry::Registry
+impl gg_ecs::registry::Registry
+pub fn gg_ecs::registry::Registry::get(&self, gg_ecs::hash::ComponentId) -> core::option::Option<&gg_ecs::registry::ComponentInfo>
+pub fn gg_ecs::registry::Registry::hash_into(&self, &mut gg_ecs::hash::StateHasher)
+pub fn gg_ecs::registry::Registry::is_empty(&self) -> bool
+pub fn gg_ecs::registry::Registry::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = &gg_ecs::registry::ComponentInfo> + '_
+pub fn gg_ecs::registry::Registry::len(&self) -> usize
+pub fn gg_ecs::registry::Registry::new() -> Self
+pub fn gg_ecs::registry::Registry::register<T: gg_ecs::component::Component>(&mut self) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
+pub type gg_ecs::registry::ProtocolHashFn = fn(&[u8], &mut gg_ecs::hash::StateHasher)
+pub mod gg_ecs::side_table
+pub enum gg_ecs::side_table::SideTableError
+pub gg_ecs::side_table::SideTableError::AlreadyInstalled
+pub gg_ecs::side_table::SideTableError::AlreadyInstalled::declared: &'static str
+pub gg_ecs::side_table::SideTableError::AlreadyInstalled::type_name: &'static str
+pub gg_ecs::side_table::SideTableError::DuplicateDeclaration
+pub gg_ecs::side_table::SideTableError::DuplicateDeclaration::declared: &'static str
+pub gg_ecs::side_table::SideTableError::DuplicateDeclaration::first_type: &'static str
+pub gg_ecs::side_table::SideTableError::DuplicateDeclaration::second_type: &'static str
+pub gg_ecs::side_table::SideTableError::IdCollision
+pub gg_ecs::side_table::SideTableError::IdCollision::first_declared: &'static str
+pub gg_ecs::side_table::SideTableError::IdCollision::first_type: &'static str
+pub gg_ecs::side_table::SideTableError::IdCollision::id: gg_ecs::hash::SideTableId
+pub gg_ecs::side_table::SideTableError::IdCollision::second_declared: &'static str
+pub gg_ecs::side_table::SideTableError::IdCollision::second_type: &'static str
+pub trait gg_ecs::side_table::SideTable: gg_ecs::state_hash::StateHash + core::marker::Send + core::marker::Sync + 'static
+pub const gg_ecs::side_table::SideTable::DECLARED_ID: &'static str
+pub const gg_ecs::side_table::SideTable::TYPE_NAME: &'static str
+pub mod gg_ecs::state_hash
+pub trait gg_ecs::state_hash::StateHash
+pub fn gg_ecs::state_hash::StateHash::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for alloc::string::String
+pub fn alloc::string::String::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for bool
+pub fn bool::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for f32
+pub fn f32::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for f64
+pub fn f64::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::entity::Entity
+pub fn gg_ecs::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
+pub fn gg_ecs::hash::ComponentId::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DMat3
+pub fn gg_math::sim::DMat3::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DMat4
+pub fn gg_math::sim::DMat4::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DQuat
+pub fn gg_math::sim::DQuat::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DVec2
+pub fn gg_math::sim::DVec2::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DVec3
+pub fn gg_math::sim::DVec3::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DVec4
+pub fn gg_math::sim::DVec4::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Mat3
+pub fn gg_math::sim::Mat3::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Mat4
+pub fn gg_math::sim::Mat4::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Quat
+pub fn gg_math::sim::Quat::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Vec2
+pub fn gg_math::sim::Vec2::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Vec3
+pub fn gg_math::sim::Vec3::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Vec4
+pub fn gg_math::sim::Vec4::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for i128
+pub fn i128::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for i16
+pub fn i16::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for i32
+pub fn i32::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for i64
+pub fn i64::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for i8
+pub fn i8::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for str
+pub fn str::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for u128
+pub fn u128::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for u16
+pub fn u16::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for u32
+pub fn u32::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for u64
+pub fn u64::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for u8
+pub fn u8::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl<T: gg_ecs::state_hash::StateHash, const N: usize> gg_ecs::state_hash::StateHash for [T; N]
+pub fn [T; N]::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl<T: gg_ecs::state_hash::StateHash> gg_ecs::state_hash::StateHash for [T]
+pub fn [T]::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl<T: gg_ecs::state_hash::StateHash> gg_ecs::state_hash::StateHash for alloc::vec::Vec<T>
+pub fn alloc::vec::Vec<T>::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl<T: gg_ecs::state_hash::StateHash> gg_ecs::state_hash::StateHash for core::option::Option<T>
+pub fn core::option::Option<T>::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+pub mod gg_ecs::view
+pub enum gg_ecs::view::AliasError
+pub gg_ecs::view::AliasError::ReadWrite
+pub gg_ecs::view::AliasError::ReadWrite::id: gg_ecs::hash::ComponentId
+pub gg_ecs::view::AliasError::TooManyWrites
+pub gg_ecs::view::AliasError::TooManyWrites::count: usize
+pub gg_ecs::view::AliasError::WriteWrite
+pub gg_ecs::view::AliasError::WriteWrite::id: gg_ecs::hash::ComponentId
+pub struct gg_ecs::view::ArchetypeView<'w, 'q>
+impl<'w, 'q> gg_ecs::view::ArchetypeView<'w, 'q>
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::entities(&self) -> &'w [gg_ecs::entity::Entity]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::is_empty(&self) -> bool
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::len(&self) -> usize
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_reads(&self) -> &[gg_ecs::view::ColumnView]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_writes(&self) -> &[gg_ecs::view::ColumnView]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read<T: gg_ecs::component::Component>(&self, usize) -> &'w [T]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read_of<T: gg_ecs::component::Component>(&self) -> &'w [T]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write<T: gg_ecs::component::Component>(&mut self, usize) -> &'w mut [T]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write_of<T: gg_ecs::component::Component>(&mut self) -> &'w mut [T]
+#[repr(C)] pub struct gg_ecs::view::ColumnView
+pub gg_ecs::view::ColumnView::len: usize
+pub gg_ecs::view::ColumnView::ptr: *mut u8
+pub gg_ecs::view::ColumnView::stride: usize
+pub struct gg_ecs::view::QueryAccess
+impl gg_ecs::view::QueryAccess
+pub fn gg_ecs::view::QueryAccess::new(&[gg_ecs::hash::ComponentId], &[gg_ecs::hash::ComponentId]) -> core::result::Result<Self, gg_ecs::view::AliasError>
+pub fn gg_ecs::view::QueryAccess::reads(&self) -> &[gg_ecs::hash::ComponentId]
+pub fn gg_ecs::view::QueryAccess::writes(&self) -> &[gg_ecs::hash::ComponentId]
+pub const gg_ecs::view::MAX_WRITES: usize
+pub mod gg_ecs::world
+pub enum gg_ecs::world::WorldError
+pub gg_ecs::world::WorldError::DeadEntity
+pub gg_ecs::world::WorldError::DeadEntity::entity: gg_ecs::entity::Entity
+pub gg_ecs::world::WorldError::Registry(gg_ecs::registry::RegistryError)
+pub gg_ecs::world::WorldError::SideTable(gg_ecs::side_table::SideTableError)
+pub struct gg_ecs::world::World
+impl gg_ecs::world::World
+pub fn gg_ecs::world::World::canonical_hash(&self) -> gg_ecs::hash::CanonicalHash
+pub fn gg_ecs::world::World::canonical_hash_via_protocol(&self) -> gg_ecs::hash::CanonicalHash
+pub fn gg_ecs::world::World::contains<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::despawn(&mut self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::each<D: gg_ecs::query::QueryData>(&mut self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_ecs::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
+pub fn gg_ecs::world::World::get<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> core::option::Option<&T>
+pub fn gg_ecs::world::World::get_mut<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity) -> core::option::Option<&mut T>
+pub fn gg_ecs::world::World::insert<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity, T) -> core::result::Result<(), gg_ecs::world::WorldError>
+pub fn gg_ecs::world::World::insert_side_table<T: gg_ecs::side_table::SideTable>(&mut self, T) -> core::result::Result<(), gg_ecs::side_table::SideTableError>
+pub fn gg_ecs::world::World::is_alive(&self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::is_empty(&self) -> bool
+pub fn gg_ecs::world::World::len(&self) -> u32
+pub fn gg_ecs::world::World::new() -> Self
+pub fn gg_ecs::world::World::register<T: gg_ecs::component::Component>(&mut self) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
+pub fn gg_ecs::world::World::registry(&self) -> &gg_ecs::registry::Registry
+pub fn gg_ecs::world::World::remove<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::remove_side_table<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<T>
+pub fn gg_ecs::world::World::side_table<T: gg_ecs::side_table::SideTable>(&self) -> core::option::Option<&T>
+pub fn gg_ecs::world::World::side_table_count(&self) -> usize
+pub fn gg_ecs::world::World::side_table_mut<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<&mut T>
+pub fn gg_ecs::world::World::spawn(&mut self) -> gg_ecs::entity::Entity
+pub fn gg_ecs::world::World::views<'q>(&mut self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'_, 'q>))
+pub enum gg_ecs::AliasError
+pub gg_ecs::AliasError::ReadWrite
+pub gg_ecs::AliasError::ReadWrite::id: gg_ecs::hash::ComponentId
+pub gg_ecs::AliasError::TooManyWrites
+pub gg_ecs::AliasError::TooManyWrites::count: usize
+pub gg_ecs::AliasError::WriteWrite
+pub gg_ecs::AliasError::WriteWrite::id: gg_ecs::hash::ComponentId
+pub enum gg_ecs::RegistryError
+pub gg_ecs::RegistryError::DuplicateDeclaration
+pub gg_ecs::RegistryError::DuplicateDeclaration::declared: &'static str
+pub gg_ecs::RegistryError::DuplicateDeclaration::first_type: &'static str
+pub gg_ecs::RegistryError::DuplicateDeclaration::second_type: &'static str
+pub gg_ecs::RegistryError::IdCollision
+pub gg_ecs::RegistryError::IdCollision::first_declared: &'static str
+pub gg_ecs::RegistryError::IdCollision::first_type: &'static str
+pub gg_ecs::RegistryError::IdCollision::id: gg_ecs::hash::ComponentId
+pub gg_ecs::RegistryError::IdCollision::second_declared: &'static str
+pub gg_ecs::RegistryError::IdCollision::second_type: &'static str
+pub gg_ecs::RegistryError::OverAligned
+pub gg_ecs::RegistryError::OverAligned::align: usize
+pub gg_ecs::RegistryError::OverAligned::type_name: &'static str
+pub enum gg_ecs::SideTableError
+pub gg_ecs::SideTableError::AlreadyInstalled
+pub gg_ecs::SideTableError::AlreadyInstalled::declared: &'static str
+pub gg_ecs::SideTableError::AlreadyInstalled::type_name: &'static str
+pub gg_ecs::SideTableError::DuplicateDeclaration
+pub gg_ecs::SideTableError::DuplicateDeclaration::declared: &'static str
+pub gg_ecs::SideTableError::DuplicateDeclaration::first_type: &'static str
+pub gg_ecs::SideTableError::DuplicateDeclaration::second_type: &'static str
+pub gg_ecs::SideTableError::IdCollision
+pub gg_ecs::SideTableError::IdCollision::first_declared: &'static str
+pub gg_ecs::SideTableError::IdCollision::first_type: &'static str
+pub gg_ecs::SideTableError::IdCollision::id: gg_ecs::hash::SideTableId
+pub gg_ecs::SideTableError::IdCollision::second_declared: &'static str
+pub gg_ecs::SideTableError::IdCollision::second_type: &'static str
+pub enum gg_ecs::WorldError
+pub gg_ecs::WorldError::DeadEntity
+pub gg_ecs::WorldError::DeadEntity::entity: gg_ecs::entity::Entity
+pub gg_ecs::WorldError::Registry(gg_ecs::registry::RegistryError)
+pub gg_ecs::WorldError::SideTable(gg_ecs::side_table::SideTableError)
+pub struct gg_ecs::ArchetypeId(_)
+impl gg_ecs::archetype::ArchetypeId
+pub const fn gg_ecs::archetype::ArchetypeId::index(self) -> u32
+pub struct gg_ecs::ArchetypeView<'w, 'q>
+impl<'w, 'q> gg_ecs::view::ArchetypeView<'w, 'q>
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::entities(&self) -> &'w [gg_ecs::entity::Entity]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::is_empty(&self) -> bool
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::len(&self) -> usize
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_reads(&self) -> &[gg_ecs::view::ColumnView]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_writes(&self) -> &[gg_ecs::view::ColumnView]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read<T: gg_ecs::component::Component>(&self, usize) -> &'w [T]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read_of<T: gg_ecs::component::Component>(&self) -> &'w [T]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write<T: gg_ecs::component::Component>(&mut self, usize) -> &'w mut [T]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write_of<T: gg_ecs::component::Component>(&mut self) -> &'w mut [T]
+pub struct gg_ecs::CanonicalHash(_)
+impl gg_ecs::hash::CanonicalHash
+pub const fn gg_ecs::hash::CanonicalHash::get(self) -> u128
+impl core::fmt::Debug for gg_ecs::hash::CanonicalHash
+pub fn gg_ecs::hash::CanonicalHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for gg_ecs::hash::CanonicalHash
+pub fn gg_ecs::hash::CanonicalHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[repr(C)] pub struct gg_ecs::ColumnView
+pub gg_ecs::ColumnView::len: usize
+pub gg_ecs::ColumnView::ptr: *mut u8
+pub gg_ecs::ColumnView::stride: usize
+pub struct gg_ecs::ComponentId(_)
+impl gg_ecs::hash::ComponentId
+pub const fn gg_ecs::hash::ComponentId::from_raw(u64) -> Self
+pub const fn gg_ecs::hash::ComponentId::get(self) -> u64
+pub fn gg_ecs::hash::ComponentId::of(&str) -> Self
+impl core::fmt::Debug for gg_ecs::hash::ComponentId
+pub fn gg_ecs::hash::ComponentId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
+pub fn gg_ecs::hash::ComponentId::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+pub struct gg_ecs::ComponentInfo
+pub gg_ecs::ComponentInfo::align: usize
+pub gg_ecs::ComponentInfo::declared_id: &'static str
+pub gg_ecs::ComponentInfo::fields: &'static [gg_ecs::component::FieldDesc]
+pub gg_ecs::ComponentInfo::id: gg_ecs::hash::ComponentId
+pub gg_ecs::ComponentInfo::protocol_hash: gg_ecs::registry::ProtocolHashFn
+pub gg_ecs::ComponentInfo::schema: gg_ecs::hash::SchemaHash
+pub gg_ecs::ComponentInfo::size: usize
+pub gg_ecs::ComponentInfo::type_name: &'static str
+pub struct gg_ecs::Entities
+impl gg_ecs::entity::Entities
+pub fn gg_ecs::entity::Entities::alloc(&mut self) -> gg_ecs::entity::Entity
+pub fn gg_ecs::entity::Entities::free(&mut self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::entity::Entities::hash_into(&self, &mut gg_ecs::hash::StateHasher)
+pub fn gg_ecs::entity::Entities::is_alive(&self, gg_ecs::entity::Entity) -> bool
+pub const fn gg_ecs::entity::Entities::is_empty(&self) -> bool
+pub fn gg_ecs::entity::Entities::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = gg_ecs::entity::Entity> + '_
+pub const fn gg_ecs::entity::Entities::len(&self) -> u32
+pub fn gg_ecs::entity::Entities::new() -> Self
+#[repr(C)] pub struct gg_ecs::Entity
+impl gg_ecs::entity::Entity
+pub const gg_ecs::entity::Entity::NONE: Self
+pub const fn gg_ecs::entity::Entity::from_bits(u64) -> Self
+pub const fn gg_ecs::entity::Entity::generation(self) -> u32
+pub const fn gg_ecs::entity::Entity::index(self) -> u32
+pub const fn gg_ecs::entity::Entity::is_none(self) -> bool
+pub const fn gg_ecs::entity::Entity::to_bits(self) -> u64
+impl bytemuck::pod::Pod for gg_ecs::entity::Entity
+impl bytemuck::zeroable::Zeroable for gg_ecs::entity::Entity
+impl core::fmt::Debug for gg_ecs::entity::Entity
+pub fn gg_ecs::entity::Entity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl gg_ecs::state_hash::StateHash for gg_ecs::entity::Entity
+pub fn gg_ecs::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+pub struct gg_ecs::FieldDesc
+pub gg_ecs::FieldDesc::name: &'static str
+pub gg_ecs::FieldDesc::offset: usize
+pub gg_ecs::FieldDesc::size: usize
+pub gg_ecs::FieldDesc::ty: &'static str
+pub struct gg_ecs::Query<D: gg_ecs::query::QueryData>
+impl<D: gg_ecs::query::QueryData> gg_ecs::query::Query<D>
+pub fn gg_ecs::query::Query<D>::access(&self) -> &gg_ecs::view::QueryAccess
+pub fn gg_ecs::query::Query<D>::new() -> core::result::Result<Self, gg_ecs::view::AliasError>
+impl<D: gg_ecs::query::QueryData> core::fmt::Debug for gg_ecs::query::Query<D>
+pub fn gg_ecs::query::Query<D>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::QueryAccess
+impl gg_ecs::view::QueryAccess
+pub fn gg_ecs::view::QueryAccess::new(&[gg_ecs::hash::ComponentId], &[gg_ecs::hash::ComponentId]) -> core::result::Result<Self, gg_ecs::view::AliasError>
+pub fn gg_ecs::view::QueryAccess::reads(&self) -> &[gg_ecs::hash::ComponentId]
+pub fn gg_ecs::view::QueryAccess::writes(&self) -> &[gg_ecs::hash::ComponentId]
+pub struct gg_ecs::Registry
+impl gg_ecs::registry::Registry
+pub fn gg_ecs::registry::Registry::get(&self, gg_ecs::hash::ComponentId) -> core::option::Option<&gg_ecs::registry::ComponentInfo>
+pub fn gg_ecs::registry::Registry::hash_into(&self, &mut gg_ecs::hash::StateHasher)
+pub fn gg_ecs::registry::Registry::is_empty(&self) -> bool
+pub fn gg_ecs::registry::Registry::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = &gg_ecs::registry::ComponentInfo> + '_
+pub fn gg_ecs::registry::Registry::len(&self) -> usize
+pub fn gg_ecs::registry::Registry::new() -> Self
+pub fn gg_ecs::registry::Registry::register<T: gg_ecs::component::Component>(&mut self) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
+pub struct gg_ecs::SchemaHash(_)
+impl gg_ecs::hash::SchemaHash
+pub const fn gg_ecs::hash::SchemaHash::from_raw(u128) -> Self
+pub const fn gg_ecs::hash::SchemaHash::get(self) -> u128
+impl core::fmt::Debug for gg_ecs::hash::SchemaHash
+pub fn gg_ecs::hash::SchemaHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::SideTableId(_)
+impl gg_ecs::hash::SideTableId
+pub const fn gg_ecs::hash::SideTableId::get(self) -> u64
+pub fn gg_ecs::hash::SideTableId::of(&str) -> Self
+impl core::fmt::Debug for gg_ecs::hash::SideTableId
+pub fn gg_ecs::hash::SideTableId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::StateHasher
+impl gg_ecs::hash::StateHasher
+pub fn gg_ecs::hash::StateHasher::bool(&mut self, bool)
+pub fn gg_ecs::hash::StateHasher::bytes(&mut self, &[u8])
+pub fn gg_ecs::hash::StateHasher::canonical() -> Self
+pub fn gg_ecs::hash::StateHasher::delimited(&mut self, &[u8])
+pub fn gg_ecs::hash::StateHasher::f32(&mut self, f32)
+pub fn gg_ecs::hash::StateHasher::f64(&mut self, f64)
+pub fn gg_ecs::hash::StateHasher::finish_canonical(self) -> gg_ecs::hash::CanonicalHash
+pub fn gg_ecs::hash::StateHasher::finish_schema(self) -> gg_ecs::hash::SchemaHash
+pub fn gg_ecs::hash::StateHasher::i128(&mut self, i128)
+pub fn gg_ecs::hash::StateHasher::i16(&mut self, i16)
+pub fn gg_ecs::hash::StateHasher::i32(&mut self, i32)
+pub fn gg_ecs::hash::StateHasher::i64(&mut self, i64)
+pub fn gg_ecs::hash::StateHasher::i8(&mut self, i8)
+pub fn gg_ecs::hash::StateHasher::raw_column(&mut self, usize, usize, &[u8])
+pub fn gg_ecs::hash::StateHasher::schema() -> Self
+pub fn gg_ecs::hash::StateHasher::str(&mut self, &str)
+pub fn gg_ecs::hash::StateHasher::u128(&mut self, u128)
+pub fn gg_ecs::hash::StateHasher::u16(&mut self, u16)
+pub fn gg_ecs::hash::StateHasher::u32(&mut self, u32)
+pub fn gg_ecs::hash::StateHasher::u64(&mut self, u64)
+pub fn gg_ecs::hash::StateHasher::u8(&mut self, u8)
+pub struct gg_ecs::World
+impl gg_ecs::world::World
+pub fn gg_ecs::world::World::canonical_hash(&self) -> gg_ecs::hash::CanonicalHash
+pub fn gg_ecs::world::World::canonical_hash_via_protocol(&self) -> gg_ecs::hash::CanonicalHash
+pub fn gg_ecs::world::World::contains<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::despawn(&mut self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::each<D: gg_ecs::query::QueryData>(&mut self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_ecs::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
+pub fn gg_ecs::world::World::get<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> core::option::Option<&T>
+pub fn gg_ecs::world::World::get_mut<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity) -> core::option::Option<&mut T>
+pub fn gg_ecs::world::World::insert<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity, T) -> core::result::Result<(), gg_ecs::world::WorldError>
+pub fn gg_ecs::world::World::insert_side_table<T: gg_ecs::side_table::SideTable>(&mut self, T) -> core::result::Result<(), gg_ecs::side_table::SideTableError>
+pub fn gg_ecs::world::World::is_alive(&self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::is_empty(&self) -> bool
+pub fn gg_ecs::world::World::len(&self) -> u32
+pub fn gg_ecs::world::World::new() -> Self
+pub fn gg_ecs::world::World::register<T: gg_ecs::component::Component>(&mut self) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
+pub fn gg_ecs::world::World::registry(&self) -> &gg_ecs::registry::Registry
+pub fn gg_ecs::world::World::remove<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::remove_side_table<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<T>
+pub fn gg_ecs::world::World::side_table<T: gg_ecs::side_table::SideTable>(&self) -> core::option::Option<&T>
+pub fn gg_ecs::world::World::side_table_count(&self) -> usize
+pub fn gg_ecs::world::World::side_table_mut<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<&mut T>
+pub fn gg_ecs::world::World::spawn(&mut self) -> gg_ecs::entity::Entity
+pub fn gg_ecs::world::World::views<'q>(&mut self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'_, 'q>))
+pub trait gg_ecs::Component: bytemuck::pod::Pod + gg_ecs::state_hash::StateHash + core::marker::Send + core::marker::Sync + 'static
+pub const gg_ecs::Component::DECLARED_ID: &'static str
+pub const gg_ecs::Component::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::Component::TYPE_NAME: &'static str
+pub trait gg_ecs::QueryData
+pub type gg_ecs::QueryData::Columns<'w>
+pub type gg_ecs::QueryData::Item<'r>
+pub fn gg_ecs::QueryData::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn gg_ecs::QueryData::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn gg_ecs::QueryData::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData, D: gg_ecs::query::QueryData, E: gg_ecs::query::QueryData, F: gg_ecs::query::QueryData, G: gg_ecs::query::QueryData, H: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C, D, E, F, G, H)
+pub type (A, B, C, D, E, F, G, H)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns, <D as gg_ecs::query::QueryData>::Columns, <E as gg_ecs::query::QueryData>::Columns, <F as gg_ecs::query::QueryData>::Columns, <G as gg_ecs::query::QueryData>::Columns, <H as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C, D, E, F, G, H)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item, <D as gg_ecs::query::QueryData>::Item, <E as gg_ecs::query::QueryData>::Item, <F as gg_ecs::query::QueryData>::Item, <G as gg_ecs::query::QueryData>::Item, <H as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C, D, E, F, G, H)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C, D, E, F, G, H)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C, D, E, F, G, H)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData, D: gg_ecs::query::QueryData, E: gg_ecs::query::QueryData, F: gg_ecs::query::QueryData, G: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C, D, E, F, G)
+pub type (A, B, C, D, E, F, G)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns, <D as gg_ecs::query::QueryData>::Columns, <E as gg_ecs::query::QueryData>::Columns, <F as gg_ecs::query::QueryData>::Columns, <G as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C, D, E, F, G)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item, <D as gg_ecs::query::QueryData>::Item, <E as gg_ecs::query::QueryData>::Item, <F as gg_ecs::query::QueryData>::Item, <G as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C, D, E, F, G)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C, D, E, F, G)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C, D, E, F, G)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData, D: gg_ecs::query::QueryData, E: gg_ecs::query::QueryData, F: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C, D, E, F)
+pub type (A, B, C, D, E, F)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns, <D as gg_ecs::query::QueryData>::Columns, <E as gg_ecs::query::QueryData>::Columns, <F as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C, D, E, F)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item, <D as gg_ecs::query::QueryData>::Item, <E as gg_ecs::query::QueryData>::Item, <F as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C, D, E, F)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C, D, E, F)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C, D, E, F)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData, D: gg_ecs::query::QueryData, E: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C, D, E)
+pub type (A, B, C, D, E)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns, <D as gg_ecs::query::QueryData>::Columns, <E as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C, D, E)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item, <D as gg_ecs::query::QueryData>::Item, <E as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C, D, E)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C, D, E)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C, D, E)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData, D: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C, D)
+pub type (A, B, C, D)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns, <D as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C, D)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item, <D as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C, D)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C, D)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C, D)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData, C: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B, C)
+pub type (A, B, C)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns, <C as gg_ecs::query::QueryData>::Columns)
+pub type (A, B, C)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item, <C as gg_ecs::query::QueryData>::Item)
+pub fn (A, B, C)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B, C)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B, C)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData, B: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A, B)
+pub type (A, B)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns, <B as gg_ecs::query::QueryData>::Columns)
+pub type (A, B)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item, <B as gg_ecs::query::QueryData>::Item)
+pub fn (A, B)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A, B)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A, B)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::query::QueryData> gg_ecs::query::QueryData for (A)
+pub type (A)::Columns<'w> = (<A as gg_ecs::query::QueryData>::Columns)
+pub type (A)::Item<'r> = (<A as gg_ecs::query::QueryData>::Item)
+pub fn (A)::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn (A)::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn (A)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<T: gg_ecs::component::Component> gg_ecs::query::QueryData for &T
+pub type &T::Columns<'w> = &'w [T]
+pub type &T::Item<'r> = &'r T
+pub fn &T::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn &T::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn &T::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<T: gg_ecs::component::Component> gg_ecs::query::QueryData for &mut T
+pub type &mut T::Columns<'w> = &'w mut [T]
+pub type &mut T::Item<'r> = &'r mut T
+pub fn &mut T::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
+pub fn &mut T::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
+pub fn &mut T::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+pub trait gg_ecs::SideTable: gg_ecs::state_hash::StateHash + core::marker::Send + core::marker::Sync + 'static
+pub const gg_ecs::SideTable::DECLARED_ID: &'static str
+pub const gg_ecs::SideTable::TYPE_NAME: &'static str
+pub trait gg_ecs::StateHash
+pub fn gg_ecs::StateHash::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for alloc::string::String
+pub fn alloc::string::String::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for bool
+pub fn bool::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for f32
+pub fn f32::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for f64
+pub fn f64::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::entity::Entity
+pub fn gg_ecs::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
+pub fn gg_ecs::hash::ComponentId::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DMat3
+pub fn gg_math::sim::DMat3::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DMat4
+pub fn gg_math::sim::DMat4::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DQuat
+pub fn gg_math::sim::DQuat::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DVec2
+pub fn gg_math::sim::DVec2::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DVec3
+pub fn gg_math::sim::DVec3::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::DVec4
+pub fn gg_math::sim::DVec4::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Mat3
+pub fn gg_math::sim::Mat3::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Mat4
+pub fn gg_math::sim::Mat4::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Quat
+pub fn gg_math::sim::Quat::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Vec2
+pub fn gg_math::sim::Vec2::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Vec3
+pub fn gg_math::sim::Vec3::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Vec4
+pub fn gg_math::sim::Vec4::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for i128
+pub fn i128::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for i16
+pub fn i16::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for i32
+pub fn i32::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for i64
+pub fn i64::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for i8
+pub fn i8::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for str
+pub fn str::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for u128
+pub fn u128::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for u16
+pub fn u16::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for u32
+pub fn u32::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for u64
+pub fn u64::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for u8
+pub fn u8::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl<T: gg_ecs::state_hash::StateHash, const N: usize> gg_ecs::state_hash::StateHash for [T; N]
+pub fn [T; N]::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl<T: gg_ecs::state_hash::StateHash> gg_ecs::state_hash::StateHash for [T]
+pub fn [T]::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl<T: gg_ecs::state_hash::StateHash> gg_ecs::state_hash::StateHash for alloc::vec::Vec<T>
+pub fn alloc::vec::Vec<T>::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl<T: gg_ecs::state_hash::StateHash> gg_ecs::state_hash::StateHash for core::option::Option<T>
+pub fn core::option::Option<T>::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+pub fn gg_ecs::component_id<T: gg_ecs::component::Component>() -> gg_ecs::hash::ComponentId
+pub fn gg_ecs::schema_hash<T: gg_ecs::component::Component>() -> gg_ecs::hash::SchemaHash

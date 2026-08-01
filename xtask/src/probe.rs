@@ -141,6 +141,8 @@ fn probe_device(system: bool) -> anyhow::Result<()> {
             .push_next(&mut f13);
         // SAFETY: pd from the live instance; feature structs are default-initialized.
         unsafe { instance.get_physical_device_features2(pd, &mut f2) };
+        // Read out of the chain head before the rows below borrow its links.
+        let shader_int64 = f2.features.shader_int64 == ash::vk::TRUE;
 
         let rows: Vec<(&str, bool)> = vec![
             (
@@ -152,6 +154,12 @@ fn probe_device(system: bool) -> anyhow::Result<()> {
                 // declares DrawParameters; names match gg-rhi's device rows.
                 "shaderDrawParameters",
                 f11.shader_draw_parameters == ash::vk::TRUE,
+            ),
+            (
+                // §4.3's "all buffer access by device address" is 64-bit
+                // arithmetic in every shader that reads a buffer.
+                "shaderInt64",
+                shader_int64,
             ),
             (
                 "descriptorIndexing",
@@ -180,6 +188,10 @@ fn probe_device(system: bool) -> anyhow::Result<()> {
             (
                 "descriptorBindingStorageBufferUpdateAfterBind",
                 f12.descriptor_binding_storage_buffer_update_after_bind == ash::vk::TRUE,
+            ),
+            (
+                "descriptorBindingStorageImageUpdateAfterBind",
+                f12.descriptor_binding_storage_image_update_after_bind == ash::vk::TRUE,
             ),
             (
                 "descriptorBindingUpdateUnusedWhilePending",

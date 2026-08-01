@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: derive(Pod) was applied to a type with padding
+ --> tests/reject/padded_component.rs:7:23
+  |
+7 | #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
+  |                       ^^^^^^^^^^^^^ evaluation of `_` failed here

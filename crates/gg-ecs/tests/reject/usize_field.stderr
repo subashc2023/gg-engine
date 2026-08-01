@@ -1,0 +1,5 @@
+error: field `ticks`: `usize` is platform-width, so its encoding would differ between a 32-bit and a 64-bit target and its meaning differs across the §4.2.2 boundary (§4.2.1). Use an explicit width — `u32`/`u64` — chosen for the range the field actually needs.
+ --> tests/reject/usize_field.rs:9:12
+  |
+9 |     ticks: usize,
+  |            ^^^^^

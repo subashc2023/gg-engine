@@ -1,0 +1,5 @@
+error: Component requires named fields: §4.2.2 migration matches fields by name, so a tuple struct could only migrate by position — silently retyping state whenever fields are reordered
+ --> tests/reject/tuple_struct.rs:8:13
+  |
+8 | struct Score(u32);
+  |             ^^^^^

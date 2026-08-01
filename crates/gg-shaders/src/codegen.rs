@@ -14,7 +14,7 @@ use crate::{CompiledModule, ShaderError, Stage};
 
 /// Bumped whenever generated output changes shape; part of the header line the
 /// incremental/diff-clean machinery compares.
-pub const GENERATOR_VERSION: u32 = 3;
+pub const GENERATOR_VERSION: u32 = 4;
 
 /// The header line carrying the identity of the inputs. `xtask shaders` skips
 /// recompilation when the on-disk header matches the current source hash.
@@ -124,15 +124,62 @@ fn generate_struct(out: &mut String, push: &crate::StructLayout) -> Result<(), S
         push.name, push.size
     ));
     out.push_str(&format!(
-        "impl {name} {{\n    /// Construct with every padding byte zeroed.\n    pub fn new({}) -> Self {{\n        Self {{ {} }}\n    }}\n}}\n\n",
-        ctor_params.join(", "),
-        ctor_fields.join(", ")
+        "impl {name} {{\n    /// Construct with every padding byte zeroed.\n    pub fn new({}) -> Self {{\n        Self {{{}}}\n    }}\n}}\n\n",
+        wrap_list(&ctor_params, "    pub fn new(".len() + ") -> Self {".len(), 8),
+        wrap_braced(&ctor_fields, 12),
     ));
     out.push_str(&format!(
         "const _: () = {{\n{}\n}};\n\n",
         asserts.join("\n")
     ));
     Ok(())
+}
+
+/// rustfmt's max width. Generated output has to be a *fixed point* of `cargo
+/// fmt`, or the formatter and the diff-clean gate (§5, gate 3) disagree about
+/// the checked-in bytes forever — so the two places a generated line can grow
+/// past it reproduce rustfmt's own rule rather than hoping to stay short.
+const MAX_WIDTH: usize = 100;
+
+/// A comma-separated parameter list: joined on one line while it fits, else
+/// one item per line at `indent`, with a trailing comma — what rustfmt does.
+/// `fixed` is everything else on the line the joined form would occupy.
+fn wrap_list(items: &[String], fixed: usize, indent: usize) -> String {
+    let joined = items.join(", ");
+    if items.is_empty() || fixed + joined.len() <= MAX_WIDTH {
+        return joined;
+    }
+    let pad = " ".repeat(indent);
+    let mut out = String::from("\n");
+    for item in items {
+        out.push_str(&format!("{pad}{item},\n"));
+    }
+    out.push_str(&" ".repeat(indent - 4));
+    out
+}
+
+/// As [`wrap_list`], for a struct literal's fields — which rustfmt writes with
+/// surrounding spaces on one line (`{ a, b }`) and without them when split.
+///
+/// The threshold is *not* `max_width`: rustfmt's `struct_lit_width` defaults to
+/// 18 and measures the contents alone, so a short literal on a long line stays
+/// joined and a 54-character one splits at column 8.
+fn wrap_braced(items: &[String], indent: usize) -> String {
+    const STRUCT_LIT_WIDTH: usize = 18;
+    let joined = items.join(", ");
+    if items.is_empty() {
+        return String::new();
+    }
+    if joined.len() <= STRUCT_LIT_WIDTH {
+        return format!(" {joined} ");
+    }
+    let pad = " ".repeat(indent);
+    let mut out = String::from("\n");
+    for item in items {
+        out.push_str(&format!("{pad}{item},\n"));
+    }
+    out.push_str(&" ".repeat(indent - 4));
+    out
 }
 
 /// Field/struct names pass through as-is when already valid Rust identifiers;

@@ -46,6 +46,15 @@ pub struct Candidate {
     pub missing: Vec<&'static str>,
 }
 
+/// How large the global bindless arrays may be on this device (§4.3). Both
+/// are the min of the per-set and per-stage update-after-bind limits: our one
+/// set *is* the per-stage budget, so the smaller of the two is the real cap.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DescriptorLimits {
+    pub sampled_images: u32,
+    pub storage_images: u32,
+}
+
 /// The logical device, its queues, and the allocator.
 pub struct Device {
     physical: vk::PhysicalDevice,
@@ -55,6 +64,7 @@ pub struct Device {
     debug_fns: ash::ext::debug_utils::Device,
     pub(crate) graphics: Queue,
     pub(crate) transfer: Queue,
+    descriptor_limits: DescriptorLimits,
     allocator: Option<gpu_allocator::vulkan::Allocator>,
     report: DeviceReport,
 }
@@ -77,6 +87,8 @@ fn missing_features(
         .push_next(&mut f13);
     // SAFETY: pd comes from this live instance; structs are default-init.
     unsafe { instance.get_physical_device_features2(pd, &mut f2) };
+    // Read out of the chain head before the rows below borrow its links.
+    let shader_int64 = f2.features.shader_int64 == vk::TRUE;
 
     // Offscreen contexts (§4.10) have no surface: any graphics family will
     // do, and the row says so honestly.
@@ -92,7 +104,7 @@ fn missing_features(
         "graphics queue family"
     };
 
-    let rows: [(&'static str, bool); 16] = [
+    let rows: [(&'static str, bool); 18] = [
         (
             "Vulkan >= 1.3",
             api_version >= vk::make_api_version(0, 1, 3, 0),
@@ -104,6 +116,9 @@ fn missing_features(
             "shaderDrawParameters",
             f11.shader_draw_parameters == vk::TRUE,
         ),
+        // Buffer device addresses are 64-bit values a shader does arithmetic
+        // on, so §4.3's "all buffer access by address" implies this row.
+        ("shaderInt64", shader_int64),
         ("timelineSemaphore", f12.timeline_semaphore == vk::TRUE),
         ("bufferDeviceAddress", f12.buffer_device_address == vk::TRUE),
         ("descriptorIndexing", f12.descriptor_indexing == vk::TRUE),
@@ -130,6 +145,13 @@ fn missing_features(
         (
             "descriptorBindingStorageBufferUpdateAfterBind",
             f12.descriptor_binding_storage_buffer_update_after_bind == vk::TRUE,
+        ),
+        // The global set's storage-image array carries the same
+        // update-after-bind flag as its sampled-image array, so it needs the
+        // matching feature — not a spare row: the layout is refused without it.
+        (
+            "descriptorBindingStorageImageUpdateAfterBind",
+            f12.descriptor_binding_storage_image_update_after_bind == vk::TRUE,
         ),
         (
             "descriptorBindingUpdateUnusedWhilePending",
@@ -218,6 +240,19 @@ impl Device {
         // SAFETY: as above.
         let families = unsafe { inst.get_physical_device_queue_family_properties(pd) };
 
+        let mut p12 = vk::PhysicalDeviceVulkan12Properties::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut p12);
+        // SAFETY: pd from the live instance; the chain is default-initialized.
+        unsafe { inst.get_physical_device_properties2(pd, &mut props2) };
+        let descriptor_limits = DescriptorLimits {
+            sampled_images: p12
+                .max_descriptor_set_update_after_bind_sampled_images
+                .min(p12.max_per_stage_descriptor_update_after_bind_sampled_images),
+            storage_images: p12
+                .max_descriptor_set_update_after_bind_storage_images
+                .min(p12.max_per_stage_descriptor_update_after_bind_storage_images),
+        };
+
         // Queues: graphics+present is required (selection proved it exists);
         // transfer prefers a family that is neither graphics nor compute
         // (a real DMA queue), falls back to any other transfer-capable
@@ -271,12 +306,15 @@ impl Device {
             .descriptor_binding_partially_bound(true)
             .descriptor_binding_sampled_image_update_after_bind(true)
             .descriptor_binding_storage_buffer_update_after_bind(true)
+            .descriptor_binding_storage_image_update_after_bind(true)
             .descriptor_binding_update_unused_while_pending(true);
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)
             .maintenance4(true);
+        let base = vk::PhysicalDeviceFeatures::default().shader_int64(true);
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
+            .features(base)
             .push_next(&mut f11)
             .push_next(&mut f12)
             .push_next(&mut f13);
@@ -357,6 +395,7 @@ impl Device {
                 raw: transfer_queue,
                 timeline: transfer_timeline,
             },
+            descriptor_limits,
             allocator: Some(allocator),
             report,
         };
@@ -380,6 +419,18 @@ impl Device {
 
     pub(crate) fn swapchain_fns(&self) -> &ash::khr::swapchain::Device {
         &self.swapchain_fns
+    }
+
+    pub(crate) fn descriptor_limits(&self) -> DescriptorLimits {
+        self.descriptor_limits
+    }
+
+    /// Whether uploads cross a queue-family boundary. `false` on lavapipe,
+    /// which has one family total — recorded honestly rather than assumed
+    /// away, because the ownership-transfer path only exists when this is
+    /// `true` and a test that cannot tell would silently prove nothing.
+    pub(crate) fn transfer_crosses_families(&self) -> bool {
+        self.transfer.family != self.graphics.family
     }
 
     /// Name any Vulkan object (§1.6). Required at creation sites — the
@@ -418,6 +469,18 @@ impl Device {
         // SAFETY: semaphore is live and a timeline.
         unsafe { self.raw.get_semaphore_counter_value(self.graphics.timeline) }
             .map_err(RhiError::Vk)
+    }
+
+    /// Block until the transfer timeline reaches `value` — the staging ring's
+    /// reclaim wait and the synchronous upload path's completion wait (§4.3).
+    pub(crate) fn wait_transfer_timeline(&self, value: u64) -> Result<(), RhiError> {
+        let semaphores = [self.transfer.timeline];
+        let values = [value];
+        let info = vk::SemaphoreWaitInfo::default()
+            .semaphores(&semaphores)
+            .values(&values);
+        // SAFETY: semaphore is live and a timeline.
+        unsafe { self.raw.wait_semaphores(&info, u64::MAX) }.map_err(RhiError::Vk)
     }
 
     /// Wait the graphics queue idle. Swapchain recreation only: presentation

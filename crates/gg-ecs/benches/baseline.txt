@@ -1,0 +1,33 @@
+gg-ecs query baseline (§4.2, M3 exit criterion)
+
+The crate's own reference point for future internal rework. Absolute times are
+machine-specific and not a gate; the **ratios** are, and they are what
+`benches/query.rs` asserts. Re-record this file when the machine changes, not
+when a number moves — a moved number is the finding.
+
+Recorded 2026-07-31
+  Windows 11 Pro 26200, Ryzen (host desk machine), rustc 1.97.1
+  cargo bench -p gg-ecs, release, 100000 entities, one archetype, best of 25
+
+  native Vec loop               59.700µs    0.597 ns/entity
+  column views                  57.400µs    0.574 ns/entity
+  typed each()                  57.800µs    0.578 ns/entity
+  canonical_hash                10.866ms  108.663 ns/entity
+
+  column views    0.96x native
+  typed each()    0.97x native
+  canonical_hash  182x   native
+
+Readings:
+
+- §4.2.2's hot-path claim holds. Whole-column views iterate at parity with two
+  plain `Vec`s zipped in the same process, so one FFI-shaped call per archetype
+  match really is enough and no per-entity boundary crossing is needed. M5 can
+  budget against this.
+- The typed tuple layer costs ~1%, which is the point of resolving columns once
+  per archetype rather than per row.
+- The canonical hash is ~180x a query pass over the same data. That is the
+  number that eventually justifies the chunked accelerator (§4.2.1, designed in
+  `src/chunked.rs`) — and equally the reason not to build it yet: 11ms/tick is
+  invisible in a dev loop until entity counts climb well past 100k, which is
+  demo 05-many's job to prove (§6, M9).

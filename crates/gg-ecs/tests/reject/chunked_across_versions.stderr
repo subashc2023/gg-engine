@@ -1,0 +1,8 @@
+error[E0308]: mismatched types
+  --> tests/reject/chunked_across_versions.rs:12:22
+   |
+12 |     assert_eq!(here, elsewhere);
+   |                      ^^^^^^^^^ expected `1`, found `2`
+   |
+   = note: expected struct `ChunkedHash<1>`
+              found struct `ChunkedHash<2>`

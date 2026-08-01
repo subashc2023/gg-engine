@@ -1,0 +1,5 @@
+error: field `who`: references cannot be hashed state: components are `Pod` and cross the §4.2.2 reload boundary by raw pointer, where a borrow has no meaning. Store an `Entity` or an index.
+  --> tests/reject/reference_field.rs:11:10
+   |
+11 |     who: &'static u32,
+   |          ^

@@ -1,0 +1,5 @@
+error: Component cannot be derived for an enum: a bare enum's discriminant representation is not pinned by the language (§4.2.1 hazard 4). Use the newtyped-integer pattern — a `#[repr(transparent)]` struct over a `u8`/`u32` with validated accessors.
+ --> tests/reject/enum_component.rs:9:1
+  |
+9 | enum Stance {
+  | ^^^^

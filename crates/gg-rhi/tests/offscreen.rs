@@ -75,6 +75,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             fs_spirv: &fs.spirv,
             fs_entry: &fs.spirv_entry,
             push_constant_size: 0,
+            depth: false,
         })
         .unwrap();
     let pixels = rhi
@@ -83,7 +84,8 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             Some(&DrawSpec {
                 pipeline,
                 push_constants: &[],
-                vertex_count: 3,
+                count: 3,
+                index_buffer: None,
             }),
         )
         .unwrap();
@@ -99,7 +101,8 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             Some(&DrawSpec {
                 pipeline,
                 push_constants: &[],
-                vertex_count: 3,
+                count: 3,
+                index_buffer: None,
             }),
         )
         .unwrap_err();
@@ -168,6 +171,7 @@ float4 fs_main() : SV_Target { return push.color; }
             fs_spirv: &fs.spirv,
             fs_entry: &fs.spirv_entry,
             push_constant_size: 16,
+            depth: false,
         })
         .unwrap();
 
@@ -177,7 +181,8 @@ float4 fs_main() : SV_Target { return push.color; }
             Some(&DrawSpec {
                 pipeline,
                 push_constants: &[0u8; 12], // wrong: pipeline declares 16
-                vertex_count: 3,
+                count: 3,
+                index_buffer: None,
             }),
         )
         .unwrap_err();
@@ -193,7 +198,8 @@ float4 fs_main() : SV_Target { return push.color; }
             Some(&DrawSpec {
                 pipeline,
                 push_constants: bytemuck::bytes_of(&[1.0f32, 1.0, 1.0, 1.0]),
-                vertex_count: 3,
+                count: 3,
+                index_buffer: None,
             }),
         )
         .unwrap();

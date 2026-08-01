@@ -1,0 +1,40 @@
+# gg-ecs (§3, §4.2) — archetype storage, queries, entity ids, stable component
+# ids, schema hashes, the canonical state hash. Ours from day one (M3).
+#
+# Complexity budget (§3): <= 5 external dependencies, public surface held by the
+# cargo-public-api baseline (§5.10), and standing non-goals — no scheduler, no
+# system graph, no reflection, no serialization (§7). Internals are explicitly
+# fair game for later rework; the canonical hash is what makes that safe.
+# Determinism-critical (§3): gg_math::sim only, never ::render, never glam.
+
+[package]
+name = "gg-ecs"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gg_ecs"
+
+[dependencies]
+gg-ecs-derive = { path = "../gg-ecs-derive" }
+gg-math = { path = "../gg-math" }
+blake3 = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Compile-fail proofs for the derive's rejections (§4.2.1). Dev-only: absent
+# from every runtime graph, so outside the crate's <= 5 dependency budget (§3).
+trybuild = { workspace = true }
+
+[[bench]]
+name = "query"
+# No framework: the numbers that matter are ratios against a plain `Vec` loop in
+# the same run, which needs no harness and no dependency tree (§3 budget).
+harness = false
+
+[lints]
+workspace = true

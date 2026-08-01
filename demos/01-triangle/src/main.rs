@@ -82,6 +82,7 @@ impl HotReload {
             fs_spirv: &fs.spirv,
             fs_entry: &fs.spirv_entry,
             push_constant_size: push_size,
+            depth: false,
         };
         match rhi.create_pipeline(&desc) {
             Ok(handle) => {
@@ -196,7 +197,8 @@ fn main() -> anyhow::Result<()> {
             let draw = DrawSpec {
                 pipeline: p,
                 push_constants: bytemuck::bytes_of(&push),
-                vertex_count: scene::VERTEX_COUNT,
+                count: scene::VERTEX_COUNT,
+                index_buffer: None,
             };
             match r.render_frame(scene::CLEAR, Some(&draw)) {
                 Ok(FrameOutcome::Presented { .. }) => {
@@ -232,6 +234,8 @@ fn main() -> anyhow::Result<()> {
             }
             Control::Exit
         }
+        // Demos 00 and 01 predate raw input (§4.7) and ignore it.
+        Event::Key { .. } | Event::MouseMotion { .. } => Control::Continue,
     })?;
 
     if let Some(err) = failure {
