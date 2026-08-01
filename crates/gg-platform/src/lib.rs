@@ -36,6 +36,12 @@ pub fn headless() -> bool {
     std::env::var_os("GG_HEADLESS").is_some()
 }
 
+/// Where invisible windows live (§1.5): far beyond any plausible
+/// monitor arrangement, so a window the OS "shows" (minimize/restore does)
+/// still never reaches a screen. Test-visible so the regression test asserts
+/// against the same number.
+pub const OFFSCREEN_POS: (i32, i32) = (-30000, -30000);
+
 /// What kind of window to create.
 #[derive(Clone, Debug)]
 pub struct WindowDesc {
@@ -51,8 +57,11 @@ pub struct WindowDesc {
 }
 
 impl WindowDesc {
-    /// The interactive suite's window (§4.3): invisible and non-activating
-    /// (`WS_EX_NOACTIVATE` on Windows), so even nightly runs steal nothing.
+    /// The interactive suite's window (§4.3): invisible, non-activating
+    /// (`WS_EX_NOACTIVATE`), absent from taskbar/Alt-Tab (`WS_EX_TOOLWINDOW`),
+    /// and parked off-screen on Windows — because minimize/restore *shows* a
+    /// hidden window, and §1.5 holds even then. Nightly runs steal nothing
+    /// and display nothing.
     pub fn invisible(title: &str, size: (u32, u32)) -> Self {
         Self {
             title: title.to_string(),
@@ -86,36 +95,57 @@ impl Window {
              automated paths use invisible, non-activating windows",
             desc.title
         );
-        let attrs = WindowAttributes::default()
+        let mut attrs = WindowAttributes::default()
             .with_title(&desc.title)
             .with_inner_size(PhysicalSize::new(desc.size.0, desc.size.1))
             .with_visible(desc.visible)
             .with_resizable(desc.resizable)
             .with_active(desc.visible);
+        // §1.5, learned the hard way — twice: Win32 SW_MINIMIZE/SW_RESTORE
+        // *show* a window even created hidden, and on X11 (incl. WSLg's
+        // XWayland) winit's un-minimize sends _NET_ACTIVE_WINDOW, which the
+        // WM answers by mapping the window. The interactive suite spams
+        // exactly those, so invisible windows live far off-screen on every
+        // backend: OS machinery may "show" them, but no monitor ever renders
+        // a pixel. Wayland has no window positions and ignores this; its
+        // surfaces stay unmapped until shown, so it needs no parking.
+        if !desc.visible {
+            attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
+                OFFSCREEN_POS.0,
+                OFFSCREEN_POS.1,
+            ));
+        }
         let window = Self {
             inner: event_loop.create_window(attrs)?,
         };
         if !desc.visible {
-            window.set_no_activate();
+            window.harden_invisible();
         }
         Ok(window)
     }
 
-    /// `WS_EX_NOACTIVATE` (§4.3): should an invisible window ever be shown by
-    /// OS machinery, it still cannot steal focus. Windows-only by nature.
-    fn set_no_activate(&self) {
+    /// The Windows half of §1.5's "never on the user's screen" for windows OS
+    /// machinery may show anyway (see [`Self::create`]): `WS_EX_NOACTIVATE`
+    /// (§4.3 — cannot steal focus) plus `WS_EX_TOOLWINDOW` (no taskbar button,
+    /// no Alt-Tab entry). Windows-only by nature.
+    fn harden_invisible(&self) {
         #[cfg(windows)]
         if let Ok(handle) = self.inner.window_handle()
             && let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw()
         {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW,
             };
             let hwnd = win32.hwnd.get() as windows_sys::Win32::Foundation::HWND;
             // SAFETY: hwnd comes from a live winit window on this thread.
             unsafe {
                 let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE as isize);
+                SetWindowLongPtrW(
+                    hwnd,
+                    GWL_EXSTYLE,
+                    style | WS_EX_NOACTIVATE as isize | WS_EX_TOOLWINDOW as isize,
+                );
             }
         }
     }

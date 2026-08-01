@@ -133,9 +133,11 @@ fn probe_device(system: bool) -> anyhow::Result<()> {
             ash::vk::api_version_patch(api),
         );
 
+        let mut f11 = ash::vk::PhysicalDeviceVulkan11Features::default();
         let mut f12 = ash::vk::PhysicalDeviceVulkan12Features::default();
         let mut f13 = ash::vk::PhysicalDeviceVulkan13Features::default();
         let mut f2 = ash::vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut f11)
             .push_next(&mut f12)
             .push_next(&mut f13);
         // SAFETY: pd from the live instance; feature structs are default-initialized.
@@ -145,6 +147,12 @@ fn probe_device(system: bool) -> anyhow::Result<()> {
             (
                 "Vulkan >= 1.3",
                 api >= ash::vk::make_api_version(0, 1, 3, 0),
+            ),
+            (
+                // M2's pipelines, not M4A's bindless: Slang vertex SPIR-V
+                // declares DrawParameters; names match gg-rhi's device rows.
+                "shaderDrawParameters",
+                f11.shader_draw_parameters == ash::vk::TRUE,
             ),
             (
                 "descriptorIndexing",

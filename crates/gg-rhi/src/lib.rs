@@ -15,6 +15,8 @@ mod deletion;
 mod device;
 mod frame;
 mod instance;
+mod offscreen;
+mod pipeline;
 mod suppressions;
 mod surface;
 mod swapchain;
@@ -22,6 +24,8 @@ mod swapchain;
 pub use device::{Candidate, DeviceReport};
 pub use frame::FRAMES_IN_FLIGHT;
 pub use instance::validation_message_count;
+pub use offscreen::OffscreenRhi;
+pub use pipeline::{PipelineDesc, PipelineHandle};
 pub use suppressions::{parse as parse_suppressions, validated as validated_suppressions};
 
 use ash::vk;
@@ -29,9 +33,21 @@ use deletion::DeletionQueue;
 use device::Device;
 use frame::Frames;
 use instance::Instance;
+use pipeline::PipelineStore;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use surface::Surface;
 use swapchain::{Acquired, Swapchain};
+
+/// One draw call at M2 scope: a pipeline, its push constants, and a vertex
+/// count (geometry comes from the shader; vertex buffers land at M4A).
+pub struct DrawSpec<'a> {
+    /// The pipeline to draw with.
+    pub pipeline: PipelineHandle,
+    /// Push-constant bytes; length must equal the pipeline's declared size.
+    pub push_constants: &'a [u8],
+    /// Number of vertices to draw.
+    pub vertex_count: u32,
+}
 
 /// Errors from the RHI. Vulkan result codes surface as their spec names; the
 /// §3 containment grep keeps callers from matching on raw codes anyway.
@@ -94,6 +110,7 @@ pub struct Rhi {
     pending_recreate: bool,
     dead: bool,
     deletions: DeletionQueue,
+    pipelines: PipelineStore,
     frames: Frames,
     swapchain: Swapchain,
     device: Device,
@@ -111,7 +128,7 @@ impl Rhi {
         let display = window
             .display_handle()
             .map_err(|e| RhiError::Loader(format!("no display handle: {e}")))?;
-        let mut instance = Instance::new(display.as_raw())?;
+        let mut instance = Instance::new(Some(display.as_raw()))?;
         let mut surface = match Surface::new(&instance, window) {
             Ok(s) => s,
             Err(e) => {
@@ -119,7 +136,7 @@ impl Rhi {
                 return Err(e);
             }
         };
-        let mut device = match Device::new(&instance, &surface) {
+        let mut device = match Device::new(&instance, Some(&surface)) {
             Ok(d) => d,
             Err(e) => {
                 surface.destroy();
@@ -136,9 +153,20 @@ impl Rhi {
                 return Err(e);
             }
         };
-        let frames = match Frames::new(&device) {
+        let mut frames = match Frames::new(&device) {
             Ok(f) => f,
             Err(e) => {
+                swapchain.destroy(&device);
+                device.destroy();
+                surface.destroy();
+                instance.destroy();
+                return Err(e);
+            }
+        };
+        let pipelines = match PipelineStore::new(&device) {
+            Ok(p) => p,
+            Err(e) => {
+                frames.destroy(&device);
                 swapchain.destroy(&device);
                 device.destroy();
                 surface.destroy();
@@ -152,12 +180,28 @@ impl Rhi {
             pending_recreate: false,
             dead: false,
             deletions: DeletionQueue::default(),
+            pipelines,
             frames,
             swapchain,
             device,
             surface,
             instance,
         })
+    }
+
+    /// Create a graphics pipeline targeting this window's swapchain format
+    /// (§4.4: dynamic rendering, disk-backed cache, creation timed + logged).
+    pub fn create_pipeline(&mut self, desc: &PipelineDesc<'_>) -> Result<PipelineHandle, RhiError> {
+        let format = self.swapchain.format(&self.device, &self.surface)?;
+        self.pipelines.create(&self.device, desc, format)
+    }
+
+    /// Retire a pipeline behind the frame timeline — safe to call while
+    /// frames using it are still in flight; destruction is deferred (§4.4:
+    /// hot reload rebuilds behind the timeline, never mid-frame).
+    pub fn destroy_pipeline(&mut self, handle: PipelineHandle) -> Result<(), RhiError> {
+        self.pipelines
+            .retire(handle, &mut self.deletions, self.frame_index)
     }
 
     /// The device-selection report (§4.3: a diagnostic document, kept).
@@ -197,6 +241,18 @@ impl Rhi {
     /// to `color` (linear values; the sRGB target encodes). Handles resize,
     /// minimize, out-of-date, and suboptimal as normal events (§4.3).
     pub fn render_clear_frame(&mut self, color: [f32; 4]) -> Result<FrameOutcome, RhiError> {
+        self.render_frame(color, None)
+    }
+
+    /// Record, submit, and present one frame: clear to `color`, then run
+    /// `draw` if given (M2's one-pass world; the render graph owns passes
+    /// from M6). Resize/minimize/out-of-date handled as in
+    /// [`Rhi::render_clear_frame`].
+    pub fn render_frame(
+        &mut self,
+        color: [f32; 4],
+        draw: Option<&DrawSpec<'_>>,
+    ) -> Result<FrameOutcome, RhiError> {
         if self.pending_recreate || self.swapchain.suspended() {
             // Recreation is a normal event but a *structural* one: presents
             // in flight hold the retired per-image semaphores with no signal
@@ -239,7 +295,7 @@ impl Rhi {
                 }
             };
 
-        self.record_clear(slot.pool, slot.cmd, image_index, color)?;
+        self.record_pass(slot.pool, slot.cmd, image_index, color, draw)?;
 
         // Submit: wait the acquire binary, signal the per-image render-done
         // binary (for present) and the graphics timeline (frame pacing and
@@ -306,15 +362,26 @@ impl Rhi {
         }
     }
 
-    /// Record the clear pass: undefined → color-attachment barrier, dynamic
-    /// rendering with a clear load op, then color-attachment → present.
-    fn record_clear(
+    /// Record the frame's pass: undefined → color-attachment barrier, dynamic
+    /// rendering with a clear load op (plus the draw, when given), then
+    /// color-attachment → present.
+    fn record_pass(
         &self,
         pool: vk::CommandPool,
         cmd: vk::CommandBuffer,
         image_index: u32,
         color: [f32; 4],
+        draw: Option<&DrawSpec<'_>>,
     ) -> Result<(), RhiError> {
+        // Resolve the handle before recording so a dead handle is an error,
+        // not a half-recorded command buffer.
+        let draw = draw
+            .map(|d| {
+                self.pipelines
+                    .get(d.pipeline)
+                    .map(|entry| (entry, d.push_constants, d.vertex_count))
+            })
+            .transpose()?;
         let device = self.device.raw();
         // SAFETY: the timeline wait proved this slot's previous frame retired,
         // so its pool and command buffer are free to reset and rerecord.
@@ -369,6 +436,11 @@ impl Rhi {
                 .layer_count(1)
                 .color_attachments(&attachment);
             device.cmd_begin_rendering(cmd, &rendering);
+            if let Some((entry, push, vertex_count)) = draw {
+                // SAFETY: cmd is recording inside the rendering pass; the
+                // entry came from the live store and targets this format.
+                pipeline::record_draw(&self.device, cmd, extent, entry, push, vertex_count)?;
+            }
             device.cmd_end_rendering(cmd);
 
             let to_present = [vk::ImageMemoryBarrier2::default()
@@ -406,6 +478,7 @@ impl Rhi {
         self.device.wait_idle();
         self.frames.destroy(&self.device);
         self.deletions.drain_all(&self.device);
+        self.pipelines.destroy(&self.device);
         self.swapchain.destroy(&self.device);
         let report = ShutdownReport {
             leaked_allocations: self.device.leak_report(),

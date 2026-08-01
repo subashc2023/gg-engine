@@ -1,7 +1,12 @@
+# gg-shaders (§4.4): Slang compilation, reflection, codegen — and, dev-only
+# behind `hot-reload`, the save-watcher. The dist gate (§5.8) proves neither
+# this crate's compiler machinery nor notify reaches a shipping binary: dist
+# demos embed SPIR-V generated offline by `cargo xtask shaders`.
+
 [package]
 name = "gg-shaders"
 version = "0.1.0"
-description = "Slang compilation, reflection, hot reload, codegen (PLAN.md §4.4). M0A scope: spike 1"
+description = "Slang compilation, reflection, hot reload, codegen (PLAN.md §4.4)"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -12,7 +17,13 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
-# Spike 1 (§6 M0A): in-process Slang via the shader-slang bindings, linking the
-# Slang shipped inside the LunarG Vulkan SDK (§2, Shader language row). Binding
-# maturity is the named §8 risk; the spike test is its canary.
+# In-process Slang via the shader-slang bindings, linking the Slang shipped in
+# the LunarG Vulkan SDK (§2, Shader language row). Binding maturity is the
+# named §8 risk; the spike test remains its canary.
 shader-slang.workspace = true
+notify = { workspace = true, optional = true }
+
+[features]
+# The hot path (§4.4): file watcher + recompile-on-save. Dev tier only; never
+# in dist (the demo tier features wire it, the dist gate proves the absence).
+hot-reload = ["dep:notify"]

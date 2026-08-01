@@ -27,17 +27,27 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Create the instance with the surface extensions the display needs.
+    /// Create the instance with the surface extensions the display needs —
+    /// or, with `None`, a display-less instance for offscreen rendering
+    /// (§4.10: gg-golden renders with no swapchain and no windowing).
     /// With `validation`: the Khronos layer, synchronization validation, and
     /// the debug messenger — all lab equipment that unbolts in dist (§1.13).
-    pub fn new(display: raw_window_handle::RawDisplayHandle) -> Result<Self, RhiError> {
+    pub fn new(display: Option<raw_window_handle::RawDisplayHandle>) -> Result<Self, RhiError> {
         // SAFETY: loading the system Vulkan loader; sound to call anytime.
         let entry = unsafe { ash::Entry::load() }
             .map_err(|e| RhiError::Loader(format!("Vulkan loader not found: {e}")))?;
 
-        let mut extensions = ash_window::enumerate_required_extensions(display)
-            .map_err(RhiError::Vk)?
-            .to_vec();
+        // `mut` feeds the validation-only debug_utils push below.
+        #[cfg_attr(not(feature = "validation"), allow(unused_mut))]
+        let mut extensions = match display {
+            Some(display) => ash_window::enumerate_required_extensions(display)
+                .map_err(RhiError::Vk)?
+                .to_vec(),
+            // Offscreen still enables VK_KHR_surface alone: it is what device
+            // creation's unconditional VK_KHR_swapchain extension requires,
+            // and enabling it costs nothing without a surface object.
+            None => vec![ash::khr::surface::NAME.as_ptr()],
+        };
 
         let app_info = vk::ApplicationInfo::default()
             .application_name(c"golden")

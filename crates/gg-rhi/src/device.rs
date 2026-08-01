@@ -65,30 +65,45 @@ fn missing_features(
     instance: &ash::Instance,
     pd: vk::PhysicalDevice,
     api_version: u32,
-    surface: &Surface,
+    surface: Option<&Surface>,
     families: &[vk::QueueFamilyProperties],
 ) -> Vec<&'static str> {
+    let mut f11 = vk::PhysicalDeviceVulkan11Features::default();
     let mut f12 = vk::PhysicalDeviceVulkan12Features::default();
     let mut f13 = vk::PhysicalDeviceVulkan13Features::default();
     let mut f2 = vk::PhysicalDeviceFeatures2::default()
+        .push_next(&mut f11)
         .push_next(&mut f12)
         .push_next(&mut f13);
     // SAFETY: pd comes from this live instance; structs are default-init.
     unsafe { instance.get_physical_device_features2(pd, &mut f2) };
 
+    // Offscreen contexts (§4.10) have no surface: any graphics family will
+    // do, and the row says so honestly.
     let graphics_present = (0..families.len() as u32).any(|i| {
         families[i as usize]
             .queue_flags
             .contains(vk::QueueFlags::GRAPHICS)
-            && surface.supports_present(pd, i)
+            && surface.is_none_or(|s| s.supports_present(pd, i))
     });
+    let queue_row = if surface.is_some() {
+        "graphics+present queue family"
+    } else {
+        "graphics queue family"
+    };
 
-    let rows: [(&'static str, bool); 15] = [
+    let rows: [(&'static str, bool); 16] = [
         (
             "Vulkan >= 1.3",
             api_version >= vk::make_api_version(0, 1, 3, 0),
         ),
-        ("graphics+present queue family", graphics_present),
+        (queue_row, graphics_present),
+        // Slang's vertex SPIR-V declares DrawParameters (BaseVertex) — a 1.1
+        // core feature every M2+ pipeline rides on.
+        (
+            "shaderDrawParameters",
+            f11.shader_draw_parameters == vk::TRUE,
+        ),
         ("timelineSemaphore", f12.timeline_semaphore == vk::TRUE),
         ("bufferDeviceAddress", f12.buffer_device_address == vk::TRUE),
         ("descriptorIndexing", f12.descriptor_indexing == vk::TRUE),
@@ -138,9 +153,10 @@ fn device_type_name(t: vk::PhysicalDeviceType) -> (&'static str, u32) {
 }
 
 impl Device {
-    /// Select and create the device. Logs every candidate; on failure the
-    /// error carries the full report (§1.10: fail loudly and precisely).
-    pub fn new(instance: &Instance, surface: &Surface) -> Result<Self, RhiError> {
+    /// Select and create the device. `surface` is `None` for offscreen
+    /// contexts (§4.10), which need no present support. Logs every candidate;
+    /// on failure the error carries the full report (§1.10).
+    pub fn new(instance: &Instance, surface: Option<&Surface>) -> Result<Self, RhiError> {
         let inst = instance.raw();
         // SAFETY: instance is live.
         let physical_devices =
@@ -212,9 +228,9 @@ impl Device {
                 families[i as usize]
                     .queue_flags
                     .contains(vk::QueueFlags::GRAPHICS)
-                    && surface.supports_present(pd, i)
+                    && surface.is_none_or(|s| s.supports_present(pd, i))
             })
-            .ok_or_else(|| RhiError::NoSuitableDevice("graphics+present family vanished".into()))?;
+            .ok_or_else(|| RhiError::NoSuitableDevice("graphics family vanished".into()))?;
         let transfer_family = (0..families.len() as u32)
             .filter(|&i| i != graphics_family)
             .filter(|&i| {
@@ -244,6 +260,7 @@ impl Device {
         }
 
         // Enable exactly the asserted feature set — nothing speculative.
+        let mut f11 = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
         let mut f12 = vk::PhysicalDeviceVulkan12Features::default()
             .timeline_semaphore(true)
             .buffer_device_address(true)
@@ -260,6 +277,7 @@ impl Device {
             .synchronization2(true)
             .maintenance4(true);
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut f11)
             .push_next(&mut f12)
             .push_next(&mut f13);
 
@@ -417,6 +435,31 @@ impl Device {
     pub(crate) fn wait_idle(&self) {
         // SAFETY: device is live.
         let _ = unsafe { self.raw.device_wait_idle() };
+    }
+
+    /// Allocate GPU memory. Every byte in the engine flows through here so
+    /// the shutdown leak report is total (§4.3).
+    pub(crate) fn allocate(
+        &mut self,
+        desc: &gpu_allocator::vulkan::AllocationCreateDesc<'_>,
+    ) -> Result<gpu_allocator::vulkan::Allocation, RhiError> {
+        self.allocator
+            .as_mut()
+            .ok_or_else(|| RhiError::Allocator("allocator already torn down".into()))?
+            .allocate(desc)
+            .map_err(|e| RhiError::Allocator(e.to_string()))
+    }
+
+    /// Return an allocation to the allocator.
+    pub(crate) fn free(
+        &mut self,
+        allocation: gpu_allocator::vulkan::Allocation,
+    ) -> Result<(), RhiError> {
+        self.allocator
+            .as_mut()
+            .ok_or_else(|| RhiError::Allocator("allocator already torn down".into()))?
+            .free(allocation)
+            .map_err(|e| RhiError::Allocator(e.to_string()))
     }
 
     /// Live allocations at shutdown, named — the §4.3 leak report. CI fails

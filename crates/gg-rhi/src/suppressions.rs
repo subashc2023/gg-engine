@@ -129,6 +129,9 @@ pub fn validated(now_days: i64) -> Result<Vec<Suppression>, String> {
 }
 
 /// Today in days since the epoch, from the system clock.
+// Consumed by the validation-feature messenger and by tests; dist builds
+// compile the whole suppressions mechanism out with the layer it serves.
+#[cfg_attr(not(feature = "validation"), allow(dead_code))]
 pub fn today() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

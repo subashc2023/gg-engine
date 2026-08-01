@@ -1,11 +1,19 @@
-//! `xtask shaders` — the offline path (§4.4), M0A form: compile every `.slang`
-//! module in the tree to SPIR-V via `slangc` (the CLI fallback the in-process
-//! bindings are allowed to fall back to). Structured per-target from day one:
-//! the one-variant enum below is the console door (§2, Console portability row).
-//! Content-hashed incrementality arrives when shader counts make it matter.
+//! `xtask shaders` — the offline path (§4.4), M2 form: compile every `.slang`
+//! module under `*/shaders/` **in-process** through gg-shaders (the same
+//! compiler the hot path uses), and freeze the results into the tree —
+//! `src/shaders_gen/<stem>.rs` (reflection→codegen with layout assertions)
+//! plus the sibling `<stem>.<entry>.spv` blobs it `include_bytes!`s. All
+//! checked in: dist embeds them, and CI's gate 3 holds them diff-clean
+//! against the sources via `--check`.
+//!
+//! Structured per-target from day one: the one-variant enum below is the
+//! console door (§2, Console portability row). Content-hashed incremental:
+//! the generated header carries the source hash + generator version, and a
+//! matching header skips the recompile.
 
 use crate::util::workspace_root;
-use std::path::PathBuf;
+use sha2::Digest;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy)]
 pub enum Target {
@@ -13,21 +21,17 @@ pub enum Target {
 }
 
 impl Target {
-    fn slangc_name(self) -> &'static str {
+    /// File suffix for this target's compiled blobs.
+    fn blob_extension(self) -> &'static str {
         match self {
-            Target::Spirv => "spirv",
-        }
-    }
-    fn out_dir(self) -> &'static str {
-        match self {
-            Target::Spirv => "spirv",
+            Target::Spirv => "spv",
         }
     }
 }
 
 const TARGETS: &[Target] = &[Target::Spirv];
 
-pub fn build_all() -> anyhow::Result<()> {
+pub fn build_all(check: bool) -> anyhow::Result<()> {
     let root = workspace_root();
     let mut modules = Vec::new();
     for base in ["crates", "demos"] {
@@ -37,68 +41,142 @@ pub fn build_all() -> anyhow::Result<()> {
         println!("xtask shaders: no .slang modules in the tree");
         return Ok(());
     }
+    modules.sort(); // deterministic order, deterministic logs
 
-    let slangc = slangc_path();
-    for target in TARGETS {
-        let out_dir = root.join("target/shaders").join(target.out_dir());
-        std::fs::create_dir_all(&out_dir)?;
-        for module in &modules {
-            let stem = module
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let out = out_dir.join(format!("{stem}.spv"));
-            crate::util::run(
-                std::process::Command::new(&slangc).args([
-                    &module.to_string_lossy() as &str,
-                    "-target",
-                    target.slangc_name(),
-                    "-o",
-                    &out.to_string_lossy(),
-                ]),
-                &format!("slangc {stem}.slang -> {}", target.slangc_name()),
-            )?;
+    let mut built = 0usize;
+    let mut skipped = 0usize;
+    for module in &modules {
+        if process_module(module, check)? {
+            built += 1;
+        } else {
+            skipped += 1;
         }
     }
-    println!("xtask shaders: {} module(s) built", modules.len());
+    println!(
+        "xtask shaders{}: {built} module(s) {}, {skipped} up-to-date",
+        if check { " --check" } else { "" },
+        if check { "verified" } else { "built" },
+    );
     Ok(())
 }
 
-fn slangc_path() -> PathBuf {
-    let exe = if cfg!(windows) {
-        "slangc.exe"
-    } else {
-        "slangc"
-    };
-    if let Ok(sdk) = std::env::var("VULKAN_SDK") {
-        let p = PathBuf::from(&sdk)
-            .join(if cfg!(windows) { "Bin" } else { "bin" })
-            .join(exe);
-        if p.exists() {
-            return p;
+/// Compile one module and write (or, under `check`, verify) its artifacts.
+/// Returns false when the source hash already matched and nothing was done.
+fn process_module(module: &Path, check: bool) -> anyhow::Result<bool> {
+    let stem = module
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .ok_or_else(|| anyhow::anyhow!("shader path has no stem: {}", module.display()))?;
+    let shaders_dir = module
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("shader has no parent dir: {}", module.display()))?;
+    // Convention (§4.4): <crate>/shaders/<stem>.slang → <crate>/src/shaders_gen/.
+    let crate_root = shaders_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("shaders dir has no parent: {}", shaders_dir.display()))?;
+    let gen_dir = crate_root.join("src/shaders_gen");
+    let rs_path = gen_dir.join(format!("{stem}.rs"));
+
+    let source = std::fs::read(module)?;
+    let hash = format!("{:x}", sha2::Sha256::digest(&source));
+    let header = gg_shaders::codegen::header_line(&hash);
+
+    // Incremental (build mode only): an on-disk header matching source hash +
+    // generator version means the artifacts are current. Check mode never
+    // trusts the header — it recompiles and compares bytes, so a hand-edited
+    // generated file cannot ride a matching hash through the gate.
+    if !check
+        && let Ok(existing) = std::fs::read_to_string(&rs_path)
+        && existing.lines().nth(1) == Some(header.as_str())
+    {
+        return Ok(false);
+    }
+
+    let compiled =
+        gg_shaders::compile_module(&shaders_dir.to_string_lossy(), &format!("{stem}.slang"))
+            .map_err(|e| anyhow::anyhow!("{}: {e}", module.display()))?;
+    anyhow::ensure!(
+        !compiled.entry_points.is_empty(),
+        "{}: no [shader(...)] entry points",
+        module.display()
+    );
+    let generated = gg_shaders::codegen::generate(&stem, &compiled, &hash)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", module.display()))?;
+
+    if check {
+        // Gate 3 (§5): reflection codegen diff-clean. The .rs must match the
+        // regeneration byte for byte. The .spv blobs are validated for
+        // presence + SPIR-V magic, not bytes: the two hosts pin different
+        // Slang builds, and the codegen layout facts are the cross-host truth.
+        let on_disk = std::fs::read_to_string(&rs_path).map_err(|_| {
+            anyhow::anyhow!(
+                "{}: missing — run `cargo xtask shaders` and commit (§5 gate 3)",
+                rs_path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            on_disk == generated,
+            "{}: stale against {} — run `cargo xtask shaders` and commit (§5 gate 3: \
+             reflection codegen diff-clean)",
+            rs_path.display(),
+            module.display()
+        );
+        for ep in &compiled.entry_points {
+            let blob = gen_dir.join(format!("{stem}.{}.spv", ep.name));
+            let bytes = std::fs::read(&blob)
+                .map_err(|_| anyhow::anyhow!("{}: missing (§5 gate 3)", blob.display()))?;
+            anyhow::ensure!(
+                bytes.len() >= 4 && bytes[0..4] == [0x03, 0x02, 0x23, 0x07],
+                "{}: not SPIR-V (§5 gate 3)",
+                blob.display()
+            );
+        }
+        return Ok(true);
+    }
+
+    std::fs::create_dir_all(&gen_dir)?;
+    for target in TARGETS {
+        for ep in &compiled.entry_points {
+            let blob = gen_dir.join(format!("{stem}.{}.{}", ep.name, target.blob_extension()));
+            std::fs::write(&blob, &ep.spirv)?;
         }
     }
-    if let Ok(dir) = std::env::var("SLANG_DIR") {
-        let p = PathBuf::from(&dir).join("bin").join(exe);
-        if p.exists() {
-            return p;
+    std::fs::write(&rs_path, &generated)?;
+    println!(
+        "xtask: shaders/{stem}.slang -> {} ({} entry points{})",
+        rs_path.display(),
+        compiled.entry_points.len(),
+        if compiled.push_constants.is_some() {
+            ", push constants"
+        } else {
+            ""
         }
-    }
-    PathBuf::from(exe) // PATH fallback
+    );
+    Ok(true)
 }
 
-fn find_slang(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+/// All `<crate>/shaders/*.slang` modules. `fixtures/` trees are compiler test
+/// data (compiled by gg-shaders' own tests), not engine shaders.
+fn find_slang(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "target") {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "target" || n == "fixtures")
+            {
                 continue;
             }
             find_slang(&path, out);
-        } else if path.extension().is_some_and(|e| e == "slang") {
+        } else if path.extension().is_some_and(|e| e == "slang")
+            && path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|n| n == "shaders")
+        {
             out.push(path);
         }
     }

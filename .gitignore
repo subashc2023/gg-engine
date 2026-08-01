@@ -2,3 +2,4 @@ target/
 *.jsonl
 *.md
 !README.md
+.claude/scheduled_tasks.lock

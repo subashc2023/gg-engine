@@ -17,8 +17,9 @@ fn main() {
     let hook = rest.contains(&"--hook");
     let result = match cmd {
         Some("ci") => ci::run(&rest),
+        Some("interactive") => ci::interactive(),
         Some("probe") => probe::run(rest.contains(&"--system")),
-        Some("shaders") => shaders::build_all(),
+        Some("shaders") => shaders::build_all(rest.contains(&"--check")),
         Some("dist") => dist::gate(),
         Some("assets") => stub("assets", "M9 (asset pipeline; `ggc` does not exist yet)"),
         Some("bench") => stub("bench", "M3 (first benches arrive with gg-ecs)"),
@@ -43,9 +44,10 @@ fn usage() -> anyhow::Result<()> {
     anyhow::bail!(
         "usage: cargo xtask <command>\n\
          \n\
-         ci [--fast|--push|--nightly|--weekly] [--hook]   local-first CI tiers (§5)\n\
+         ci [--fast|--push|--nightly|--weekly] [--hook]   local-first CI tiers (§5) — windowless by construction (§1.5)\n\
+         interactive                                      manual windowed suite: storms + demo WSI runs (creates windows)\n\
          probe [--system]                                 capability table vs pinned lavapipe (spike 2)\n\
-         shaders                                          offline shader build (slangc fallback path)\n\
+         shaders [--check]                                offline shader build + codegen (in-process Slang)\n\
          dist                                             dist gate: build+run tier-dist, symbol absence (§5.8)\n\
          assets | bench | capture                         stubs until their milestone"
     )

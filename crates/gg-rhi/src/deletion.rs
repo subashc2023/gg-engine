@@ -10,6 +10,8 @@ pub(crate) enum Deferred {
     Swapchain(vk::SwapchainKHR),
     ImageView(vk::ImageView),
     Semaphore(vk::Semaphore),
+    Pipeline(vk::Pipeline),
+    PipelineLayout(vk::PipelineLayout),
 }
 
 impl Deferred {
@@ -22,6 +24,8 @@ impl Deferred {
                 Deferred::Swapchain(s) => device.swapchain_fns().destroy_swapchain(s, None),
                 Deferred::ImageView(v) => device.raw().destroy_image_view(v, None),
                 Deferred::Semaphore(s) => device.raw().destroy_semaphore(s, None),
+                Deferred::Pipeline(p) => device.raw().destroy_pipeline(p, None),
+                Deferred::PipelineLayout(l) => device.raw().destroy_pipeline_layout(l, None),
             }
         }
     }

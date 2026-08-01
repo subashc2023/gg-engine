@@ -1,6 +1,11 @@
 //! `cargo xtask ci` — the four tiers of §3/§5. `--fast` is the Stop hook's tier
 //! and lives under a <30 s warm budget: it must never be the reason agent turns
-//! balloon. Every tier is headless (§1.5) via util::cargo().
+//! balloon. Every tier is headless (§1.5) via util::cargo() — and *windowless
+//! by construction*: no automated tier creates an OS window at all (presenting
+//! maps a Wayland surface, minimize/restore maps X11/Win32 ones, and WSLg
+//! mirrors any mapped window onto the real desktop — "invisible" is not a
+//! property CI may rely on). Everything windowed lives in the manual suite,
+//! `cargo xtask interactive`, run by a human who expects windows.
 
 use crate::util::{cargo, run as exec, run_capture, walk_rs, workspace_root};
 use std::collections::BTreeSet;
@@ -52,11 +57,14 @@ fn push() -> anyhow::Result<()> {
     line_budgets()?;
     tests(&All)?;
     fp_baseline_dist_profile()?;
-    crate::shaders::build_all()?;
+    // Gate 3 (§5): entry points compile + reflection codegen diff-clean. Check
+    // mode: CI verifies the checked-in artifacts, it never rewrites the tree.
+    crate::shaders::build_all(true)?;
     for (pkg, feats) in [
         ("gg-runtime", "tier-dist"),
         ("gg-runtime", "tier-dist-verify"),
         ("demo-00-clear", "tier-dist"),
+        ("demo-01-triangle", "tier-dist"),
     ] {
         exec(
             cargo().args([
@@ -80,12 +88,48 @@ fn nightly() -> anyhow::Result<()> {
     crate::probe::run(false)?;
     aarch64_leg()?;
     gpu_tests()?;
-    demo_runs()?;
-    interactive_suite()?;
+    golden_suite()?;
     println!(
-        "xtask ci --nightly: green (golden suite M7, chaos replays M4B — \
-         each lands with its milestone)"
+        "xtask ci --nightly: green (windowless by construction — windowed WSI coverage is \
+         `cargo xtask interactive`, manual; golden suite grows to v1 at M7, chaos replays M4B)"
     );
+    Ok(())
+}
+
+/// `cargo xtask interactive` — the manual windowed suite (§1.5): everything
+/// that creates an OS window, extracted from the automated tiers because
+/// "invisible" is not a property CI may rely on (WSLg mirrors mapped windows
+/// onto the real desktop; minimize/restore maps them everywhere). A human runs
+/// this when touching WSI code — expect window activity on WSLg/taskbar.
+pub fn interactive() -> anyhow::Result<()> {
+    // The window-creating tests: swapchain recreation + resize/minimize storm
+    // (gg-rhi) and the off-screen-parking §1.5 regressions (gg-platform).
+    let mut cmd = cargo();
+    cmd.args([
+        "nextest",
+        "run",
+        "-p",
+        "gg-rhi",
+        "-p",
+        "gg-platform",
+        "--run-ignored",
+        "ignored-only",
+    ]);
+    lavapipe_env(&mut cmd)?;
+    // Linux runs over X11 (XWayland): WSLg's Weston drops the Wayland
+    // connection under minimize-spam on an unmapped surface (broken pipe →
+    // VK_ERROR_SURFACE_LOST_KHR); the suite's job is the resize/minimize event
+    // storm, and X11 delivers it. The contract platform is the Windows host.
+    if !cfg!(windows) {
+        cmd.env_remove("WAYLAND_DISPLAY");
+    }
+    exec(
+        &mut cmd,
+        "windowed suite: swapchain torture + resize/minimize storms (§4.3, §1.5)",
+    )?;
+    demo_runs()?;
+    crate::dist::demo_runs()?;
+    println!("xtask interactive: green (manual windowed suite — not part of any automated tier)");
     Ok(())
 }
 
@@ -102,10 +146,11 @@ fn lavapipe_env(cmd: &mut std::process::Command) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Gate 4 (§5): the headless GPU tests — today the swapchain-recreation
-/// torture and the rest of gg-rhi/gg-platform's suites — against the pinned
-/// lavapipe, validation on, any message a failure (the tests enforce that
-/// themselves via the shutdown report).
+/// Gate 4 (§5): the headless GPU tests — gg-rhi's offscreen suite and
+/// gg-platform's headless-law tests — against the pinned lavapipe, validation
+/// on, any message a failure (the tests enforce that themselves via the
+/// shutdown report). Window-creating tests are `#[ignore]` and belong to
+/// `cargo xtask interactive` (§1.5).
 fn gpu_tests() -> anyhow::Result<()> {
     let mut cmd = cargo();
     cmd.args(["nextest", "run", "-p", "gg-rhi", "-p", "gg-platform"]);
@@ -113,54 +158,52 @@ fn gpu_tests() -> anyhow::Result<()> {
     exec(&mut cmd, "headless GPU tests on pinned lavapipe (§5.4)")
 }
 
-/// Gate 7 (§5): every demo runs 100 frames headless without validation errors
-/// or leaks — the demo binaries exit nonzero on either, so the gate is just
-/// the run. (The winit symbol-absence half of gate 7 guards the *harness and
-/// test* binaries and lands with gg-golden at M2.)
-fn demo_runs() -> anyhow::Result<()> {
-    let mut cmd = cargo();
-    cmd.args(["run", "-p", "demo-00-clear", "--", "--frames", "100"]);
-    lavapipe_env(&mut cmd)?;
+/// Gate 5 (§5), v0 spine (§4.10): the golden suite on the pinned lavapipe —
+/// offscreen render, readback, compare against the checked-in references.
+/// Also gate 7's winit half: the harness binary must be headless *by linkage*,
+/// so its bytes are scanned for winit before it runs.
+fn golden_suite() -> anyhow::Result<()> {
     exec(
-        &mut cmd,
-        "demo 00-clear, 100 frames headless on pinned lavapipe",
-    )
+        cargo().args(["build", "-p", "gg-golden"]),
+        "build gg-golden",
+    )?;
+    let exe = workspace_root()
+        .join("target/debug")
+        .join(if cfg!(windows) {
+            "gg-golden.exe"
+        } else {
+            "gg-golden"
+        });
+    let bytes = std::fs::read(&exe)?;
+    let needle = b"winit";
+    anyhow::ensure!(
+        !bytes.windows(needle.len()).any(|w| w == needle),
+        "gg-golden links winit — the harness must be headless by linkage (§1.5, §5 gate 7)"
+    );
+    println!("xtask: gg-golden is winit-free by linkage (§5 gate 7)");
+
+    let mut cmd = cargo();
+    cmd.args(["run", "-p", "gg-golden", "--", "run"]);
+    lavapipe_env(&mut cmd)?;
+    exec(&mut cmd, "golden suite v0 on pinned lavapipe (§4.10)")
 }
 
-/// The nightly interactive suite (§4.3): the real OS resize/minimize event
-/// path against invisible, non-activating windows. Runs on the Windows host
-/// (the WSI players ship on); the Linux windowed path runs via WSLg when a
-/// display is present (§5).
-fn interactive_suite() -> anyhow::Result<()> {
-    if !cfg!(windows)
-        && std::env::var_os("DISPLAY").is_none()
-        && std::env::var_os("WAYLAND_DISPLAY").is_none()
-    {
-        println!("xtask: interactive suite skipped — no display (WSLg absent, §5)");
-        return Ok(());
+/// The demo WSI runs (part of the manual windowed suite): every demo runs 100
+/// frames against a real (invisible) window's swapchain without validation
+/// errors or leaks — the demo binaries exit nonzero on either. Creates
+/// windows, so never part of an automated tier (§1.5).
+fn demo_runs() -> anyhow::Result<()> {
+    for demo in ["demo-00-clear", "demo-01-triangle"] {
+        let mut cmd = cargo();
+        cmd.args(["run", "-p", demo, "--", "--frames", "100"]);
+        cmd.env("GG_HEADLESS", "1");
+        lavapipe_env(&mut cmd)?;
+        exec(
+            &mut cmd,
+            &format!("demo {demo}, 100 frames headless on pinned lavapipe"),
+        )?;
     }
-    let mut cmd = cargo();
-    cmd.args([
-        "nextest",
-        "run",
-        "-p",
-        "gg-rhi",
-        "--run-ignored",
-        "ignored-only",
-    ]);
-    // Linux runs the suite over X11 (XWayland): WSLg's Weston drops the
-    // Wayland connection under minimize-spam on an unmapped surface
-    // (broken pipe → VK_ERROR_SURFACE_LOST_KHR). The Wayland-native windowed
-    // path is still exercised by the demo-run gate; the suite's job is the
-    // resize/minimize event storm, and X11 delivers it (§5: the interactive
-    // suite's contract platform is the Windows host).
-    if !cfg!(windows) {
-        cmd.env_remove("WAYLAND_DISPLAY");
-    }
-    exec(
-        &mut cmd,
-        "interactive suite: resize/minimize spam, invisible non-activating windows (§4.3)",
-    )
+    Ok(())
 }
 
 /// The third architecture of the §5 matrix (§6 M0B): gg-math — the FP baseline

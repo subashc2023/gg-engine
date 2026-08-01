@@ -10,6 +10,8 @@ members = [
     "crates/gg-runtime",
     "crates/gg-shaders",
     "demos/00-clear",
+    "demos/01-triangle",
+    "tools/gg-golden",
     "xtask",
 ]
 
@@ -51,6 +53,10 @@ winit = { version = "0.30", default-features = false, features = [
 raw-window-handle = "0.6"
 ash-window = "0.13"
 gpu-allocator = { version = "0.27", default-features = false, features = ["vulkan"] }
+# M2 (§4.4, §4.10): notify drives shader hot reload (dev-only — the dist gate
+# proves its absence); png is gg-golden's reference-image format.
+notify = "8"
+png = "0.18"
 
 [workspace.lints.clippy]
 # Error-handling policy (§2): unwrap/expect forbidden in engine crates. Tools and

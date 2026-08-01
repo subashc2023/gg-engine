@@ -2,14 +2,16 @@
 //! tests:
 //!
 //! - `recreation_survives_1000_synthetic_extents` — the *recreation logic*
-//!   (where every young engine hides its crashes): per-commit, synthetic
-//!   extent changes against an invisible window, headless, focus never
-//!   touched.
+//!   (where every young engine hides its crashes): synthetic extent changes
+//!   against an invisible window's swapchain.
 //! - `interactive_resize_minimize_spam_1000` — the *OS event path* (real
-//!   resize/minimize plumbing through winit and WSI): the nightly interactive
-//!   suite, against an invisible, non-activating window. `#[ignore]` in the
-//!   default run; `xtask ci --nightly` runs it, and it ran once in full to
-//!   close M1.
+//!   resize/minimize plumbing through winit and WSI).
+//!
+//! Both create OS windows and present to them, so both are `#[ignore]`: the
+//! automated tiers are windowless by construction (§1.5 — presenting maps a
+//! Wayland surface, un-minimize maps an X11/Win32 one, and WSLg mirrors any
+//! mapped window onto the real desktop). They run in the manual windowed
+//! suite, `cargo xtask interactive`.
 //!
 //! Both end with the §4.3 accounting: zero validation messages, zero leaks.
 
@@ -45,6 +47,7 @@ fn shutdown_clean(rhi: Rhi, what: &str) {
 }
 
 #[test]
+#[ignore = "creates a window + presents (WSI) — manual windowed suite: cargo xtask interactive (§1.5)"]
 fn recreation_survives_1000_synthetic_extents() {
     init_tracing();
     let mut pump = Pump::new(WindowDesc::invisible("gg swapchain recreation", (640, 360)))
@@ -77,10 +80,11 @@ fn recreation_survives_1000_synthetic_extents() {
     shutdown_clean(rhi, "synthetic-extent recreation");
 }
 
-/// Nightly interactive suite (§4.3): real OS resize and minimize events. The
-/// window is invisible and non-activating, so even this steals nothing (§1.5).
+/// The OS event path (§4.3): real resize and minimize events. The window is
+/// invisible, non-activating and parked off-screen, but minimize/restore maps
+/// windows on every OS — so this is manual-suite only (§1.5).
 #[test]
-#[ignore = "interactive suite: nightly tier (xtask ci --nightly); ran once in full to close M1"]
+#[ignore = "creates a window + presents (WSI) — manual windowed suite: cargo xtask interactive (§1.5)"]
 fn interactive_resize_minimize_spam_1000() {
     init_tracing();
     let mut pump =

@@ -27,6 +27,21 @@ pub(crate) struct Swapchain {
     generation: u64,
 }
 
+/// The surface format the swapchain uses (and pipelines must target): sRGB
+/// BGRA8 when the surface offers it, else whatever it lists first.
+fn preferred_format(device: &Device, surface: &Surface) -> Result<vk::SurfaceFormatKHR, RhiError> {
+    let formats = surface.formats(device.physical())?;
+    formats
+        .iter()
+        .find(|f| {
+            f.format == vk::Format::B8G8R8A8_SRGB
+                && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+        })
+        .or_else(|| formats.first())
+        .copied()
+        .ok_or_else(|| RhiError::Loader("surface reports no formats".into()))
+}
+
 /// What [`Swapchain::acquire`] produced.
 pub(crate) enum Acquired {
     /// An image index, plus whether the WSI flagged the swapchain suboptimal.
@@ -88,16 +103,7 @@ impl Swapchain {
             return Ok(false);
         }
 
-        let formats = surface.formats(device.physical())?;
-        let format = formats
-            .iter()
-            .find(|f| {
-                f.format == vk::Format::B8G8R8A8_SRGB
-                    && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-            })
-            .or_else(|| formats.first())
-            .copied()
-            .ok_or_else(|| RhiError::Loader("surface reports no formats".into()))?;
+        let format = preferred_format(device, surface)?;
 
         let mut min_images = caps.min_image_count + 1;
         if caps.max_image_count > 0 {
@@ -221,6 +227,16 @@ impl Swapchain {
 
     pub fn suspended(&self) -> bool {
         self.suspended
+    }
+
+    /// The color format pipelines must target. Valid even while the swapchain
+    /// is suspended (zero-extent): it falls back to the surface's preferred
+    /// format, which is exactly what the next materialization will pick.
+    pub fn format(&self, device: &Device, surface: &Surface) -> Result<vk::Format, RhiError> {
+        if self.format != vk::Format::UNDEFINED {
+            return Ok(self.format);
+        }
+        Ok(preferred_format(device, surface)?.format)
     }
 
     pub fn generation(&self) -> u64 {

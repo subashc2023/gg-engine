@@ -25,6 +25,9 @@ raw-window-handle = { workspace = true }
 
 [dev-dependencies]
 gg-platform = { path = "../gg-platform" }
+# Offscreen tests compile their fixture shaders in-process (same layer, §3).
+gg-shaders = { path = "../gg-shaders" }
+bytemuck.workspace = true
 tracing-subscriber.workspace = true
 
 [features]

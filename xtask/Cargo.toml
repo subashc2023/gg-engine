@@ -18,3 +18,6 @@ anyhow.workspace = true
 ash.workspace = true
 sha2 = "0.10"
 toml = "0.8"
+# M2 (§4.4): the offline shader path compiles in-process through gg-shaders —
+# the same compiler the hot path uses, and the only road to the reflection API.
+gg-shaders = { path = "../crates/gg-shaders" }
