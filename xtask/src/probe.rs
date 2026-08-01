@@ -10,8 +10,7 @@
 //! a §5.4 deferred machine that lands with the golden suite (M7), which is
 //! what the pin protects; until then Linux probes the system ICD.
 
-use crate::util::workspace_root;
-use sha2::Digest;
+use crate::util::{sha256_hex, workspace_root};
 use std::path::PathBuf;
 
 const MESA_VERSION: &str = "26.1.3";
@@ -66,7 +65,7 @@ pub(crate) fn ensure_lavapipe() -> anyhow::Result<PathBuf> {
     )?;
 
     let bytes = std::fs::read(&archive)?;
-    let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+    let digest = sha256_hex(&bytes);
     if digest != MESA_SHA256 {
         let _ = std::fs::remove_file(&archive);
         anyhow::bail!(

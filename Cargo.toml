@@ -28,21 +28,36 @@ publish = false
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 profiling = "1"
-tracy-client = "0.18"
+# Version-coupled to the Tracy profiler GUI by wire protocol, so the patch is
+# pinned rather than carets: 0.18.0..=0.18.4 span Tracy v0.11.1..=v0.13.1 and a
+# mismatch is a hard connect failure, not a degradation. Requires Tracy v0.13.1.
+tracy-client = "=0.18.4"
 tracing-tracy = "0.11"
 thiserror = "2"
 anyhow = "1"
 shader-slang = "0.1"
 ash = "0.38"
 # gg-math (§4.2.1): portable transcendentals for sim, SIMD glam for render,
-# Pod for hashed/flat state. libm bumps are Determinism Contract events.
-libm = "0.2"
+# Pod for hashed/flat state. libm bumps are Determinism Contract events — and
+# that is why this is an *exact* pin, not a caret: libm's own patch releases
+# move result bits (0.2.12 replaced cbrt wholesale with CORE-MATH, 0.2.16 fixed
+# the expm1f overflow threshold — both functions gg_math::sim exposes and the FP
+# baseline pins). A caret would let `cargo update` perform a contract event
+# silently, with Cargo.lock as the only thing standing in the way.
+libm = "=0.2.16"
 bytemuck = { version = "1", features = ["derive"] }
-glam = "0.30"
+# Render-side only, and deny.toml keeps it that way; judged by gg-golden, never
+# by a hash. Never enable `fast-math` — it is the one glam feature that would
+# disturb blessed golden images.
+glam = "0.33"
 # M1 (§4.3, §2): windowing rented behind gg-platform; ash-window/gpu-allocator
 # are gg-rhi's surface + memory plumbing (deny.toml wrappers cover their ash).
 # csd-adwaita-notitle: Wayland decorations without titlebar text — drops the
-# ab_glyph/ttf-parser font stack (RUSTSEC-2026-0192 unmaintained advisory).
+# ab_glyph/ttf-parser font stack. The advisory is on ttf-parser specifically
+# (RUSTSEC-2026-0192, unmaintained, 2026-06-29, no patched version — upstream
+# points at skrifa); ab_glyph is how winit reaches it. Verified absent from
+# Cargo.lock. This exemption holds only while sctk-adwaita keeps its font
+# backends optional: `-notitle` enables it with no font backend at all.
 winit = { version = "0.30", default-features = false, features = [
     "rwh_06",
     "x11",
@@ -52,11 +67,24 @@ winit = { version = "0.30", default-features = false, features = [
 ] }
 raw-window-handle = "0.6"
 ash-window = "0.13"
-gpu-allocator = { version = "0.27", default-features = false, features = ["vulkan"] }
+# 0.28 gained no_std support, which moved `std` into `default` — so with
+# default-features = false the `std` feature must be named explicitly or the
+# crate hits its own `compile_error!` demanding std-or-hashbrown.
+gpu-allocator = { version = "0.28", default-features = false, features = [
+    "std",
+    "vulkan",
+] }
 # M2 (§4.4, §4.10): notify drives shader hot reload (dev-only — the dist gate
 # proves its absence); png is gg-golden's reference-image format.
 notify = "8"
 png = "0.18"
+# gg-platform's Win32 half of the §1.5 window law (WS_EX_TOOLWINDOW/NOACTIVATE,
+# GetWindowRect). Declared here rather than in the crate so both its normal and
+# dev dependency stay in lockstep.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [workspace.lints.clippy]
 # Error-handling policy (§2): unwrap/expect forbidden in engine crates. Tools and

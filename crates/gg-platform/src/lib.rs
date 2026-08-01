@@ -87,6 +87,38 @@ pub struct Window {
     inner: winit::window::Window,
 }
 
+/// The X11 half of §1.5, applied at creation because these are creation-time
+/// properties (see [`Window::harden_invisible`] for the Win32 half).
+///
+/// `_NET_WM_WINDOW_TYPE = _NET_WM_WINDOW_TYPE_UTILITY` is the EWMH hint window
+/// managers and pagers read to decide taskbar/Alt-Tab presence — the X11
+/// analogue of `WS_EX_TOOLWINDOW`, and the property WSLg's RAIL bridge consults
+/// when deciding whether to mirror a window onto the real Windows desktop as a
+/// taskbar entry. Setting it is strictly additive to the off-screen parking.
+///
+/// **`with_override_redirect(true)` is deliberately NOT set here.** It would be
+/// the stronger fix — an override-redirect window is entirely unmanaged, so the
+/// WM never maps, moves, reparents or activates it and the `_NET_ACTIVE_WINDOW`
+/// that caused the recorded WSLg incident becomes a no-op at the source. The
+/// reason against it is coverage, not correctness: the only windows this code
+/// creates live in the manual windowed suite, whose whole job is spamming
+/// resize *and minimize*, and an unmanaged window's minimize requests are
+/// ignored by the WM — so X11 would silently stop exercising the swapchain
+/// suspend/resume path while `interactive_resize_minimize_spam_1000` kept
+/// passing (it asserts on resize counts, not minimizes). Trading a real gate
+/// for a hardening that only matters while a human is watching the suite run is
+/// the wrong trade. Revisit if that suite ever gains a windowless way to drive
+/// the suspend path, or if WSLg mirroring proves worse than the lost coverage.
+#[allow(unused_mut, unused_variables)]
+fn harden_invisible_attrs(mut attrs: WindowAttributes) -> WindowAttributes {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use winit::platform::x11::{WindowAttributesExtX11, WindowType};
+        attrs = attrs.with_x11_window_type(vec![WindowType::Utility]);
+    }
+    attrs
+}
+
 impl Window {
     fn create(event_loop: &ActiveEventLoop, desc: &WindowDesc) -> Result<Self, PlatformError> {
         assert!(
@@ -107,13 +139,26 @@ impl Window {
         // WM answers by mapping the window. The interactive suite spams
         // exactly those, so invisible windows live far off-screen on every
         // backend: OS machinery may "show" them, but no monitor ever renders
-        // a pixel. Wayland has no window positions and ignores this; its
-        // surfaces stay unmapped until shown, so it needs no parking.
+        // a pixel.
+        //
+        // Wayland is the honest exception, and it is worth stating precisely
+        // rather than reassuringly: winit's Wayland backend implements
+        // `set_visible` and `set_outer_position` as literal no-ops ("Not
+        // possible on Wayland"), and `with_active` is documented Unsupported
+        // there. So on Wayland *none* of this applies — invisibility, parking
+        // and non-activation are all inert. What actually keeps a Wayland
+        // surface off the screen is that a surface is not mapped until a buffer
+        // is committed to it, and the only thing that commits one is presenting.
+        // §1.5 on Wayland therefore rests on automated tiers never presenting
+        // (the window-creating tests are `#[ignore]`d into the manual suite) —
+        // not on anything gg-platform does. Anything that presents on Wayland
+        // maps a window, and this code cannot stop it.
         if !desc.visible {
             attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
                 OFFSCREEN_POS.0,
                 OFFSCREEN_POS.1,
             ));
+            attrs = harden_invisible_attrs(attrs);
         }
         let window = Self {
             inner: event_loop.create_window(attrs)?,
@@ -124,15 +169,53 @@ impl Window {
         Ok(window)
     }
 
+    /// Re-assert the off-screen parking (§1.5).
+    ///
+    /// Parking is not a one-time act. On Windows, `SW_RESTORE` sets
+    /// `WS_VISIBLE` and winit never re-hides, so after the first un-minimize
+    /// the window is genuinely visible and *only* its position keeps it off a
+    /// monitor — while display-topology changes (monitor hot-plug, resolution
+    /// change, RDP reconnect) can relocate a window the OS considers stray.
+    /// The event loop calls this whenever an invisible window reports a move.
+    fn park_offscreen(&self) {
+        self.inner
+            .set_outer_position(winit::dpi::PhysicalPosition::new(
+                OFFSCREEN_POS.0,
+                OFFSCREEN_POS.1,
+            ));
+    }
+
     /// The Windows half of §1.5's "never on the user's screen" for windows OS
     /// machinery may show anyway (see [`Self::create`]): `WS_EX_NOACTIVATE`
     /// (§4.3 — cannot steal focus) plus `WS_EX_TOOLWINDOW` (no taskbar button,
     /// no Alt-Tab entry). Windows-only by nature.
+    ///
+    /// Note winit *does* offer `with_skip_taskbar`, and it is not a substitute:
+    /// it drives the ITaskbarList COM interface, which removes the taskbar
+    /// button but leaves the window in Alt-Tab. `WS_EX_TOOLWINDOW` removes
+    /// both, which is why this is hand-rolled. `WS_EX_NOACTIVATE` has no winit
+    /// equivalent at all (`with_active` only picks `SW_SHOWNOACTIVATE` at show
+    /// time and is ignored by the `SW_RESTORE` path that matters here).
+    ///
+    /// Panics rather than skipping if the handle is not what it must be: a
+    /// §1.5 mechanism that silently no-ops is worse than one that is absent,
+    /// because the tests would still pass.
     fn harden_invisible(&self) {
         #[cfg(windows)]
-        if let Ok(handle) = self.inner.window_handle()
-            && let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw()
         {
+            let handle = match self.inner.window_handle() {
+                Ok(h) => h,
+                Err(e) => panic!(
+                    "§1.5: cannot read the window handle to harden an invisible window ({e}) — \
+                     refusing to continue with an unhardened window"
+                ),
+            };
+            let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw() else {
+                panic!(
+                    "§1.5: expected a Win32 window handle on Windows — refusing to continue \
+                     with an unhardened window"
+                )
+            };
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE,
                 WS_EX_TOOLWINDOW,
@@ -203,6 +286,19 @@ pub enum Event {
     Frame,
     /// The user asked the window to close.
     CloseRequested,
+    /// The loop is over and the window is about to be destroyed — the last
+    /// moment anything holding a surface derived from it may tear down.
+    ///
+    /// Delivered exactly once, after the event loop returns (for any reason,
+    /// including an error) and before the window drops, whenever a window was
+    /// created at all. Handlers return a [`Control`] verdict as usual and it is
+    /// ignored; there is nothing left to control.
+    ///
+    /// This exists because `ash_window`'s surface creation requires the window
+    /// to outlive the `VkSurfaceKHR` derived from it, and a handler that tears
+    /// down only on [`Event::CloseRequested`] misses every failure path. Doing
+    /// it after [`run`] returns is too late: the window is already gone.
+    Exiting,
 }
 
 /// Handler verdict for [`run`].
@@ -227,6 +323,15 @@ impl App<'_> {
             && (self.handler)(window, event) == Control::Exit
         {
             event_loop.exit();
+        }
+    }
+
+    /// Deliver [`Event::Exiting`] while the window is still alive. Separate
+    /// from `dispatch` because there is no `ActiveEventLoop` once `run_app`
+    /// has returned, and no verdict worth honoring — the loop is already over.
+    fn dispatch_exiting(&mut self) {
+        if let Some(window) = &self.window {
+            let _ = (self.handler)(window, Event::Exiting);
         }
     }
 }
@@ -257,6 +362,20 @@ impl ApplicationHandler for App<'_> {
             WindowEvent::Resized(size) => Event::Resized(size.width, size.height),
             WindowEvent::CloseRequested => Event::CloseRequested,
             WindowEvent::RedrawRequested => Event::Frame,
+            // §1.5: an invisible window that moved is a window whose parking
+            // the OS just undid — re-park it. Not reported upward: nothing
+            // above gg-platform has any business knowing where a window that
+            // must never be seen happens to sit. The position guard is what
+            // makes this terminate, since set_outer_position itself emits Moved.
+            WindowEvent::Moved(pos) => {
+                if !self.desc.visible
+                    && (pos.x, pos.y) != OFFSCREEN_POS
+                    && let Some(window) = &self.window
+                {
+                    window.park_offscreen();
+                }
+                return;
+            }
             _ => return,
         };
         self.dispatch(event_loop, event);
@@ -284,7 +403,12 @@ pub fn run(
         handler: &mut handler,
         result: Ok(()),
     };
-    event_loop.run_app(&mut app)?;
+    // Dispatch Exiting before propagating any loop error: a failed run is
+    // exactly the case where the handler never reached its own teardown, and
+    // the window is still alive here but not one line later.
+    let loop_result = event_loop.run_app(&mut app);
+    app.dispatch_exiting();
+    loop_result?;
     app.result
 }
 

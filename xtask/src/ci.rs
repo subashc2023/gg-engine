@@ -402,9 +402,13 @@ fn greps() -> anyhow::Result<()> {
 /// determinism-allowlist.toml (§4.1) — two files, one truth, machine-checked.
 fn allowlist_crosscheck() -> anyhow::Result<()> {
     let root = workspace_root();
-    let allow: toml::Value =
-        std::fs::read_to_string(root.join("determinism-allowlist.toml"))?.parse()?;
-    let deny: toml::Value = std::fs::read_to_string(root.join("deny.toml"))?.parse()?;
+    // toml::from_str, not str::parse: since toml 0.9 `FromStr for Value` parses a
+    // TOML *value*, not a document, so `.parse()` on a file starting with a table
+    // header reads it as an array literal and errors.
+    let allow: toml::Value = toml::from_str(&std::fs::read_to_string(
+        root.join("determinism-allowlist.toml"),
+    )?)?;
+    let deny: toml::Value = toml::from_str(&std::fs::read_to_string(root.join("deny.toml"))?)?;
 
     let exempt: BTreeSet<&str> = allow
         .get("exemptions")

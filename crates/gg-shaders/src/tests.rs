@@ -33,6 +33,30 @@ fn spike1_slang_bindings_compile_and_reflect() {
     }
 }
 
+/// The `*_ENTRY` constants name what the SPIR-V actually declares.
+///
+/// Slang renames entry points to `main` when a blob holds exactly one — the
+/// rule the codegen depends on, and previously a hardcoded assumption. Now the
+/// name is read back out of `OpEntryPoint`, so this test is what converts "we
+/// believe Slang does this" into "this Slang build does this": the source
+/// names differ from the SPIR-V name, and reading them back proves both halves.
+#[test]
+fn spirv_entry_names_are_read_back_from_the_blob() {
+    let module = compile_module(&fixtures_dir(), "spike.slang").unwrap();
+
+    for ep in &module.entry_points {
+        assert_eq!(
+            ep.spirv_entry, "main",
+            "entry point `{}` declares OpEntryPoint `{}` — Slang's one-entry-point-per-blob \
+             renaming is what the generated *_ENTRY constants assume (§4.4)",
+            ep.name, ep.spirv_entry
+        );
+        // The source name is *not* the SPIR-V name: this is the distinction
+        // that cost a rejected pipeline on NVIDIA when it was assumed away.
+        assert_ne!(ep.name, ep.spirv_entry);
+    }
+}
+
 /// The reflected push-constant layout matches hand-computed std430 — the
 /// ground truth codegen freezes (§4.4).
 #[test]

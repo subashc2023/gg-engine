@@ -16,8 +16,8 @@ anyhow.workspace = true
 # Spike 2 probe (§6 M0A) queries device capabilities directly; xtask sits
 # outside the §3 containment seam and deny.toml's ash wrappers name it.
 ash.workspace = true
-sha2 = "0.10"
-toml = "0.8"
+sha2 = "0.11"
+toml = "1"
 # M2 (§4.4): the offline shader path compiles in-process through gg-shaders —
 # the same compiler the hot path uses, and the only road to the reflection API.
 gg-shaders = { path = "../crates/gg-shaders" }

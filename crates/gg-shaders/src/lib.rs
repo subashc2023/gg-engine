@@ -18,7 +18,7 @@ pub mod hot;
 
 pub use compile::{
     CompiledEntryPoint, CompiledModule, FieldType, Scalar, Stage, StructField, StructLayout,
-    compile_module,
+    compile_module, slang_build_tag,
 };
 
 /// Errors from compilation or reflection. `Slang` carries the compiler's own

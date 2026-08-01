@@ -5,8 +5,21 @@
 # permitted per-architecture divergence (hazard 6).
 # No --bless exists: edits to this file must name their cause (toolchain bump,
 # libm bump, hardware change - each a Determinism Contract event).
-# Initial creation: 2026-07-31, rustc 1.92.0 pinned, libm 0.2, on the x86_64
-# Windows host; Linux legs verified identical before commit.
+# Initial creation: 2026-07-31, rustc 1.92.0 pinned, libm 0.2.16, on the x86_64
+# Windows host; Linux legs verified identical before commit. (The libm version
+# is recorded to the patch deliberately: libm's own patch releases have changed
+# result bits of functions listed below - 0.2.12 replaced cbrt wholesale, 0.2.16
+# fixed expm1f - so "libm 0.2" was not a provenance record at all. The dependency
+# is now pinned exactly in Cargo.toml for the same reason.)
+#
+# Contract event 2026-07-31: rustc 1.92.0 -> 1.97.1 (post-M2 audit). Five stable
+# releases, crossing LLVM 21 -> 22 at Rust 1.95 - a full major version of the
+# backend that emits every float instruction below. NOT ONE BIT IN THIS FILE
+# CHANGED. Re-verified on all three legs under both profiles: x86_64 Windows
+# (dev + dist), x86_64 Linux in WSL (dev + dist), aarch64-unknown-linux-gnu
+# under qemu-user (dev + dist). Contract version stays v1: a bump would only be
+# honest if the bits had moved. libm held at 0.2.16 across the event, so rustc
+# and LLVM are the sole variables - which is the point of changing one thing.
 f32/sin = 0x3F157682
 f32/cos = 0x3F4FD6A7
 f32/sin_cos.s = 0x3F157682

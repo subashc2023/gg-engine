@@ -20,10 +20,7 @@ winit = { workspace = true }
 raw-window-handle = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-] }
+windows-sys = { workspace = true }
 
 [dev-dependencies]
 # The §1.5 off-screen regression test reads the window handle back.
@@ -31,10 +28,7 @@ raw-window-handle = { workspace = true }
 
 [target.'cfg(windows)'.dev-dependencies]
 # ...and asserts Win32 styles/geometry directly against the OS.
-windows-sys = { version = "0.59", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-] }
+windows-sys = { workspace = true }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
 # ...and asserts X11 geometry directly against the X server (WSLg leg).

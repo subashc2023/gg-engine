@@ -36,6 +36,10 @@ pub struct PipelineDesc<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PipelineHandle(u64);
 
+// Copy so a draw can be resolved to an owned value *before* the swapchain
+// acquire (see Rhi::render_frame) without holding a borrow of the store across
+// it — three handles and a length, so copying is free.
+#[derive(Clone, Copy)]
 pub(crate) struct PipelineEntry {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,

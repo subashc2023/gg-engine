@@ -71,9 +71,9 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
         .create_pipeline(&PipelineDesc {
             name: "test-fullscreen",
             vs_spirv: &vs.spirv,
-            vs_entry: vs.spirv_entry,
+            vs_entry: &vs.spirv_entry,
             fs_spirv: &fs.spirv,
-            fs_entry: fs.spirv_entry,
+            fs_entry: &fs.spirv_entry,
             push_constant_size: 0,
         })
         .unwrap();
@@ -164,9 +164,9 @@ float4 fs_main() : SV_Target { return push.color; }
         .create_pipeline(&PipelineDesc {
             name: "test-pushy",
             vs_spirv: &vs.spirv,
-            vs_entry: vs.spirv_entry,
+            vs_entry: &vs.spirv_entry,
             fs_spirv: &fs.spirv,
-            fs_entry: fs.spirv_entry,
+            fs_entry: &fs.spirv_entry,
             push_constant_size: 16,
         })
         .unwrap();

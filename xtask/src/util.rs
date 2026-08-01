@@ -4,6 +4,28 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Lowercase hex of a SHA-256 digest.
+///
+/// Spelled out by hand because sha2 0.11 returns `hybrid_array::Array` rather
+/// than the old `GenericArray`, and `Array` implements no `LowerHex` — so the
+/// `format!("{:x}", ..)` this replaces no longer compiles. The output is
+/// byte-identical to the old spelling (two lowercase digits per byte), which
+/// matters: this string is frozen into checked-in codegen headers and into the
+/// pinned-lavapipe checksum, so a formatting change would be a silent
+/// invalidation of both.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    use std::fmt::Write as _;
+
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            // Infallible: writing to a String cannot fail.
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
 pub fn workspace_root() -> PathBuf {
     // xtask lives at <root>/xtask; CARGO_MANIFEST_DIR is compile-time truth.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

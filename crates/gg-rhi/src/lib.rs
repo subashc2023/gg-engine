@@ -120,7 +120,20 @@ pub struct Rhi {
 
 impl Rhi {
     /// Bring up instance, surface, device, swapchain, and frame slots for
-    /// `window`. The window must outlive the returned value.
+    /// `window`.
+    ///
+    /// **The window must outlive the returned value.** `ash_window` requires
+    /// the window and display connection to stay valid for the lifetime of the
+    /// `VkSurfaceKHR` derived from them, and nothing in this signature enforces
+    /// it — `HasWindowHandle` hands out a borrowed handle whose lifetime is
+    /// dropped at the FFI boundary, so a lifetime parameter here would have to
+    /// propagate into every caller's storage to mean anything.
+    ///
+    /// Callers driving `gg_platform::run` uphold this by tearing down in the
+    /// `Event::Exiting` arm, which is dispatched while the window is still
+    /// alive; doing it after `run` returns is too late. Callers owning their
+    /// own window must destroy the `Rhi` (via [`Rhi::shutdown`] or by dropping
+    /// it) before the window.
     pub fn new(
         window: &(impl HasWindowHandle + HasDisplayHandle),
         extent: (u32, u32),
@@ -285,6 +298,20 @@ impl Rhi {
         let completed = self.device.graphics_timeline_value()?;
         self.deletions.collect(&self.device, completed);
 
+        // Resolve the draw's pipeline handle BEFORE acquiring. A stale handle
+        // (retired by hot reload) is a normal, caller-reachable error, and
+        // acquire signals `slot.acquire` — so returning between the two would
+        // leave a signaled semaphore with no waiter, which the next frame to
+        // reuse this slot trips over as a validation error, permanently failing
+        // the §4.3 zero-message shutdown report. Nothing may fail in between.
+        let draw = draw
+            .map(|d| {
+                self.pipelines
+                    .get(d.pipeline)
+                    .map(|entry| (*entry, d.push_constants, d.vertex_count))
+            })
+            .transpose()?;
+
         let slot = &self.frames.slots[(self.frame_index % FRAMES_IN_FLIGHT) as usize];
         let (image_index, acquire_suboptimal) =
             match self.swapchain.acquire(&self.device, slot.acquire)? {
@@ -365,23 +392,17 @@ impl Rhi {
     /// Record the frame's pass: undefined → color-attachment barrier, dynamic
     /// rendering with a clear load op (plus the draw, when given), then
     /// color-attachment → present.
+    /// `draw` arrives already resolved: the caller looks the pipeline handle up
+    /// before acquiring an image, so this function cannot fail on a dead handle
+    /// (see the note at the resolve site in `render_frame`).
     fn record_pass(
         &self,
         pool: vk::CommandPool,
         cmd: vk::CommandBuffer,
         image_index: u32,
         color: [f32; 4],
-        draw: Option<&DrawSpec<'_>>,
+        draw: Option<(pipeline::PipelineEntry, &[u8], u32)>,
     ) -> Result<(), RhiError> {
-        // Resolve the handle before recording so a dead handle is an error,
-        // not a half-recorded command buffer.
-        let draw = draw
-            .map(|d| {
-                self.pipelines
-                    .get(d.pipeline)
-                    .map(|entry| (entry, d.push_constants, d.vertex_count))
-            })
-            .transpose()?;
         let device = self.device.raw();
         // SAFETY: the timeline wait proved this slot's previous frame retired,
         // so its pool and command buffer are free to reset and rerecord.
@@ -439,7 +460,7 @@ impl Rhi {
             if let Some((entry, push, vertex_count)) = draw {
                 // SAFETY: cmd is recording inside the rendering pass; the
                 // entry came from the live store and targets this format.
-                pipeline::record_draw(&self.device, cmd, extent, entry, push, vertex_count)?;
+                pipeline::record_draw(&self.device, cmd, extent, &entry, push, vertex_count)?;
             }
             device.cmd_end_rendering(cmd);
 

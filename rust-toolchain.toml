@@ -1,4 +1,9 @@
 [toolchain]
 # Pinned per PLAN.md §2 (Determinism Contract v1: rustc = the pinned toolchain).
 # Bumping this is a deliberate compatibility event gated by the M0B FP baseline (§4.2.1).
-channel = "1.92.0"
+#
+# 1.92.0 -> 1.97.1 (2026-07-31, post-M2 audit). Deliberate: this crosses LLVM
+# 21 -> 22 (Rust 1.95), i.e. a full major version of the backend that generates
+# every float instruction in gg_math::sim. Gated by fp_baseline on all three
+# §5 legs under both the dev and dist profiles. Bits unchanged.
+channel = "1.97.1"

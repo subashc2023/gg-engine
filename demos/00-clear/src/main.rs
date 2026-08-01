@@ -88,12 +88,18 @@ fn main() -> anyhow::Result<()> {
             report = rhi.take().map(Rhi::shutdown);
             Control::Exit
         }
+        Event::Exiting => {
+            // The backstop for every path that exits without its own teardown
+            // (the failure arms above, or the loop ending on its own). Still
+            // inside the closure, so the window is alive — which is the whole
+            // point: the surface must never outlive it.
+            if let Some(r) = rhi.take() {
+                report = Some(r.shutdown());
+            }
+            Control::Exit
+        }
     })?;
 
-    // The loop may exit via failure paths that never reached shutdown.
-    if let Some(r) = rhi.take() {
-        report = Some(r.shutdown());
-    }
     if let Some(err) = failure {
         return Err(err);
     }

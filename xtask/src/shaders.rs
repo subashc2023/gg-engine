@@ -11,8 +11,7 @@
 //! the generated header carries the source hash + generator version, and a
 //! matching header skips the recompile.
 
-use crate::util::workspace_root;
-use sha2::Digest;
+use crate::util::{sha256_hex, workspace_root};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy)]
@@ -31,7 +30,50 @@ impl Target {
 
 const TARGETS: &[Target] = &[Target::Spirv];
 
+/// Assert the linked Slang matches this host's row in `slang-pin.toml` (§4.4).
+///
+/// `shader-slang` pins no Slang version — bindgen runs against whatever header
+/// the machine has and links the installed dylib — so the compiler behind our
+/// reflection and SPIR-V is machine state, invisible to Cargo.lock. Gate 3
+/// requires the generated Rust to be byte-identical across hosts; that is only
+/// a real gate if the compiler producing it is pinned. Without this, a Slang
+/// upgrade on one lane turns gate 3 red with no attributable cause, or changes
+/// a reflected offset that both lanes then quietly agree on.
+pub fn assert_slang_pin() -> anyhow::Result<()> {
+    let root = workspace_root();
+    let pin_path = root.join("slang-pin.toml");
+    let pins: toml::Value = toml::from_str(&std::fs::read_to_string(&pin_path)?)?;
+
+    // Host key by OS family, matching how the two lanes are provisioned: the
+    // Windows host takes Slang from the LunarG SDK, the WSL lane from SLANG_DIR.
+    let host = if cfg!(windows) { "windows" } else { "linux" };
+    let expected = pins
+        .get("hosts")
+        .and_then(|h| h.get(host))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "slang-pin.toml has no [hosts].{host} row — every host that compiles shaders \
+                 needs a pinned Slang version (§4.4)"
+            )
+        })?;
+
+    let actual = gg_shaders::slang_build_tag()
+        .map_err(|e| anyhow::anyhow!("could not ask Slang for its build tag: {e}"))?;
+
+    anyhow::ensure!(
+        actual == expected,
+        "Slang version drift on `{host}`: linked {actual}, pinned {expected} (slang-pin.toml).\n\
+         The generated shader Rust must be byte-identical across hosts, so the compiler that \
+         produces it is pinned. If this upgrade is intended: re-run `cargo xtask shaders`, read \
+         the diff (an empty one means the upgrade was layout-neutral), then move the row."
+    );
+    println!("xtask: slang {actual} matches the {host} pin (§4.4)");
+    Ok(())
+}
+
 pub fn build_all(check: bool) -> anyhow::Result<()> {
+    assert_slang_pin()?;
     let root = workspace_root();
     let mut modules = Vec::new();
     for base in ["crates", "demos"] {
@@ -78,7 +120,7 @@ fn process_module(module: &Path, check: bool) -> anyhow::Result<bool> {
     let rs_path = gen_dir.join(format!("{stem}.rs"));
 
     let source = std::fs::read(module)?;
-    let hash = format!("{:x}", sha2::Sha256::digest(&source));
+    let hash = sha256_hex(&source);
     let header = gg_shaders::codegen::header_line(&hash);
 
     // Incremental (build mode only): an on-disk header matching source hash +
