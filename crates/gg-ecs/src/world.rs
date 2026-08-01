@@ -10,6 +10,8 @@ use crate::registry::{Registry, RegistryError};
 use crate::side_table::{SideTable, SideTableError, SideTables};
 use crate::view::{ArchetypeView, QueryAccess};
 
+pub mod snapshot;
+
 /// Which encoding a canonical walk uses. Both must agree; see
 /// [`World::canonical_hash_via_protocol`].
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -91,6 +93,13 @@ impl World {
     #[must_use]
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// For `boundary::load`, which registers what a dylib declares and is a
+    /// sibling module rather than a child of this one. Not public: registration
+    /// is a checked act (§4.2) and the checks live in [`Registry`].
+    pub(crate) fn registry_mut(&mut self) -> &mut Registry {
+        &mut self.registry
     }
 
     #[must_use]
@@ -203,6 +212,83 @@ impl World {
         Some(bytemuck::from_bytes_mut(
             archetype.column_mut(at).row_mut(loc.row as usize),
         ))
+    }
+
+    // ---- by stable id, for the §4.2.2 boundary ---------------------------
+    //
+    // The dylib names components by `u64`, never by type: it has no `T` to hand
+    // us and we have no way to trust one if it did. These three mirror
+    // `insert`/`remove`/`get` with the type replaced by a registry lookup, which
+    // is also what makes them *refuse* an unregistered id — the host registers
+    // everything a dylib declares at load, so an unknown id means the dylib
+    // asked for something it never declared. Not public: raw bytes into a column
+    // is the boundary's contract, not the ECS's.
+
+    pub(crate) fn insert_raw(
+        &mut self,
+        entity: Entity,
+        id: ComponentId,
+        bytes: &[u8],
+    ) -> gg_abi::AbiStatus {
+        let Some(info) = self.registry.get(id) else {
+            return gg_abi::AbiStatus::UnknownComponent;
+        };
+        if info.size != bytes.len() {
+            return gg_abi::AbiStatus::SizeMismatch;
+        }
+        let Some(loc) = self.location(entity) else {
+            return gg_abi::AbiStatus::DeadEntity;
+        };
+
+        if let Some(at) = self.archetypes[loc.archetype.index() as usize].column_index(id) {
+            self.archetypes[loc.archetype.index() as usize]
+                .column_mut(at)
+                .row_mut(loc.row as usize)
+                .copy_from_slice(bytes);
+            return gg_abi::AbiStatus::Ok;
+        }
+
+        let target = self.archetype_with(loc.archetype, id);
+        let new_row = self.move_row(entity, loc, target);
+        let Some(at) = self.archetypes[target.index() as usize].column_index(id) else {
+            // The target archetype was built to contain `id`; reaching here is a
+            // storage bug, and the boundary reports rather than panics inside a
+            // host call the dylib cannot unwind out of.
+            return gg_abi::AbiStatus::UnknownComponent;
+        };
+        self.archetypes[target.index() as usize]
+            .column_mut(at)
+            .row_mut(new_row as usize)
+            .copy_from_slice(bytes);
+        gg_abi::AbiStatus::Ok
+    }
+
+    pub(crate) fn remove_raw(&mut self, entity: Entity, id: ComponentId) -> bool {
+        let Some(loc) = self.location(entity) else {
+            return false;
+        };
+        if !self.archetypes[loc.archetype.index() as usize].contains(id) {
+            return false;
+        }
+        let target = self.archetype_without(loc.archetype, id);
+        self.move_row(entity, loc, target);
+        true
+    }
+
+    /// A pointer to one row of one column, or null. Invalidated by the next
+    /// structural change — the same rule the column views carry.
+    pub(crate) fn get_raw(&mut self, entity: Entity, id: ComponentId) -> *mut u8 {
+        let Some(loc) = self.location(entity) else {
+            return core::ptr::null_mut();
+        };
+        let archetype = &mut self.archetypes[loc.archetype.index() as usize];
+        let Some(at) = archetype.column_index(id) else {
+            return core::ptr::null_mut();
+        };
+        archetype
+            .column_mut(at)
+            .row_mut(loc.row as usize)
+            .as_mut_ptr()
     }
 
     // ---- hashed side tables (§4.2.1) -------------------------------------

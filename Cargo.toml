@@ -4,19 +4,24 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/gg-abi",
+    "crates/gg-core",
     "crates/gg-ecs",
     "crates/gg-ecs-derive",
     "crates/gg-extract",
     "crates/gg-input",
     "crates/gg-math",
     "crates/gg-platform",
+    "crates/gg-render",
     "crates/gg-rhi",
     "crates/gg-runtime",
     "crates/gg-shaders",
     "demos/00-clear",
     "demos/01-triangle",
     "demos/02-mesh",
+    "demos/03-reload",
     "tools/gg-golden",
+    "tools/gg-static-link",
     "xtask",
 ]
 
@@ -93,6 +98,11 @@ gpu-allocator = { version = "0.28", default-features = false, features = [
     "std",
     "vulkan",
 ] }
+# M5 (§4.2.2): the game dylib's loader. Unconditional — dist loads the table
+# once too, and the only difference between the tiers is who watches for a new
+# one. `dlopen`/`LoadLibrary` behind a safe-ish wrapper is the whole of it; the
+# unsafety that matters is the symbol signatures, which are ours.
+libloading = "0.8"
 # M2 (§4.4, §4.10): notify drives shader hot reload (dev-only — the dist gate
 # proves its absence); png is gg-golden's reference-image format.
 notify = "8"

@@ -1,0 +1,20 @@
+# Demo 03's bindings (§4.7). By *physical* key position, so this file means the
+# same thing on AZERTY as on QWERTY.
+#
+# Verb names resolve against the two lists in `gg_game!`, and their order there
+# is the id space a replay records — so renaming a verb here without renaming it
+# there is refused at load, not a silently dead binding. The host reads that list
+# off the dylib (`gg_game_verbs`), which is what makes a reload that adds an
+# action re-parse this file against the *new* build's verbs.
+
+[game.actions]
+fire = ["Mouse1", "Space"]
+spawn = ["F", "Mouse2"]
+restart = ["R"]          # wipes the world; the initial-state code rebuilds it
+
+[game.axes]
+move_right = ["+D", "-A"]
+move_up = ["+E", "-Q"]
+move_forward = ["+W", "-S"]
+aim_x = ["MouseX"]
+aim_y = ["MouseY"]

@@ -461,6 +461,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "demo-03-reload"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "gg-ecs",
+ "gg-math",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -654,11 +663,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "gg-abi"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytemuck",
+]
+
+[[package]]
+name = "gg-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "gg-abi",
+ "gg-math",
+ "libloading",
+ "notify",
+ "profiling",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
 name = "gg-ecs"
 version = "0.1.0"
 dependencies = [
  "blake3",
  "bytemuck",
+ "gg-abi",
  "gg-ecs-derive",
  "gg-math",
  "thiserror 2.0.19",
@@ -703,6 +735,7 @@ dependencies = [
 name = "gg-input"
 version = "0.1.0"
 dependencies = [
+ "gg-abi",
  "thiserror 2.0.19",
 ]
 
@@ -729,6 +762,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gg-render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "gg-ecs",
+ "gg-extract",
+ "gg-math",
+ "gg-rhi",
+ "raw-window-handle",
+]
+
+[[package]]
 name = "gg-rhi"
 version = "0.1.0"
 dependencies = [
@@ -749,6 +794,13 @@ name = "gg-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "gg-core",
+ "gg-ecs",
+ "gg-extract",
+ "gg-input",
+ "gg-math",
+ "gg-platform",
+ "gg-render",
  "profiling",
  "tracing",
  "tracing-subscriber",
@@ -763,6 +815,15 @@ dependencies = [
  "notify",
  "shader-slang",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "gg-static-link"
+version = "0.1.0"
+dependencies = [
+ "demo-03-reload",
+ "gg-core",
+ "gg-ecs",
 ]
 
 [[package]]
@@ -2715,7 +2776,9 @@ dependencies = [
  "anyhow",
  "ash",
  "demo-02-mesh",
+ "gg-core",
  "gg-input",
+ "gg-math",
  "gg-shaders",
  "sha2",
  "toml",

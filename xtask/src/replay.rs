@@ -64,6 +64,11 @@ fn check() -> anyhow::Result<()> {
         gate::CHAOS_SEEDS.len(),
         gate::CHAOS_TICKS,
     );
+    // Demo 03's curated stream carries no checked-in hash baseline on purpose
+    // (see `shell.rs`): its gameplay code is the crate agents edit all day, so
+    // the tiers are compared against each other rather than against a file.
+    // What can be checked cheaply here is that the stream is still readable.
+    crate::shell::describe()?;
     println!("xtask replay: baselines live in {}", dir.display());
     Ok(())
 }
@@ -102,6 +107,7 @@ fn bless() -> anyhow::Result<()> {
         chaos.extend(gate::checkpoints(&sequence));
     }
     std::fs::write(gate::baseline_path("chaos"), gate::encode_baseline(&chaos))?;
+    crate::shell::bless(&commit)?;
 
     println!(
         "xtask replay: blessed {} ({} ticks) and {} chaos checkpoint(s) at {commit} — \

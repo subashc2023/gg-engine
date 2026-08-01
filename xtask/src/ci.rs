@@ -9,7 +9,6 @@
 
 use crate::util::{cargo, run as exec, run_capture, walk_rs, workspace_root};
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 pub fn run_tier(tier: &str) -> anyhow::Result<()> {
     match tier {
@@ -55,7 +54,7 @@ fn push() -> anyhow::Result<()> {
     exec(cargo().args(["deny", "check"]), "cargo deny check")?;
     greps()?;
     allowlist_crosscheck()?;
-    line_budgets()?;
+    crate::budgets::check()?;
     crate::public_api::check()?;
     tests(&All)?;
     fp_baseline_dist_profile()?;
@@ -67,6 +66,8 @@ fn push() -> anyhow::Result<()> {
     // Gate 3 (§5): entry points compile + reflection codegen diff-clean. Check
     // mode: CI verifies the checked-in artifacts, it never rewrites the tree.
     crate::shaders::build_all(true)?;
+    rejuvenation()?;
+    static_link()?;
     for (pkg, feats) in [
         ("gg-runtime", "tier-dist"),
         ("gg-runtime", "tier-dist-verify"),
@@ -97,6 +98,11 @@ fn nightly() -> anyhow::Result<()> {
     stress_and_miri()?;
     aarch64_leg()?;
     replay_instrumented_profile()?;
+    // §5.6c in full, replay segments across a reload, §5.11's reload cases, and
+    // the reload-latency instrument (§6 M5): everything that needs the shell
+    // driving a real game dylib.
+    crate::shell::gates(&[])?;
+    crate::bench()?;
     gpu_tests()?;
     golden_suite()?;
     println!(
@@ -179,6 +185,7 @@ pub fn interactive() -> anyhow::Result<()> {
         "windowed suite: swapchain torture + resize/minimize storms (§4.3, §1.5)",
     )?;
     demo_runs()?;
+    shell_run()?;
     replay_run()?;
     crate::dist::demo_runs()?;
     println!("xtask interactive: green (manual windowed suite — not part of any automated tier)");
@@ -293,6 +300,149 @@ fn demo_runs() -> anyhow::Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// The shell's own WSI leg: a game dylib loaded, a real window, the §4.5 v0 pass
+/// presenting (§6 M5).
+///
+/// `GG_HEADLESS` is deliberately *unset* — the shell answers it by skipping
+/// windowing entirely, so a headless run proves nothing about the swapchain path
+/// a player takes. That is precisely why this is in `interactive` and in no
+/// automated tier (§1.5).
+/// The forced-rejuvenation criterion (§6 M5): a session whose leak budget is
+/// zero rejuvenates on its first reload — snapshot, restart the host, restore,
+/// resume — and the world it comes back to is the world it left.
+///
+/// Windowless, so this is a CI tier and not `interactive` (§1.5). The successor
+/// process inherits this pipe, which is what makes "did it come back" observable
+/// at all: `wait_with_output` returns only once the *last* process in the chain
+/// has closed it.
+fn rejuvenation() -> anyhow::Result<()> {
+    use std::process::Stdio;
+
+    let root = crate::util::workspace_root();
+    exec(
+        cargo().args(["build", "-p", "demo-03-reload", "-p", "gg-runtime"]),
+        "build demo 03 + the shell",
+    )?;
+
+    // A directory of its own: the watcher watches a *directory*, so rewriting the
+    // artifact under target/debug would be a reload event for anything else
+    // pointed there.
+    let name = if cfg!(windows) {
+        "demo_03_reload.dll"
+    } else {
+        "libdemo_03_reload.so"
+    };
+    let built = root.join("target/debug").join(name);
+    let dir = root.join("target/rejuvenate");
+    std::fs::create_dir_all(&dir)?;
+    let game = dir.join(name);
+    std::fs::copy(&built, &game)?;
+
+    let mut cmd = std::process::Command::new(root.join("target/debug").join(if cfg!(windows) {
+        "gg-runtime.exe"
+    } else {
+        "gg-runtime"
+    }));
+    cmd.arg("--game")
+        .arg(&game)
+        .args(["--frames", "300000", "--leak-budget", "0"])
+        .env("GG_HEADLESS", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = cmd.spawn()?;
+
+    // Only a *reload* charges the leak budget, so the rewrite is the trigger and
+    // there is no rejuvenation without one. 300k headless frames is around a
+    // second of runtime; a busier machine makes that window wider, never
+    // narrower, which is the direction a timing assumption should fail in.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    std::fs::copy(&built, &game)?;
+    let out = child.wait_with_output()?;
+
+    let log = format!(
+        "{}{}",
+        crate::util::plain(&out.stdout),
+        crate::util::plain(&out.stderr)
+    );
+    let line = |needle: &str| {
+        log.lines()
+            .find(|l| l.contains(needle))
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("no `{needle}` line in:\n{log}"))
+    };
+    let staged = line("rejuvenating")?;
+    let resumed = line("rejuvenated")?;
+    let (left_at, came_back) = (
+        crate::util::field_u64(&staged, "tick")?,
+        crate::util::field_u64(&resumed, "tick")?,
+    );
+    anyhow::ensure!(
+        left_at > 0 && left_at == came_back,
+        "resumed at tick {came_back}, left off at {left_at}"
+    );
+    anyhow::ensure!(
+        crate::util::field_u64(&resumed, "entities")? > 0,
+        "came back to an empty world: {resumed}"
+    );
+    // The demo's bootstrap is idempotent and logs once. Twice would mean the
+    // successor rebuilt the world instead of restoring it — passing the tick
+    // assertion above while failing the criterion it exists for.
+    let births = log.matches("open for business").count();
+    anyhow::ensure!(births == 1, "the game bootstrapped {births} times");
+    anyhow::ensure!(
+        log.contains("clean exit"),
+        "the successor did not finish its run:\n{log}"
+    );
+    println!(
+        "xtask: rejuvenation: restarted at tick {left_at}, resumed with \
+         {} entities, one bootstrap",
+        crate::util::field_u64(&resumed, "entities")?
+    );
+    Ok(())
+}
+
+/// Gate 9 (§5), live from M5: the statically-linked systems-table variant still
+/// compiles. Dormant — it runs no world and gates nothing further until the
+/// fallback is activated, at which point §5.6e's link-mode equivalence gate
+/// activates with it (§2, Game-code boundary row).
+///
+/// The crate's own test goes one step further and *links* it, which is where the
+/// interesting failure lives: a game crate contributes `#[no_mangle]` symbols
+/// and no Rust items, so rustc leaves its rlib out of the link unless something
+/// names it — a variant that compiles and does not link is exactly the rot this
+/// gate exists to catch, and a `cargo check` cannot see it.
+fn static_link() -> anyhow::Result<()> {
+    exec(
+        cargo().args(["check", "-p", "gg-static-link"]),
+        "dormant static-link variant compiles (§5.9)",
+    )
+}
+
+fn shell_run() -> anyhow::Result<()> {
+    let mut build = cargo();
+    build.args(["build", "-p", "demo-03-reload", "-p", "gg-runtime"]);
+    exec(&mut build, "build demo 03 + the shell")?;
+
+    let root = crate::util::workspace_root();
+    let dylib = root.join("target/debug").join(if cfg!(windows) {
+        "demo_03_reload.dll"
+    } else {
+        "libdemo_03_reload.so"
+    });
+    let mut cmd = std::process::Command::new(root.join("target/debug").join(if cfg!(windows) {
+        "gg-runtime.exe"
+    } else {
+        "gg-runtime"
+    }));
+    cmd.arg("--game")
+        .arg(&dylib)
+        .arg("--input")
+        .arg(root.join("demos/03-reload/input.toml"))
+        .args(["--frames", "100"]);
+    lavapipe_env(&mut cmd)?;
+    exec(&mut cmd, "demo 03 under the shell, 100 windowed frames")
 }
 
 /// The third architecture of the §5 matrix (§6 M0B): gg-math — the FP baseline
@@ -503,14 +653,30 @@ fn contains_path(text: &str, needle: &str) -> bool {
 }
 
 fn greps() -> anyhow::Result<()> {
-    let root = workspace_root();
+    let (violations, scanned) = scan(&workspace_root())?;
+    anyhow::ensure!(
+        violations.is_empty(),
+        "grep gate failed:\n{}",
+        violations.join("\n")
+    );
+    println!("xtask: grep gates clean ({scanned} files)");
+    Ok(())
+}
+
+/// The §3 greps as a function of a source tree, so the gate can be *pointed at*
+/// a tree with each violation deliberately planted (`mod tests`) rather than
+/// only ever at a clean one. A gate that has never once been red is a gate
+/// nobody has tested — §5's "reject a plant" criterion in its cheapest form.
+///
+/// Returns the violations and how many files were read.
+fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
     let mut files = Vec::new();
     walk_rs(&root.join("crates"), &mut files);
     walk_rs(&root.join("demos"), &mut files);
 
     let mut violations = Vec::new();
     for file in &files {
-        let rel = file.strip_prefix(&root).unwrap_or(file);
+        let rel = file.strip_prefix(root).unwrap_or(file);
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let text = std::fs::read_to_string(file)?;
 
@@ -585,13 +751,7 @@ fn greps() -> anyhow::Result<()> {
     }
     // Hand-written barrier grep joins at M6, when the render graph owns barriers.
 
-    anyhow::ensure!(
-        violations.is_empty(),
-        "grep gate failed:\n{}",
-        violations.join("\n")
-    );
-    println!("xtask: grep gates clean ({} files)", files.len());
-    Ok(())
+    Ok((violations, files.len()))
 }
 
 /// The `rayon` ban's wrappers in deny.toml must cover every exemption in
@@ -640,22 +800,140 @@ fn allowlist_crosscheck() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Complexity budgets, the CI-counted lines (§3). gg-runtime: 300.
-fn line_budgets() -> anyhow::Result<()> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    walk_rs(&workspace_root().join("crates/gg-runtime/src"), &mut files);
-    let lines: usize = files
-        .iter()
-        .map(|f| {
-            std::fs::read_to_string(f)
-                .map(|t| t.lines().count())
-                .unwrap_or(0)
-        })
-        .sum();
-    anyhow::ensure!(
-        lines <= 300,
-        "gg-runtime is {lines} lines against a 300-line budget (§3) — raising the budget is a PR, not a drift"
-    );
-    println!("xtask: gg-runtime line budget {lines}/300");
-    Ok(())
+/// Every §3 grep, pointed at a tree where the thing it bans is present.
+///
+/// The gates have only ever run against a clean workspace, which proves they do
+/// not fire and nothing else — and §6 M5 asks for the opposite evidence ("the
+/// grep bans on `static mut` / `thread_local!` in game crates are live and
+/// **reject a plant**"). Each test below plants one violation and asserts the
+/// scan names the file; the last plants none and asserts silence, so a scan that
+/// reported everything would fail too.
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    /// A throwaway source tree. Named after the test, and nextest gives each
+    /// test its own process, so two of these never collide.
+    fn plant(test: &str, files: &[(&str, &str)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("gg-grep-plant-{test}"));
+        let _ = std::fs::remove_dir_all(&root);
+        for (rel, text) in files {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+        }
+        root
+    }
+
+    fn violations(root: &Path) -> Vec<String> {
+        super::scan(root).unwrap().0
+    }
+
+    /// The two bans that keep game state from surviving a reload behind the
+    /// host's back (§4.2.2). Scoped to `demos/`, which is where game crates live.
+    #[test]
+    fn retained_state_in_a_game_crate_is_rejected() {
+        for planted in [
+            "static mut COUNT: u32 = 0;",
+            "thread_local! { static X: u8 }",
+        ] {
+            let root = plant("retained-state", &[("demos/03-x/src/lib.rs", planted)]);
+            let found = violations(&root);
+            assert_eq!(found.len(), 1, "planted `{planted}`, got {found:?}");
+            assert!(found[0].contains("static mut / thread_local!"), "{found:?}");
+        }
+        // The same text in an engine crate is legal: the ban is about code that
+        // crosses the reload seam, not about the tokens.
+        let root = plant(
+            "retained-state-engine",
+            &[("crates/gg-x/src/lib.rs", "static mut COUNT: u32 = 0;")],
+        );
+        assert!(violations(&root).is_empty());
+    }
+
+    /// The containment seam (§3): `gg-rhi` is the only crate that speaks Vulkan.
+    #[test]
+    fn a_vulkan_token_outside_gg_rhi_is_rejected() {
+        let root = plant(
+            "vk-token",
+            &[
+                (
+                    "crates/gg-render/src/pass.rs",
+                    "let f = vk::Format::UNDEFINED;",
+                ),
+                (
+                    "crates/gg-rhi/src/device.rs",
+                    "let f = vk::Format::UNDEFINED;",
+                ),
+            ],
+        );
+        let found = violations(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].starts_with("crates/gg-render/"), "{found:?}");
+    }
+
+    /// The whole-segment rule the gate is built on: `gg_ecs::hash::` ends in
+    /// `ash::` and is not the crate `ash`.
+    #[test]
+    fn a_path_ending_in_ash_is_not_the_ash_crate() {
+        let root = plant(
+            "ash-suffix",
+            &[(
+                "crates/gg-ecs/src/world.rs",
+                "use gg_ecs::hash::ComponentId;",
+            )],
+        );
+        assert!(violations(&root).is_empty());
+    }
+
+    /// §2's Sim time row: sim-visible time is a tick count, never a float.
+    #[test]
+    fn a_float_time_field_is_rejected() {
+        let root = plant(
+            "float-time",
+            &[(
+                "crates/gg-x/src/lib.rs",
+                "struct S {\n    pub elapsed: f32,\n}\nfn dt(&self) -> f32 { 0.0 }\n",
+            )],
+        );
+        let found = violations(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("float time field `elapsed`"), "{found:?}");
+    }
+
+    /// Every `unsafe` block carries a `// SAFETY:` within eight lines (§4.2).
+    /// An `unsafe fn` *declaration* does not: that obligation is the caller's.
+    #[test]
+    fn an_unsafe_block_without_a_safety_note_is_rejected() {
+        let root = plant(
+            "unsafe-note",
+            &[
+                (
+                    "crates/gg-a/src/lib.rs",
+                    "fn f() {\n    unsafe { g() }\n}\n",
+                ),
+                (
+                    "crates/gg-b/src/lib.rs",
+                    "fn f() {\n    // SAFETY: g is trivially fine.\n    unsafe { g() }\n}\n",
+                ),
+                ("crates/gg-c/src/lib.rs", "pub unsafe fn h() {}\n"),
+            ],
+        );
+        let found = violations(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].starts_with("crates/gg-a/"), "{found:?}");
+    }
+
+    /// The other half of the evidence: a tree with nothing planted is silent.
+    #[test]
+    fn a_clean_tree_reports_nothing() {
+        let root = plant(
+            "clean",
+            &[(
+                "crates/gg-x/src/lib.rs",
+                "pub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n",
+            )],
+        );
+        assert!(violations(&root).is_empty());
+    }
 }

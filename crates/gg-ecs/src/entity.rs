@@ -25,88 +25,18 @@
 //!    instead of wrapping. Wrapping would eventually resurrect a stale handle
 //!    as valid, the one failure this scheme exists to prevent.
 
-use core::fmt;
-
 use crate::hash::StateHasher;
+
+/// The handle itself lives in `gg-abi` (§4.2.2): it crosses the reload boundary
+/// both as an archetype match's entity slice and inside `Pod` component bytes,
+/// which makes its layout a contract between two separately-compiled artifacts
+/// rather than a storage detail. The *contract above* — how ids are handed out —
+/// is still this module's, and it is the part determinism depends on.
+pub use gg_abi::Entity;
 
 /// Terminal generation for an index that has been despawned `u32::MAX / 2`
 /// times. Even (⇒ dead by rule 3) and never re-issued (rule 4).
 const RETIRED: u32 = u32::MAX - 1;
-
-/// A live-or-dead handle: a dense `index` plus the `generation` that index was
-/// on when the handle was made.
-///
-/// `repr(C)` and `Pod` because components carrying entity references must stay
-/// `Pod` (§4.2.1 hazard 4) and these cross the §4.2.2 reload boundary.
-///
-/// `Ord` sorts by index then generation — load-bearing, not a convenience impl:
-/// it is the order the canonical hash walks state in.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(C)]
-pub struct Entity {
-    index: u32,
-    generation: u32,
-}
-
-// SAFETY: `repr(C)`, two `u32`s — 8 bytes, no padding, no interior mutability.
-// Every bit pattern is a valid `Entity`; an unrecognized one is simply not
-// alive, which `Entities::is_alive` reports without dereferencing anything.
-unsafe impl bytemuck::Zeroable for Entity {}
-// SAFETY: as above, plus `Copy`.
-unsafe impl bytemuck::Pod for Entity {}
-
-impl Entity {
-    /// The all-zeroes entity — never alive, by rule 3. This is the "no entity"
-    /// value for `Pod` components, where `Option<Entity>` is unavailable
-    /// (niche optimization is not a layout guarantee).
-    pub const NONE: Self = Self {
-        index: 0,
-        generation: 0,
-    };
-
-    #[must_use]
-    pub const fn index(self) -> u32 {
-        self.index
-    }
-
-    #[must_use]
-    pub const fn generation(self) -> u32 {
-        self.generation
-    }
-
-    /// Whether this is [`Entity::NONE`]. Not the same question as "is it
-    /// alive" — ask [`Entities::is_alive`] for that.
-    #[must_use]
-    pub const fn is_none(self) -> bool {
-        self.generation == 0
-    }
-
-    /// The `u64` the state-hash protocol encodes an entity reference as
-    /// (§4.2.1): generation high, index low. Both halves are committed, so a
-    /// stale handle and a live one at the same index hash differently.
-    #[must_use]
-    pub const fn to_bits(self) -> u64 {
-        ((self.generation as u64) << 32) | self.index as u64
-    }
-
-    #[must_use]
-    pub const fn from_bits(bits: u64) -> Self {
-        Self {
-            index: bits as u32,
-            generation: (bits >> 32) as u32,
-        }
-    }
-}
-
-impl fmt::Debug for Entity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_none() {
-            f.write_str("Entity::NONE")
-        } else {
-            write!(f, "Entity({}v{})", self.index, self.generation)
-        }
-    }
-}
 
 /// The entity allocator: one generation per index, plus the freelist.
 ///
@@ -156,10 +86,7 @@ impl Entities {
         if let Some(index) = self.free.pop() {
             let slot = &mut self.generations[index as usize];
             *slot += 1; // even -> odd: live again
-            return Entity {
-                index,
-                generation: *slot,
-            };
+            return Entity::new(index, *slot);
         }
         assert!(
             self.generations.len() < u32::MAX as usize,
@@ -167,10 +94,7 @@ impl Entities {
         );
         let index = self.generations.len() as u32;
         self.generations.push(1);
-        Entity {
-            index,
-            generation: 1,
-        }
+        Entity::new(index, 1)
     }
 
     /// Free an entity. Returns whether it was alive — a double despawn is a
@@ -181,10 +105,10 @@ impl Entities {
             return false;
         }
         self.live -= 1;
-        let slot = &mut self.generations[entity.index as usize];
+        let slot = &mut self.generations[entity.index() as usize];
         *slot += 1; // odd -> even: dead
         if *slot != RETIRED {
-            self.free.push(entity.index);
+            self.free.push(entity.index());
         }
         true
     }
@@ -195,11 +119,11 @@ impl Entities {
     /// storage.
     #[must_use]
     pub fn is_alive(&self, entity: Entity) -> bool {
-        entity.generation % 2 == 1
+        entity.generation() % 2 == 1
             && self
                 .generations
-                .get(entity.index as usize)
-                .is_some_and(|&g| g == entity.generation)
+                .get(entity.index() as usize)
+                .is_some_and(|&g| g == entity.generation())
     }
 
     /// Every live entity, ascending by index — the order the canonical hash
@@ -210,10 +134,29 @@ impl Entities {
             .iter()
             .enumerate()
             .filter(|&(_, &g)| g % 2 == 1)
-            .map(|(index, &generation)| Entity {
-                index: index as u32,
-                generation,
-            })
+            .map(|(index, &generation)| Entity::new(index as u32, generation))
+    }
+
+    /// Freeze allocator state for a snapshot (§4.8).
+    ///
+    /// The freelist and the retired slots come along, not just the live ids:
+    /// two allocators with identical live entities but different freelists hand
+    /// out *different ids next tick*, so restoring one as the other would be a
+    /// divergence one spawn later — the same reasoning that puts the freelist in
+    /// the canonical hash.
+    pub(crate) fn image(&self) -> EntitiesImage {
+        EntitiesImage {
+            generations: self.generations.clone(),
+            free: self.free.clone(),
+            live: self.live,
+        }
+    }
+
+    /// Replace allocator state wholesale. Restores the id sequence exactly.
+    pub(crate) fn restore(&mut self, image: &EntitiesImage) {
+        self.generations.clone_from(&image.generations);
+        self.free.clone_from(&image.free);
+        self.live = image.live;
     }
 
     /// Fold allocator state into the canonical hash (§4.2.1).
@@ -232,6 +175,26 @@ impl Entities {
         for &i in &self.free {
             h.u32(i);
         }
+    }
+}
+
+/// Allocator state as a snapshot carries it (§4.8).
+///
+/// Public because [`Snapshot`](crate::Snapshot) is, but opaque: the fields are
+/// the allocation contract's private business, and a caller that could edit them
+/// could hand out a live id twice.
+#[derive(Clone, Debug)]
+pub struct EntitiesImage {
+    pub(crate) generations: Vec<u32>,
+    pub(crate) free: Vec<u32>,
+    pub(crate) live: u32,
+}
+
+impl EntitiesImage {
+    /// Live entities in the captured world.
+    #[must_use]
+    pub fn live(&self) -> u32 {
+        self.live
     }
 }
 

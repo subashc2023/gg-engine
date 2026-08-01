@@ -1,0 +1,30 @@
+# demo 03-reload: the Ugly Game (§6 M5) — the first crate that is game code
+# rather than a demo binary, and the first artifact built as a dylib.
+#
+# Three engine dependencies and no fourth: §3's game-crate deny pin is what makes
+# the boundary fingerprint's scope and a dylib's possible link set the same list.
+# `gg-abi` arrives through `gg-ecs`'s re-exports, which is why it is not named
+# here — a game crate writes `gg_ecs::boundary::*` and nothing else.
+
+[package]
+name = "demo-03-reload"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "demo_03_reload"
+path = "src/lib.rs"
+# cdylib is what the host loads; rlib is what the tests link. Both from one
+# build, so the artifact under test is the artifact that ships.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bytemuck.workspace = true
+gg-ecs = { path = "../../crates/gg-ecs" }
+gg-math = { path = "../../crates/gg-math" }

@@ -42,6 +42,20 @@ pub trait SimTransform: Component {
     fn orientation(&self) -> sim::DQuat {
         sim::DQuat::IDENTITY
     }
+
+    /// Half-extent per axis, metres, before rotation. `f32` on both sides of
+    /// the membrane already: a size is a local quantity and never gains
+    /// planetary magnitude, which is the only thing `f64` buys here.
+    fn half_extent(&self) -> sim::Vec3 {
+        sim::Vec3::splat(0.5)
+    }
+
+    /// `0x00RRGGBB`, sRGB. Carried across because the game picks it and the
+    /// renderer must not — a host with an opinion about colour is a host the
+    /// game cannot restyle without a rebuild of the *engine* (§6 M5).
+    fn color(&self) -> u32 {
+        0x00ff_ffff
+    }
 }
 
 /// One render-space instance: an entity, where it is *relative to the camera*,
@@ -55,6 +69,10 @@ pub struct Instance {
     pub offset: render::Vec3,
     /// Orientation, narrowed.
     pub rotation: render::Quat,
+    /// Half-extent per axis, metres.
+    pub half_extent: render::Vec3,
+    /// `0x00RRGGBB`, sRGB.
+    pub color: u32,
 }
 
 /// The per-frame arrays, reused across frames.
@@ -116,13 +134,40 @@ impl Extracted {
         // runs of the same sim produce the same array in the same order — which
         // is what lets a golden image be compared byte-for-byte at all.
         world.each_ref(&query, |entity, transform: &T| {
+            let half = transform.half_extent();
             instances.push(Instance {
                 entity,
                 offset: render::camera_relative(transform.world_position(), origin),
                 rotation: render::narrow_rotation(transform.orientation()),
+                half_extent: render::Vec3::new(half.x, half.y, half.z),
+                color: transform.color(),
             });
         });
         Ok(())
+    }
+}
+
+/// The §4.5 v0 render protocol as an extract source (§4.2.2): the host draws
+/// [`Renderable`] and nothing else, so this is the one impl that ships.
+///
+/// A game's own component *may* implement [`SimTransform`] — demo 02's does —
+/// but a component the host has no Rust type for cannot, which is why the
+/// protocol exists at all.
+impl SimTransform for gg_ecs::boundary::Renderable {
+    fn world_position(&self) -> sim::DVec3 {
+        self.position
+    }
+
+    fn orientation(&self) -> sim::DQuat {
+        self.rotation
+    }
+
+    fn half_extent(&self) -> sim::Vec3 {
+        self.half_extent
+    }
+
+    fn color(&self) -> u32 {
+        self.color
     }
 }
 
@@ -190,6 +235,31 @@ mod tests {
         assert_eq!(out.instances[0].offset, render::Vec3::new(1.0, 0.0, 0.0));
         // Narrowing first is what this test is a control for.
         assert_ne!((far + 1.0) as f32 - far as f32, 1.0);
+    }
+
+    #[test]
+    fn the_render_protocol_carries_size_and_colour_across() {
+        use gg_ecs::boundary::Renderable;
+        let mut world = World::new();
+        world.register::<Renderable>().unwrap();
+        let e = world.spawn();
+        let mut beam = Renderable::boxed(
+            sim::DVec3::new(0.0, 0.0, -2.0),
+            sim::Vec3::new(0.05, 0.05, 3.0),
+            0x0033_66ff,
+        );
+        beam.rotation = sim::DQuat::from_axis_angle(sim::DVec3::Y, core::f64::consts::FRAC_PI_2);
+        world.insert(e, beam).unwrap();
+
+        let mut out = Extracted::default();
+        out.transforms::<Renderable>(&world, sim::DVec3::ZERO)
+            .unwrap();
+        let instance = out.instances[0];
+        assert_eq!(instance.half_extent, render::Vec3::new(0.05, 0.05, 3.0));
+        assert_eq!(instance.color, 0x0033_66ff);
+        // The defaults exist for game components that predate the protocol, and
+        // must not leak into a type that answers for itself.
+        assert_ne!(instance.rotation, render::Quat::IDENTITY);
     }
 
     #[test]

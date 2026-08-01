@@ -119,14 +119,24 @@ fn harden_invisible_attrs(mut attrs: WindowAttributes) -> WindowAttributes {
     attrs
 }
 
+/// §1.5, evaluated before anything touches the OS. Hoisted above event-loop
+/// construction deliberately: `Window::create` runs *inside* the loop callback,
+/// so on a display-less host the loop failed first and the law degraded from a
+/// panic to an ordinary `Err`. A scheduled systemd service inherits no
+/// `DISPLAY` — which is the strongest §1.5 guarantee available, and exactly why
+/// the law must not be reachable only when a display server exists.
+fn enforce_headless_law(desc: &WindowDesc) {
+    assert!(
+        !(desc.visible && headless()),
+        "GG_HEADLESS=1 forbids visible windows (§1.5): `{}` requested one — \
+         automated paths use invisible, non-activating windows",
+        desc.title
+    );
+}
+
 impl Window {
     fn create(event_loop: &ActiveEventLoop, desc: &WindowDesc) -> Result<Self, PlatformError> {
-        assert!(
-            !(desc.visible && headless()),
-            "GG_HEADLESS=1 forbids visible windows (§1.5): `{}` requested one — \
-             automated paths use invisible, non-activating windows",
-            desc.title
-        );
+        enforce_headless_law(desc); // still checked at the birth site itself
         let mut attrs = WindowAttributes::default()
             .with_title(&desc.title)
             .with_inner_size(PhysicalSize::new(desc.size.0, desc.size.1))
@@ -256,6 +266,27 @@ impl Window {
     pub fn request_redraw(&self) {
         self.inner.request_redraw();
     }
+
+    /// Hold the pointer and hide it — what mouse-look needs to be usable.
+    ///
+    /// [`Event::MouseMotion`] is raw device motion and arrives with or without
+    /// this; what it buys is the pointer not leaving the window, which is the
+    /// difference between aiming and losing focus mid-turn. Best effort by
+    /// design: `Locked` is the Wayland/macOS mode and `Confined` the Windows/X11
+    /// one, no platform has both, and a refusal is a worse pointer rather than a
+    /// broken run.
+    pub fn set_pointer_held(&self, held: bool) {
+        use winit::window::CursorGrabMode;
+        let mode = if held {
+            CursorGrabMode::Locked
+        } else {
+            CursorGrabMode::None
+        };
+        if self.inner.set_cursor_grab(mode).is_err() && held {
+            let _ = self.inner.set_cursor_grab(CursorGrabMode::Confined);
+        }
+        self.inner.set_cursor_visible(!held);
+    }
 }
 
 impl HasWindowHandle for Window {
@@ -334,6 +365,70 @@ pub enum Event {
 /// *below* this crate: the sim and replay path binds against them and must stay
 /// winit-free by linkage (§1.5). Re-exported so callers still name one crate.
 pub use gg_input::{Key, MouseButton};
+
+/// Apply a raw input event to [`gg_input::Input`]. `false` for events that carry
+/// no input — a window resize, a frame, a close request — which the caller was
+/// going to route somewhere else anyway.
+///
+/// This is the translation half of the seam above, and it belongs on this side
+/// of it for the same reason [`key_from_winit`] does: `gg-input` sits *below*
+/// this crate and has never heard of an [`Event`]. Without it every host writes
+/// the same three-arm match, which is how an app shell acquires input logic it
+/// has no charter for (§3).
+///
+/// Keys the *app* owns — Escape, in the shell — must be handled before this is
+/// called: quitting is not simulated state and must not reach the action map.
+pub fn feed(input: &mut gg_input::Input, event: &Event) -> bool {
+    match *event {
+        Event::Key { key, pressed } => input.key(key, pressed),
+        Event::MouseButton { button, pressed } => input.mouse_button(button, pressed),
+        Event::MouseMotion { dx, dy } => input.motion(dx, dy),
+        _ => return false,
+    }
+    true
+}
+
+#[cfg(test)]
+mod feed_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{Event, Key, MouseButton, feed};
+
+    /// The one thing a caller relies on: which events this claims and which it
+    /// leaves alone. A shell routes the rest itself — Escape is the app's key,
+    /// not the sim's — so an event silently claimed here would be an event that
+    /// never reaches the code that was supposed to handle it.
+    ///
+    /// Windowless on purpose (§1.5): the real event stream needs a window, so
+    /// without this the routing table would be covered by the manual suite alone.
+    #[test]
+    fn feed_claims_input_events_and_nothing_else() {
+        let map = gg_input::ActionMap::parse("", &[], &[]).unwrap();
+        let mut input = gg_input::Input::new(map);
+        for event in [
+            Event::Key {
+                key: Key::W,
+                pressed: true,
+            },
+            Event::MouseButton {
+                button: MouseButton::Left,
+                pressed: true,
+            },
+            Event::MouseMotion { dx: 1.0, dy: -2.0 },
+        ] {
+            assert!(feed(&mut input, &event), "unclaimed: {event:?}");
+        }
+        for event in [
+            Event::WindowReady,
+            Event::Resized(1, 2),
+            Event::Frame,
+            Event::CloseRequested,
+            Event::Exiting,
+        ] {
+            assert!(!feed(&mut input, &event), "wrongly claimed: {event:?}");
+        }
+    }
+}
 
 /// Translate a winit key code. The match is the seam between winit's naming and
 /// ours, and it lives here because this is the only crate that has heard of
@@ -576,10 +671,14 @@ impl ApplicationHandler for App<'_> {
 
 /// Run the OS event loop until the handler returns [`Control::Exit`] or the
 /// window closes. The handler sees [`Event::WindowReady`] first.
+///
+/// Panics on a visible `desc` under `GG_HEADLESS=1` (§1.5), before the event
+/// loop is built — so the law holds with or without a display server.
 pub fn run(
     desc: WindowDesc,
     mut handler: impl FnMut(&Window, Event) -> Control,
 ) -> Result<(), PlatformError> {
+    enforce_headless_law(&desc);
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -652,7 +751,11 @@ impl ApplicationHandler for PumpApp<'_> {
 
 impl Pump {
     /// Create the event loop and window, pumping until the OS delivers it.
+    ///
+    /// Panics on a visible `desc` under `GG_HEADLESS=1` (§1.5), before the
+    /// event loop is built — so the law holds with or without a display server.
     pub fn new(desc: WindowDesc) -> Result<Self, PlatformError> {
+        enforce_headless_law(&desc);
         let mut builder = EventLoop::builder();
         #[cfg(windows)]
         winit::platform::windows::EventLoopBuilderExtWindows::with_any_thread(&mut builder, true);

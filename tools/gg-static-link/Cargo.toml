@@ -1,0 +1,31 @@
+# The dormant static-link variant (§2 Game-code boundary row, §5.9): the host
+# reaching a game's systems table through the linker instead of through
+# `dlopen`, kept compiling by `cargo xtask ci --push` and activated only if a
+# platform forbids dylibs or dist numbers ever demand whole-program
+# optimization.
+#
+# It exists to be *checked*, not run. That is the whole design: a fallback
+# nobody compiles is a fallback that does not exist on the day it is needed,
+# and the cheapest way to keep this one honest is for it to be a crate the
+# compiler must agree with every push.
+
+[package]
+name = "gg-static-link"
+version = "0.1.0"
+description = "Dormant statically-linked game host (PLAN.md §5.9) — compiled by CI, run by nobody"
+publish = false
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The host half: `GameLib::linked` is the variant this crate exists to keep
+# compiling.
+gg-core = { path = "../../crates/gg-core" }
+gg-ecs = { path = "../../crates/gg-ecs" }
+# The game, as an rlib rather than as a cdylib — the one line that is the whole
+# difference between the two link modes (§2).
+demo-03-reload = { path = "../../demos/03-reload" }

@@ -1,0 +1,41 @@
+# gg-render (§3, §4.5) — passes and frame orchestration.
+#
+# **v0, and deliberately not the graph.** §4.5's v1 list opens with "forward
+# opaque pass"; this crate is that one pass and nothing else, born at M5 because
+# §2 gives the shell the renderer in every tier and §3 forbids the shell from
+# *implementing* one. M6 replaces the inside with virtual resources and derived
+# barriers; the shell's three calls are meant to survive it.
+
+[package]
+name = "gg-render"
+version = "0.1.0"
+description = "Render passes and frame orchestration (PLAN.md §4.5)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The GPU. `gg-render` speaks the RHI's safe API only — `ash`/`vk::` are banned
+# outside gg-rhi by cargo-deny and by a grep gate (§3).
+gg-rhi = { path = "../gg-rhi", default-features = false }
+# What a frame draws, already narrowed through the §1.4 membrane.
+gg-extract = { path = "../gg-extract" }
+# The render half only: this crate is downstream of the membrane and has no
+# business with sim types.
+gg-math = { path = "../gg-math" }
+bytemuck.workspace = true
+# The window is the shell's; this crate only needs the handles a surface is
+# built from, which is what keeps `gg-platform` out of its graph.
+raw-window-handle = { workspace = true }
+
+[features]
+validation = ["gg-rhi/validation"]
+
+[dev-dependencies]
+# The offscreen render test builds its world out of the render protocol's own
+# components, so the path it proves is the one the shell runs (§1.5: no window).
+gg-ecs = { path = "../gg-ecs" }

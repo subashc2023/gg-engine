@@ -17,6 +17,7 @@ use core::fmt;
 /// it moves every id and hash in the domain at once.
 const DOMAIN_COMPONENT_ID: &[u8] = b"gg-ecs/component-id/v1\0";
 const DOMAIN_SIDE_TABLE_ID: &[u8] = b"gg-ecs/side-table-id/v1\0";
+const DOMAIN_SYSTEM_ID: &[u8] = b"gg-ecs/system-id/v1\0";
 const DOMAIN_SCHEMA: &[u8] = b"gg-ecs/schema/v1\0";
 const DOMAIN_CANONICAL: &[u8] = b"gg-ecs/canonical-state/v1\0";
 
@@ -64,6 +65,23 @@ impl fmt::Debug for ComponentId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ComponentId({:#018x})", self.0)
     }
+}
+
+/// A system's stable id for the §4.2.2 systems table: the same construction as
+/// [`ComponentId`] under its own domain, over the *declared* system name.
+///
+/// Raw `u64` rather than a newtype because it exists only to fill
+/// [`SystemEntry::id`](gg_abi::SystemEntry) — nothing in this crate keys on it.
+/// What it buys the host is telling "the table was reordered" from "a system was
+/// replaced", which is why it must not be the table index.
+#[must_use]
+pub fn system_id(name: &str) -> u64 {
+    let mut h = blake3::Hasher::new();
+    h.update(DOMAIN_SYSTEM_ID);
+    h.update(name.as_bytes());
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&h.finalize().as_bytes()[..8]);
+    u64::from_le_bytes(out)
 }
 
 /// A hashed side table's persisted identity (§4.2.1) — the same construction as

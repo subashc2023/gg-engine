@@ -29,3 +29,10 @@ demo-02-mesh = { path = "../demos/02-mesh", default-features = false, features =
     "gate",
 ] }
 gg-input = { path = "../crates/gg-input" }
+# M5 (§5.6c): the curated demo-03 stream is authored here and driven through the
+# real shell, so xtask needs the two constants the shell's replay header is
+# built from — the tick rate and the Determinism Contract version. Nothing else
+# from either crate is used; a mismatch would otherwise be a header nobody could
+# check.
+gg-core = { path = "../crates/gg-core" }
+gg-math = { path = "../crates/gg-math" }

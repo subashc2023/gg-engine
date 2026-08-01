@@ -1,0 +1,324 @@
+//! The CVar registry (§4.8) — runtime-tweakable variables any crate can declare.
+//!
+//! The registry is homed here rather than in `gg-debug` for a dependency-direction
+//! reason (§4.8): every crate that declares a CVar would otherwise point its
+//! arrow at the observability crate, `gg-rhi` included. The *console* — parsing,
+//! UI, and the tab-completion nobody needs at 3 a.m. — stays in `gg-debug` and
+//! compiles out in dist. Config-file CVars remain in every tier, which is why
+//! [`crate::config`] sits beside this and not behind a feature.
+//!
+//! # Declaring one
+//!
+//! ```
+//! use gg_core::cvar::{self, CVar};
+//!
+//! static VSYNC: CVar = CVar::new_bool("r.vsync", true, "wait for vertical blank");
+//!
+//! cvar::register(&VSYNC)?;
+//! assert!(VSYNC.bool());
+//! # Ok::<(), gg_core::cvar::CVarError>(())
+//! ```
+//!
+//! A `static` with interior mutability, not a handle into a table: reads are a
+//! relaxed atomic load at the use site with no lookup, no lock, and no chance of
+//! a stale handle. The registry exists for the *by-name* paths — config file,
+//! CLI, console — and for enumeration.
+//!
+//! Registration is an explicit call. Link-time registration tricks (a distributed
+//! slice, a `ctor` shim) would make the set of live CVars depend on link order and
+//! on which objects the linker kept, which is a worse property than typing one
+//! line per crate.
+//!
+//! # CVars are not sim state
+//!
+//! Nothing here is hashed, snapshotted or recorded into a replay. A CVar read
+//! inside a sim tick would make that tick depend on a config file, and the replay
+//! would reproduce only on machines with the same one — so sim code does not read
+//! them. The types stop at `bool`/`i64`/`f64` partly for that reason: a CVar is a
+//! knob, and anything that needs a string wants config or an asset, not a knob.
+
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// What a [`CVar`]'s bits mean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CVarKind {
+    /// `0`/`1`/`true`/`false`/`on`/`off`/`yes`/`no`.
+    Bool,
+    /// A signed 64-bit integer.
+    Int,
+    /// A finite `f64`.
+    Float,
+}
+
+impl CVarKind {
+    /// The word this kind goes by in an error message.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CVarKind::Bool => "bool",
+            CVarKind::Int => "int",
+            CVarKind::Float => "float",
+        }
+    }
+}
+
+/// A registered runtime variable.
+///
+/// Declare it as a `static`; the value lives in the `static`, so a read is one
+/// relaxed load. Relaxed is the whole ordering story on purpose: a CVar carries
+/// no happens-before relationship to anything, and a knob whose new value lands
+/// one frame later is a knob working correctly.
+#[derive(Debug)]
+pub struct CVar {
+    name: &'static str,
+    help: &'static str,
+    kind: CVarKind,
+    default: u64,
+    bits: AtomicU64,
+}
+
+impl CVar {
+    /// Declare a boolean knob. `const` so it can be a `static`, which is the
+    /// only way it is meant to be declared.
+    pub const fn new_bool(name: &'static str, default: bool, help: &'static str) -> Self {
+        Self::new(name, CVarKind::Bool, default as u64, help)
+    }
+
+    /// Declare an integer knob.
+    pub const fn new_int(name: &'static str, default: i64, help: &'static str) -> Self {
+        Self::new(name, CVarKind::Int, default as u64, help)
+    }
+
+    /// Declare a float knob. Non-finite values are refused on the way in, so a
+    /// non-finite default is a bug this cannot catch.
+    pub const fn new_float(name: &'static str, default: f64, help: &'static str) -> Self {
+        Self::new(name, CVarKind::Float, default.to_bits(), help)
+    }
+
+    const fn new(name: &'static str, kind: CVarKind, default: u64, help: &'static str) -> Self {
+        Self {
+            name,
+            help,
+            kind,
+            default,
+            bits: AtomicU64::new(default),
+        }
+    }
+
+    /// The name config, CLI and console reach it by.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// One line for the console listing.
+    pub fn help(&self) -> &'static str {
+        self.help
+    }
+
+    /// Which accessor is the right one.
+    pub fn kind(&self) -> CVarKind {
+        self.kind
+    }
+
+    /// Reading with the wrong accessor is a `debug_assert` and, past that, a
+    /// reinterpretation of the bits — the declaration and its readers are the
+    /// same crate, usually the same screen, so this is a typo caught in dev
+    /// rather than a `Result` every call site has to carry.
+    pub fn bool(&self) -> bool {
+        debug_assert_eq!(
+            self.kind,
+            CVarKind::Bool,
+            "cvar `{}` is not a bool",
+            self.name
+        );
+        self.bits.load(Ordering::Relaxed) != 0
+    }
+
+    /// See [`CVar::bool`] for what a wrong-kind read does.
+    pub fn int(&self) -> i64 {
+        debug_assert_eq!(
+            self.kind,
+            CVarKind::Int,
+            "cvar `{}` is not an int",
+            self.name
+        );
+        self.bits.load(Ordering::Relaxed) as i64
+    }
+
+    /// See [`CVar::bool`] for what a wrong-kind read does.
+    pub fn float(&self) -> f64 {
+        debug_assert_eq!(
+            self.kind,
+            CVarKind::Float,
+            "cvar `{}` is not a float",
+            self.name
+        );
+        f64::from_bits(self.bits.load(Ordering::Relaxed))
+    }
+
+    /// Set directly, skipping the parse. Code paths that hold a value already.
+    pub fn set_bool(&self, value: bool) {
+        self.bits.store(value as u64, Ordering::Relaxed);
+    }
+
+    /// Set directly, skipping the parse.
+    pub fn set_int(&self, value: i64) {
+        self.bits.store(value as u64, Ordering::Relaxed);
+    }
+
+    /// Set directly, skipping the parse — including the finite check, which is
+    /// [`CVar::set_from_str`]'s and not the type's.
+    pub fn set_float(&self, value: f64) {
+        self.bits.store(value.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Back to the declared default. Not "the value at startup" — a config file
+    /// applied over it is a setting like any other.
+    pub fn reset(&self) {
+        self.bits.store(self.default, Ordering::Relaxed);
+    }
+
+    /// Whether the current value is still the declared one — what a config
+    /// writer uses to write only what was changed.
+    pub fn is_default(&self) -> bool {
+        self.bits.load(Ordering::Relaxed) == self.default
+    }
+
+    /// The current value as the console and a written-back config file spell it.
+    pub fn to_text(&self) -> String {
+        match self.kind {
+            CVarKind::Bool => if self.bool() { "1" } else { "0" }.to_owned(),
+            CVarKind::Int => self.int().to_string(),
+            CVarKind::Float => self.float().to_string(),
+        }
+    }
+
+    /// Parse and store — the one entry point config, CLI and console share, so
+    /// the three cannot drift on what `on` means.
+    pub fn set_from_str(&self, text: &str) -> Result<(), CVarError> {
+        let text = text.trim();
+        let bad = || CVarError::BadValue {
+            name: self.name,
+            kind: self.kind,
+            value: text.to_owned(),
+        };
+        match self.kind {
+            CVarKind::Bool => match text {
+                "1" | "true" | "on" | "yes" => self.set_bool(true),
+                "0" | "false" | "off" | "no" => self.set_bool(false),
+                _ => return Err(bad()),
+            },
+            CVarKind::Int => self.set_int(text.parse::<i64>().map_err(|_| bad())?),
+            // Rejects `inf` and `NaN` by name: a knob set to either is a bug
+            // report about the renderer three days later, not a setting.
+            CVarKind::Float => {
+                let value = text.parse::<f64>().map_err(|_| bad())?;
+                if !value.is_finite() {
+                    return Err(bad());
+                }
+                self.set_float(value);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Registration and by-name lookup failures. All of them are startup errors or
+/// user typos — never conditions the engine recovers from silently.
+#[derive(Debug, thiserror::Error)]
+pub enum CVarError {
+    #[error(
+        "cvar `{name}` is declared twice. Two declarations of one name would leave half the \
+         engine reading a value the other half never sees."
+    )]
+    /// Two declarations claimed one name.
+    Duplicate {
+        /// The name declared twice.
+        name: &'static str,
+    },
+    #[error("no cvar named `{name}`")]
+    /// A config line, flag or console command named a CVar that does not exist.
+    Unknown {
+        /// The name nothing answers to.
+        name: String,
+    },
+    #[error("cvar `{name}` is a {} and cannot take `{value}`", kind.as_str())]
+    /// The CVar exists and the text is not a value of its kind.
+    BadValue {
+        /// The cvar that refused.
+        name: &'static str,
+        /// What it does take.
+        kind: CVarKind,
+        /// What it was offered.
+        value: String,
+    },
+}
+
+/// Registered CVars, sorted by name.
+///
+/// A `static` holding a lock, not a `static mut`: the §4.2.2 ban is on state
+/// smuggled across a reload inside *game* crates, and this is host-owned
+/// configuration that a reload does not touch. Sorted rather than hashed keeps
+/// `all()` in one order regardless of registration order (§4.2.1 hazard 3) —
+/// which matters the moment anything writes a config file back out.
+static REGISTRY: RwLock<Vec<&'static CVar>> = RwLock::new(Vec::new());
+
+/// A poisoned registry lock means something panicked mid-lookup. The table is
+/// still exactly as consistent as it was — every mutation under the write lock is
+/// a single `insert` — so recovering beats taking the process down over a knob.
+macro_rules! locked {
+    (read) => {
+        REGISTRY.read().unwrap_or_else(|e| e.into_inner())
+    };
+    (write) => {
+        REGISTRY.write().unwrap_or_else(|e| e.into_inner())
+    };
+}
+
+/// Make `cvar` reachable by name. Call once, at startup, from the crate that
+/// declares it.
+pub fn register(cvar: &'static CVar) -> Result<(), CVarError> {
+    let mut registry = locked!(write);
+    match registry.binary_search_by_key(&cvar.name, |c| c.name) {
+        Ok(_) => Err(CVarError::Duplicate { name: cvar.name }),
+        Err(at) => {
+            registry.insert(at, cvar);
+            Ok(())
+        }
+    }
+}
+
+/// Register a crate's whole set. Stops at the first duplicate — a name collision
+/// is a build-time mistake and the rest of the list is not worth guessing about.
+pub fn register_all(cvars: &[&'static CVar]) -> Result<(), CVarError> {
+    for cvar in cvars {
+        register(cvar)?;
+    }
+    Ok(())
+}
+
+/// The registered CVar of that name, if there is one.
+pub fn find(name: &str) -> Option<&'static CVar> {
+    let registry = locked!(read);
+    let at = registry.binary_search_by_key(&name, |c| c.name).ok()?;
+    Some(registry[at])
+}
+
+/// Set by name, as config, CLI and console all do.
+pub fn set(name: &str, value: &str) -> Result<(), CVarError> {
+    let cvar = find(name).ok_or_else(|| CVarError::Unknown {
+        name: name.to_owned(),
+    })?;
+    cvar.set_from_str(value)
+}
+
+/// Every registered CVar, ascending by name — the console's listing, and the
+/// order a written config file would take.
+pub fn all() -> Vec<&'static CVar> {
+    locked!(read).clone()
+}
+
+/// How many CVars are registered.
+pub fn count() -> usize {
+    locked!(read).len()
+}

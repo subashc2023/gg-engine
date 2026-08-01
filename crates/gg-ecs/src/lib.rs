@@ -60,7 +60,14 @@
 //! pointers, references, and randomly-ordered containers all fail before they
 //! can reach a hash (§4.2.1).
 
+// `#[derive(Component)]` emits `::gg_ecs::` paths, which is what lets a game
+// crate name one crate (§3). The alias is how the derive also works *inside*
+// this crate, so the boundary's own components are derived rather than
+// hand-written — a hand-written `FIELDS` is a schema hash waiting to drift.
+extern crate self as gg_ecs;
+
 pub mod archetype;
+pub mod boundary;
 pub mod chunked;
 mod column;
 pub mod component;
@@ -74,6 +81,7 @@ pub mod view;
 pub mod world;
 
 pub use archetype::ArchetypeId;
+pub use boundary::{GameWorld, host_api};
 pub use component::{Component, FieldDesc, component_id, schema_hash};
 pub use entity::{Entities, Entity};
 pub use hash::{CanonicalHash, ComponentId, SchemaHash, SideTableId, StateHasher};
@@ -82,6 +90,7 @@ pub use registry::{ComponentInfo, Registry, RegistryError};
 pub use side_table::{SideTable, SideTableError};
 pub use state_hash::StateHash;
 pub use view::{AliasError, ArchetypeView, ColumnView, QueryAccess};
+pub use world::snapshot::{ComponentOutcome, MigrationReport, Snapshot, SnapshotError};
 pub use world::{World, WorldError};
 
 /// The derives (§4.2, §4.2.1), re-exported so game crates name `gg-ecs` alone

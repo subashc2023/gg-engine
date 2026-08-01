@@ -3,13 +3,16 @@
 //! bench, capture, probe, dist — the ones whose first consumer hasn't arrived
 //! yet are stubs that say which milestone brings it.
 
+mod budgets;
 mod ci;
 mod dist;
 mod fresh;
 mod probe;
 mod public_api;
 mod replay;
+mod run;
 mod shaders;
+mod shell;
 mod timers;
 mod util;
 
@@ -27,6 +30,8 @@ fn main() {
         Some("dist") => dist::gate(),
         Some("public-api") => public_api::run(&rest),
         Some("replay") => replay::run(&rest),
+        Some("reload") => shell::gates(&rest),
+        Some("run") => run::run(&rest),
         Some("timers") => timers::run(&rest),
         Some("assets") => stub("assets", "M9 (asset pipeline; `ggc` does not exist yet)"),
         Some("bench") => bench(),
@@ -42,10 +47,13 @@ fn main() {
     }
 }
 
-/// `cargo xtask bench` — the gg-ecs baseline (§4.2). Release, harness-free, and
-/// self-asserting: it fails if column-view iteration drifts away from parity
-/// with a native loop, which is the §4.2.2 claim M5 budgets against.
-fn bench() -> anyhow::Result<()> {
+/// `cargo xtask bench` — the gg-ecs baseline (§4.2, and §6 M5's measured exit
+/// criterion). Release, harness-free, and self-asserting: it fails if column-view
+/// iteration drifts away from parity with a native loop, and if the same query
+/// issued *through the boundary* costs measurably more than the host-side one —
+/// which is §4.2.2's one-FFI-call-per-archetype claim as a number. Part of the
+/// nightly tier (§5 gate 11).
+pub(crate) fn bench() -> anyhow::Result<()> {
     util::run(
         util::cargo().args(["bench", "-p", "gg-ecs"]),
         "cargo bench -p gg-ecs",
@@ -63,9 +71,11 @@ fn usage() -> anyhow::Result<()> {
          \n\
          ci [--fast|--push|--nightly|--weekly] [--hook]   local-first CI tiers (§5) — windowless by construction (§1.5)\n\
          interactive                                      manual windowed suite: storms + demo WSI runs (creates windows)\n\
+         run <demo> [shell flags]                         manual: build the game dylib, play it under gg-runtime (creates a window)\n\
          probe [--system]                                 capability table vs pinned lavapipe (spike 2)\n\
          shaders [--check]                                offline shader build + codegen (in-process Slang)\n\
          dist                                             dist gate: build+run tier-dist, symbol absence (§5.8)\n\
+         reload [--cross-tier|--segments|--chaos|--latency]  the M5 shell gates over demo 03; no flag runs the set\n\
          assets | capture                                 stubs until their milestone"
     )
 }

@@ -1,10 +1,16 @@
 # gg-ecs (§3, §4.2) — archetype storage, queries, entity ids, stable component
 # ids, schema hashes, the canonical state hash. Ours from day one (M3).
 #
-# Complexity budget (§3): <= 5 external dependencies, public surface held by the
-# cargo-public-api baseline (§5.10), and standing non-goals — no scheduler, no
-# system graph, no reflection, no serialization (§7). Internals are explicitly
-# fair game for later rework; the canonical hash is what makes that safe.
+# Complexity budget (§3): <= 6 dependencies (counted by `xtask ci`, §3's number
+# made a machine at M5), public surface held by the cargo-public-api baseline
+# (§5.10), and standing non-goals — no scheduler, no system graph, no
+# reflection, no serialization (§7). Internals are explicitly fair game for
+# later rework; the canonical hash is what makes that safe.
+#
+# The budget went 5 → 6 at M5 for `gg-abi`, and that direction is the opposite
+# of what a budget usually catches: the dependency arrived by moving `Entity`
+# and `ColumnView` *out* of this crate and into the boundary below it, so the
+# crate shrank while its dependency count grew by one.
 # Determinism-critical (§3): gg_math::sim only, never ::render, never glam.
 
 [package]
@@ -19,6 +25,7 @@ publish.workspace = true
 name = "gg_ecs"
 
 [dependencies]
+gg-abi = { path = "../gg-abi" }
 gg-ecs-derive = { path = "../gg-ecs-derive" }
 gg-math = { path = "../gg-math" }
 blake3 = { workspace = true }

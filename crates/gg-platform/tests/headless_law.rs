@@ -36,6 +36,16 @@ fn visible_window_under_gg_headless_panics() {
 fn invisible_windows_are_always_legal() {
     // SAFETY: as above.
     unsafe { std::env::set_var("GG_HEADLESS", "1") };
+    // A scheduled tier has no display at all — systemd user services inherit
+    // neither DISPLAY nor WAYLAND_DISPLAY, and that is a §1.5 feature worth
+    // keeping rather than an environment to repair: a tier that cannot reach a
+    // display server cannot put a window on the user's screen by any bug. The
+    // legality of an invisible window is then untestable, not violated.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        eprintln!("skipped: no display server reachable (§1.5)");
+        return;
+    }
     let mut pump = Pump::new(WindowDesc::invisible("gg invisible ok", (320, 200)))
         .expect("invisible window under GG_HEADLESS must be legal (§1.5)");
     let _ = pump.pump();

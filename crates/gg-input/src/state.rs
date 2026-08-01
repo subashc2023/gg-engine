@@ -13,22 +13,14 @@
 use crate::key::{Key, MouseAxis, MouseButton};
 use crate::map::{ActionId, ActionMap, AxisId, ContextId, MAX_AXES, Source};
 
-/// Fixed-point unit for axis values: `1.0` is `AXIS_SCALE`. A power of two, so
-/// the conversion back to `f32` is exact and identical on every target.
-pub const AXIS_SCALE: i32 = 1024;
+/// The recorded frame and its fixed-point unit live in `gg-abi`: the frame is
+/// what [`TickCtx`](gg_abi::TickCtx) carries into a game dylib by value, so its
+/// layout is a cross-artifact contract (§4.2.2). Everything that *decides* the
+/// bits stays here.
+pub use gg_abi::{AXIS_SCALE, InputFrame};
 
 /// Mouse buttons tracked as held state. Bit `n` is button number `n + 1`.
 const TRACKED_BUTTONS: u8 = 16;
-
-/// One tick of input, as recorded and as replayed. This *is* the replay
-/// stream's element — the whole sim-visible input surface in 40 bytes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct InputFrame {
-    /// Bit `i` is the action with index `i`, down this tick.
-    pub buttons: u64,
-    /// Axis values in [`AXIS_SCALE`]ths.
-    pub axes: [i32; MAX_AXES],
-}
 
 /// Action state for the current tick, plus the previous one for edges.
 #[derive(Debug)]
@@ -70,6 +62,22 @@ impl Input {
     /// Activate a layer. The most recently pushed context sees a source first.
     pub fn push_context(&mut self, context: ContextId) {
         self.stack.push(context);
+    }
+
+    /// Activate the layer `name`, reporting whether the map declared one.
+    ///
+    /// The by-name form exists so a host does not have to reach into the map for
+    /// an id and hand it straight back; whether a missing context is worth a
+    /// complaint depends on why the caller asked, so this answers rather than
+    /// warns.
+    pub fn push_named(&mut self, name: &str) -> bool {
+        match self.map.context(name) {
+            Some(context) => {
+                self.stack.push(context);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Deactivate the topmost layer.

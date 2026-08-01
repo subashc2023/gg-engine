@@ -1,33 +1,56 @@
-gg-ecs query baseline (§4.2, M3 exit criterion)
+gg-ecs query baseline (§4.2, M3 exit criterion; §6 M5 exit criterion)
 
 The crate's own reference point for future internal rework. Absolute times are
 machine-specific and not a gate; the **ratios** are, and they are what
 `benches/query.rs` asserts. Re-record this file when the machine changes, not
 when a number moves — a moved number is the finding.
 
-Recorded 2026-07-31
+Recorded 2026-08-01 (M5 close; adds the boundary leg)
   Windows 11 Pro 26200, Ryzen (host desk machine), rustc 1.97.1
   cargo bench -p gg-ecs, release, 100000 entities, one archetype, best of 25
 
-  native Vec loop               59.700µs    0.597 ns/entity
-  column views                  57.400µs    0.574 ns/entity
-  typed each()                  57.800µs    0.578 ns/entity
-  canonical_hash                10.866ms  108.663 ns/entity
+  native Vec loop               59.000µs    0.590 ns/entity
+  column views                  57.800µs    0.578 ns/entity
+  typed each()                  70.400µs    0.704 ns/entity
+  boundary each()               70.800µs    0.708 ns/entity
+  canonical_hash                10.839ms  108.387 ns/entity
 
-  column views    0.96x native
-  typed each()    0.97x native
-  canonical_hash  182x   native
+  column views     0.98x native
+  typed each()     1.19x native
+  boundary each()  1.20x native   1.01x host each()
+  canonical_hash    184x native
 
 Readings:
 
-- §4.2.2's hot-path claim holds. Whole-column views iterate at parity with two
-  plain `Vec`s zipped in the same process, so one FFI-shaped call per archetype
-  match really is enough and no per-entity boundary crossing is needed. M5 can
-  budget against this.
-- The typed tuple layer costs ~1%, which is the point of resolving columns once
-  per archetype rather than per row.
+- **§4.2.2's boundary claim holds, and now it is measured across the seam.**
+  `boundary each()` is the same query issued through the `repr(C)` host table —
+  `query` fills a page of archetype matches, the per-entity loop runs on the
+  caller's side over the column pointers that came back — and it costs 1.01x the
+  host-side query on the same data. That ratio is the M5 criterion in its
+  sharpest form: measured against the host-side path rather than against the
+  native loop, the difference *is* the boundary and nothing else, and one call
+  per archetype disappears into 100k rows. A per-entity crossing would read here
+  as a multiple, not as a percent. The bench asserts 1.15x.
+- Whole-column views still iterate at parity with two plain `Vec`s zipped in the
+  same process, so the storage layer is not what anything above it pays for.
 - The canonical hash is ~180x a query pass over the same data. That is the
   number that eventually justifies the chunked accelerator (§4.2.1, designed in
   `src/chunked.rs`) — and equally the reason not to build it yet: 11ms/tick is
   invisible in a dev loop until entity counts climb well past 100k, which is
   demo 05-many's job to prove (§6, M9).
+
+Open finding — **typed each() moved 0.97x → 1.19x between the first recording
+(2026-07-31) and M5's close**, and this file's own rule says a moved number is
+the finding rather than an occasion to re-record quietly. It reproduces across
+runs and is not the new leg's doing: with the boundary measurement removed
+entirely, typed each() still reads 1.17x. `native Vec loop` and `column views`
+did not move (59.7→59.0µs and 57.4→57.8µs), so the ~19% is in the tuple
+resolution layer and not in storage — which is the same conclusion `column
+views` staying flat forces. It sits well inside the 2.0x bound the bench
+asserts, so nothing is red; it is recorded here unexplained rather than chased,
+because the cost that matters for M5 is the seam ratio above and that one is
+clean. Candidate causes, both cheap to test when someone cares: the M5 type
+moves (`Entity` and `ColumnView` down into `gg-abi`, which changed which crate
+defines the types the tuple layer resolves and therefore what is available to
+inline), and ordinary code-layout drift in a crate that grew a boundary module
+and a snapshot codec this milestone.

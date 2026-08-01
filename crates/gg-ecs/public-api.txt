@@ -1,11 +1,192 @@
 pub mod gg_ecs
+pub use gg_ecs::ColumnView
 pub use gg_ecs::Component
+pub use gg_ecs::Entity
 pub use gg_ecs::SideTable
 pub use gg_ecs::StateHash
 pub mod gg_ecs::archetype
 pub struct gg_ecs::archetype::ArchetypeId(_)
 impl gg_ecs::archetype::ArchetypeId
 pub const fn gg_ecs::archetype::ArchetypeId::index(self) -> u32
+pub mod gg_ecs::boundary
+pub use gg_ecs::boundary::AXIS_SCALE
+pub use gg_ecs::boundary::AbiInfo
+pub use gg_ecs::boundary::AbiStatus
+pub use gg_ecs::boundary::ActionId
+pub use gg_ecs::boundary::AxisId
+pub use gg_ecs::boundary::ComponentLayout
+pub use gg_ecs::boundary::ComponentsTable
+pub use gg_ecs::boundary::HostApiV1
+pub use gg_ecs::boundary::InputFrame
+pub use gg_ecs::boundary::MAX_AXES
+pub use gg_ecs::boundary::SystemEntry
+pub use gg_ecs::boundary::SystemStatus
+pub use gg_ecs::boundary::SystemsTable
+pub use gg_ecs::boundary::TickCtx
+pub use gg_ecs::boundary::VerbName
+pub use gg_ecs::boundary::VerbsTable
+pub use gg_ecs::boundary::WorldHandle
+pub use gg_ecs::boundary::log_level
+pub struct gg_ecs::boundary::Access
+impl gg_ecs::boundary::Access
+pub const fn gg_ecs::boundary::Access::new() -> Self
+pub const fn gg_ecs::boundary::Access::read(&mut self, u64)
+pub const fn gg_ecs::boundary::Access::write(&mut self, u64)
+impl core::default::Default for gg_ecs::boundary::Access
+pub fn gg_ecs::boundary::Access::default() -> Self
+pub struct gg_ecs::boundary::BoundaryError
+pub gg_ecs::boundary::BoundaryError::op: &'static str
+pub gg_ecs::boundary::BoundaryError::status: gg_abi::host::AbiStatus
+pub struct gg_ecs::boundary::Columns<'m>
+impl<'m> gg_ecs::boundary::Columns<'m>
+pub const fn gg_ecs::boundary::Columns<'m>::is_empty(&self) -> bool
+pub const fn gg_ecs::boundary::Columns<'m>::len(&self) -> usize
+#[repr(C)] pub struct gg_ecs::boundary::Eye
+pub gg_ecs::boundary::Eye::pitch: f32
+pub gg_ecs::boundary::Eye::position: gg_math::sim::DVec3
+pub gg_ecs::boundary::Eye::yaw: f32
+impl gg_ecs::boundary::Eye
+pub const gg_ecs::boundary::Eye::ORIGIN: gg_ecs::boundary::Eye
+pub fn gg_ecs::boundary::Eye::of(&gg_ecs::world::World) -> core::result::Result<gg_ecs::boundary::Eye, gg_ecs::view::AliasError>
+impl bytemuck::pod::Pod for gg_ecs::boundary::Eye
+impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Eye
+impl gg_ecs::component::Component for gg_ecs::boundary::Eye
+pub const gg_ecs::boundary::Eye::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Eye::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Eye::TYPE_NAME: &'static str
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Eye
+pub fn gg_ecs::boundary::Eye::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+pub struct gg_ecs::boundary::GameWorld<'a>
+impl<'a> gg_ecs::GameWorld<'a>
+pub fn gg_ecs::GameWorld<'a>::axis(&self, gg_abi::input::AxisId) -> f32
+pub fn gg_ecs::GameWorld<'a>::despawn(&mut self, gg_abi::entity::Entity) -> bool
+pub fn gg_ecs::GameWorld<'a>::dt(&self) -> f32
+pub fn gg_ecs::GameWorld<'a>::each<D: gg_ecs::boundary::BoundaryData>(&mut self, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::boundary::BoundaryData>::Item)) -> core::result::Result<(), gg_ecs::boundary::BoundaryError>
+pub fn gg_ecs::GameWorld<'a>::get<T: gg_ecs::component::Component>(&self, gg_abi::entity::Entity) -> core::option::Option<&T>
+pub fn gg_ecs::GameWorld<'a>::get_mut<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> core::option::Option<&mut T>
+pub const fn gg_ecs::GameWorld<'a>::input(&self) -> &gg_abi::input::InputFrame
+pub fn gg_ecs::GameWorld<'a>::insert<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity, T) -> core::result::Result<(), gg_ecs::boundary::BoundaryError>
+pub fn gg_ecs::GameWorld<'a>::is_alive(&self, gg_abi::entity::Entity) -> bool
+pub const fn gg_ecs::GameWorld<'a>::just_pressed(&self, gg_abi::input::ActionId) -> bool
+pub fn gg_ecs::GameWorld<'a>::log(&self, u32, &str)
+pub unsafe fn gg_ecs::GameWorld<'a>::new(*mut gg_abi::host::WorldHandle, &'a gg_abi::system::TickCtx) -> Self
+pub const fn gg_ecs::GameWorld<'a>::pressed(&self, gg_abi::input::ActionId) -> bool
+pub const fn gg_ecs::GameWorld<'a>::previous(&self) -> &gg_abi::input::InputFrame
+pub fn gg_ecs::GameWorld<'a>::remove<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> bool
+pub fn gg_ecs::GameWorld<'a>::spawn(&mut self) -> gg_abi::entity::Entity
+pub const fn gg_ecs::GameWorld<'a>::tick(&self) -> u64
+pub const fn gg_ecs::GameWorld<'a>::tick_hz(&self) -> u32
+impl core::fmt::Debug for gg_ecs::GameWorld<'_>
+pub fn gg_ecs::GameWorld<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[repr(C)] pub struct gg_ecs::boundary::Renderable
+pub gg_ecs::boundary::Renderable::color: u32
+pub gg_ecs::boundary::Renderable::half_extent: gg_math::sim::Vec3
+pub gg_ecs::boundary::Renderable::position: gg_math::sim::DVec3
+pub gg_ecs::boundary::Renderable::rotation: gg_math::sim::DQuat
+impl gg_ecs::boundary::Renderable
+pub fn gg_ecs::boundary::Renderable::boxed(gg_math::sim::DVec3, gg_math::sim::Vec3, u32) -> Self
+impl bytemuck::pod::Pod for gg_ecs::boundary::Renderable
+impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Renderable
+impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
+pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Renderable::TYPE_NAME: &'static str
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
+pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+pub struct gg_ecs::boundary::SystemPanic
+pub gg_ecs::boundary::SystemPanic::message: alloc::string::String
+pub gg_ecs::boundary::SystemPanic::system: alloc::string::String
+pub struct gg_ecs::boundary::Table<T: 'static>
+impl gg_ecs::boundary::Table<gg_abi::layout::ComponentLayout>
+pub fn gg_ecs::boundary::Table<gg_abi::layout::ComponentLayout>::components(&'static self, &[fn() -> gg_abi::layout::ComponentLayout]) -> gg_abi::layout::ComponentsTable
+impl gg_ecs::boundary::Table<gg_abi::system::SystemEntry>
+pub fn gg_ecs::boundary::Table<gg_abi::system::SystemEntry>::systems(&'static self, &[gg_abi::system::SystemEntry]) -> gg_abi::system::SystemsTable
+impl<T: 'static> gg_ecs::boundary::Table<T>
+pub const fn gg_ecs::boundary::Table<T>::new() -> Self
+impl<T: 'static> core::default::Default for gg_ecs::boundary::Table<T>
+pub fn gg_ecs::boundary::Table<T>::default() -> Self
+impl<T> core::marker::Send for gg_ecs::boundary::Table<T>
+impl<T> core::marker::Sync for gg_ecs::boundary::Table<T>
+pub struct gg_ecs::boundary::Verbs
+pub gg_ecs::boundary::Verbs::actions: &'static [&'static str]
+pub gg_ecs::boundary::Verbs::axes: &'static [&'static str]
+pub trait gg_ecs::boundary::BoundaryData
+pub type gg_ecs::boundary::BoundaryData::Columns<'w>
+pub type gg_ecs::boundary::BoundaryData::Item<'r>
+pub fn gg_ecs::boundary::BoundaryData::access(&mut gg_ecs::boundary::Access)
+pub unsafe fn gg_ecs::boundary::BoundaryData::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
+pub fn gg_ecs::boundary::BoundaryData::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::boundary::BoundaryData, B: gg_ecs::boundary::BoundaryData, C: gg_ecs::boundary::BoundaryData, D: gg_ecs::boundary::BoundaryData, E: gg_ecs::boundary::BoundaryData, F: gg_ecs::boundary::BoundaryData, G: gg_ecs::boundary::BoundaryData, H: gg_ecs::boundary::BoundaryData> gg_ecs::boundary::BoundaryData for (A, B, C, D, E, F, G, H)
+pub type (A, B, C, D, E, F, G, H)::Columns<'w> = (<A as gg_ecs::boundary::BoundaryData>::Columns, <B as gg_ecs::boundary::BoundaryData>::Columns, <C as gg_ecs::boundary::BoundaryData>::Columns, <D as gg_ecs::boundary::BoundaryData>::Columns, <E as gg_ecs::boundary::BoundaryData>::Columns, <F as gg_ecs::boundary::BoundaryData>::Columns, <G as gg_ecs::boundary::BoundaryData>::Columns, <H as gg_ecs::boundary::BoundaryData>::Columns)
+pub type (A, B, C, D, E, F, G, H)::Item<'r> = (<A as gg_ecs::boundary::BoundaryData>::Item, <B as gg_ecs::boundary::BoundaryData>::Item, <C as gg_ecs::boundary::BoundaryData>::Item, <D as gg_ecs::boundary::BoundaryData>::Item, <E as gg_ecs::boundary::BoundaryData>::Item, <F as gg_ecs::boundary::BoundaryData>::Item, <G as gg_ecs::boundary::BoundaryData>::Item, <H as gg_ecs::boundary::BoundaryData>::Item)
+pub fn (A, B, C, D, E, F, G, H)::access(&mut gg_ecs::boundary::Access)
+pub unsafe fn (A, B, C, D, E, F, G, H)::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
+pub fn (A, B, C, D, E, F, G, H)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::boundary::BoundaryData, B: gg_ecs::boundary::BoundaryData, C: gg_ecs::boundary::BoundaryData, D: gg_ecs::boundary::BoundaryData, E: gg_ecs::boundary::BoundaryData, F: gg_ecs::boundary::BoundaryData, G: gg_ecs::boundary::BoundaryData> gg_ecs::boundary::BoundaryData for (A, B, C, D, E, F, G)
+pub type (A, B, C, D, E, F, G)::Columns<'w> = (<A as gg_ecs::boundary::BoundaryData>::Columns, <B as gg_ecs::boundary::BoundaryData>::Columns, <C as gg_ecs::boundary::BoundaryData>::Columns, <D as gg_ecs::boundary::BoundaryData>::Columns, <E as gg_ecs::boundary::BoundaryData>::Columns, <F as gg_ecs::boundary::BoundaryData>::Columns, <G as gg_ecs::boundary::BoundaryData>::Columns)
+pub type (A, B, C, D, E, F, G)::Item<'r> = (<A as gg_ecs::boundary::BoundaryData>::Item, <B as gg_ecs::boundary::BoundaryData>::Item, <C as gg_ecs::boundary::BoundaryData>::Item, <D as gg_ecs::boundary::BoundaryData>::Item, <E as gg_ecs::boundary::BoundaryData>::Item, <F as gg_ecs::boundary::BoundaryData>::Item, <G as gg_ecs::boundary::BoundaryData>::Item)
+pub fn (A, B, C, D, E, F, G)::access(&mut gg_ecs::boundary::Access)
+pub unsafe fn (A, B, C, D, E, F, G)::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
+pub fn (A, B, C, D, E, F, G)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::boundary::BoundaryData, B: gg_ecs::boundary::BoundaryData, C: gg_ecs::boundary::BoundaryData, D: gg_ecs::boundary::BoundaryData, E: gg_ecs::boundary::BoundaryData, F: gg_ecs::boundary::BoundaryData> gg_ecs::boundary::BoundaryData for (A, B, C, D, E, F)
+pub type (A, B, C, D, E, F)::Columns<'w> = (<A as gg_ecs::boundary::BoundaryData>::Columns, <B as gg_ecs::boundary::BoundaryData>::Columns, <C as gg_ecs::boundary::BoundaryData>::Columns, <D as gg_ecs::boundary::BoundaryData>::Columns, <E as gg_ecs::boundary::BoundaryData>::Columns, <F as gg_ecs::boundary::BoundaryData>::Columns)
+pub type (A, B, C, D, E, F)::Item<'r> = (<A as gg_ecs::boundary::BoundaryData>::Item, <B as gg_ecs::boundary::BoundaryData>::Item, <C as gg_ecs::boundary::BoundaryData>::Item, <D as gg_ecs::boundary::BoundaryData>::Item, <E as gg_ecs::boundary::BoundaryData>::Item, <F as gg_ecs::boundary::BoundaryData>::Item)
+pub fn (A, B, C, D, E, F)::access(&mut gg_ecs::boundary::Access)
+pub unsafe fn (A, B, C, D, E, F)::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
+pub fn (A, B, C, D, E, F)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::boundary::BoundaryData, B: gg_ecs::boundary::BoundaryData, C: gg_ecs::boundary::BoundaryData, D: gg_ecs::boundary::BoundaryData, E: gg_ecs::boundary::BoundaryData> gg_ecs::boundary::BoundaryData for (A, B, C, D, E)
+pub type (A, B, C, D, E)::Columns<'w> = (<A as gg_ecs::boundary::BoundaryData>::Columns, <B as gg_ecs::boundary::BoundaryData>::Columns, <C as gg_ecs::boundary::BoundaryData>::Columns, <D as gg_ecs::boundary::BoundaryData>::Columns, <E as gg_ecs::boundary::BoundaryData>::Columns)
+pub type (A, B, C, D, E)::Item<'r> = (<A as gg_ecs::boundary::BoundaryData>::Item, <B as gg_ecs::boundary::BoundaryData>::Item, <C as gg_ecs::boundary::BoundaryData>::Item, <D as gg_ecs::boundary::BoundaryData>::Item, <E as gg_ecs::boundary::BoundaryData>::Item)
+pub fn (A, B, C, D, E)::access(&mut gg_ecs::boundary::Access)
+pub unsafe fn (A, B, C, D, E)::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
+pub fn (A, B, C, D, E)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::boundary::BoundaryData, B: gg_ecs::boundary::BoundaryData, C: gg_ecs::boundary::BoundaryData, D: gg_ecs::boundary::BoundaryData> gg_ecs::boundary::BoundaryData for (A, B, C, D)
+pub type (A, B, C, D)::Columns<'w> = (<A as gg_ecs::boundary::BoundaryData>::Columns, <B as gg_ecs::boundary::BoundaryData>::Columns, <C as gg_ecs::boundary::BoundaryData>::Columns, <D as gg_ecs::boundary::BoundaryData>::Columns)
+pub type (A, B, C, D)::Item<'r> = (<A as gg_ecs::boundary::BoundaryData>::Item, <B as gg_ecs::boundary::BoundaryData>::Item, <C as gg_ecs::boundary::BoundaryData>::Item, <D as gg_ecs::boundary::BoundaryData>::Item)
+pub fn (A, B, C, D)::access(&mut gg_ecs::boundary::Access)
+pub unsafe fn (A, B, C, D)::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
+pub fn (A, B, C, D)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::boundary::BoundaryData, B: gg_ecs::boundary::BoundaryData, C: gg_ecs::boundary::BoundaryData> gg_ecs::boundary::BoundaryData for (A, B, C)
+pub type (A, B, C)::Columns<'w> = (<A as gg_ecs::boundary::BoundaryData>::Columns, <B as gg_ecs::boundary::BoundaryData>::Columns, <C as gg_ecs::boundary::BoundaryData>::Columns)
+pub type (A, B, C)::Item<'r> = (<A as gg_ecs::boundary::BoundaryData>::Item, <B as gg_ecs::boundary::BoundaryData>::Item, <C as gg_ecs::boundary::BoundaryData>::Item)
+pub fn (A, B, C)::access(&mut gg_ecs::boundary::Access)
+pub unsafe fn (A, B, C)::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
+pub fn (A, B, C)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::boundary::BoundaryData, B: gg_ecs::boundary::BoundaryData> gg_ecs::boundary::BoundaryData for (A, B)
+pub type (A, B)::Columns<'w> = (<A as gg_ecs::boundary::BoundaryData>::Columns, <B as gg_ecs::boundary::BoundaryData>::Columns)
+pub type (A, B)::Item<'r> = (<A as gg_ecs::boundary::BoundaryData>::Item, <B as gg_ecs::boundary::BoundaryData>::Item)
+pub fn (A, B)::access(&mut gg_ecs::boundary::Access)
+pub unsafe fn (A, B)::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
+pub fn (A, B)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<A: gg_ecs::boundary::BoundaryData> gg_ecs::boundary::BoundaryData for (A)
+pub type (A)::Columns<'w> = (<A as gg_ecs::boundary::BoundaryData>::Columns)
+pub type (A)::Item<'r> = (<A as gg_ecs::boundary::BoundaryData>::Item)
+pub fn (A)::access(&mut gg_ecs::boundary::Access)
+pub unsafe fn (A)::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
+pub fn (A)::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<T: gg_ecs::component::Component> gg_ecs::boundary::BoundaryData for &T
+pub type &T::Columns<'w> = &'w [T]
+pub type &T::Item<'r> = &'r T
+pub fn &T::access(&mut gg_ecs::boundary::Access)
+pub unsafe fn &T::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
+pub fn &T::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+impl<T: gg_ecs::component::Component> gg_ecs::boundary::BoundaryData for &mut T
+pub type &mut T::Columns<'w> = &'w mut [T]
+pub type &mut T::Item<'r> = &'r mut T
+pub fn &mut T::access(&mut gg_ecs::boundary::Access)
+pub unsafe fn &mut T::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
+pub fn &mut T::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+pub const fn gg_ecs::boundary::abi_info() -> gg_abi::AbiInfo
+pub fn gg_ecs::boundary::entry(&'static str, gg_abi::system::SystemFn) -> gg_abi::system::SystemEntry
+pub fn gg_ecs::boundary::handle(&mut gg_ecs::world::World) -> *mut gg_abi::host::WorldHandle
+pub fn gg_ecs::boundary::host_api() -> &'static gg_abi::host::HostApiV1
+pub unsafe fn gg_ecs::boundary::init(*const gg_abi::host::HostApiV1)
+pub fn gg_ecs::boundary::layout_of<T: gg_ecs::component::Component>() -> gg_abi::layout::ComponentLayout
+pub unsafe fn gg_ecs::boundary::read_verbs(&gg_abi::verb::VerbsTable) -> gg_ecs::boundary::Verbs
+pub unsafe fn gg_ecs::boundary::run(*mut gg_abi::host::WorldHandle, *const gg_abi::system::TickCtx, fn(&mut gg_ecs::GameWorld<'_>)) -> gg_abi::system::SystemStatus
+pub fn gg_ecs::boundary::set_logger(fn(u32, &str)) -> core::result::Result<(), fn(u32, &str)>
+pub fn gg_ecs::boundary::system_id(&str) -> u64
+pub fn gg_ecs::boundary::verbs(&'static gg_ecs::boundary::Table<gg_abi::verb::VerbName>, &'static gg_ecs::boundary::Table<gg_abi::verb::VerbName>, &[&'static str], &[&'static str]) -> gg_abi::verb::VerbsTable
 pub mod gg_ecs::chunked
 pub struct gg_ecs::chunked::ChunkedHash<const VERSION: u64>(_)
 impl<const VERSION: u64> gg_ecs::chunked::ChunkedHash<VERSION>
@@ -25,33 +206,31 @@ pub trait gg_ecs::component::Component: bytemuck::pod::Pod + gg_ecs::state_hash:
 pub const gg_ecs::component::Component::DECLARED_ID: &'static str
 pub const gg_ecs::component::Component::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::component::Component::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Eye
+pub const gg_ecs::boundary::Eye::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Eye::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Eye::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
+pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Renderable::TYPE_NAME: &'static str
 pub fn gg_ecs::component::component_id<T: gg_ecs::component::Component>() -> gg_ecs::hash::ComponentId
 pub fn gg_ecs::component::schema_hash<T: gg_ecs::component::Component>() -> gg_ecs::hash::SchemaHash
 pub mod gg_ecs::entity
+pub use gg_ecs::entity::Entity
 pub struct gg_ecs::entity::Entities
 impl gg_ecs::entity::Entities
-pub fn gg_ecs::entity::Entities::alloc(&mut self) -> gg_ecs::entity::Entity
-pub fn gg_ecs::entity::Entities::free(&mut self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::entity::Entities::alloc(&mut self) -> gg_abi::entity::Entity
+pub fn gg_ecs::entity::Entities::free(&mut self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::entity::Entities::hash_into(&self, &mut gg_ecs::hash::StateHasher)
-pub fn gg_ecs::entity::Entities::is_alive(&self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::entity::Entities::is_alive(&self, gg_abi::entity::Entity) -> bool
 pub const fn gg_ecs::entity::Entities::is_empty(&self) -> bool
-pub fn gg_ecs::entity::Entities::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = gg_ecs::entity::Entity> + '_
+pub fn gg_ecs::entity::Entities::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = gg_abi::entity::Entity> + '_
 pub const fn gg_ecs::entity::Entities::len(&self) -> u32
 pub fn gg_ecs::entity::Entities::new() -> Self
-#[repr(C)] pub struct gg_ecs::entity::Entity
-impl gg_ecs::entity::Entity
-pub const gg_ecs::entity::Entity::NONE: Self
-pub const fn gg_ecs::entity::Entity::from_bits(u64) -> Self
-pub const fn gg_ecs::entity::Entity::generation(self) -> u32
-pub const fn gg_ecs::entity::Entity::index(self) -> u32
-pub const fn gg_ecs::entity::Entity::is_none(self) -> bool
-pub const fn gg_ecs::entity::Entity::to_bits(self) -> u64
-impl bytemuck::pod::Pod for gg_ecs::entity::Entity
-impl bytemuck::zeroable::Zeroable for gg_ecs::entity::Entity
-impl core::fmt::Debug for gg_ecs::entity::Entity
-pub fn gg_ecs::entity::Entity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl gg_ecs::state_hash::StateHash for gg_ecs::entity::Entity
-pub fn gg_ecs::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+pub struct gg_ecs::entity::EntitiesImage
+impl gg_ecs::entity::EntitiesImage
+pub fn gg_ecs::entity::EntitiesImage::live(&self) -> u32
 pub mod gg_ecs::hash
 pub struct gg_ecs::hash::CanonicalHash(_)
 impl gg_ecs::hash::CanonicalHash
@@ -104,6 +283,7 @@ pub fn gg_ecs::hash::StateHasher::u16(&mut self, u16)
 pub fn gg_ecs::hash::StateHasher::u32(&mut self, u32)
 pub fn gg_ecs::hash::StateHasher::u64(&mut self, u64)
 pub fn gg_ecs::hash::StateHasher::u8(&mut self, u8)
+pub fn gg_ecs::hash::system_id(&str) -> u64
 pub mod gg_ecs::query
 pub struct gg_ecs::query::Query<D: gg_ecs::query::QueryData>
 impl<D: gg_ecs::query::QueryData> gg_ecs::query::Query<D>
@@ -202,6 +382,8 @@ pub gg_ecs::registry::RegistryError::IdCollision::second_type: &'static str
 pub gg_ecs::registry::RegistryError::OverAligned
 pub gg_ecs::registry::RegistryError::OverAligned::align: usize
 pub gg_ecs::registry::RegistryError::OverAligned::type_name: &'static str
+pub gg_ecs::registry::RegistryError::SchemaConflict
+pub gg_ecs::registry::RegistryError::SchemaConflict::declared: &'static str
 pub struct gg_ecs::registry::ComponentInfo
 pub gg_ecs::registry::ComponentInfo::align: usize
 pub gg_ecs::registry::ComponentInfo::declared_id: &'static str
@@ -220,6 +402,7 @@ pub fn gg_ecs::registry::Registry::iter(&self) -> impl core::iter::traits::itera
 pub fn gg_ecs::registry::Registry::len(&self) -> usize
 pub fn gg_ecs::registry::Registry::new() -> Self
 pub fn gg_ecs::registry::Registry::register<T: gg_ecs::component::Component>(&mut self) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
+pub fn gg_ecs::registry::Registry::register_declared(&mut self, gg_ecs::registry::ComponentInfo) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
 pub type gg_ecs::registry::ProtocolHashFn = fn(&[u8], &mut gg_ecs::hash::StateHasher)
 pub mod gg_ecs::side_table
 pub enum gg_ecs::side_table::SideTableError
@@ -250,8 +433,12 @@ impl gg_ecs::state_hash::StateHash for f32
 pub fn f32::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for f64
 pub fn f64::state_hash(&self, &mut gg_ecs::hash::StateHasher)
-impl gg_ecs::state_hash::StateHash for gg_ecs::entity::Entity
-pub fn gg_ecs::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_abi::entity::Entity
+pub fn gg_abi::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Eye
+pub fn gg_ecs::boundary::Eye::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
+pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
 pub fn gg_ecs::hash::ComponentId::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_math::sim::DMat3
@@ -309,6 +496,7 @@ pub fn alloc::vec::Vec<T>::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl<T: gg_ecs::state_hash::StateHash> gg_ecs::state_hash::StateHash for core::option::Option<T>
 pub fn core::option::Option<T>::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 pub mod gg_ecs::view
+pub use gg_ecs::view::ColumnView
 pub enum gg_ecs::view::AliasError
 pub gg_ecs::view::AliasError::ReadWrite
 pub gg_ecs::view::AliasError::ReadWrite::id: gg_ecs::hash::ComponentId
@@ -318,19 +506,15 @@ pub gg_ecs::view::AliasError::WriteWrite
 pub gg_ecs::view::AliasError::WriteWrite::id: gg_ecs::hash::ComponentId
 pub struct gg_ecs::view::ArchetypeView<'w, 'q>
 impl<'w, 'q> gg_ecs::view::ArchetypeView<'w, 'q>
-pub fn gg_ecs::view::ArchetypeView<'w, 'q>::entities(&self) -> &'w [gg_ecs::entity::Entity]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::entities(&self) -> &'w [gg_abi::entity::Entity]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::is_empty(&self) -> bool
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::len(&self) -> usize
-pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_reads(&self) -> &[gg_ecs::view::ColumnView]
-pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_writes(&self) -> &[gg_ecs::view::ColumnView]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_reads(&self) -> &[gg_abi::query::ColumnView]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_writes(&self) -> &[gg_abi::query::ColumnView]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read<T: gg_ecs::component::Component>(&self, usize) -> &'w [T]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read_of<T: gg_ecs::component::Component>(&self) -> &'w [T]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write<T: gg_ecs::component::Component>(&mut self, usize) -> &'w mut [T]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write_of<T: gg_ecs::component::Component>(&mut self) -> &'w mut [T]
-#[repr(C)] pub struct gg_ecs::view::ColumnView
-pub gg_ecs::view::ColumnView::len: usize
-pub gg_ecs::view::ColumnView::ptr: *mut u8
-pub gg_ecs::view::ColumnView::stride: usize
 pub struct gg_ecs::view::QueryAccess
 impl gg_ecs::view::QueryAccess
 pub fn gg_ecs::view::QueryAccess::new(&[gg_ecs::hash::ComponentId], &[gg_ecs::hash::ComponentId]) -> core::result::Result<Self, gg_ecs::view::AliasError>
@@ -338,37 +522,79 @@ pub fn gg_ecs::view::QueryAccess::reads(&self) -> &[gg_ecs::hash::ComponentId]
 pub fn gg_ecs::view::QueryAccess::writes(&self) -> &[gg_ecs::hash::ComponentId]
 pub const gg_ecs::view::MAX_WRITES: usize
 pub mod gg_ecs::world
+pub mod gg_ecs::world::snapshot
+pub enum gg_ecs::world::snapshot::ComponentOutcome
+pub gg_ecs::world::snapshot::ComponentOutcome::Dropped
+pub gg_ecs::world::snapshot::ComponentOutcome::Migrated
+pub gg_ecs::world::snapshot::ComponentOutcome::Migrated::copied: alloc::vec::Vec<alloc::string::String>
+pub gg_ecs::world::snapshot::ComponentOutcome::Migrated::defaulted: alloc::vec::Vec<alloc::string::String>
+pub gg_ecs::world::snapshot::ComponentOutcome::Migrated::retyped: alloc::vec::Vec<alloc::string::String>
+pub gg_ecs::world::snapshot::ComponentOutcome::Reused
+pub enum gg_ecs::world::snapshot::SnapshotError
+pub gg_ecs::world::snapshot::SnapshotError::Format
+pub gg_ecs::world::snapshot::SnapshotError::Format::found: u32
+pub gg_ecs::world::snapshot::SnapshotError::Magic
+pub gg_ecs::world::snapshot::SnapshotError::Magic::found: [u8; 4]
+pub gg_ecs::world::snapshot::SnapshotError::NotUtf8
+pub gg_ecs::world::snapshot::SnapshotError::SchemaContradiction
+pub gg_ecs::world::snapshot::SnapshotError::SchemaContradiction::captured: usize
+pub gg_ecs::world::snapshot::SnapshotError::SchemaContradiction::declared: alloc::string::String
+pub gg_ecs::world::snapshot::SnapshotError::SchemaContradiction::present: usize
+pub gg_ecs::world::snapshot::SnapshotError::SideTableMismatch
+pub gg_ecs::world::snapshot::SnapshotError::SideTableMismatch::captured: alloc::string::String
+pub gg_ecs::world::snapshot::SnapshotError::SideTableMismatch::present: alloc::string::String
+pub gg_ecs::world::snapshot::SnapshotError::Truncated
+pub gg_ecs::world::snapshot::SnapshotError::Truncated::left: usize
+pub gg_ecs::world::snapshot::SnapshotError::Truncated::need: usize
+pub struct gg_ecs::world::snapshot::MigrationReport
+pub gg_ecs::world::snapshot::MigrationReport::components: alloc::vec::Vec<(alloc::string::String, gg_ecs::world::snapshot::ComponentOutcome)>
+pub gg_ecs::world::snapshot::MigrationReport::entities: u32
+impl gg_ecs::world::snapshot::MigrationReport
+pub fn gg_ecs::world::snapshot::MigrationReport::is_clean(&self) -> bool
+pub struct gg_ecs::world::snapshot::Snapshot
+impl gg_ecs::world::snapshot::Snapshot
+pub fn gg_ecs::world::snapshot::Snapshot::components(&self) -> impl core::iter::traits::iterator::Iterator<Item = (gg_ecs::hash::ComponentId, gg_ecs::hash::SchemaHash)> + '_
+pub fn gg_ecs::world::snapshot::Snapshot::decode(&[u8]) -> core::result::Result<gg_ecs::world::snapshot::Snapshot, gg_ecs::world::snapshot::SnapshotError>
+pub fn gg_ecs::world::snapshot::Snapshot::encode(&self) -> alloc::vec::Vec<u8>
+pub fn gg_ecs::world::snapshot::Snapshot::entity_count(&self) -> u32
 pub enum gg_ecs::world::WorldError
 pub gg_ecs::world::WorldError::DeadEntity
-pub gg_ecs::world::WorldError::DeadEntity::entity: gg_ecs::entity::Entity
+pub gg_ecs::world::WorldError::DeadEntity::entity: gg_abi::entity::Entity
 pub gg_ecs::world::WorldError::Registry(gg_ecs::registry::RegistryError)
 pub gg_ecs::world::WorldError::SideTable(gg_ecs::side_table::SideTableError)
 pub struct gg_ecs::world::World
 impl gg_ecs::world::World
+pub unsafe fn gg_ecs::world::World::adopt(&mut self, &gg_abi::layout::ComponentsTable) -> core::result::Result<usize, gg_ecs::registry::RegistryError>
+pub unsafe fn gg_ecs::world::World::run_systems(&mut self, &gg_abi::system::SystemsTable, &gg_abi::system::TickCtx) -> core::result::Result<(), gg_ecs::boundary::SystemPanic>
+impl gg_ecs::world::World
 pub fn gg_ecs::world::World::canonical_hash(&self) -> gg_ecs::hash::CanonicalHash
 pub fn gg_ecs::world::World::canonical_hash_via_protocol(&self) -> gg_ecs::hash::CanonicalHash
-pub fn gg_ecs::world::World::contains<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> bool
-pub fn gg_ecs::world::World::despawn(&mut self, gg_ecs::entity::Entity) -> bool
-pub fn gg_ecs::world::World::each<D: gg_ecs::query::QueryData>(&mut self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_ecs::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
-pub fn gg_ecs::world::World::each_ref<D: gg_ecs::query::QueryData + gg_ecs::query::ReadOnly>(&self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_ecs::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
-pub fn gg_ecs::world::World::entity_hashes(&self) -> alloc::vec::Vec<(gg_ecs::entity::Entity, gg_ecs::hash::CanonicalHash)>
-pub fn gg_ecs::world::World::get<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> core::option::Option<&T>
-pub fn gg_ecs::world::World::get_mut<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity) -> core::option::Option<&mut T>
-pub fn gg_ecs::world::World::insert<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity, T) -> core::result::Result<(), gg_ecs::world::WorldError>
+pub fn gg_ecs::world::World::contains<T: gg_ecs::component::Component>(&self, gg_abi::entity::Entity) -> bool
+pub fn gg_ecs::world::World::despawn(&mut self, gg_abi::entity::Entity) -> bool
+pub fn gg_ecs::world::World::each<D: gg_ecs::query::QueryData>(&mut self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
+pub fn gg_ecs::world::World::each_ref<D: gg_ecs::query::QueryData + gg_ecs::query::ReadOnly>(&self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
+pub fn gg_ecs::world::World::entity_hashes(&self) -> alloc::vec::Vec<(gg_abi::entity::Entity, gg_ecs::hash::CanonicalHash)>
+pub fn gg_ecs::world::World::get<T: gg_ecs::component::Component>(&self, gg_abi::entity::Entity) -> core::option::Option<&T>
+pub fn gg_ecs::world::World::get_mut<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> core::option::Option<&mut T>
+pub fn gg_ecs::world::World::insert<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity, T) -> core::result::Result<(), gg_ecs::world::WorldError>
 pub fn gg_ecs::world::World::insert_side_table<T: gg_ecs::side_table::SideTable>(&mut self, T) -> core::result::Result<(), gg_ecs::side_table::SideTableError>
-pub fn gg_ecs::world::World::is_alive(&self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::is_alive(&self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::world::World::is_empty(&self) -> bool
 pub fn gg_ecs::world::World::len(&self) -> u32
 pub fn gg_ecs::world::World::new() -> Self
 pub fn gg_ecs::world::World::register<T: gg_ecs::component::Component>(&mut self) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
 pub fn gg_ecs::world::World::registry(&self) -> &gg_ecs::registry::Registry
-pub fn gg_ecs::world::World::remove<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::remove<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::world::World::remove_side_table<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<T>
 pub fn gg_ecs::world::World::side_table<T: gg_ecs::side_table::SideTable>(&self) -> core::option::Option<&T>
 pub fn gg_ecs::world::World::side_table_count(&self) -> usize
 pub fn gg_ecs::world::World::side_table_mut<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<&mut T>
-pub fn gg_ecs::world::World::spawn(&mut self) -> gg_ecs::entity::Entity
+pub fn gg_ecs::world::World::spawn(&mut self) -> gg_abi::entity::Entity
 pub fn gg_ecs::world::World::views<'q>(&mut self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'_, 'q>))
+impl gg_ecs::world::World
+pub fn gg_ecs::world::World::restore(&mut self, &gg_ecs::world::snapshot::Snapshot) -> core::result::Result<gg_ecs::world::snapshot::MigrationReport, gg_ecs::world::snapshot::SnapshotError>
+pub fn gg_ecs::world::World::snapshot(&self) -> gg_ecs::world::snapshot::Snapshot
+pub macro gg_ecs::gg_game!
 pub enum gg_ecs::AliasError
 pub gg_ecs::AliasError::ReadWrite
 pub gg_ecs::AliasError::ReadWrite::id: gg_ecs::hash::ComponentId
@@ -376,6 +602,13 @@ pub gg_ecs::AliasError::TooManyWrites
 pub gg_ecs::AliasError::TooManyWrites::count: usize
 pub gg_ecs::AliasError::WriteWrite
 pub gg_ecs::AliasError::WriteWrite::id: gg_ecs::hash::ComponentId
+pub enum gg_ecs::ComponentOutcome
+pub gg_ecs::ComponentOutcome::Dropped
+pub gg_ecs::ComponentOutcome::Migrated
+pub gg_ecs::ComponentOutcome::Migrated::copied: alloc::vec::Vec<alloc::string::String>
+pub gg_ecs::ComponentOutcome::Migrated::defaulted: alloc::vec::Vec<alloc::string::String>
+pub gg_ecs::ComponentOutcome::Migrated::retyped: alloc::vec::Vec<alloc::string::String>
+pub gg_ecs::ComponentOutcome::Reused
 pub enum gg_ecs::RegistryError
 pub gg_ecs::RegistryError::DuplicateDeclaration
 pub gg_ecs::RegistryError::DuplicateDeclaration::declared: &'static str
@@ -390,6 +623,8 @@ pub gg_ecs::RegistryError::IdCollision::second_type: &'static str
 pub gg_ecs::RegistryError::OverAligned
 pub gg_ecs::RegistryError::OverAligned::align: usize
 pub gg_ecs::RegistryError::OverAligned::type_name: &'static str
+pub gg_ecs::RegistryError::SchemaConflict
+pub gg_ecs::RegistryError::SchemaConflict::declared: &'static str
 pub enum gg_ecs::SideTableError
 pub gg_ecs::SideTableError::AlreadyInstalled
 pub gg_ecs::SideTableError::AlreadyInstalled::declared: &'static str
@@ -404,9 +639,25 @@ pub gg_ecs::SideTableError::IdCollision::first_type: &'static str
 pub gg_ecs::SideTableError::IdCollision::id: gg_ecs::hash::SideTableId
 pub gg_ecs::SideTableError::IdCollision::second_declared: &'static str
 pub gg_ecs::SideTableError::IdCollision::second_type: &'static str
+pub enum gg_ecs::SnapshotError
+pub gg_ecs::SnapshotError::Format
+pub gg_ecs::SnapshotError::Format::found: u32
+pub gg_ecs::SnapshotError::Magic
+pub gg_ecs::SnapshotError::Magic::found: [u8; 4]
+pub gg_ecs::SnapshotError::NotUtf8
+pub gg_ecs::SnapshotError::SchemaContradiction
+pub gg_ecs::SnapshotError::SchemaContradiction::captured: usize
+pub gg_ecs::SnapshotError::SchemaContradiction::declared: alloc::string::String
+pub gg_ecs::SnapshotError::SchemaContradiction::present: usize
+pub gg_ecs::SnapshotError::SideTableMismatch
+pub gg_ecs::SnapshotError::SideTableMismatch::captured: alloc::string::String
+pub gg_ecs::SnapshotError::SideTableMismatch::present: alloc::string::String
+pub gg_ecs::SnapshotError::Truncated
+pub gg_ecs::SnapshotError::Truncated::left: usize
+pub gg_ecs::SnapshotError::Truncated::need: usize
 pub enum gg_ecs::WorldError
 pub gg_ecs::WorldError::DeadEntity
-pub gg_ecs::WorldError::DeadEntity::entity: gg_ecs::entity::Entity
+pub gg_ecs::WorldError::DeadEntity::entity: gg_abi::entity::Entity
 pub gg_ecs::WorldError::Registry(gg_ecs::registry::RegistryError)
 pub gg_ecs::WorldError::SideTable(gg_ecs::side_table::SideTableError)
 pub struct gg_ecs::ArchetypeId(_)
@@ -414,11 +665,11 @@ impl gg_ecs::archetype::ArchetypeId
 pub const fn gg_ecs::archetype::ArchetypeId::index(self) -> u32
 pub struct gg_ecs::ArchetypeView<'w, 'q>
 impl<'w, 'q> gg_ecs::view::ArchetypeView<'w, 'q>
-pub fn gg_ecs::view::ArchetypeView<'w, 'q>::entities(&self) -> &'w [gg_ecs::entity::Entity]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::entities(&self) -> &'w [gg_abi::entity::Entity]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::is_empty(&self) -> bool
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::len(&self) -> usize
-pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_reads(&self) -> &[gg_ecs::view::ColumnView]
-pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_writes(&self) -> &[gg_ecs::view::ColumnView]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_reads(&self) -> &[gg_abi::query::ColumnView]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_writes(&self) -> &[gg_abi::query::ColumnView]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read<T: gg_ecs::component::Component>(&self, usize) -> &'w [T]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read_of<T: gg_ecs::component::Component>(&self) -> &'w [T]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write<T: gg_ecs::component::Component>(&mut self, usize) -> &'w mut [T]
@@ -430,10 +681,6 @@ impl core::fmt::Debug for gg_ecs::hash::CanonicalHash
 pub fn gg_ecs::hash::CanonicalHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for gg_ecs::hash::CanonicalHash
 pub fn gg_ecs::hash::CanonicalHash::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-#[repr(C)] pub struct gg_ecs::ColumnView
-pub gg_ecs::ColumnView::len: usize
-pub gg_ecs::ColumnView::ptr: *mut u8
-pub gg_ecs::ColumnView::stride: usize
 pub struct gg_ecs::ComponentId(_)
 impl gg_ecs::hash::ComponentId
 pub const fn gg_ecs::hash::ComponentId::from_raw(u64) -> Self
@@ -454,33 +701,46 @@ pub gg_ecs::ComponentInfo::size: usize
 pub gg_ecs::ComponentInfo::type_name: &'static str
 pub struct gg_ecs::Entities
 impl gg_ecs::entity::Entities
-pub fn gg_ecs::entity::Entities::alloc(&mut self) -> gg_ecs::entity::Entity
-pub fn gg_ecs::entity::Entities::free(&mut self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::entity::Entities::alloc(&mut self) -> gg_abi::entity::Entity
+pub fn gg_ecs::entity::Entities::free(&mut self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::entity::Entities::hash_into(&self, &mut gg_ecs::hash::StateHasher)
-pub fn gg_ecs::entity::Entities::is_alive(&self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::entity::Entities::is_alive(&self, gg_abi::entity::Entity) -> bool
 pub const fn gg_ecs::entity::Entities::is_empty(&self) -> bool
-pub fn gg_ecs::entity::Entities::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = gg_ecs::entity::Entity> + '_
+pub fn gg_ecs::entity::Entities::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = gg_abi::entity::Entity> + '_
 pub const fn gg_ecs::entity::Entities::len(&self) -> u32
 pub fn gg_ecs::entity::Entities::new() -> Self
-#[repr(C)] pub struct gg_ecs::Entity
-impl gg_ecs::entity::Entity
-pub const gg_ecs::entity::Entity::NONE: Self
-pub const fn gg_ecs::entity::Entity::from_bits(u64) -> Self
-pub const fn gg_ecs::entity::Entity::generation(self) -> u32
-pub const fn gg_ecs::entity::Entity::index(self) -> u32
-pub const fn gg_ecs::entity::Entity::is_none(self) -> bool
-pub const fn gg_ecs::entity::Entity::to_bits(self) -> u64
-impl bytemuck::pod::Pod for gg_ecs::entity::Entity
-impl bytemuck::zeroable::Zeroable for gg_ecs::entity::Entity
-impl core::fmt::Debug for gg_ecs::entity::Entity
-pub fn gg_ecs::entity::Entity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl gg_ecs::state_hash::StateHash for gg_ecs::entity::Entity
-pub fn gg_ecs::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 pub struct gg_ecs::FieldDesc
 pub gg_ecs::FieldDesc::name: &'static str
 pub gg_ecs::FieldDesc::offset: usize
 pub gg_ecs::FieldDesc::size: usize
 pub gg_ecs::FieldDesc::ty: &'static str
+pub struct gg_ecs::GameWorld<'a>
+impl<'a> gg_ecs::GameWorld<'a>
+pub fn gg_ecs::GameWorld<'a>::axis(&self, gg_abi::input::AxisId) -> f32
+pub fn gg_ecs::GameWorld<'a>::despawn(&mut self, gg_abi::entity::Entity) -> bool
+pub fn gg_ecs::GameWorld<'a>::dt(&self) -> f32
+pub fn gg_ecs::GameWorld<'a>::each<D: gg_ecs::boundary::BoundaryData>(&mut self, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::boundary::BoundaryData>::Item)) -> core::result::Result<(), gg_ecs::boundary::BoundaryError>
+pub fn gg_ecs::GameWorld<'a>::get<T: gg_ecs::component::Component>(&self, gg_abi::entity::Entity) -> core::option::Option<&T>
+pub fn gg_ecs::GameWorld<'a>::get_mut<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> core::option::Option<&mut T>
+pub const fn gg_ecs::GameWorld<'a>::input(&self) -> &gg_abi::input::InputFrame
+pub fn gg_ecs::GameWorld<'a>::insert<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity, T) -> core::result::Result<(), gg_ecs::boundary::BoundaryError>
+pub fn gg_ecs::GameWorld<'a>::is_alive(&self, gg_abi::entity::Entity) -> bool
+pub const fn gg_ecs::GameWorld<'a>::just_pressed(&self, gg_abi::input::ActionId) -> bool
+pub fn gg_ecs::GameWorld<'a>::log(&self, u32, &str)
+pub unsafe fn gg_ecs::GameWorld<'a>::new(*mut gg_abi::host::WorldHandle, &'a gg_abi::system::TickCtx) -> Self
+pub const fn gg_ecs::GameWorld<'a>::pressed(&self, gg_abi::input::ActionId) -> bool
+pub const fn gg_ecs::GameWorld<'a>::previous(&self) -> &gg_abi::input::InputFrame
+pub fn gg_ecs::GameWorld<'a>::remove<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> bool
+pub fn gg_ecs::GameWorld<'a>::spawn(&mut self) -> gg_abi::entity::Entity
+pub const fn gg_ecs::GameWorld<'a>::tick(&self) -> u64
+pub const fn gg_ecs::GameWorld<'a>::tick_hz(&self) -> u32
+impl core::fmt::Debug for gg_ecs::GameWorld<'_>
+pub fn gg_ecs::GameWorld<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::MigrationReport
+pub gg_ecs::MigrationReport::components: alloc::vec::Vec<(alloc::string::String, gg_ecs::world::snapshot::ComponentOutcome)>
+pub gg_ecs::MigrationReport::entities: u32
+impl gg_ecs::world::snapshot::MigrationReport
+pub fn gg_ecs::world::snapshot::MigrationReport::is_clean(&self) -> bool
 pub struct gg_ecs::Query<D: gg_ecs::query::QueryData>
 impl<D: gg_ecs::query::QueryData> gg_ecs::query::Query<D>
 pub fn gg_ecs::query::Query<D>::access(&self) -> &gg_ecs::view::QueryAccess
@@ -501,6 +761,7 @@ pub fn gg_ecs::registry::Registry::iter(&self) -> impl core::iter::traits::itera
 pub fn gg_ecs::registry::Registry::len(&self) -> usize
 pub fn gg_ecs::registry::Registry::new() -> Self
 pub fn gg_ecs::registry::Registry::register<T: gg_ecs::component::Component>(&mut self) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
+pub fn gg_ecs::registry::Registry::register_declared(&mut self, gg_ecs::registry::ComponentInfo) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
 pub struct gg_ecs::SchemaHash(_)
 impl gg_ecs::hash::SchemaHash
 pub const fn gg_ecs::hash::SchemaHash::from_raw(u128) -> Self
@@ -513,6 +774,12 @@ pub const fn gg_ecs::hash::SideTableId::get(self) -> u64
 pub fn gg_ecs::hash::SideTableId::of(&str) -> Self
 impl core::fmt::Debug for gg_ecs::hash::SideTableId
 pub fn gg_ecs::hash::SideTableId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::Snapshot
+impl gg_ecs::world::snapshot::Snapshot
+pub fn gg_ecs::world::snapshot::Snapshot::components(&self) -> impl core::iter::traits::iterator::Iterator<Item = (gg_ecs::hash::ComponentId, gg_ecs::hash::SchemaHash)> + '_
+pub fn gg_ecs::world::snapshot::Snapshot::decode(&[u8]) -> core::result::Result<gg_ecs::world::snapshot::Snapshot, gg_ecs::world::snapshot::SnapshotError>
+pub fn gg_ecs::world::snapshot::Snapshot::encode(&self) -> alloc::vec::Vec<u8>
+pub fn gg_ecs::world::snapshot::Snapshot::entity_count(&self) -> u32
 pub struct gg_ecs::StateHasher
 impl gg_ecs::hash::StateHasher
 pub fn gg_ecs::hash::StateHasher::bool(&mut self, bool)
@@ -538,34 +805,48 @@ pub fn gg_ecs::hash::StateHasher::u64(&mut self, u64)
 pub fn gg_ecs::hash::StateHasher::u8(&mut self, u8)
 pub struct gg_ecs::World
 impl gg_ecs::world::World
+pub unsafe fn gg_ecs::world::World::adopt(&mut self, &gg_abi::layout::ComponentsTable) -> core::result::Result<usize, gg_ecs::registry::RegistryError>
+pub unsafe fn gg_ecs::world::World::run_systems(&mut self, &gg_abi::system::SystemsTable, &gg_abi::system::TickCtx) -> core::result::Result<(), gg_ecs::boundary::SystemPanic>
+impl gg_ecs::world::World
 pub fn gg_ecs::world::World::canonical_hash(&self) -> gg_ecs::hash::CanonicalHash
 pub fn gg_ecs::world::World::canonical_hash_via_protocol(&self) -> gg_ecs::hash::CanonicalHash
-pub fn gg_ecs::world::World::contains<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> bool
-pub fn gg_ecs::world::World::despawn(&mut self, gg_ecs::entity::Entity) -> bool
-pub fn gg_ecs::world::World::each<D: gg_ecs::query::QueryData>(&mut self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_ecs::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
-pub fn gg_ecs::world::World::each_ref<D: gg_ecs::query::QueryData + gg_ecs::query::ReadOnly>(&self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_ecs::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
-pub fn gg_ecs::world::World::entity_hashes(&self) -> alloc::vec::Vec<(gg_ecs::entity::Entity, gg_ecs::hash::CanonicalHash)>
-pub fn gg_ecs::world::World::get<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> core::option::Option<&T>
-pub fn gg_ecs::world::World::get_mut<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity) -> core::option::Option<&mut T>
-pub fn gg_ecs::world::World::insert<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity, T) -> core::result::Result<(), gg_ecs::world::WorldError>
+pub fn gg_ecs::world::World::contains<T: gg_ecs::component::Component>(&self, gg_abi::entity::Entity) -> bool
+pub fn gg_ecs::world::World::despawn(&mut self, gg_abi::entity::Entity) -> bool
+pub fn gg_ecs::world::World::each<D: gg_ecs::query::QueryData>(&mut self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
+pub fn gg_ecs::world::World::each_ref<D: gg_ecs::query::QueryData + gg_ecs::query::ReadOnly>(&self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
+pub fn gg_ecs::world::World::entity_hashes(&self) -> alloc::vec::Vec<(gg_abi::entity::Entity, gg_ecs::hash::CanonicalHash)>
+pub fn gg_ecs::world::World::get<T: gg_ecs::component::Component>(&self, gg_abi::entity::Entity) -> core::option::Option<&T>
+pub fn gg_ecs::world::World::get_mut<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> core::option::Option<&mut T>
+pub fn gg_ecs::world::World::insert<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity, T) -> core::result::Result<(), gg_ecs::world::WorldError>
 pub fn gg_ecs::world::World::insert_side_table<T: gg_ecs::side_table::SideTable>(&mut self, T) -> core::result::Result<(), gg_ecs::side_table::SideTableError>
-pub fn gg_ecs::world::World::is_alive(&self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::is_alive(&self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::world::World::is_empty(&self) -> bool
 pub fn gg_ecs::world::World::len(&self) -> u32
 pub fn gg_ecs::world::World::new() -> Self
 pub fn gg_ecs::world::World::register<T: gg_ecs::component::Component>(&mut self) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
 pub fn gg_ecs::world::World::registry(&self) -> &gg_ecs::registry::Registry
-pub fn gg_ecs::world::World::remove<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity) -> bool
+pub fn gg_ecs::world::World::remove<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::world::World::remove_side_table<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<T>
 pub fn gg_ecs::world::World::side_table<T: gg_ecs::side_table::SideTable>(&self) -> core::option::Option<&T>
 pub fn gg_ecs::world::World::side_table_count(&self) -> usize
 pub fn gg_ecs::world::World::side_table_mut<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<&mut T>
-pub fn gg_ecs::world::World::spawn(&mut self) -> gg_ecs::entity::Entity
+pub fn gg_ecs::world::World::spawn(&mut self) -> gg_abi::entity::Entity
 pub fn gg_ecs::world::World::views<'q>(&mut self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'_, 'q>))
+impl gg_ecs::world::World
+pub fn gg_ecs::world::World::restore(&mut self, &gg_ecs::world::snapshot::Snapshot) -> core::result::Result<gg_ecs::world::snapshot::MigrationReport, gg_ecs::world::snapshot::SnapshotError>
+pub fn gg_ecs::world::World::snapshot(&self) -> gg_ecs::world::snapshot::Snapshot
 pub trait gg_ecs::Component: bytemuck::pod::Pod + gg_ecs::state_hash::StateHash + core::marker::Send + core::marker::Sync + 'static
 pub const gg_ecs::Component::DECLARED_ID: &'static str
 pub const gg_ecs::Component::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::Component::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Eye
+pub const gg_ecs::boundary::Eye::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Eye::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Eye::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
+pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Renderable::TYPE_NAME: &'static str
 pub trait gg_ecs::QueryData
 pub type gg_ecs::QueryData::Columns<'w>
 pub type gg_ecs::QueryData::Item<'r>
@@ -655,8 +936,12 @@ impl gg_ecs::state_hash::StateHash for f32
 pub fn f32::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for f64
 pub fn f64::state_hash(&self, &mut gg_ecs::hash::StateHasher)
-impl gg_ecs::state_hash::StateHash for gg_ecs::entity::Entity
-pub fn gg_ecs::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_abi::entity::Entity
+pub fn gg_abi::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Eye
+pub fn gg_ecs::boundary::Eye::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
+pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
 pub fn gg_ecs::hash::ComponentId::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_math::sim::DMat3
@@ -714,4 +999,5 @@ pub fn alloc::vec::Vec<T>::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl<T: gg_ecs::state_hash::StateHash> gg_ecs::state_hash::StateHash for core::option::Option<T>
 pub fn core::option::Option<T>::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 pub fn gg_ecs::component_id<T: gg_ecs::component::Component>() -> gg_ecs::hash::ComponentId
+pub fn gg_ecs::host_api() -> &'static gg_abi::host::HostApiV1
 pub fn gg_ecs::schema_hash<T: gg_ecs::component::Component>() -> gg_ecs::hash::SchemaHash

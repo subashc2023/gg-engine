@@ -51,6 +51,30 @@ pub struct ReplayMeta {
     pub axes: Vec<String>,
 }
 
+impl ReplayMeta {
+    /// The header a host records under, for `contract`
+    /// (`gg_math::DETERMINISM_CONTRACT`, which this crate does not depend on) and
+    /// a build tier.
+    ///
+    /// Everything else is this crate's to answer, and deliberately not a
+    /// caller's: the engine commit is [`ENGINE_COMMIT`], and the seed is zero
+    /// until a game asks for one — the boundary has no seed to hand across
+    /// (§4.2.2), so the field is kept honest rather than invented at each call
+    /// site.
+    #[must_use]
+    pub fn new(contract: u32, tier: &str, tick_hz: u32, actions: &[&str], axes: &[&str]) -> Self {
+        ReplayMeta {
+            engine_commit: ENGINE_COMMIT.to_owned(),
+            contract,
+            tier: tier.to_owned(),
+            tick_hz,
+            seed: 0,
+            actions: actions.iter().map(|s| (*s).to_owned()).collect(),
+            axes: axes.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+}
+
 /// A run of ticks produced by one build of the game code (§4.2.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Segment {

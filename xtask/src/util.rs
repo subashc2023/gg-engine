@@ -83,6 +83,44 @@ pub fn run_capture(cmd: &mut Command, what: &str) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Drop ANSI colour sequences. The `tracing` subscriber writes them whether or
+/// not it is talking to a terminal, and every gate that reads a child process's
+/// log has to get past them first.
+pub fn plain(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A `tracing` field's value, as text up to the next space. Run [`plain`] first.
+pub fn field<'a>(line: &'a str, name: &str) -> anyhow::Result<&'a str> {
+    let at = line
+        .find(&format!("{name}="))
+        .ok_or_else(|| anyhow::anyhow!("no `{name}=` in `{line}`"))?
+        + name.len()
+        + 1;
+    Ok(line[at..].split_whitespace().next().unwrap_or(""))
+}
+
+/// The same, parsed as a number.
+pub fn field_u64(line: &str, name: &str) -> anyhow::Result<u64> {
+    let text = field(line, name)?;
+    let digits: String = text.chars().take_while(char::is_ascii_digit).collect();
+    Ok(digits.parse()?)
+}
+
 /// All `.rs` files under `dir`, skipping `target/` — fuel for the §3 greps.
 pub fn walk_rs(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {

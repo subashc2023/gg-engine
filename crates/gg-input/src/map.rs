@@ -28,56 +28,18 @@
 
 use crate::key::{Key, MouseAxis, MouseButton};
 
-/// Actions per map. One `u64` bitset is the recorded per-tick button state
-/// ([`crate::InputFrame`]), and widening it is a replay-format change — so the
-/// ceiling is named here rather than discovered at 65.
-pub const MAX_ACTIONS: usize = 64;
-
-/// Axes per map, same reasoning: the recorded frame carries a fixed array.
-pub const MAX_AXES: usize = 8;
-
-/// A verb, as an index into the game's declared action list. The list's *order*
-/// is the identity a replay file records, so reordering it is a replay-format
-/// change and adding to the end is not.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ActionId(u8);
-
-impl ActionId {
-    /// The id at `index` in the declared action list.
-    ///
-    /// # Panics
-    /// If `index >= MAX_ACTIONS` — a const-evaluable panic, so the usual use
-    /// (a `const` per action beside the list) fails at compile time.
-    pub const fn new(index: usize) -> Self {
-        assert!(index < MAX_ACTIONS, "action index past MAX_ACTIONS");
-        ActionId(index as u8)
-    }
-
-    /// Its index in the declared list.
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-/// An analogue verb, as an index into the game's declared axis list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AxisId(u8);
-
-impl AxisId {
-    /// The id at `index` in the declared axis list.
-    ///
-    /// # Panics
-    /// If `index >= MAX_AXES`.
-    pub const fn new(index: usize) -> Self {
-        assert!(index < MAX_AXES, "axis index past MAX_AXES");
-        AxisId(index as u8)
-    }
-
-    /// Its index in the declared list.
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
-}
+/// The verb identities and the ceilings on them live in `gg-abi` (§4.2.2).
+///
+/// Not because input belongs to the boundary — the map, the layering, the key
+/// identity and the recorder are all still this crate's — but because a game
+/// dylib is deny-pinned to `gg-abi`/`gg-ecs`/`gg-math` (§3) and must still be
+/// able to say `input.pressed(SPAWN)`. So the *shape* of a verb crosses and the
+/// judgement about what produced it does not.
+///
+/// An id is an index into the game's declared list, and that list's **order** is
+/// the identity a replay file records: reordering it is a replay-format change,
+/// appending to it is not.
+pub use gg_abi::{ActionId, AxisId, MAX_ACTIONS, MAX_AXES};
 
 /// A layer of the map, as an index into its declaration order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

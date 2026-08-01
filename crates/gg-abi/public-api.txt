@@ -1,0 +1,277 @@
+pub mod gg_abi
+pub mod gg_abi::entity
+#[repr(C)] pub struct gg_abi::entity::Entity
+impl gg_abi::entity::Entity
+pub const gg_abi::entity::Entity::NONE: Self
+pub const fn gg_abi::entity::Entity::from_bits(u64) -> Self
+pub const fn gg_abi::entity::Entity::generation(self) -> u32
+pub const fn gg_abi::entity::Entity::index(self) -> u32
+pub const fn gg_abi::entity::Entity::is_none(self) -> bool
+pub const fn gg_abi::entity::Entity::new(u32, u32) -> Self
+pub const fn gg_abi::entity::Entity::to_bits(self) -> u64
+impl bytemuck::pod::Pod for gg_abi::entity::Entity
+impl bytemuck::zeroable::Zeroable for gg_abi::entity::Entity
+impl core::fmt::Debug for gg_abi::entity::Entity
+pub fn gg_abi::entity::Entity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub mod gg_abi::host
+pub mod gg_abi::host::log_level
+pub const gg_abi::host::log_level::DEBUG: u32
+pub const gg_abi::host::log_level::ERROR: u32
+pub const gg_abi::host::log_level::INFO: u32
+pub const gg_abi::host::log_level::TRACE: u32
+pub const gg_abi::host::log_level::WARN: u32
+#[repr(u32)] pub enum gg_abi::host::AbiStatus
+pub gg_abi::host::AbiStatus::Alias = 4
+pub gg_abi::host::AbiStatus::BadRequest = 5
+pub gg_abi::host::AbiStatus::DeadEntity = 2
+pub gg_abi::host::AbiStatus::Ok = 0
+pub gg_abi::host::AbiStatus::SizeMismatch = 3
+pub gg_abi::host::AbiStatus::UnknownComponent = 1
+#[repr(C)] pub struct gg_abi::host::HostApiV1
+pub gg_abi::host::HostApiV1::despawn: fn(*mut gg_abi::host::WorldHandle, gg_abi::entity::Entity) -> bool
+pub gg_abi::host::HostApiV1::get: fn(*mut gg_abi::host::WorldHandle, gg_abi::entity::Entity, u64) -> *mut u8
+pub gg_abi::host::HostApiV1::insert: fn(*mut gg_abi::host::WorldHandle, gg_abi::entity::Entity, u64, *const u8, u32) -> gg_abi::host::AbiStatus
+pub gg_abi::host::HostApiV1::is_alive: fn(*const gg_abi::host::WorldHandle, gg_abi::entity::Entity) -> bool
+pub gg_abi::host::HostApiV1::log: fn(u32, *const u8, u32)
+pub gg_abi::host::HostApiV1::query: fn(*mut gg_abi::host::WorldHandle, *const gg_abi::query::QueryDesc, u32, *mut gg_abi::query::ArchetypeMatch, u32, *mut u32) -> gg_abi::host::AbiStatus
+pub gg_abi::host::HostApiV1::remove: fn(*mut gg_abi::host::WorldHandle, gg_abi::entity::Entity, u64) -> bool
+pub gg_abi::host::HostApiV1::reserved: u32
+pub gg_abi::host::HostApiV1::spawn: fn(*mut gg_abi::host::WorldHandle) -> gg_abi::entity::Entity
+pub gg_abi::host::HostApiV1::version: u32
+#[repr(C)] pub struct gg_abi::host::WorldHandle
+pub fn gg_abi::host::get() -> &'static gg_abi::host::HostApiV1
+pub unsafe fn gg_abi::host::set(*const gg_abi::host::HostApiV1)
+pub mod gg_abi::input
+#[repr(transparent)] pub struct gg_abi::input::ActionId(_)
+impl gg_abi::input::ActionId
+pub const fn gg_abi::input::ActionId::index(self) -> usize
+pub const fn gg_abi::input::ActionId::new(usize) -> Self
+#[repr(transparent)] pub struct gg_abi::input::AxisId(_)
+impl gg_abi::input::AxisId
+pub const fn gg_abi::input::AxisId::index(self) -> usize
+pub const fn gg_abi::input::AxisId::new(usize) -> Self
+#[repr(C)] pub struct gg_abi::input::InputFrame
+pub gg_abi::input::InputFrame::axes: [i32; 8]
+pub gg_abi::input::InputFrame::buttons: u64
+impl gg_abi::input::InputFrame
+pub fn gg_abi::input::InputFrame::axis(&self, gg_abi::input::AxisId) -> f32
+pub const fn gg_abi::input::InputFrame::pressed(&self, gg_abi::input::ActionId) -> bool
+pub const gg_abi::input::AXIS_SCALE: i32
+pub const gg_abi::input::MAX_ACTIONS: usize
+pub const gg_abi::input::MAX_AXES: usize
+pub mod gg_abi::layout
+#[repr(C)] pub struct gg_abi::layout::ComponentLayout
+pub gg_abi::layout::ComponentLayout::align: u32
+pub gg_abi::layout::ComponentLayout::declared: *const u8
+pub gg_abi::layout::ComponentLayout::declared_len: u32
+pub gg_abi::layout::ComponentLayout::field_len: u32
+pub gg_abi::layout::ComponentLayout::fields: *const gg_abi::layout::FieldLayout
+pub gg_abi::layout::ComponentLayout::id: u64
+pub gg_abi::layout::ComponentLayout::name: *const u8
+pub gg_abi::layout::ComponentLayout::name_len: u32
+pub gg_abi::layout::ComponentLayout::schema_hash: [u8; 16]
+pub gg_abi::layout::ComponentLayout::size: u32
+#[repr(C)] pub struct gg_abi::layout::ComponentsTable
+pub gg_abi::layout::ComponentsTable::entries: *const gg_abi::layout::ComponentLayout
+pub gg_abi::layout::ComponentsTable::len: u32
+pub gg_abi::layout::ComponentsTable::reserved: u32
+#[repr(C)] pub struct gg_abi::layout::FieldLayout
+pub gg_abi::layout::FieldLayout::name: *const u8
+pub gg_abi::layout::FieldLayout::name_len: u32
+pub gg_abi::layout::FieldLayout::offset: u32
+pub gg_abi::layout::FieldLayout::size: u32
+pub gg_abi::layout::FieldLayout::ty: *const u8
+pub gg_abi::layout::FieldLayout::ty_len: u32
+pub mod gg_abi::query
+#[repr(C)] pub struct gg_abi::query::ArchetypeMatch
+pub gg_abi::query::ArchetypeMatch::columns: [gg_abi::query::ColumnView; 16]
+pub gg_abi::query::ArchetypeMatch::entities: *const gg_abi::entity::Entity
+pub gg_abi::query::ArchetypeMatch::len: usize
+impl gg_abi::query::ArchetypeMatch
+pub const gg_abi::query::ArchetypeMatch::EMPTY: Self
+#[repr(C)] pub struct gg_abi::query::ColumnView
+pub gg_abi::query::ColumnView::len: usize
+pub gg_abi::query::ColumnView::ptr: *mut u8
+pub gg_abi::query::ColumnView::stride: usize
+#[repr(C)] pub struct gg_abi::query::QueryDesc
+pub gg_abi::query::QueryDesc::read: *const u64
+pub gg_abi::query::QueryDesc::read_len: u32
+pub gg_abi::query::QueryDesc::write: *const u64
+pub gg_abi::query::QueryDesc::write_len: u32
+pub const gg_abi::query::MAX_QUERY_COLUMNS: usize
+pub mod gg_abi::system
+#[repr(C)] pub struct gg_abi::system::SystemEntry
+pub gg_abi::system::SystemEntry::id: u64
+pub gg_abi::system::SystemEntry::name: *const u8
+pub gg_abi::system::SystemEntry::name_len: u32
+pub gg_abi::system::SystemEntry::reserved: u32
+pub gg_abi::system::SystemEntry::run: gg_abi::system::SystemFn
+#[repr(C)] pub struct gg_abi::system::SystemStatus
+pub gg_abi::system::SystemStatus::code: u32
+pub gg_abi::system::SystemStatus::message: *const u8
+pub gg_abi::system::SystemStatus::message_len: u32
+impl gg_abi::system::SystemStatus
+pub const gg_abi::system::SystemStatus::OK: u32
+pub const gg_abi::system::SystemStatus::PANICKED: u32
+pub const fn gg_abi::system::SystemStatus::is_ok(&self) -> bool
+pub const fn gg_abi::system::SystemStatus::ok() -> Self
+#[repr(C)] pub struct gg_abi::system::SystemsTable
+pub gg_abi::system::SystemsTable::entries: *const gg_abi::system::SystemEntry
+pub gg_abi::system::SystemsTable::len: u32
+pub gg_abi::system::SystemsTable::reserved: u32
+#[repr(C)] pub struct gg_abi::system::TickCtx
+pub gg_abi::system::TickCtx::input: gg_abi::input::InputFrame
+pub gg_abi::system::TickCtx::previous: gg_abi::input::InputFrame
+pub gg_abi::system::TickCtx::reserved: u32
+pub gg_abi::system::TickCtx::tick: u64
+pub gg_abi::system::TickCtx::tick_hz: u32
+pub type gg_abi::system::SystemFn = fn(*mut gg_abi::host::WorldHandle, *const gg_abi::system::TickCtx) -> gg_abi::system::SystemStatus
+pub mod gg_abi::verb
+#[repr(C)] pub struct gg_abi::verb::VerbName
+pub gg_abi::verb::VerbName::name: *const u8
+pub gg_abi::verb::VerbName::name_len: u32
+pub gg_abi::verb::VerbName::reserved: u32
+#[repr(C)] pub struct gg_abi::verb::VerbsTable
+pub gg_abi::verb::VerbsTable::action_len: u32
+pub gg_abi::verb::VerbsTable::actions: *const gg_abi::verb::VerbName
+pub gg_abi::verb::VerbsTable::axes: *const gg_abi::verb::VerbName
+pub gg_abi::verb::VerbsTable::axis_len: u32
+#[repr(u32)] pub enum gg_abi::AbiStatus
+pub gg_abi::AbiStatus::Alias = 4
+pub gg_abi::AbiStatus::BadRequest = 5
+pub gg_abi::AbiStatus::DeadEntity = 2
+pub gg_abi::AbiStatus::Ok = 0
+pub gg_abi::AbiStatus::SizeMismatch = 3
+pub gg_abi::AbiStatus::UnknownComponent = 1
+#[repr(C)] pub struct gg_abi::AbiInfo
+pub gg_abi::AbiInfo::fingerprint: [u8; 32]
+pub gg_abi::AbiInfo::host_api_version: u32
+#[repr(transparent)] pub struct gg_abi::ActionId(_)
+impl gg_abi::input::ActionId
+pub const fn gg_abi::input::ActionId::index(self) -> usize
+pub const fn gg_abi::input::ActionId::new(usize) -> Self
+#[repr(C)] pub struct gg_abi::ArchetypeMatch
+pub gg_abi::ArchetypeMatch::columns: [gg_abi::query::ColumnView; 16]
+pub gg_abi::ArchetypeMatch::entities: *const gg_abi::entity::Entity
+pub gg_abi::ArchetypeMatch::len: usize
+impl gg_abi::query::ArchetypeMatch
+pub const gg_abi::query::ArchetypeMatch::EMPTY: Self
+#[repr(transparent)] pub struct gg_abi::AxisId(_)
+impl gg_abi::input::AxisId
+pub const fn gg_abi::input::AxisId::index(self) -> usize
+pub const fn gg_abi::input::AxisId::new(usize) -> Self
+#[repr(C)] pub struct gg_abi::ColumnView
+pub gg_abi::ColumnView::len: usize
+pub gg_abi::ColumnView::ptr: *mut u8
+pub gg_abi::ColumnView::stride: usize
+#[repr(C)] pub struct gg_abi::ComponentLayout
+pub gg_abi::ComponentLayout::align: u32
+pub gg_abi::ComponentLayout::declared: *const u8
+pub gg_abi::ComponentLayout::declared_len: u32
+pub gg_abi::ComponentLayout::field_len: u32
+pub gg_abi::ComponentLayout::fields: *const gg_abi::layout::FieldLayout
+pub gg_abi::ComponentLayout::id: u64
+pub gg_abi::ComponentLayout::name: *const u8
+pub gg_abi::ComponentLayout::name_len: u32
+pub gg_abi::ComponentLayout::schema_hash: [u8; 16]
+pub gg_abi::ComponentLayout::size: u32
+#[repr(C)] pub struct gg_abi::ComponentsTable
+pub gg_abi::ComponentsTable::entries: *const gg_abi::layout::ComponentLayout
+pub gg_abi::ComponentsTable::len: u32
+pub gg_abi::ComponentsTable::reserved: u32
+#[repr(C)] pub struct gg_abi::Entity
+impl gg_abi::entity::Entity
+pub const gg_abi::entity::Entity::NONE: Self
+pub const fn gg_abi::entity::Entity::from_bits(u64) -> Self
+pub const fn gg_abi::entity::Entity::generation(self) -> u32
+pub const fn gg_abi::entity::Entity::index(self) -> u32
+pub const fn gg_abi::entity::Entity::is_none(self) -> bool
+pub const fn gg_abi::entity::Entity::new(u32, u32) -> Self
+pub const fn gg_abi::entity::Entity::to_bits(self) -> u64
+impl bytemuck::pod::Pod for gg_abi::entity::Entity
+impl bytemuck::zeroable::Zeroable for gg_abi::entity::Entity
+impl core::fmt::Debug for gg_abi::entity::Entity
+pub fn gg_abi::entity::Entity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[repr(C)] pub struct gg_abi::FieldLayout
+pub gg_abi::FieldLayout::name: *const u8
+pub gg_abi::FieldLayout::name_len: u32
+pub gg_abi::FieldLayout::offset: u32
+pub gg_abi::FieldLayout::size: u32
+pub gg_abi::FieldLayout::ty: *const u8
+pub gg_abi::FieldLayout::ty_len: u32
+#[repr(C)] pub struct gg_abi::HostApiV1
+pub gg_abi::HostApiV1::despawn: fn(*mut gg_abi::host::WorldHandle, gg_abi::entity::Entity) -> bool
+pub gg_abi::HostApiV1::get: fn(*mut gg_abi::host::WorldHandle, gg_abi::entity::Entity, u64) -> *mut u8
+pub gg_abi::HostApiV1::insert: fn(*mut gg_abi::host::WorldHandle, gg_abi::entity::Entity, u64, *const u8, u32) -> gg_abi::host::AbiStatus
+pub gg_abi::HostApiV1::is_alive: fn(*const gg_abi::host::WorldHandle, gg_abi::entity::Entity) -> bool
+pub gg_abi::HostApiV1::log: fn(u32, *const u8, u32)
+pub gg_abi::HostApiV1::query: fn(*mut gg_abi::host::WorldHandle, *const gg_abi::query::QueryDesc, u32, *mut gg_abi::query::ArchetypeMatch, u32, *mut u32) -> gg_abi::host::AbiStatus
+pub gg_abi::HostApiV1::remove: fn(*mut gg_abi::host::WorldHandle, gg_abi::entity::Entity, u64) -> bool
+pub gg_abi::HostApiV1::reserved: u32
+pub gg_abi::HostApiV1::spawn: fn(*mut gg_abi::host::WorldHandle) -> gg_abi::entity::Entity
+pub gg_abi::HostApiV1::version: u32
+#[repr(C)] pub struct gg_abi::InputFrame
+pub gg_abi::InputFrame::axes: [i32; 8]
+pub gg_abi::InputFrame::buttons: u64
+impl gg_abi::input::InputFrame
+pub fn gg_abi::input::InputFrame::axis(&self, gg_abi::input::AxisId) -> f32
+pub const fn gg_abi::input::InputFrame::pressed(&self, gg_abi::input::ActionId) -> bool
+#[repr(C)] pub struct gg_abi::QueryDesc
+pub gg_abi::QueryDesc::read: *const u64
+pub gg_abi::QueryDesc::read_len: u32
+pub gg_abi::QueryDesc::write: *const u64
+pub gg_abi::QueryDesc::write_len: u32
+#[repr(C)] pub struct gg_abi::SystemEntry
+pub gg_abi::SystemEntry::id: u64
+pub gg_abi::SystemEntry::name: *const u8
+pub gg_abi::SystemEntry::name_len: u32
+pub gg_abi::SystemEntry::reserved: u32
+pub gg_abi::SystemEntry::run: gg_abi::system::SystemFn
+#[repr(C)] pub struct gg_abi::SystemStatus
+pub gg_abi::SystemStatus::code: u32
+pub gg_abi::SystemStatus::message: *const u8
+pub gg_abi::SystemStatus::message_len: u32
+impl gg_abi::system::SystemStatus
+pub const gg_abi::system::SystemStatus::OK: u32
+pub const gg_abi::system::SystemStatus::PANICKED: u32
+pub const fn gg_abi::system::SystemStatus::is_ok(&self) -> bool
+pub const fn gg_abi::system::SystemStatus::ok() -> Self
+#[repr(C)] pub struct gg_abi::SystemsTable
+pub gg_abi::SystemsTable::entries: *const gg_abi::system::SystemEntry
+pub gg_abi::SystemsTable::len: u32
+pub gg_abi::SystemsTable::reserved: u32
+#[repr(C)] pub struct gg_abi::TickCtx
+pub gg_abi::TickCtx::input: gg_abi::input::InputFrame
+pub gg_abi::TickCtx::previous: gg_abi::input::InputFrame
+pub gg_abi::TickCtx::reserved: u32
+pub gg_abi::TickCtx::tick: u64
+pub gg_abi::TickCtx::tick_hz: u32
+#[repr(C)] pub struct gg_abi::VerbName
+pub gg_abi::VerbName::name: *const u8
+pub gg_abi::VerbName::name_len: u32
+pub gg_abi::VerbName::reserved: u32
+#[repr(C)] pub struct gg_abi::VerbsTable
+pub gg_abi::VerbsTable::action_len: u32
+pub gg_abi::VerbsTable::actions: *const gg_abi::verb::VerbName
+pub gg_abi::VerbsTable::axes: *const gg_abi::verb::VerbName
+pub gg_abi::VerbsTable::axis_len: u32
+#[repr(C)] pub struct gg_abi::WorldHandle
+pub const gg_abi::AXIS_SCALE: i32
+pub const gg_abi::BOUNDARY_FINGERPRINT: [u8; 32]
+pub const gg_abi::BOUNDARY_FINGERPRINT_HEX: &str
+pub const gg_abi::FINGERPRINT_BYTES: usize
+pub const gg_abi::HOST_API_VERSION: u32
+pub const gg_abi::MAX_ACTIONS: usize
+pub const gg_abi::MAX_AXES: usize
+pub const gg_abi::MAX_QUERY_COLUMNS: usize
+pub const gg_abi::SYM_GAME_ABI: &[u8]
+pub const gg_abi::SYM_GAME_COMPONENTS: &[u8]
+pub const gg_abi::SYM_GAME_INIT: &[u8]
+pub const gg_abi::SYM_GAME_SYSTEMS: &[u8]
+pub const gg_abi::SYM_GAME_VERBS: &[u8]
+pub type gg_abi::GameAbiFn = fn() -> gg_abi::AbiInfo
+pub type gg_abi::GameComponentsFn = fn() -> gg_abi::layout::ComponentsTable
+pub type gg_abi::GameInitFn = fn(*const gg_abi::host::HostApiV1)
+pub type gg_abi::GameSystemsFn = fn() -> gg_abi::system::SystemsTable
+pub type gg_abi::GameVerbsFn = fn() -> gg_abi::verb::VerbsTable
+pub type gg_abi::SystemFn = fn(*mut gg_abi::host::WorldHandle, *const gg_abi::system::TickCtx) -> gg_abi::system::SystemStatus

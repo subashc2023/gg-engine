@@ -28,20 +28,11 @@ use crate::hash::ComponentId;
 
 /// One column of one archetype match: base pointer, row count, stride.
 ///
-/// `repr(C)` because this crosses the §4.2.2 boundary unchanged. A stride of
-/// zero is a marker component — `len` still counts rows.
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-pub struct ColumnView {
-    /// Base of the column. Aligned to the component's requirement (columns are
-    /// 16-aligned; registration refuses anything stricter). Never null: an
-    /// empty column still points at a valid, zero-length allocation base.
-    pub ptr: *mut u8,
-    /// Rows in this column.
-    pub len: usize,
-    /// Bytes per row.
-    pub stride: usize,
-}
+/// Defined in `gg-abi` and re-exported, because "crosses the §4.2.2 boundary
+/// unchanged" is stronger stated as *there is only one of it*. M3 built this
+/// shape here to prove it cheap; M5 moved the definition down to the crate whose
+/// subject is layout, and nothing about the shape changed in the move.
+pub use gg_abi::ColumnView;
 
 /// A validated set of component accesses.
 ///

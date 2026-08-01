@@ -20,7 +20,7 @@
 
 use demo_02_mesh as scene;
 use gg_extract::Extracted;
-use gg_input::{Input, InputFrame, Recorder, Replay, ReplayMeta};
+use gg_input::{Drive, Recorder, Replay, ReplayMeta};
 use gg_platform::{Control, Event, Key, WindowDesc};
 use gg_rhi::{DrawSpec, FrameOutcome, Rhi};
 
@@ -31,40 +31,6 @@ const TIER: &str = if cfg!(feature = "validation") {
 } else {
     "dist"
 };
-
-/// Live play, or a recording being played back.
-enum Drive {
-    Live(Option<Recorder>),
-    Replay(Box<Replay>),
-}
-
-impl Drive {
-    /// This tick's input, from the hardware or from the file.
-    fn frame(&mut self, input: &mut Input, tick: u64) -> InputFrame {
-        match self {
-            Drive::Live(recorder) => {
-                let frame = input.tick();
-                if let Some(recorder) = recorder {
-                    recorder.record(tick, frame);
-                }
-                frame
-            }
-            Drive::Replay(replay) => {
-                let frame = replay.frame(tick);
-                input.tick_from(frame);
-                frame
-            }
-        }
-    }
-
-    /// Ticks the replay covers, if this is one.
-    fn ticks(&self) -> Option<u64> {
-        match self {
-            Drive::Replay(replay) => Some(replay.ticks()),
-            Drive::Live(_) => None,
-        }
-    }
-}
 
 fn value_of(name: &str) -> Option<String> {
     std::env::args().skip_while(|a| a != name).nth(1)
@@ -120,7 +86,7 @@ fn main() -> anyhow::Result<()> {
             Drive::Replay(Box::new(replay))
         }
         None => Drive::Live(record_to.is_some().then(|| {
-            Recorder::new(ReplayMeta {
+            Box::new(Recorder::new(ReplayMeta {
                 engine_commit: gg_input::ENGINE_COMMIT.to_owned(),
                 contract: gg_math::DETERMINISM_CONTRACT,
                 tier: TIER.to_owned(),
@@ -131,7 +97,7 @@ fn main() -> anyhow::Result<()> {
                     .map(|s| (*s).to_owned())
                     .collect(),
                 axes: scene::sim::AXES.iter().map(|s| (*s).to_owned()).collect(),
-            })
+            }))
         })),
     };
 

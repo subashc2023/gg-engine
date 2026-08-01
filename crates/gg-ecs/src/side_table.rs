@@ -184,6 +184,15 @@ impl SideTables {
         self.sorted.len()
     }
 
+    /// Declared ids of the installed tables, ascending — what a snapshot records
+    /// so a restore can refuse a world whose host-side state differs (§4.8).
+    pub(crate) fn declared_ids(&self) -> Vec<String> {
+        self.sorted
+            .iter()
+            .map(|(_, t)| t.declared_id().to_string())
+            .collect()
+    }
+
     /// Ascending by id, so the canonical pass sees one order regardless of when
     /// each table was installed.
     pub(crate) fn hash_into(&self, h: &mut StateHasher) {

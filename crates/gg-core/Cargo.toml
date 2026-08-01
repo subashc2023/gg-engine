@@ -1,0 +1,47 @@
+# gg-core (§3, §4.1) — app lifecycle, the loop skeleton, the tick clock, events,
+# config and the CVar registry. The reload host (§4.2.2) joins them.
+#
+# Complexity budget (§3): the charter above is *closed*, not open — a new
+# responsibility landing here edits the budget in its own PR — and <= 8 external
+# dependencies keep it honest. gg-core sits below gg-render, gg-extract and
+# gg-platform in §3's dependency direction, so it owns the loop's shape and
+# never its contents: no winit, no ECS, no renderer.
+
+[package]
+name = "gg-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gg_core"
+
+[dependencies]
+gg-abi = { path = "../gg-abi" }
+gg-math = { path = "../gg-math" }
+# The game dylib's loader (§4.2.2). Not optional: dist loads the table once too,
+# and a loader that existed only in dev would make dist the untested path (§1.10).
+libloading = { workspace = true }
+# The one hash primitive (§4.2.1), here for one job: a loaded artifact's content
+# hash, which is what a replay segment names so a stream recorded across a
+# reload still says which build produced which ticks (§4.7).
+blake3 = { workspace = true }
+profiling = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Dev-tier lab equipment: the save-watcher, and only the watcher. The dist gate
+# (§5.8) proves it absent from a shipping graph.
+notify = { workspace = true, optional = true }
+
+[features]
+# Watch for a rebuilt dylib and swap it between ticks (§4.2.2). Without it the
+# loader still exists — dist loads once and never watches.
+hot-reload = ["dep:notify"]
+# Re-assert the FP environment after every load (§4.2.1 hazard 5): a dylib is
+# the most plausible thing in the process to have vandalized it.
+fp-assert = []
+
+[lints]
+workspace = true

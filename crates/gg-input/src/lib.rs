@@ -28,11 +28,13 @@
 
 #![warn(missing_docs)]
 
+pub mod drive;
 pub mod key;
 pub mod map;
 pub mod replay;
 pub mod state;
 
+pub use drive::Drive;
 pub use key::{Key, MouseAxis, MouseButton};
 pub use map::{
     ActionId, ActionMap, AxisId, AxisSource, ContextId, MAX_ACTIONS, MAX_AXES, MapError, Source,

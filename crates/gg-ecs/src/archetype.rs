@@ -95,6 +95,12 @@ impl Archetype {
         self.entities.as_ptr()
     }
 
+    /// The row→entity map as a slice, for the snapshot walk (§4.8) — which
+    /// wants the values, not a pointer to alias.
+    pub(crate) fn entities_slice(&self) -> &[Entity] {
+        &self.entities
+    }
+
     /// Position of `id` in this archetype's parallel arrays.
     pub(crate) fn column_index(&self, id: ComponentId) -> Option<usize> {
         self.ids.binary_search(&id).ok()

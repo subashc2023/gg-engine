@@ -111,6 +111,37 @@ fn main() {
         });
     });
 
+    // The same query from the *other side of the seam* (§4.2.2, M5's exit
+    // criterion). Everything above runs host-side against `World` directly;
+    // this goes out through the `repr(C)` host table — `query` fills a page of
+    // archetype matches, and the per-entity loop runs on the caller's side over
+    // the column pointers that came back. In a shipped build the caller is a
+    // dylib; here it is this process, which changes the call's address and
+    // nothing about its shape. What it prices is the claim: one call per
+    // archetype is enough, so a 100k-entity pass costs one crossing.
+    let boundary = {
+        // SAFETY: `host_api()` is `&'static`, which is what `init` requires. It
+        // is the same handshake `gg_game_init` performs, minus the dylib.
+        unsafe { gg_ecs::boundary::init(gg_ecs::boundary::host_api()) };
+        let ctx = gg_ecs::boundary::TickCtx {
+            tick: 0,
+            tick_hz: 60,
+            reserved: 0,
+            input: gg_ecs::boundary::InputFrame::default(),
+            previous: gg_ecs::boundary::InputFrame::default(),
+        };
+        let handle = gg_ecs::boundary::handle(&mut world);
+        // SAFETY: `handle` is this world's, `ctx` outlives the borrow, and the
+        // table was installed one line above.
+        let mut game = unsafe { gg_ecs::boundary::GameWorld::new(handle, &ctx) };
+        measure("boundary each()", || {
+            game.each::<(&mut Position, &Velocity)>(|_, (p, v)| {
+                p.p += v.v;
+            })
+            .unwrap();
+        })
+    };
+
     // Not a query, but the other per-tick cost the dev loop pays (§4.2.1).
     let hash = measure("canonical_hash", || {
         black_box(world.canonical_hash());
@@ -118,9 +149,12 @@ fn main() {
 
     let ratio = |d: Duration| d.as_secs_f64() / native.as_secs_f64();
     println!(
-        "\ncolumn views {:.2}x native, typed each() {:.2}x native, canonical_hash {:.2}x native",
+        "\ncolumn views {:.2}x native, typed each() {:.2}x native, boundary each() {:.2}x native \
+         ({:.2}x host each()), canonical_hash {:.2}x native",
         ratio(views),
         ratio(typed),
+        ratio(boundary),
+        boundary.as_secs_f64() / typed.as_secs_f64(),
         ratio(hash)
     );
 
@@ -138,6 +172,17 @@ fn main() {
         failures.push(format!(
             "typed each() is {:.2}x the native loop; the tuple layer is meant to be thin",
             ratio(typed)
+        ));
+    }
+    // The M5 criterion, and the sharper of the two comparisons: measured against
+    // the *host-side* query rather than against the native loop, the difference
+    // is the boundary and nothing else. A per-entity crossing would show up here
+    // as a multiple; one crossing per archetype disappears into 100k rows.
+    let seam = boundary.as_secs_f64() / typed.as_secs_f64();
+    if seam > 1.15 {
+        failures.push(format!(
+            "the same query costs {seam:.2}x more through the boundary than host-side; §4.2.2 \
+             budgets one FFI call per archetype, and this is what a per-entity crossing looks like"
         ));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

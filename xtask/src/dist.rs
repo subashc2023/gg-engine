@@ -47,9 +47,20 @@ pub fn gate() -> anyhow::Result<()> {
     } else {
         "gg-runtime"
     });
+    // Running it needs a game (§2: the shell is the same program in every tier
+    // and the game is what makes it a game), which has been true since demo 03
+    // existed — before that the shell ran bare and this line was a bare spawn.
+    let games = game_dylibs()?;
+    let game = games
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no game dylib to run the dist shell over"))?;
     exec(
-        std::process::Command::new(&exe).env("GG_HEADLESS", "1"),
-        "run dist gg-runtime headless",
+        std::process::Command::new(&exe)
+            .arg("--game")
+            .arg(game)
+            .args(["--frames", "100"])
+            .env("GG_HEADLESS", "1"),
+        "run dist gg-runtime over a dist game dylib, 100 frames headless",
     )?;
 
     // Graph absence check — the authoritative half.
@@ -90,6 +101,16 @@ pub fn gate() -> anyhow::Result<()> {
             String::from_utf8_lossy(needle)
         );
     }
+    // And the presence check the shell earned at M5, when it took delivery of
+    // the recorder (§5.8, §2): the shipping shell is the binary a player's bug
+    // report comes out of. `xtask reload` proves it behaviourally by recording a
+    // file and reading it back; this is the byte-level half, which holds even
+    // when nobody runs it.
+    anyhow::ensure!(
+        bytes.windows(4).any(|w| w == gg_input::replay::MAGIC),
+        "the dist shell carries no replay magic — the input recorder ships in every tier (§2, \
+         §5.8): it is the bug-report channel, not lab equipment"
+    );
 
     // Demos join the dist gate at their milestones (§5.8): the exact
     // tier-dist combination builds, and the binary passes the absence/presence
@@ -210,6 +231,50 @@ pub fn gate() -> anyhow::Result<()> {
 
     println!("xtask dist: gate green (lab equipment absent, SPIR-V and the recorder present)");
     Ok(())
+}
+
+/// Game crates under dist (§5.8, live from M5). They are dylibs, not binaries,
+/// so the checks above do not fit: there is no `tier-dist` feature to select —
+/// a game crate has no tiers, it is the same code in every one — and no embedded
+/// SPIR-V or recorder of its own. What is checked is the pair of claims §2's
+/// Game-code boundary row makes about dist: the artifact builds under the
+/// shipping profile, and nothing that reloads it is in its graph.
+///
+/// The behavioural half — the dylib is loaded *once*, with no watcher behind it
+/// — is `xtask reload`'s, where a dist shell actually runs one.
+fn game_dylibs() -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let mut built = Vec::new();
+    for game in crate::budgets::game_crates()? {
+        let tree = run_capture(
+            cargo().args(["tree", "-p", &game, "-e", "normal", "--prefix", "none"]),
+            &format!("cargo tree ({game} dist graph)"),
+        )?;
+        let offenders: Vec<&str> = BANNED_DIST_CRATES
+            .iter()
+            .chain(&["gg-shaders", "shader-slang"])
+            .copied()
+            .filter(|c| {
+                tree.lines()
+                    .any(|l| l.split_whitespace().next() == Some(*c))
+            })
+            .collect();
+        anyhow::ensure!(
+            offenders.is_empty(),
+            "game crate {game} links {offenders:?} (§5.8) — a game dylib that carried the watcher \
+             would reload itself"
+        );
+        exec(
+            cargo().args(["build", "-p", &game, "--profile", "dist"]),
+            &format!("build {game} [dist profile]"),
+        )?;
+        built.push(workspace_root().join("target/dist").join(if cfg!(windows) {
+            format!("{}.dll", game.replace('-', "_"))
+        } else {
+            format!("lib{}.so", game.replace('-', "_"))
+        }));
+        println!("xtask dist: {game} builds as a shipping game dylib, watcher-free (§5.8)");
+    }
+    Ok(built)
 }
 
 /// The dist demo runs — part of the manual windowed suite (`cargo xtask

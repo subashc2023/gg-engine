@@ -11,6 +11,24 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# The loop skeleton and the reload host (§4.1, §4.2.2). Wired here, never
+# implemented here — the shell's whole job is choosing which stages exist.
+gg-core = { path = "../gg-core" }
+# The world the game dylib is driven against, and the host half of the §4.2.2
+# seam (the vtable, the component adoption, the systems driver) — all of which
+# need `World`, which is why they are `gg-ecs`'s and not this crate's.
+gg-ecs = { path = "../gg-ecs" }
+# The window, the GPU, the one pass, and the narrowing between the sim and it.
+# §2 gives the shell the renderer in every tier; §3 forbids it from *being* one,
+# which is why `gg-render` exists and this is a dependency rather than a module.
+gg-platform = { path = "../gg-platform" }
+gg-render = { path = "../gg-render" }
+gg-extract = { path = "../gg-extract" }
+# Action maps and the replay recorder — the recorder is unconditional in every
+# tier (§2, Build tiers row), which is why it is not behind a feature.
+gg-input = { path = "../gg-input" }
+# The replay header's determinism contract, and the default eye's position.
+gg-math = { path = "../gg-math" }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -25,12 +43,14 @@ default = ["tier-dev"]
 # combination — CI builds the four named tier combinations and nothing else
 # (§3). Most are declared ahead of their machinery (§6 M0A: forty features
 # retrofitted into a tier system later is the archaeology this prevents).
-validation = []
+validation = ["gg-render/validation"]
 tracy = ["dep:tracy-client", "dep:tracing-tracy", "profiling/profile-with-tracy"]
 state-hash = []
 nan-scan = []
-fp-assert = []
-hot-reload = []
+# Forwarded rather than local: the machinery is `gg-core`'s and the tier
+# meta-features below are the only place that decides it is present.
+fp-assert = ["gg-core/fp-assert"]
+hot-reload = ["gg-core/hot-reload"]
 cvar-console = []
 overlay = []
 

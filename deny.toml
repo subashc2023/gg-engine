@@ -41,8 +41,11 @@ deny = [
     # vk::/ash:: tokens in every other crate's source.
     { crate = "ash", wrappers = ["gg-rhi", "xtask", "ash-window", "gpu-allocator"] },
     # Determinism (§3): sim crates never see glam. gg-math wraps it as
-    # gg_math::render; gg-extract is the one membrane crate allowed both sides.
-    { crate = "glam", wrappers = ["gg-math", "gg-extract"] },
+    # gg_math::render, and that is the *only* edge — gg-extract is the membrane
+    # crate allowed both sides but reaches render through gg-math like everyone
+    # else, so listing it here was a wrapper for an edge that does not exist and
+    # cargo-deny said so on every push (§6 M5 finding).
+    { crate = "glam", wrappers = ["gg-math"] },
     # Determinism (§4.1): no work-stealing near the state hash. Exemptions only
     # via determinism-allowlist.toml; this wrappers list must mirror that file
     # plus the render/tools crates rayon is chartered for — xtask ci cross-checks.

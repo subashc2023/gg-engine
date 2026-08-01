@@ -80,6 +80,12 @@ pub enum RegistryError {
         type_name: &'static str,
         align: usize,
     },
+    #[error(
+        "component \"{declared}\" is already registered with a different schema. A registry \
+         entry describes the columns that exist; changing one under live data is what \
+         snapshot → restore is for (§4.2.2), not what registration does."
+    )]
+    SchemaConflict { declared: &'static str },
 }
 
 /// The registry. Entries are kept **sorted by [`ComponentId`]**, which is what
@@ -123,7 +129,22 @@ impl Registry {
             fields: T::FIELDS,
             protocol_hash: protocol_hash_of::<T>,
         };
+        self.insert(info)
+    }
 
+    /// Register a component a *loaded dylib* declares, with no Rust type here to
+    /// describe it (§4.2.2).
+    ///
+    /// The same collision rules as [`register`](Self::register): the entry's
+    /// identity is `info.id`, and two entries claiming it is a startup error
+    /// either way. Callers live at the boundary, which is where the raw
+    /// descriptors are decoded into the `&'static` pieces this takes.
+    pub fn register_declared(&mut self, info: ComponentInfo) -> Result<ComponentId, RegistryError> {
+        self.insert(info)
+    }
+
+    fn insert(&mut self, info: ComponentInfo) -> Result<ComponentId, RegistryError> {
+        let id = info.id;
         if info.align > MAX_ALIGN {
             return Err(RegistryError::OverAligned {
                 type_name: info.type_name,
@@ -135,7 +156,18 @@ impl Registry {
             Ok(at) => {
                 let existing = &self.sorted[at];
                 if existing.type_name == info.type_name {
-                    return Ok(id); // idempotent re-registration
+                    // Idempotent, *if* it is the same component. One Rust type
+                    // has one layout per build, so the typed path can never
+                    // reach the conflict; a reload can, and answering it with a
+                    // silent `Ok` would leave columns described by the schema
+                    // they no longer have.
+                    return if existing.schema == info.schema {
+                        Ok(id)
+                    } else {
+                        Err(RegistryError::SchemaConflict {
+                            declared: info.declared_id,
+                        })
+                    };
                 }
                 // Same 64-bit id from two types. Which of the two failures it
                 // is depends on whether the *declared strings* also match:
