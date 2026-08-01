@@ -3,7 +3,9 @@
 //! engine logic, zero game logic, no public API. Complexity budget: 300 lines,
 //! CI-counted (§3). M0A scope: boot, observability hookup (tracing + Tracy),
 //! a heartbeat proving zones and structured logs flow, clean exit. The real loop
-//! skeleton arrives with `gg-core` (M1) and is *wired* here, never implemented here.
+//! skeleton arrives with `gg-core` (whose charter §3 fixes; demos 00–02 are
+//! their own thin mains until the systems table exists, §4.1) and is *wired*
+//! here, never implemented here.
 
 use tracing::{debug, info, info_span};
 

@@ -53,17 +53,21 @@ fn push() -> anyhow::Result<()> {
     tests(&All)?;
     fp_baseline_dist_profile()?;
     crate::shaders::build_all()?;
-    for feats in ["tier-dist", "tier-dist-verify"] {
+    for (pkg, feats) in [
+        ("gg-runtime", "tier-dist"),
+        ("gg-runtime", "tier-dist-verify"),
+        ("demo-00-clear", "tier-dist"),
+    ] {
         exec(
             cargo().args([
                 "check",
                 "-p",
-                "gg-runtime",
+                pkg,
                 "--no-default-features",
                 "--features",
                 feats,
             ]),
-            &format!("cargo check gg-runtime --features {feats}"),
+            &format!("cargo check {pkg} --features {feats}"),
         )?;
     }
     println!("xtask ci --push: green (replay determinism gates join at M4B)");
@@ -75,11 +79,88 @@ fn nightly() -> anyhow::Result<()> {
     crate::dist::gate()?;
     crate::probe::run(false)?;
     aarch64_leg()?;
+    gpu_tests()?;
+    demo_runs()?;
+    interactive_suite()?;
     println!(
-        "xtask ci --nightly: green (golden suite M7, GPU tests M1, demo runs M1, \
-         chaos replays M4B — each lands with its milestone)"
+        "xtask ci --nightly: green (golden suite M7, chaos replays M4B — \
+         each lands with its milestone)"
     );
     Ok(())
+}
+
+/// Point child processes at the pinned lavapipe (§5.4). Windows pins via
+/// mesa-dist-win by SHA-256; the WSL container pin is still the deferred
+/// machine the probe names — until it lands, Linux forces the system lvp ICD
+/// so at least the *driver* is lavapipe, not whatever enumerates first.
+fn lavapipe_env(cmd: &mut std::process::Command) -> anyhow::Result<()> {
+    if cfg!(windows) {
+        cmd.env("VK_DRIVER_FILES", crate::probe::ensure_lavapipe()?);
+    } else {
+        cmd.env("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/lvp_icd.json");
+    }
+    Ok(())
+}
+
+/// Gate 4 (§5): the headless GPU tests — today the swapchain-recreation
+/// torture and the rest of gg-rhi/gg-platform's suites — against the pinned
+/// lavapipe, validation on, any message a failure (the tests enforce that
+/// themselves via the shutdown report).
+fn gpu_tests() -> anyhow::Result<()> {
+    let mut cmd = cargo();
+    cmd.args(["nextest", "run", "-p", "gg-rhi", "-p", "gg-platform"]);
+    lavapipe_env(&mut cmd)?;
+    exec(&mut cmd, "headless GPU tests on pinned lavapipe (§5.4)")
+}
+
+/// Gate 7 (§5): every demo runs 100 frames headless without validation errors
+/// or leaks — the demo binaries exit nonzero on either, so the gate is just
+/// the run. (The winit symbol-absence half of gate 7 guards the *harness and
+/// test* binaries and lands with gg-golden at M2.)
+fn demo_runs() -> anyhow::Result<()> {
+    let mut cmd = cargo();
+    cmd.args(["run", "-p", "demo-00-clear", "--", "--frames", "100"]);
+    lavapipe_env(&mut cmd)?;
+    exec(
+        &mut cmd,
+        "demo 00-clear, 100 frames headless on pinned lavapipe",
+    )
+}
+
+/// The nightly interactive suite (§4.3): the real OS resize/minimize event
+/// path against invisible, non-activating windows. Runs on the Windows host
+/// (the WSI players ship on); the Linux windowed path runs via WSLg when a
+/// display is present (§5).
+fn interactive_suite() -> anyhow::Result<()> {
+    if !cfg!(windows)
+        && std::env::var_os("DISPLAY").is_none()
+        && std::env::var_os("WAYLAND_DISPLAY").is_none()
+    {
+        println!("xtask: interactive suite skipped — no display (WSLg absent, §5)");
+        return Ok(());
+    }
+    let mut cmd = cargo();
+    cmd.args([
+        "nextest",
+        "run",
+        "-p",
+        "gg-rhi",
+        "--run-ignored",
+        "ignored-only",
+    ]);
+    // Linux runs the suite over X11 (XWayland): WSLg's Weston drops the
+    // Wayland connection under minimize-spam on an unmapped surface
+    // (broken pipe → VK_ERROR_SURFACE_LOST_KHR). The Wayland-native windowed
+    // path is still exercised by the demo-run gate; the suite's job is the
+    // resize/minimize event storm, and X11 delivers it (§5: the interactive
+    // suite's contract platform is the Windows host).
+    if !cfg!(windows) {
+        cmd.env_remove("WAYLAND_DISPLAY");
+    }
+    exec(
+        &mut cmd,
+        "interactive suite: resize/minimize spam, invisible non-activating windows (§4.3)",
+    )
 }
 
 /// The third architecture of the §5 matrix (§6 M0B): gg-math — the FP baseline
@@ -189,6 +270,13 @@ fn crates_touched(paths: &[String]) -> BTreeSet<String> {
             && let Some((name, _)) = rest.split_once('/')
         {
             crates.insert(name.to_string());
+            continue;
+        }
+        if let Some(rest) = p.strip_prefix("demos/")
+            && let Some((dir, _)) = rest.split_once('/')
+        {
+            // demos/00-clear → package demo-00-clear (§3 layout convention).
+            crates.insert(format!("demo-{dir}"));
             continue;
         }
         if p.starts_with("xtask/") {

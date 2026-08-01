@@ -29,12 +29,17 @@ yanked = "deny"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal path dependencies (crates/ ↔ demos/) carry no version — the
+# workspace is unpublished by design (§7). Registry wildcards stay banned.
+allow-wildcard-paths = true
 deny = [
     # API containment (§3): ash appears in exactly one engine crate — gg-rhi.
     # xtask is a tool outside the seam; its `probe` (spike 2, §6 M0A) queries
-    # device capabilities directly. The companion grep in `xtask ci` rejects
+    # device capabilities directly. ash-window and gpu-allocator are gg-rhi's
+    # own plumbing (surface creation, GPU memory — §2/§4.3) and appear in no
+    # other crate's graph. The companion grep in `xtask ci` rejects
     # vk::/ash:: tokens in every other crate's source.
-    { crate = "ash", wrappers = ["gg-rhi", "xtask"] },
+    { crate = "ash", wrappers = ["gg-rhi", "xtask", "ash-window", "gpu-allocator"] },
     # Determinism (§3): sim crates never see glam. gg-math wraps it as
     # gg_math::render; gg-extract is the one membrane crate allowed both sides.
     { crate = "glam", wrappers = ["gg-math", "gg-extract"] },

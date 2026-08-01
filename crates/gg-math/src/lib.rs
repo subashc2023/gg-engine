@@ -7,7 +7,10 @@
 //!
 //! Complexity budget (§9): not a general-purpose math library. `sim` is the
 //! minimal set of scalar types the sim needs; new surface arrives with a named
-//! consumer, never speculatively.
+//! consumer, never speculatively. [`fpenv`] is hazard 5's guard (§4.2.1) —
+//! determinism infrastructure, not math surface; its named consumers are the
+//! M1 startup/per-tick assertions and §4.2.2's post-reload re-assert.
 
+pub mod fpenv;
 pub mod render;
 pub mod sim;

@@ -1,0 +1,36 @@
+# gg-rhi (§4.3): the only crate that speaks raw Vulkan — deny.toml bans `ash`
+# elsewhere and the §3 grep rejects vk::/ash:: tokens outside this crate.
+# Complexity budget (§3): no backend abstraction, no render concepts (meshes,
+# materials), resource newtypes only. The public API is engine-shaped, not
+# Vulkan-shaped in disguise — review holds that line, no grep can (§8).
+
+[package]
+name = "gg-rhi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+ash = { workspace = true }
+ash-window = { workspace = true }
+gpu-allocator = { workspace = true }
+raw-window-handle = { workspace = true }
+
+[dev-dependencies]
+gg-platform = { path = "../gg-platform" }
+tracing-subscriber.workspace = true
+
+[features]
+# Default-on so every local build and test runs validated; tier-dist resolves
+# this crate with default-features off (§2 Build tiers row). `validation`
+# carries the layer + sync validation, the debug messenger, the suppressions
+# mechanism, and debug_utils object names — all lab equipment (§1.13).
+default = ["validation"]
+validation = []

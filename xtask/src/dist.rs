@@ -79,6 +79,49 @@ pub fn gate() -> anyhow::Result<()> {
         );
     }
 
+    // Demos join the dist run at their milestones (§5.8): the exact tier-dist
+    // combination builds and runs 100 frames headless, on the pinned lavapipe
+    // so the gate means the same thing on every machine. The demo exits
+    // nonzero on validation messages or leaks on its own.
+    for demo in ["demo-00-clear"] {
+        exec(
+            cargo().args([
+                "build",
+                "-p",
+                demo,
+                "--profile",
+                "dist",
+                "--no-default-features",
+                "--features",
+                "tier-dist",
+            ]),
+            &format!("build {demo} [tier-dist, dist profile]"),
+        )?;
+        let demo_exe = workspace_root().join("target/dist").join(if cfg!(windows) {
+            format!("{demo}.exe")
+        } else {
+            demo.to_string()
+        });
+        let mut run = std::process::Command::new(&demo_exe);
+        run.args(["--frames", "100"]).env("GG_HEADLESS", "1");
+        if cfg!(windows) {
+            run.env("VK_DRIVER_FILES", crate::probe::ensure_lavapipe()?);
+        } else {
+            run.env("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/lvp_icd.json");
+        }
+        exec(&mut run, &format!("run dist {demo}, 100 frames headless"))?;
+
+        // Same absence check as the shell: lab equipment unbolted (§1.13).
+        let bytes = std::fs::read(&demo_exe)?;
+        for needle in [b"tracy" as &[u8], b"Tracy"] {
+            anyhow::ensure!(
+                !bytes.windows(needle.len()).any(|w| w == needle),
+                "dist {demo} contains `{}` bytes — lab equipment failed to unbolt (§1.13)",
+                String::from_utf8_lossy(needle)
+            );
+        }
+    }
+
     // dist-verify must also build here; it is exercised for real by §5.6c (M4B).
     exec(
         cargo().args([

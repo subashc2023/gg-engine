@@ -1,0 +1,123 @@
+//! The swapchain torture gates (§4.3, §6 M1), split into what each actually
+//! tests:
+//!
+//! - `recreation_survives_1000_synthetic_extents` — the *recreation logic*
+//!   (where every young engine hides its crashes): per-commit, synthetic
+//!   extent changes against an invisible window, headless, focus never
+//!   touched.
+//! - `interactive_resize_minimize_spam_1000` — the *OS event path* (real
+//!   resize/minimize plumbing through winit and WSI): the nightly interactive
+//!   suite, against an invisible, non-activating window. `#[ignore]` in the
+//!   default run; `xtask ci --nightly` runs it, and it ran once in full to
+//!   close M1.
+//!
+//! Both end with the §4.3 accounting: zero validation messages, zero leaks.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use gg_platform::{Event, Pump, WindowDesc};
+use gg_rhi::{FrameOutcome, Rhi};
+
+/// Deterministic extent stream — no `rand`, reproducible failures.
+struct Lcg(u64);
+impl Lcg {
+    fn next(&mut self, lo: u32, hi: u32) -> u32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        lo + ((self.0 >> 33) as u32) % (hi - lo)
+    }
+}
+
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+}
+
+fn shutdown_clean(rhi: Rhi, what: &str) {
+    let report = rhi.shutdown();
+    assert!(
+        report.clean(),
+        "{what}: {} validation message(s), leaks {:?}",
+        report.validation_messages,
+        report.leaked_allocations
+    );
+}
+
+#[test]
+fn recreation_survives_1000_synthetic_extents() {
+    init_tracing();
+    let mut pump = Pump::new(WindowDesc::invisible("gg swapchain recreation", (640, 360)))
+        .expect("event loop");
+    let mut rhi = Rhi::new(pump.window(), pump.window().inner_size()).expect("rhi");
+    let start_generation = rhi.swapchain_generation();
+
+    let mut lcg = Lcg(0x9E37_79B9_7F4A_7C15);
+    let mut presented = 0u64;
+    for i in 0..1000u32 {
+        // Synthetic extent: exercises the clamp + old-swapchain handoff +
+        // deletion-queue path every frame, whatever the surface finally says.
+        let extent = (lcg.next(1, 3000), lcg.next(1, 2000));
+        rhi.resize(extent.0, extent.1);
+        match rhi.render_clear_frame([0.1, 0.2, 0.3, 1.0]).expect("frame") {
+            FrameOutcome::Presented { .. } => presented += 1,
+            FrameOutcome::SkippedSuspended | FrameOutcome::SkippedOutOfDate => {}
+        }
+        if i % 64 == 0 {
+            let _ = pump.pump();
+        }
+    }
+
+    let recreations = rhi.swapchain_generation() - start_generation;
+    assert!(
+        recreations >= 1000,
+        "expected 1000 recreations, swapchain saw {recreations}"
+    );
+    assert!(presented > 0, "no frame ever presented");
+    shutdown_clean(rhi, "synthetic-extent recreation");
+}
+
+/// Nightly interactive suite (§4.3): real OS resize and minimize events. The
+/// window is invisible and non-activating, so even this steals nothing (§1.5).
+#[test]
+#[ignore = "interactive suite: nightly tier (xtask ci --nightly); ran once in full to close M1"]
+fn interactive_resize_minimize_spam_1000() {
+    init_tracing();
+    let mut pump =
+        Pump::new(WindowDesc::invisible("gg interactive resize", (640, 360))).expect("event loop");
+    let mut rhi = Rhi::new(pump.window(), pump.window().inner_size()).expect("rhi");
+
+    let mut lcg = Lcg(0xB5AD_4ECE_DA1C_E2A9);
+    let mut resizes_seen = 0u64;
+    let mut presented = 0u64;
+    for i in 0..1000u32 {
+        if i % 97 == 13 {
+            pump.window().set_minimized(true);
+        } else if i % 97 == 20 {
+            pump.window().set_minimized(false);
+        } else {
+            let (w, h) = (lcg.next(64, 1600), lcg.next(64, 1000));
+            pump.window().request_inner_size(w, h);
+        }
+        for event in pump.pump() {
+            match event {
+                Event::Resized(w, h) => {
+                    resizes_seen += 1;
+                    rhi.resize(w, h);
+                }
+                Event::CloseRequested | Event::WindowReady | Event::Frame => {}
+            }
+        }
+        match rhi.render_clear_frame([0.3, 0.2, 0.1, 1.0]).expect("frame") {
+            FrameOutcome::Presented { .. } => presented += 1,
+            FrameOutcome::SkippedSuspended | FrameOutcome::SkippedOutOfDate => {}
+        }
+    }
+
+    assert!(
+        resizes_seen > 100,
+        "OS event path barely exercised: {resizes_seen} resize events in 1000 iterations"
+    );
+    assert!(presented > 0, "no frame ever presented");
+    shutdown_clean(rhi, "interactive resize/minimize spam");
+}

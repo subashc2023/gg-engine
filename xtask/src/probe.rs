@@ -6,8 +6,9 @@
 //!
 //! Pin provenance (§5.4): on Windows, a mesa-dist-win release by version and
 //! SHA-256, fetched on first run into target/xtask-cache — pinned fetches are
-//! within §9's fresh-clone bar. The WSL pin is a container image by digest and
-//! lands with the WSL CI lane (M0B); until then Linux probes the system ICD.
+//! within §9's fresh-clone bar. The WSL pin is a container image by digest —
+//! a §5.4 deferred machine that lands with the golden suite (M7), which is
+//! what the pin protects; until then Linux probes the system ICD.
 
 use crate::util::workspace_root;
 use sha2::Digest;
@@ -25,15 +26,18 @@ pub fn run(system: bool) -> anyhow::Result<()> {
             unsafe { std::env::set_var("VK_DRIVER_FILES", &icd) };
         } else {
             println!(
-                "probe: pinned-lavapipe container lands with the WSL CI lane (M0B); \
-                 probing the system ICD — pass --system to silence this note"
+                "probe: WSL lavapipe is the system ICD, not yet a digest-pinned container \
+                 (§5.4 deferred machine — lands with the golden suite, M7, whose goldens \
+                 the pin protects); pass --system to silence this note"
             );
         }
     }
     probe_device(system)
 }
 
-fn ensure_lavapipe() -> anyhow::Result<PathBuf> {
+/// The pinned lavapipe's ICD manifest — fetched (SHA-256-checked) on first
+/// use. Shared by the probe, the nightly GPU tests, and the demo-run gates.
+pub(crate) fn ensure_lavapipe() -> anyhow::Result<PathBuf> {
     let cache = workspace_root()
         .join("target/xtask-cache")
         .join(format!("mesa3d-{MESA_VERSION}-msvc"));

@@ -3,12 +3,23 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/gg-math", "crates/gg-runtime", "crates/gg-shaders", "xtask"]
+members = [
+    "crates/gg-math",
+    "crates/gg-platform",
+    "crates/gg-rhi",
+    "crates/gg-runtime",
+    "crates/gg-shaders",
+    "demos/00-clear",
+    "xtask",
+]
 
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.92"
+# Unpublished by design (§7): the engine ships as a product, not a registry
+# crate — and cargo-deny's path-wildcard allowance keys off this.
+publish = false
 
 [workspace.dependencies]
 # Rented layers (§2, Locked Decisions).
@@ -26,6 +37,20 @@ ash = "0.38"
 libm = "0.2"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.30"
+# M1 (§4.3, §2): windowing rented behind gg-platform; ash-window/gpu-allocator
+# are gg-rhi's surface + memory plumbing (deny.toml wrappers cover their ash).
+# csd-adwaita-notitle: Wayland decorations without titlebar text — drops the
+# ab_glyph/ttf-parser font stack (RUSTSEC-2026-0192 unmaintained advisory).
+winit = { version = "0.30", default-features = false, features = [
+    "rwh_06",
+    "x11",
+    "wayland",
+    "wayland-dlopen",
+    "wayland-csd-adwaita-notitle",
+] }
+raw-window-handle = "0.6"
+ash-window = "0.13"
+gpu-allocator = { version = "0.27", default-features = false, features = ["vulkan"] }
 
 [workspace.lints.clippy]
 # Error-handling policy (§2): unwrap/expect forbidden in engine crates. Tools and

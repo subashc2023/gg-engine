@@ -1,0 +1,14 @@
+# Validation-message suppressions (PLAN.md §5.4). In place from M1, before it
+# is needed, and empty by design — the mechanism exists so the first noisy
+# layer release gets a scoped, expiring lease instead of the zero-messages
+# rule getting switched off wholesale.
+#
+# Every entry requires ALL of (enforced by gg-rhi's suppressions tests, which
+# run in every CI tier — a missing field or a past expiry is a CI failure):
+#
+# [[suppression]]
+# vuid     = "VUID-..."          # exact message id name the layer reports
+# reason   = "..."               # why suppressing is correct
+# driver   = "lavapipe 26.1.3 / VK_LAYER_KHRONOS_validation <version>"
+# upstream = "https://..."       # link to the upstream issue — mandatory
+# expires  = "YYYY-MM-DD"        # lease end; re-justify or delete at expiry
