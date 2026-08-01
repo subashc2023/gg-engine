@@ -348,3 +348,43 @@ pub(crate) fn build<'w, 'q>(
         _lifetime: core::marker::PhantomData,
     })
 }
+
+/// [`build`] over a shared archetype, for a query that writes nothing.
+///
+/// The extract stage takes `&World` by contract (§4.1) — one-way-ness is
+/// supposed to be a *type* fact, not a discipline — so the read-only path needs
+/// a read-only view. Callers reach this only through
+/// [`World::each_ref`](crate::World::each_ref), whose `ReadOnly` bound is what
+/// makes the empty write list a compile-time property; the assertion below is
+/// the belt to that bracing, and it is `debug_assert` because a release build
+/// cannot get here with a non-empty write list without the bound being unsound.
+pub(crate) fn build_ref<'w, 'q>(
+    archetype: &'w Archetype,
+    access: &'q QueryAccess,
+) -> Option<ArchetypeView<'w, 'q>> {
+    debug_assert!(
+        access.write.is_empty(),
+        "build_ref reached with a write list — the ReadOnly bound was bypassed"
+    );
+    if !archetype.contains_all(access.matched()) {
+        return None;
+    }
+    let mut read = Vec::with_capacity(access.read.len());
+    for &id in &access.read {
+        let column = archetype.column(archetype.column_index(id)?);
+        read.push(ColumnView {
+            ptr: column.base_ptr_shared(),
+            len: column.rows(),
+            stride: column.stride(),
+        });
+    }
+    Some(ArchetypeView {
+        entities: archetype.entities_ptr_shared(),
+        entities_len: archetype.len(),
+        read,
+        write: Vec::new(),
+        taken: 0,
+        access,
+        _lifetime: core::marker::PhantomData,
+    })
+}

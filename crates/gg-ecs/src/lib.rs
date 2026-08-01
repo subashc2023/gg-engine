@@ -77,7 +77,7 @@ pub use archetype::ArchetypeId;
 pub use component::{Component, FieldDesc, component_id, schema_hash};
 pub use entity::{Entities, Entity};
 pub use hash::{CanonicalHash, ComponentId, SchemaHash, SideTableId, StateHasher};
-pub use query::{Query, QueryData};
+pub use query::{Query, QueryData, ReadOnly};
 pub use registry::{ComponentInfo, Registry, RegistryError};
 pub use side_table::{SideTable, SideTableError};
 pub use state_hash::StateHash;

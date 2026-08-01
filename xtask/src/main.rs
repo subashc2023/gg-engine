@@ -5,9 +5,12 @@
 
 mod ci;
 mod dist;
+mod fresh;
 mod probe;
 mod public_api;
+mod replay;
 mod shaders;
+mod timers;
 mod util;
 
 fn main() {
@@ -23,6 +26,8 @@ fn main() {
         Some("shaders") => shaders::build_all(rest.contains(&"--check")),
         Some("dist") => dist::gate(),
         Some("public-api") => public_api::run(&rest),
+        Some("replay") => replay::run(&rest),
+        Some("timers") => timers::run(&rest),
         Some("assets") => stub("assets", "M9 (asset pipeline; `ggc` does not exist yet)"),
         Some("bench") => bench(),
         Some("capture") => stub("capture", "M8 (RenderDoc in-application API)"),

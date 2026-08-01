@@ -128,12 +128,12 @@ float4 fs_main() : SV_Target
     let pixels = rhi
         .render(
             [0.0, 0.0, 0.0, 1.0],
-            Some(&DrawSpec {
+            &[DrawSpec {
                 pipeline: handle,
                 push_constants: &push,
                 count: 3,
                 index_buffer: None,
-            }),
+            }],
         )
         .unwrap();
     assert_eq!(
@@ -192,12 +192,12 @@ float4 fs_main() : SV_Target
         push[..4].copy_from_slice(&texture.to_le_bytes());
         rhi.render(
             [0.0, 0.0, 0.0, 1.0],
-            Some(&DrawSpec {
+            &[DrawSpec {
                 pipeline: handle,
                 push_constants: &push,
                 count: 3,
                 index_buffer: None,
-            }),
+            }],
         )
         .unwrap()
     };
@@ -264,12 +264,12 @@ float4 fs_main(VOut i) : SV_Target { return i.color; }
     let pixels = rhi
         .render(
             [0.0, 0.0, 0.0, 1.0],
-            Some(&DrawSpec {
+            &[DrawSpec {
                 pipeline: handle,
                 push_constants: &[],
                 count: 12,
                 index_buffer: None,
-            }),
+            }],
         )
         .unwrap();
     assert_eq!(
@@ -334,12 +334,12 @@ float4 fs_main() : SV_Target
     let pixels = rhi
         .render(
             [0.0, 0.0, 0.0, 1.0],
-            Some(&DrawSpec {
+            &[DrawSpec {
                 pipeline: handle,
                 push_constants: &push,
                 count: 3,
                 index_buffer: None,
-            }),
+            }],
         )
         .unwrap();
     // Round 3: (1, 1, 0).
@@ -481,7 +481,7 @@ fn uploads_are_clean_on_whichever_queue_topology_this_device_has() {
     // The acquires are recorded by the next render; running one is what proves
     // the barrier pair validates.
     let _ = rhi.register_texture(image).unwrap();
-    let _ = rhi.render([0.0, 0.0, 0.0, 1.0], None).unwrap();
+    let _ = rhi.render([0.0, 0.0, 0.0, 1.0], &[]).unwrap();
 
     rhi.destroy_buffer(buffer).unwrap();
     rhi.destroy_image(image).unwrap();

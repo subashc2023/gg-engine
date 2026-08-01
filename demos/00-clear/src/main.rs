@@ -99,7 +99,9 @@ fn main() -> anyhow::Result<()> {
             Control::Exit
         }
         // Demos 00 and 01 predate raw input (§4.7) and ignore it.
-        Event::Key { .. } | Event::MouseMotion { .. } => Control::Continue,
+        Event::Key { .. } | Event::MouseButton { .. } | Event::MouseMotion { .. } => {
+            Control::Continue
+        }
     })?;
 
     if let Some(err) = failure {

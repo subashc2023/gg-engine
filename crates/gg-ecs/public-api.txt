@@ -177,6 +177,16 @@ pub type &mut T::Item<'r> = &'r mut T
 pub fn &mut T::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
 pub fn &mut T::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
 pub fn &mut T::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+pub trait gg_ecs::query::ReadOnly: gg_ecs::query::QueryData
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly, D: gg_ecs::query::ReadOnly, E: gg_ecs::query::ReadOnly, F: gg_ecs::query::ReadOnly, G: gg_ecs::query::ReadOnly, H: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C, D, E, F, G, H)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly, D: gg_ecs::query::ReadOnly, E: gg_ecs::query::ReadOnly, F: gg_ecs::query::ReadOnly, G: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C, D, E, F, G)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly, D: gg_ecs::query::ReadOnly, E: gg_ecs::query::ReadOnly, F: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C, D, E, F)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly, D: gg_ecs::query::ReadOnly, E: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C, D, E)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly, D: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C, D)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B)
+impl<A: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A)
+impl<T: gg_ecs::component::Component> gg_ecs::query::ReadOnly for &T
 pub mod gg_ecs::registry
 pub enum gg_ecs::registry::RegistryError
 pub gg_ecs::registry::RegistryError::DuplicateDeclaration
@@ -340,6 +350,8 @@ pub fn gg_ecs::world::World::canonical_hash_via_protocol(&self) -> gg_ecs::hash:
 pub fn gg_ecs::world::World::contains<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> bool
 pub fn gg_ecs::world::World::despawn(&mut self, gg_ecs::entity::Entity) -> bool
 pub fn gg_ecs::world::World::each<D: gg_ecs::query::QueryData>(&mut self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_ecs::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
+pub fn gg_ecs::world::World::each_ref<D: gg_ecs::query::QueryData + gg_ecs::query::ReadOnly>(&self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_ecs::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
+pub fn gg_ecs::world::World::entity_hashes(&self) -> alloc::vec::Vec<(gg_ecs::entity::Entity, gg_ecs::hash::CanonicalHash)>
 pub fn gg_ecs::world::World::get<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> core::option::Option<&T>
 pub fn gg_ecs::world::World::get_mut<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity) -> core::option::Option<&mut T>
 pub fn gg_ecs::world::World::insert<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity, T) -> core::result::Result<(), gg_ecs::world::WorldError>
@@ -531,6 +543,8 @@ pub fn gg_ecs::world::World::canonical_hash_via_protocol(&self) -> gg_ecs::hash:
 pub fn gg_ecs::world::World::contains<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> bool
 pub fn gg_ecs::world::World::despawn(&mut self, gg_ecs::entity::Entity) -> bool
 pub fn gg_ecs::world::World::each<D: gg_ecs::query::QueryData>(&mut self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_ecs::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
+pub fn gg_ecs::world::World::each_ref<D: gg_ecs::query::QueryData + gg_ecs::query::ReadOnly>(&self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_ecs::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
+pub fn gg_ecs::world::World::entity_hashes(&self) -> alloc::vec::Vec<(gg_ecs::entity::Entity, gg_ecs::hash::CanonicalHash)>
 pub fn gg_ecs::world::World::get<T: gg_ecs::component::Component>(&self, gg_ecs::entity::Entity) -> core::option::Option<&T>
 pub fn gg_ecs::world::World::get_mut<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity) -> core::option::Option<&mut T>
 pub fn gg_ecs::world::World::insert<T: gg_ecs::component::Component>(&mut self, gg_ecs::entity::Entity, T) -> core::result::Result<(), gg_ecs::world::WorldError>
@@ -618,6 +632,16 @@ pub type &mut T::Item<'r> = &'r mut T
 pub fn &mut T::access(&mut alloc::vec::Vec<gg_ecs::hash::ComponentId>, &mut alloc::vec::Vec<gg_ecs::hash::ComponentId>)
 pub fn &mut T::columns<'w>(&mut gg_ecs::view::ArchetypeView<'w, '_>) -> Self::Columns
 pub fn &mut T::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
+pub trait gg_ecs::ReadOnly: gg_ecs::query::QueryData
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly, D: gg_ecs::query::ReadOnly, E: gg_ecs::query::ReadOnly, F: gg_ecs::query::ReadOnly, G: gg_ecs::query::ReadOnly, H: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C, D, E, F, G, H)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly, D: gg_ecs::query::ReadOnly, E: gg_ecs::query::ReadOnly, F: gg_ecs::query::ReadOnly, G: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C, D, E, F, G)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly, D: gg_ecs::query::ReadOnly, E: gg_ecs::query::ReadOnly, F: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C, D, E, F)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly, D: gg_ecs::query::ReadOnly, E: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C, D, E)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly, D: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C, D)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly, C: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B, C)
+impl<A: gg_ecs::query::ReadOnly, B: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A, B)
+impl<A: gg_ecs::query::ReadOnly> gg_ecs::query::ReadOnly for (A)
+impl<T: gg_ecs::component::Component> gg_ecs::query::ReadOnly for &T
 pub trait gg_ecs::SideTable: gg_ecs::state_hash::StateHash + core::marker::Send + core::marker::Sync + 'static
 pub const gg_ecs::SideTable::DECLARED_ID: &'static str
 pub const gg_ecs::SideTable::TYPE_NAME: &'static str

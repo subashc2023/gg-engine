@@ -6,6 +6,8 @@ resolver = "3"
 members = [
     "crates/gg-ecs",
     "crates/gg-ecs-derive",
+    "crates/gg-extract",
+    "crates/gg-input",
     "crates/gg-math",
     "crates/gg-platform",
     "crates/gg-rhi",

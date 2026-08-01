@@ -196,3 +196,35 @@ fn taking_a_column_the_query_never_asked_for_panics() {
         let _ = view.write_of::<Position>();
     });
 }
+
+#[test]
+fn the_shared_visit_reproduces_the_mutable_one_exactly() {
+    // `each_ref` exists so the extract stage can take `&World` (§4.1). It must
+    // be the same walk, not a second one: same archetype order, same rows, same
+    // entities. Miri covers this file, so this is also the read-only view's
+    // aliasing proof.
+    let (mut w, _) = world_with(9);
+    let q = Query::<(&Position, &Velocity)>::new().unwrap();
+
+    let mut shared: Vec<(u64, f64, f64)> = Vec::new();
+    w.each_ref(&q, |e, (pos, vel)| {
+        shared.push((e.to_bits(), pos.p.x, vel.v.x))
+    });
+
+    let mut exclusive: Vec<(u64, f64, f64)> = Vec::new();
+    w.each(&q, |e, (pos, vel)| {
+        exclusive.push((e.to_bits(), pos.p.x, vel.v.x));
+    });
+
+    assert_eq!(shared, exclusive);
+    assert_eq!(shared.len(), 9);
+}
+
+#[test]
+fn a_shared_visit_over_an_empty_match_visits_nothing() {
+    let (w, _) = world_with(4);
+    let q = Query::<(&Position, &Frozen)>::new().unwrap();
+    let mut visits = 0;
+    w.each_ref(&q, |_, _| visits += 1);
+    assert_eq!(visits, 0);
+}

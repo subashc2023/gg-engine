@@ -21,3 +21,11 @@ toml = "1"
 # M2 (§4.4): the offline shader path compiles in-process through gg-shaders —
 # the same compiler the hot path uses, and the only road to the reflection API.
 gg-shaders = { path = "../crates/gg-shaders" }
+# M4B (§5.6): the determinism gate's material — the curated replay and the
+# chaos generator — is authored here and *checked* by an ordinary test in the
+# demo, because the test has to run under qemu where xtask cannot. One source
+# of truth, reached from both sides. Sim half only: no GPU, no winit.
+demo-02-mesh = { path = "../demos/02-mesh", default-features = false, features = [
+    "gate",
+] }
+gg-input = { path = "../crates/gg-input" }

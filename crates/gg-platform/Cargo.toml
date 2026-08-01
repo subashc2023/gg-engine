@@ -14,6 +14,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Below us, not above (§4.7): Key and MouseButton are born there so the sim and
+# replay path can bind against them without linking winit.
+gg-input = { path = "../gg-input" }
 thiserror.workspace = true
 tracing.workspace = true
 winit = { workspace = true }

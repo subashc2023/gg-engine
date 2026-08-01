@@ -119,6 +119,13 @@ fn process_module(module: &Path, check: bool) -> anyhow::Result<bool> {
     let gen_dir = crate_root.join("src/shaders_gen");
     let rs_path = gen_dir.join(format!("{stem}.rs"));
 
+    // Hashed and byte-compared exactly as checked out — no line-ending
+    // normalization here on purpose. `.gitattributes` pins every checkout to LF
+    // (§5, Filesystem hygiene), so a CRLF file reaching this point means the
+    // repository itself has one, and that is worth failing over rather than
+    // papering over. The weekly fresh-clone gate found this the hard way on its
+    // first run: without `.gitattributes`, a Windows clone got CRLF and every
+    // generated artifact read as stale in a tree nobody had touched.
     let source = std::fs::read(module)?;
     let hash = sha256_hex(&source);
     let header = gg_shaders::codegen::header_line(&hash);

@@ -1,8 +1,13 @@
-# demo 02-mesh (§6 M4A): a textured spinning mesh under a fly camera. Same
-# lib/bin split as demo 01 — the lib is the *scene* (mesh, texture, camera,
-# push constants) so gg-golden renders exactly what the demo renders, and the
-# windowed app rides the `app` feature so the harness's dependency graph never
-# touches gg-platform/winit (§5 gate 7).
+# demo 02-mesh: a textured spinning mesh under a fly camera (M4A), whose camera
+# and spin are ECS sim state driven through action maps (M4B).
+#
+# Three dependency graphs out of one crate, because the halves are gated
+# differently and §5 depends on that:
+#   sim only          — gg-ecs + gg-input + gg-math. What the determinism gate
+#                       and the aarch64-under-qemu leg build: no GPU, no winit.
+#   + `scene`         — the mesh, texture, upload path. gg-golden's graph, which
+#                       gate 7 scans for winit bytes.
+#   + `app`           — the windowed demo binary.
 
 [package]
 name = "demo-02-mesh"
@@ -22,8 +27,12 @@ required-features = ["app"]
 
 [dependencies]
 bytemuck.workspace = true
+thiserror.workspace = true
+gg-ecs = { path = "../../crates/gg-ecs" }
+gg-extract = { path = "../../crates/gg-extract" }
+gg-input = { path = "../../crates/gg-input" }
 gg-math = { path = "../../crates/gg-math" }
-gg-rhi = { path = "../../crates/gg-rhi", default-features = false }
+gg-rhi = { path = "../../crates/gg-rhi", default-features = false, optional = true }
 anyhow = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
@@ -31,16 +40,23 @@ gg-platform = { path = "../../crates/gg-platform", optional = true }
 
 [features]
 # Mirrors gg-runtime's tier discipline (§3): named combinations only.
-default = ["app", "tier-dev"]
-# The windowed demo binary. gg-golden depends on this crate with
-# default-features = false: scene only, no windowing in its graph.
+default = ["app", "gate", "tier-dev"]
+# The GPU half. gg-golden takes this without `app`: scene only, no windowing.
+scene = ["dep:gg-rhi"]
+# The determinism gate's material (§5.6): the curated replay's script, the chaos
+# generator, the divergence report. Test and xtask material — a shipped build
+# has no reason to carry the generator that authored its baselines, and saying
+# so with a feature beats trusting LTO to notice.
+gate = []
+# The windowed demo binary.
 app = [
+    "scene",
     "dep:gg-platform",
     "dep:anyhow",
     "dep:tracing",
     "dep:tracing-subscriber",
 ]
-validation = ["gg-rhi/validation"]
+validation = ["gg-rhi?/validation"]
 fp-assert = []
 tier-dev = ["validation", "fp-assert"]
 tier-dist = ["app"]

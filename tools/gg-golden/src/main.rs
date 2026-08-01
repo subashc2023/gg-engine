@@ -54,6 +54,22 @@ const SCENES: &[Scene] = &[
         },
         render: render_mesh,
     },
+    Scene {
+        name: "mesh-far",
+        // The same frame, simulated 10^12 m from the origin (§4.2.1). It is
+        // judged against its *own* reference rather than against `mesh`, so the
+        // gate catches a regression in the narrowing itself; the claim that the
+        // two frames are the same picture is a demo unit test on the clip-space
+        // corners, where a sub-pixel difference is measurable instead of
+        // rounded away. Same policy as `mesh`: nothing about the distance is
+        // supposed to make the image harder to reproduce, and if it does, that
+        // is the finding.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+        },
+        render: render_mesh_far,
+    },
 ];
 
 /// Render demo 02's scene — the same buffers, the same upload path through
@@ -61,6 +77,17 @@ const SCENES: &[Scene] = &[
 /// (§4.10: the golden guards the demo, not a lookalike). Tick 0 is the frozen
 /// pose; the mesh's rotation is a pure function of it (§2, Sim time row).
 fn render_mesh() -> Render {
+    render_mesh_from(gg_math::sim::DVec3::new(0.0, 0.0, 0.0))
+}
+
+/// The same scene with the whole world — camera and cube together — translated
+/// to [`demo_02_mesh::sim::FAR_ORIGIN`]. If subtract-then-narrow works, this is
+/// the same picture; if anything narrows before the subtraction, it is a mess.
+fn render_mesh_far() -> Render {
+    render_mesh_from(demo_02_mesh::sim::FAR_ORIGIN)
+}
+
+fn render_mesh_from(origin: gg_math::sim::DVec3) -> Render {
     let extent = demo_02_mesh::GOLDEN_EXTENT;
     let mut rhi = gg_rhi::OffscreenRhi::new(extent)?;
     tracing::info!(
@@ -69,14 +96,24 @@ fn render_mesh() -> Render {
         "offscreen device"
     );
     let scene = demo_02_mesh::upload(&mut rhi)?;
-    let push = demo_02_mesh::push_for(&demo_02_mesh::Camera::GOLDEN, extent, 0, &scene);
+    // The demo's own opening sim, extracted through the demo's own extract
+    // stage: the golden guards the whole path from ECS state to push constants,
+    // not just the draw at the end of it.
+    let sim = demo_02_mesh::sim::Sim::new_at(0, origin)?;
+    let mut extracted = gg_extract::Extracted::default();
+    let camera = demo_02_mesh::extract(&sim, &mut extracted)?;
+    let instance = extracted
+        .instances
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("demo 02's opening sim extracted no cube"))?;
+    let push = demo_02_mesh::push_for(&camera, extent, instance, &scene);
     let draw = gg_rhi::DrawSpec {
         pipeline: scene.pipeline,
         push_constants: bytemuck::bytes_of(&push),
         count: scene.index_count,
         index_buffer: Some(scene.indices),
     };
-    let pixels = rhi.render(demo_02_mesh::CLEAR, Some(&draw))?;
+    let pixels = rhi.render(demo_02_mesh::CLEAR, std::slice::from_ref(&draw))?;
     let report = rhi.shutdown();
     anyhow::ensure!(
         report.clean(),
@@ -102,7 +139,7 @@ fn render_triangle() -> Render {
         count: demo_01_triangle::VERTEX_COUNT,
         index_buffer: None,
     };
-    let pixels = rhi.render(demo_01_triangle::CLEAR, Some(&draw))?;
+    let pixels = rhi.render(demo_01_triangle::CLEAR, std::slice::from_ref(&draw))?;
     let report = rhi.shutdown();
     anyhow::ensure!(
         report.clean(),

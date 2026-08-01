@@ -313,15 +313,12 @@ impl OffscreenRhi {
         Ok(())
     }
 
-    /// Render one frame — clear to `color`, run `draw` if given — wait for
-    /// completion, and return the target's pixels: tightly packed RGBA8,
-    /// row-major, sRGB-encoded (PNG-ready bytes, §4.10).
-    pub fn render(
-        &mut self,
-        color: [f32; 4],
-        draw: Option<&DrawSpec<'_>>,
-    ) -> Result<Vec<u8>, RhiError> {
-        let resolved = draw
+    /// Render one frame — clear to `color`, then run every draw in `draws` in
+    /// order — wait for completion, and return the target's pixels: tightly
+    /// packed RGBA8, row-major, sRGB-encoded (PNG-ready bytes, §4.10).
+    pub fn render(&mut self, color: [f32; 4], draws: &[DrawSpec<'_>]) -> Result<Vec<u8>, RhiError> {
+        let resolved = draws
+            .iter()
             .map(|d| {
                 let entry = *self.gpu.pipelines.get(d.pipeline)?;
                 let index_buffer = d
@@ -335,7 +332,7 @@ impl OffscreenRhi {
                     index_buffer,
                 })
             })
-            .transpose()?;
+            .collect::<Result<Vec<_>, _>>()?;
         let depth = self.gpu.resources.image(self.depth)?;
         let (depth_image, depth_view) = (depth.raw, depth.view);
         let acquires = self.gpu.take_acquires();
@@ -401,9 +398,9 @@ impl OffscreenRhi {
                 .color_attachments(&attachment)
                 .depth_attachment(&depth_attachment);
             device.cmd_begin_rendering(self.cmd, &rendering);
-            if let Some(draw) = &resolved {
-                // SAFETY: cmd is recording inside the pass; entry is live and
-                // targets these formats; the set is the global one.
+            for draw in &resolved {
+                // SAFETY: cmd is recording inside the pass; every entry is live
+                // and targets these formats; the set is the global one.
                 record_draw(
                     &self.gpu.device,
                     self.cmd,

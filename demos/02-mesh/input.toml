@@ -1,0 +1,19 @@
+# Demo 02's action map (§4.7). Bindings are by *physical* key position, so this
+# file means the same thing on AZERTY as on QWERTY. Contexts layer top down: the
+# first one that binds a key consumes it.
+#
+# Verb names resolve against the lists in `src/sim.rs`, and their order there is
+# the id space a replay file records — so renaming a verb here without renaming
+# it there is an error at load, not a silently dead binding.
+
+[game.actions]
+look = ["Tab", "Mouse2"]     # held while turning; modal, so the pointer stays usable
+spawn = ["F", "Mouse1"]
+despawn = ["G"]
+
+[game.axes]
+move_right = ["+D", "+Right", "-A", "-Left"]
+move_up = ["+E", "+Space", "-Q", "-ShiftLeft"]
+move_forward = ["+W", "+Up", "-S", "-Down"]
+look_x = ["MouseX"]
+look_y = ["MouseY"]

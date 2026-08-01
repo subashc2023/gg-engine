@@ -268,3 +268,40 @@ fn an_empty_world_still_has_a_domain_specific_hash() {
     // and they decide what the next spawn is called.
     assert_ne!(a, w.canonical_hash());
 }
+
+#[test]
+fn entity_hashes_locate_the_one_row_that_moved() {
+    // The divergence probe (§5.6): two worlds that disagree must disagree at a
+    // *named* entity, not merely in the whole-world hash.
+    let build = || {
+        let mut w = World::new();
+        let mut entities = Vec::new();
+        for i in 0..8 {
+            let e = w.spawn();
+            w.insert(e, pos(i as f64)).unwrap();
+            entities.push(e);
+        }
+        (w, entities)
+    };
+    let (mut a, entities) = build();
+    let (b, _) = build();
+    assert_eq!(
+        a.entity_hashes(),
+        b.entity_hashes(),
+        "identical worlds agree"
+    );
+
+    // Nudge one entity by one ULP-ish amount and find it by hash alone.
+    a.get_mut::<Position>(entities[5]).unwrap().p.x += 1.0;
+    assert_ne!(a.canonical_hash(), b.canonical_hash());
+    let (ha, hb) = (a.entity_hashes(), b.entity_hashes());
+    let first = ha
+        .iter()
+        .zip(&hb)
+        .find(|(x, y)| x != y)
+        .map(|(x, _)| x.0)
+        .expect("the worlds differ, so some entity must");
+    assert_eq!(first, entities[5]);
+    // ...and exactly one row moved.
+    assert_eq!(ha.iter().zip(&hb).filter(|(x, y)| x != y).count(), 1);
+}

@@ -117,6 +117,7 @@ fn interactive_resize_minimize_spam_1000() {
                 | Event::Frame
                 | Event::Exiting
                 | Event::Key { .. }
+                | Event::MouseButton { .. }
                 | Event::MouseMotion { .. } => {}
             }
         }

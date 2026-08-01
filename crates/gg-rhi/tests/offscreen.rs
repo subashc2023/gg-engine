@@ -17,7 +17,7 @@ fn init_tracing() {
 fn clear_readback_is_exact() {
     init_tracing();
     let mut rhi = OffscreenRhi::new((8, 8)).unwrap();
-    let pixels = rhi.render([1.0, 0.0, 0.0, 1.0], None).unwrap();
+    let pixels = rhi.render([1.0, 0.0, 0.0, 1.0], &[]).unwrap();
     assert_eq!(pixels.len(), 8 * 8 * 4);
     for px in pixels.chunks_exact(4) {
         // Linear 1.0 encodes to 255; linear 0.0 to 0 — exactly, per the sRGB
@@ -81,12 +81,12 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
     let pixels = rhi
         .render(
             [1.0, 0.0, 0.0, 1.0],
-            Some(&DrawSpec {
+            &[DrawSpec {
                 pipeline,
                 push_constants: &[],
                 count: 3,
                 index_buffer: None,
-            }),
+            }],
         )
         .unwrap();
     for px in pixels.chunks_exact(4) {
@@ -98,12 +98,12 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
     let err = rhi
         .render(
             [0.0; 4],
-            Some(&DrawSpec {
+            &[DrawSpec {
                 pipeline,
                 push_constants: &[],
                 count: 3,
                 index_buffer: None,
-            }),
+            }],
         )
         .unwrap_err();
     assert!(err.to_string().contains("not live"), "got: {err}");
@@ -178,12 +178,12 @@ float4 fs_main() : SV_Target { return push.color; }
     let err = rhi
         .render(
             [0.0; 4],
-            Some(&DrawSpec {
+            &[DrawSpec {
                 pipeline,
                 push_constants: &[0u8; 12], // wrong: pipeline declares 16
                 count: 3,
                 index_buffer: None,
-            }),
+            }],
         )
         .unwrap_err();
     assert!(
@@ -195,15 +195,122 @@ float4 fs_main() : SV_Target { return push.color; }
     let pixels = rhi
         .render(
             [0.0, 0.0, 0.0, 1.0],
-            Some(&DrawSpec {
+            &[DrawSpec {
                 pipeline,
                 push_constants: bytemuck::bytes_of(&[1.0f32, 1.0, 1.0, 1.0]),
                 count: 3,
                 index_buffer: None,
-            }),
+            }],
         )
         .unwrap();
     assert_eq!(&pixels[0..4], &[255, 255, 255, 255]);
+
+    let report = rhi.shutdown();
+    assert!(report.clean(), "unclean: {report:?}");
+}
+
+/// Several draws in one pass all land, in order — the M4B shape, since the sim
+/// decides how many things exist and a caller forced to present per object
+/// would show only the last one.
+#[test]
+fn every_draw_in_one_pass_reaches_the_target() {
+    init_tracing();
+    let dir = std::env::temp_dir().join(format!("gg-rhi-many-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("many.slang"),
+        r#"
+// Push constants place the quad and colour it, so one pipeline draws each
+// instance differently — the same shape demo 02's per-cube push takes.
+struct P { float4 color; float2 offset; float2 half_size; }
+[[vk::push_constant]] ConstantBuffer<P> push;
+
+struct VOut { float4 pos : SV_Position; }
+
+[shader("vertex")]
+VOut vs_main(uint vid: SV_VertexID)
+{
+    static const float2 quad[6] = {
+        float2(-1.0, -1.0), float2(1.0, -1.0), float2(1.0, 1.0),
+        float2(-1.0, -1.0), float2(1.0, 1.0), float2(-1.0, 1.0),
+    };
+    VOut o;
+    o.pos = float4(quad[vid] * push.half_size + push.offset, 0.5, 1.0);
+    return o;
+}
+
+[shader("fragment")]
+float4 fs_main() : SV_Target { return push.color; }
+"#,
+    )
+    .unwrap();
+    let module = gg_shaders::compile_module(&dir.to_string_lossy(), "many.slang").unwrap();
+    let find = |stage| {
+        module
+            .entry_points
+            .iter()
+            .find(|e| e.stage == stage)
+            .unwrap()
+    };
+    let (vs, fs) = (
+        find(gg_shaders::Stage::Vertex),
+        find(gg_shaders::Stage::Fragment),
+    );
+
+    let extent = (16u32, 16u32);
+    let mut rhi = OffscreenRhi::new(extent).unwrap();
+    let pipeline = rhi
+        .create_pipeline(&PipelineDesc {
+            name: "many",
+            vs_spirv: &vs.spirv,
+            vs_entry: &vs.spirv_entry,
+            fs_spirv: &fs.spirv,
+            fs_entry: &fs.spirv_entry,
+            push_constant_size: 32,
+            depth: false,
+        })
+        .unwrap();
+
+    // Left half red, right half green, and a third draw over the right half in
+    // blue — which must win there, proving draws land *in order* rather than
+    // merely all landing.
+    let push = |color: [f32; 4], offset: [f32; 2]| {
+        let mut bytes = Vec::with_capacity(32);
+        for f in color.iter().chain(&offset).chain(&[0.5f32, 1.0]) {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        bytes
+    };
+    let (red, green, blue) = (
+        push([1.0, 0.0, 0.0, 1.0], [-0.5, 0.0]),
+        push([0.0, 1.0, 0.0, 1.0], [0.5, 0.0]),
+        push([0.0, 0.0, 1.0, 1.0], [0.5, 0.0]),
+    );
+    fn draw(pipeline: gg_rhi::PipelineHandle, bytes: &[u8]) -> DrawSpec<'_> {
+        DrawSpec {
+            pipeline,
+            push_constants: bytes,
+            count: 6,
+            index_buffer: None,
+        }
+    }
+    let pixels = rhi
+        .render(
+            [0.0, 0.0, 0.0, 1.0],
+            &[
+                draw(pipeline, &red),
+                draw(pipeline, &green),
+                draw(pipeline, &blue),
+            ],
+        )
+        .unwrap();
+
+    let pixel = |x: u32, y: u32| {
+        let at = ((y * extent.0 + x) * 4) as usize;
+        &pixels[at..at + 4]
+    };
+    assert_eq!(pixel(4, 8), [255, 0, 0, 255], "the first draw is missing");
+    assert_eq!(pixel(12, 8), [0, 0, 255, 255], "the last draw must win");
 
     let report = rhi.shutdown();
     assert!(report.clean(), "unclean: {report:?}");

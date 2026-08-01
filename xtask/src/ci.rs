@@ -46,8 +46,9 @@ fn fast() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Pre-push tier: gates 1-3 in full, plus dist/dist-verify feature checks (§5).
-/// Replay determinism joins when replays exist (M4B); named absence, not a gap.
+/// Pre-push tier: gates 1-3 in full, the native legs of replay determinism
+/// (§5.6a and 6b's x86 half, plus the dist-profile leg of 6c), and
+/// dist/dist-verify feature checks (§5).
 fn push() -> anyhow::Result<()> {
     exec(cargo().args(["fmt", "--check"]), "cargo fmt --check")?;
     clippy(&All)?;
@@ -58,6 +59,11 @@ fn push() -> anyhow::Result<()> {
     crate::public_api::check()?;
     tests(&All)?;
     fp_baseline_dist_profile()?;
+    // §5.6a and the x86 half of 6b: the curated replay's hash sequence, run
+    // twice here and compared against the checked-in baseline every leg shares.
+    // The tests above already ran it under the dev profile; this is the report.
+    crate::replay::run(&[])?;
+    replay_dist_profile()?;
     // Gate 3 (§5): entry points compile + reflection codegen diff-clean. Check
     // mode: CI verifies the checked-in artifacts, it never rewrites the tree.
     crate::shaders::build_all(true)?;
@@ -80,7 +86,7 @@ fn push() -> anyhow::Result<()> {
             &format!("cargo check {pkg} --features {feats}"),
         )?;
     }
-    println!("xtask ci --push: green (replay determinism gates join at M4B)");
+    println!("xtask ci --push: green");
     Ok(())
 }
 
@@ -90,11 +96,12 @@ fn nightly() -> anyhow::Result<()> {
     crate::probe::run(false)?;
     stress_and_miri()?;
     aarch64_leg()?;
+    replay_instrumented_profile()?;
     gpu_tests()?;
     golden_suite()?;
     println!(
         "xtask ci --nightly: green (windowless by construction — windowed WSI coverage is \
-         `cargo xtask interactive`, manual; golden suite grows to v1 at M7, chaos replays M4B)"
+         `cargo xtask interactive`, manual; golden suite grows to v1 at M7)"
     );
     Ok(())
 }
@@ -172,9 +179,47 @@ pub fn interactive() -> anyhow::Result<()> {
         "windowed suite: swapchain torture + resize/minimize storms (§4.3, §1.5)",
     )?;
     demo_runs()?;
+    replay_run()?;
     crate::dist::demo_runs()?;
     println!("xtask interactive: green (manual windowed suite — not part of any automated tier)");
     Ok(())
+}
+
+/// The end-to-end half of §5.6, and the only place it can live: the *windowed*
+/// demo replays the curated file and must land on the hash the gate recorded
+/// for it. Everything below the window — action state, the sim, extract — is
+/// the same code the gate drives, but this is the path a player's bug report
+/// actually takes, and a divergence between the two would be invisible to a
+/// sim-level test.
+///
+/// Windowed, therefore manual (§1.5).
+fn replay_run() -> anyhow::Result<()> {
+    let replay = demo_02_mesh::gate::replay_path(demo_02_mesh::gate::CURATED);
+    let baseline = demo_02_mesh::gate::parse_baseline(&std::fs::read_to_string(
+        demo_02_mesh::gate::baseline_path(demo_02_mesh::gate::CURATED),
+    )?)?;
+    let (_, last) = baseline
+        .last()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("the curated baseline is empty"))?;
+
+    let mut cmd = cargo();
+    cmd.args([
+        "run",
+        "-p",
+        "demo-02-mesh",
+        "--",
+        "--replay",
+        &replay.display().to_string(),
+        "--expect-hash",
+        &format!("{last:032x}"),
+    ]);
+    cmd.env("GG_HEADLESS", "1");
+    lavapipe_env(&mut cmd)?;
+    exec(
+        &mut cmd,
+        "demo 02 replays the curated file and lands on its recorded hash (§5.6)",
+    )
 }
 
 /// Point child processes at the pinned lavapipe (§5.4). Windows pins via
@@ -266,6 +311,12 @@ fn aarch64_leg() -> anyhow::Result<()> {
         // them. The full-scale churn stays `#[ignore]`d here — under qemu-user
         // it would cost most of an hour to prove what the moderate-scale frozen
         // digest already proves.
+        //
+        // demo-02-mesh joins at M4B as the *third leg of §5.6b*: the curated
+        // replay and the chaos seeds, compared against the same checked-in
+        // baselines the two x86 hosts compare against. `--no-default-features`
+        // is what makes that possible at all — the sim half has no GPU and no
+        // winit in its graph, so qemu never has to emulate a Vulkan loader.
         exec(
             cargo().args([
                 "nextest",
@@ -274,23 +325,51 @@ fn aarch64_leg() -> anyhow::Result<()> {
                 "gg-math",
                 "-p",
                 "gg-ecs",
+                "-p",
+                "demo-02-mesh",
+                "--no-default-features",
+                "--features",
+                "gate",
                 "--target",
                 "aarch64-unknown-linux-gnu",
                 "--cargo-profile",
                 profile,
             ]),
-            &format!("gg-math + gg-ecs tests on aarch64 under qemu ({profile} profile)"),
+            &format!(
+                "gg-math + gg-ecs + replay determinism on aarch64 under qemu ({profile} profile)"
+            ),
         )?;
     }
     Ok(())
 }
 
+/// The one codegen configuration no hash ever measured (§5.6c): thin LTO at
+/// full optimization, which is neither dev's nor dist's. It is also the tier a
+/// bug replay gets profiled under, where a silent divergence would cost most.
+fn replay_instrumented_profile() -> anyhow::Result<()> {
+    exec(
+        cargo().args([
+            "nextest",
+            "run",
+            "-p",
+            "demo-02-mesh",
+            "--no-default-features",
+            "--features",
+            "gate",
+            "--cargo-profile",
+            "instrumented",
+        ]),
+        "replay determinism under the instrumented profile (§5.6c)",
+    )
+}
+
 fn weekly() -> anyhow::Result<()> {
     nightly()?;
-    println!(
-        "xtask ci --weekly: green (fresh-clone gate and cargo-update canary go standing at M4B; \
-         GPU-assisted validation at M1)"
-    );
+    // Standing from M4B (§6, M0A's deferred schedule): the two gates that check
+    // the repository rather than the code.
+    crate::fresh::clone_gate()?;
+    crate::fresh::update_canary()?;
+    println!("xtask ci --weekly: green");
     Ok(())
 }
 
@@ -328,6 +407,32 @@ fn tests(crates: &dyn CrateSet) -> anyhow::Result<()> {
     cmd.args(["nextest", "run", "--no-tests=pass"])
         .args(crates.args());
     exec(&mut cmd, "cargo nextest run")
+}
+
+/// §5.6c, as far as this milestone can take it: the replay determinism tests
+/// under **dist codegen** — fat LTO, `codegen-units = 1`, full optimization —
+/// against the same checked-in baseline the dev-profile run used. Optimization
+/// level may not touch sim results, and dev alone never exercises the two knobs
+/// that would.
+///
+/// The full 6c gate (record under dist, replay under dist-verify, dev and
+/// instrumented) needs `gg-runtime` to own the loop and the recorder, which is
+/// M5's; this is the half that can be proven with the demo driving itself.
+fn replay_dist_profile() -> anyhow::Result<()> {
+    exec(
+        cargo().args([
+            "nextest",
+            "run",
+            "-p",
+            "demo-02-mesh",
+            "--no-default-features",
+            "--features",
+            "gate",
+            "--cargo-profile",
+            "dist",
+        ]),
+        "replay determinism under the dist profile (§5.6c)",
+    )
 }
 
 /// §5.6d: the FP baseline must hold under dist codegen (fat LTO,

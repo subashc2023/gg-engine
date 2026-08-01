@@ -449,9 +449,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "gg-ecs",
+ "gg-extract",
+ "gg-input",
  "gg-math",
  "gg-platform",
  "gg-rhi",
+ "thiserror 2.0.19",
  "tracing",
  "tracing-subscriber",
 ]
@@ -671,6 +675,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gg-extract"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "gg-ecs",
+ "gg-math",
+]
+
+[[package]]
 name = "gg-golden"
 version = "0.1.0"
 dependencies = [
@@ -678,10 +691,19 @@ dependencies = [
  "bytemuck",
  "demo-01-triangle",
  "demo-02-mesh",
+ "gg-extract",
+ "gg-math",
  "gg-rhi",
  "png",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "gg-input"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -697,6 +719,7 @@ dependencies = [
 name = "gg-platform"
 version = "0.1.0"
 dependencies = [
+ "gg-input",
  "raw-window-handle",
  "thiserror 2.0.19",
  "tracing",
@@ -2691,6 +2714,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ash",
+ "demo-02-mesh",
+ "gg-input",
  "gg-shaders",
  "sha2",
  "toml",

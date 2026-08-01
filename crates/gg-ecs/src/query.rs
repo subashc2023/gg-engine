@@ -55,6 +55,17 @@ impl<T: Component> QueryData for &T {
     }
 }
 
+/// A [`QueryData`] that borrows nothing mutably.
+///
+/// The bound on [`World::each_ref`](crate::World::each_ref), and the reason a
+/// read-only visit over `&World` is sound without a runtime check: `&mut T`
+/// simply does not implement it, so a writing query cannot reach the shared
+/// path at all. Not implementable downstream — it is a claim about
+/// [`QueryData::access`], which is itself sealed by the same reasoning.
+pub trait ReadOnly: QueryData {}
+
+impl<T: Component> ReadOnly for &T {}
+
 impl<T: Component> QueryData for &mut T {
     type Item<'r> = &'r mut T;
     type Columns<'w> = &'w mut [T];
@@ -94,6 +105,8 @@ macro_rules! tuple_query {
                 ($($name::get($name, row),)+)
             }
         }
+
+        impl<$($name: ReadOnly),+> ReadOnly for ($($name,)+) {}
     };
 }
 

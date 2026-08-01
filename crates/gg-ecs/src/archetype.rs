@@ -89,6 +89,12 @@ impl Archetype {
         self.entities.as_ptr()
     }
 
+    /// The same, for [`crate::view::build_ref`], where the archetype is only
+    /// ever borrowed shared and no column pointer is written through.
+    pub(crate) fn entities_ptr_shared(&self) -> *const Entity {
+        self.entities.as_ptr()
+    }
+
     /// Position of `id` in this archetype's parallel arrays.
     pub(crate) fn column_index(&self, id: ComponentId) -> Option<usize> {
         self.ids.binary_search(&id).ok()

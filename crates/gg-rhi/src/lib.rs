@@ -341,17 +341,22 @@ impl Rhi {
     /// to `color` (linear values; the sRGB target encodes). Handles resize,
     /// minimize, out-of-date, and suboptimal as normal events (§4.3).
     pub fn render_clear_frame(&mut self, color: [f32; 4]) -> Result<FrameOutcome, RhiError> {
-        self.render_frame(color, None)
+        self.render_frame(color, &[])
     }
 
-    /// Record, submit, and present one frame: clear to `color`, then run
-    /// `draw` if given (the one-pass world; the render graph owns passes from
-    /// M6). Resize/minimize/out-of-date handled as in
+    /// Record, submit, and present one frame: clear to `color`, then run every
+    /// draw in `draws`, in order, into one pass (the render graph owns passes
+    /// from M6). Resize/minimize/out-of-date handled as in
     /// [`Rhi::render_clear_frame`].
+    ///
+    /// A slice and not one draw: the sim decides how many things exist, and a
+    /// caller forced to present per object would show only the last one. It is
+    /// still *one* pass and one present — batching and instancing are M6's, and
+    /// a draw call per object is the honest cost until then.
     pub fn render_frame(
         &mut self,
         color: [f32; 4],
-        draw: Option<&DrawSpec<'_>>,
+        draws: &[DrawSpec<'_>],
     ) -> Result<FrameOutcome, RhiError> {
         if self.pending_recreate || self.swapchain.suspended() {
             // Recreation is a normal event but a *structural* one: presents
@@ -392,7 +397,7 @@ impl Rhi {
         // signaled semaphore with no waiter, which the next frame to reuse this
         // slot trips over as a validation error, permanently failing the §4.3
         // zero-message shutdown report. Nothing may fail in between.
-        let draw = self.resolve_draw(draw)?;
+        let draws = self.resolve_draws(draws)?;
         let depth = self.gpu.resources.image(self.depth)?;
         let (depth_image, depth_view) = (depth.raw, depth.view);
 
@@ -414,7 +419,7 @@ impl Rhi {
             color,
             (depth_image, depth_view),
             &acquires,
-            draw.as_ref(),
+            &draws,
         )?;
 
         // Submit: wait the acquire binary (and the transfer timeline when an
@@ -500,24 +505,23 @@ impl Rhi {
 
     /// Resolve a draw's handles to Vulkan objects, so the record path cannot
     /// fail. See the call site for why this must happen before acquire.
-    fn resolve_draw<'a>(
-        &self,
-        draw: Option<&DrawSpec<'a>>,
-    ) -> Result<Option<ResolvedDraw<'a>>, RhiError> {
-        draw.map(|d| {
-            let entry = *self.gpu.pipelines.get(d.pipeline)?;
-            let index_buffer = d
-                .index_buffer
-                .map(|h| self.gpu.resources.buffer(h).map(|b| b.raw))
-                .transpose()?;
-            Ok(ResolvedDraw {
-                entry,
-                push_constants: d.push_constants,
-                count: d.count,
-                index_buffer,
+    fn resolve_draws<'a>(&self, draws: &[DrawSpec<'a>]) -> Result<Vec<ResolvedDraw<'a>>, RhiError> {
+        draws
+            .iter()
+            .map(|d| {
+                let entry = *self.gpu.pipelines.get(d.pipeline)?;
+                let index_buffer = d
+                    .index_buffer
+                    .map(|h| self.gpu.resources.buffer(h).map(|b| b.raw))
+                    .transpose()?;
+                Ok(ResolvedDraw {
+                    entry,
+                    push_constants: d.push_constants,
+                    count: d.count,
+                    index_buffer,
+                })
             })
-        })
-        .transpose()
+            .collect()
     }
 
     /// Rebuild the depth target to match a recreated swapchain. The old one is
@@ -548,7 +552,7 @@ impl Rhi {
         color: [f32; 4],
         depth: (vk::Image, vk::ImageView),
         acquires: &[upload::Acquire],
-        draw: Option<&ResolvedDraw<'_>>,
+        draws: &[ResolvedDraw<'_>],
     ) -> Result<(), RhiError> {
         let device = self.gpu.device.raw();
         // SAFETY: the timeline wait proved this slot's previous frame retired,
@@ -613,10 +617,10 @@ impl Rhi {
                 .color_attachments(&attachment)
                 .depth_attachment(&depth_attachment);
             device.cmd_begin_rendering(cmd, &rendering);
-            if let Some(draw) = draw {
-                // SAFETY: cmd is recording inside the rendering pass; the entry
-                // came from the live store and targets these formats, and the
-                // set is the one every pipeline layout declares.
+            for draw in draws {
+                // SAFETY: cmd is recording inside the rendering pass; every
+                // entry came from the live store and targets these formats, and
+                // the set is the one every pipeline layout declares.
                 pipeline::record_draw(
                     &self.gpu.device,
                     cmd,

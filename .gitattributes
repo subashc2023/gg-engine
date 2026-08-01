@@ -1,0 +1,11 @@
+# One checkout on both hosts (§5, "Filesystem hygiene"). Without this, a Windows
+# clone with core.autocrlf=true gets CRLF while the working tree that generated
+# the checked-in artifacts has LF — and content hashes computed over source
+# files then disagree between a fresh clone and the tree they were blessed in.
+# The weekly fresh-clone gate found exactly that on its first run.
+* text=auto eol=lf
+
+# Binary, and not to be normalized under any setting.
+*.png binary
+*.spv binary
+*.ggrp binary

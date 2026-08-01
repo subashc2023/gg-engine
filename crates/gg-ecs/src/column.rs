@@ -93,6 +93,19 @@ impl Column {
         bytemuck::cast_slice_mut::<Block, u8>(&mut self.blocks).as_mut_ptr()
     }
 
+    /// Base pointer for a read-only view (`ReadOnly` queries, §4.2).
+    ///
+    /// The `*mut` in [`ColumnView`](crate::view::ColumnView) is shape, not
+    /// permission: this pointer carries shared provenance and writing through
+    /// it is UB. Only [`view::build_ref`](crate::view::build_ref) may produce
+    /// it, and only for an access set whose write list is empty — enforced at
+    /// the type level by the `ReadOnly` bound, not by this comment.
+    pub(crate) fn base_ptr_shared(&self) -> *mut u8 {
+        bytemuck::cast_slice::<Block, u8>(&self.blocks)
+            .as_ptr()
+            .cast_mut()
+    }
+
     /// Grow the block store so `rows` rows fit.
     fn reserve_rows(&mut self, rows: usize) {
         let needed = rows * self.stride;

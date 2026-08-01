@@ -1,0 +1,24 @@
+# gg-input (§4.7): action maps, the polling API, and input recording/replay.
+#
+# Below gg-platform rather than above it, which inverts the obvious direction on
+# purpose: the physical-key identity has to be reachable from the sim and replay
+# path, and that path is headless *by linkage* (§1.5, §5 gate 7). A gg-input
+# that depended on gg-platform would drag winit into every replay runner and
+# every qemu leg. So `Key` is born here and gg-platform re-exports it.
+#
+# The recorder is unconditional in every tier — it is the §1.2 bug-report
+# channel, not lab equipment (§2), and the dist gate checks for its *presence*.
+
+[package]
+name = "gg-input"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true

@@ -1,10 +1,22 @@
 //! The dist gate (§5.8), M0A form: the exact `tier-dist` combination builds and
 //! runs through gg-runtime, and the lab equipment provably unbolted (§1.13) —
 //! no Tracy/notify/tools in the resolved dist graph, no tracy strings in the
-//! binary. Demos join the run at M1+; the recorder *presence* check activates
-//! at M4B when the recorder exists.
+//! binary. Demos join the run at M1+.
+//!
+//! The gate has *presence* checks too, and they are not a symmetry exercise:
+//! embedded SPIR-V must be there (§4.4), and so must the input recorder, which
+//! is the §1.2 bug-report channel and explicitly not lab equipment (§2). A
+//! shipped build that cannot record a replay cannot produce a bug report anyone
+//! can reproduce, so its absence is a gate failure exactly like Tracy's
+//! presence is.
 
 use crate::util::{cargo, run as exec, run_capture, workspace_root};
+
+/// Shipped binaries that must carry the input recorder (§5.8, §2). Demos 00 and
+/// 01 predate the sim and record nothing; `gg-runtime` joins when it owns the
+/// loop and the recorder with it (M5). An explicit list rather than "everything
+/// linking gg-input", because linking it for `Key` is not shipping a recorder.
+const RECORDER_DEMOS: &[&str] = &["demo-02-mesh"];
 
 const BANNED_DIST_CRATES: &[&str] = &[
     "tracy-client",
@@ -83,6 +95,10 @@ pub fn gate() -> anyhow::Result<()> {
     // tier-dist combination builds, and the binary passes the absence/presence
     // byte checks. Running it presents to a window, so the run itself is
     // `cargo xtask interactive` (§1.5).
+    //
+    // A presence check that matches nothing passes vacuously, so the gate keeps
+    // score and insists at least one shipped binary carried the recorder.
+    let mut recorder_seen = false;
     for demo in ["demo-00-clear", "demo-01-triangle", "demo-02-mesh"] {
         // Graph absence per demo (§4.4): no compiler, no watcher, no harness
         // in what ships — dist embeds SPIR-V and nothing that makes it.
@@ -146,6 +162,20 @@ pub fn gate() -> anyhow::Result<()> {
             );
         }
 
+        // Recorder presence (§5.8, live from M4B): the replay format's magic in
+        // the shipped bytes. Graph presence would not do — every windowed demo
+        // links gg-input transitively through gg-platform for `Key`, and only a
+        // binary that *records* keeps the codec past dead-code elimination,
+        // which is exactly the distinction the check is about.
+        if RECORDER_DEMOS.contains(&demo) {
+            anyhow::ensure!(
+                bytes.windows(4).any(|w| w == gg_input::replay::MAGIC),
+                "dist {demo} carries no replay magic — the input recorder ships in every tier \
+                 (§2, §5.8): it is the bug-report channel, not lab equipment"
+            );
+            recorder_seen = true;
+        }
+
         // And one *presence* check for the shader-bearing demos (§6 M2 exit):
         // the dist binary contains embedded SPIR-V — the magic word, in the
         // little-endian byte order include_bytes! preserves.
@@ -173,7 +203,12 @@ pub fn gate() -> anyhow::Result<()> {
         "build gg-runtime [tier-dist-verify, dist profile]",
     )?;
 
-    println!("xtask dist: gate green (recorder presence check activates at M4B)");
+    anyhow::ensure!(
+        recorder_seen,
+        "no dist binary carried the input recorder — the presence check (§5.8) matched nothing,          which is a vacuous pass, not a green one"
+    );
+
+    println!("xtask dist: gate green (lab equipment absent, SPIR-V and the recorder present)");
     Ok(())
 }
 

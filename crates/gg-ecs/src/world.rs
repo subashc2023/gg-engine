@@ -5,7 +5,7 @@ use crate::archetype::{Archetype, ArchetypeId, Location};
 use crate::component::Component;
 use crate::entity::{Entities, Entity};
 use crate::hash::{CanonicalHash, ComponentId, StateHasher};
-use crate::query::{Query, QueryData};
+use crate::query::{Query, QueryData, ReadOnly};
 use crate::registry::{Registry, RegistryError};
 use crate::side_table::{SideTable, SideTableError, SideTables};
 use crate::view::{ArchetypeView, QueryAccess};
@@ -270,6 +270,39 @@ impl World {
         self.hash_walk(Encoding::Protocol)
     }
 
+    /// Per-entity canonical hashes, ascending by entity id.
+    ///
+    /// The divergence probe under [`canonical_hash`](Self::canonical_hash):
+    /// when two runs of one replay disagree at some tick, "which entity" is the
+    /// difference between a bug report and a wasted day (§5.6). Two runs' lists
+    /// are compared elementwise; the first pair that differs — or the first id
+    /// present in one list and not the other — is the answer.
+    ///
+    /// Not part of the whole-world hash and not a substitute for it: this walk
+    /// omits the registry, the entity allocator and side tables, so a world can
+    /// have identical entity hashes and a different canonical hash. That is
+    /// deliberate — it is a *locator*, and CI still gates on the contract.
+    #[must_use]
+    pub fn entity_hashes(&self) -> Vec<(Entity, CanonicalHash)> {
+        let mut out = Vec::with_capacity(self.entities.len() as usize);
+        for entity in self.entities.iter() {
+            let mut h = StateHasher::canonical();
+            h.u64(entity.to_bits());
+            if let Some(loc) = self.location(entity) {
+                let archetype = &self.archetypes[loc.archetype.index() as usize];
+                h.u64(archetype.ids().len() as u64);
+                for (at, id) in archetype.ids().iter().enumerate() {
+                    h.u64(id.get());
+                    h.bytes(archetype.column(at).row(loc.row as usize));
+                }
+            } else {
+                h.u64(u64::MAX);
+            }
+            out.push((entity, h.finish_canonical()));
+        }
+        out
+    }
+
     fn hash_walk(&self, encoding: Encoding) -> CanonicalHash {
         let mut h = StateHasher::canonical();
         self.entities.hash_into(&mut h);
@@ -346,6 +379,35 @@ impl World {
                 f(entity, D::get(&mut columns, row));
             }
         });
+    }
+
+    /// [`each`](Self::each) over `&self`, for queries that write nothing.
+    ///
+    /// The extract stage takes `&World` by contract (§4.1): "there is no type
+    /// through which a render result could travel back into the sim" is meant
+    /// to be checked, and `&mut World` would leave it as a habit. The
+    /// [`ReadOnly`] bound is what makes the shared column views sound — a
+    /// `&mut T` query does not satisfy it.
+    ///
+    /// Same iteration order as [`each`](Self::each), and the same cost model.
+    pub fn each_ref<D: QueryData + ReadOnly>(
+        &self,
+        query: &Query<D>,
+        mut f: impl FnMut(Entity, D::Item<'_>),
+    ) {
+        for archetype in &self.archetypes {
+            if archetype.is_empty() {
+                continue;
+            }
+            let Some(mut view) = crate::view::build_ref(archetype, query.access()) else {
+                continue;
+            };
+            let entities = view.entities();
+            let mut columns = D::columns(&mut view);
+            for (row, &entity) in entities.iter().enumerate() {
+                f(entity, D::get(&mut columns, row));
+            }
+        }
     }
 
     // ---- internals ------------------------------------------------------
