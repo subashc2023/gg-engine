@@ -57,3 +57,20 @@ float4 fs_main(VOut i) : SV_Target
     float lambert = saturate(dot(normalize(i.normal), light)) * 0.7 + 0.3;
     return float4(push.tint.rgb * lambert, 1.0);
 }
+
+// The depth prepass (§4.5 v1): position only, no colour, no interpolants. It
+// shares `UglyPush` with the pass above rather than declaring a smaller block,
+// because the forward pass must re-draw *exactly* where this one put a fragment
+// — a second matrix path is a second chance to disagree, and `GREATER_OR_EQUAL`
+// only forgives a bit-identical depth.
+[shader("vertex")]
+float4 vs_depth(uint vid: SV_VertexID) : SV_Position
+{
+    float* v = (float*)(push.vertices + uint64_t(vid) * VERTEX_STRIDE);
+    return mul(push.mvp, float4(v[0], v[1], v[2], 1.0));
+}
+
+[shader("fragment")]
+void fs_depth()
+{
+}

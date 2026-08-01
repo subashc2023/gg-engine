@@ -10,6 +10,8 @@ pub mod shaders_gen {
     pub mod triangle;
 }
 
+use gg_render::graph::{Declared, Load, ResourceId, single_pass};
+use gg_rhi::DrawSpec;
 use shaders_gen::triangle as shader;
 
 /// Background clear color (linear values; the sRGB target encodes).
@@ -30,10 +32,19 @@ pub fn pipeline_desc() -> gg_rhi::PipelineDesc<'static> {
         fs_spirv: shader::FS_MAIN_SPIRV,
         fs_entry: shader::FS_MAIN_ENTRY,
         push_constant_size: core::mem::size_of::<shader::TrianglePush>() as u32,
-        // One triangle, nothing behind it: the depth attachment exists (every
-        // pass has one since M4A) and this pipeline ignores it.
-        depth: false,
+        color: gg_rhi::ColorTarget::Backbuffer,
+        // One triangle, nothing behind it: this pass declares no depth
+        // attachment at all, which under dynamic rendering is what a pipeline
+        // that ignores depth has to say.
+        depth: gg_rhi::DepthMode::Off,
     }
+}
+
+/// The scene's graph: one pass into the backbuffer (§4.5). Shared by the app
+/// and by gg-golden, so the golden guards the demo's *frame* and not just its
+/// draw call.
+pub fn declare<'a>(backbuffer: ResourceId, draws: &'a [DrawSpec<'a>]) -> [Declared<'a>; 1] {
+    single_pass("triangle", backbuffer, Load::Clear(CLEAR), draws)
 }
 
 /// Push constants for a frame at `extent`: aspect-corrected transform (the

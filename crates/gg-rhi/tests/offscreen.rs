@@ -6,6 +6,8 @@
 // unwrap is permitted in tests (§2, Error handling row).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use gg_rhi::{DrawSpec, OffscreenRhi, PipelineDesc};
 
 fn init_tracing() {
@@ -17,7 +19,7 @@ fn init_tracing() {
 fn clear_readback_is_exact() {
     init_tracing();
     let mut rhi = OffscreenRhi::new((8, 8)).unwrap();
-    let pixels = rhi.render([1.0, 0.0, 0.0, 1.0], &[]).unwrap();
+    let pixels = common::render(&mut rhi, [1.0, 0.0, 0.0, 1.0], &[]).unwrap();
     assert_eq!(pixels.len(), 8 * 8 * 4);
     for px in pixels.chunks_exact(4) {
         // Linear 1.0 encodes to 255; linear 0.0 to 0 — exactly, per the sRGB
@@ -75,37 +77,38 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             fs_spirv: &fs.spirv,
             fs_entry: &fs.spirv_entry,
             push_constant_size: 0,
-            depth: false,
+            color: gg_rhi::ColorTarget::Backbuffer,
+            depth: gg_rhi::DepthMode::Off,
         })
         .unwrap();
-    let pixels = rhi
-        .render(
-            [1.0, 0.0, 0.0, 1.0],
-            &[DrawSpec {
-                pipeline,
-                push_constants: &[],
-                count: 3,
-                index_buffer: None,
-            }],
-        )
-        .unwrap();
+    let pixels = common::render(
+        &mut rhi,
+        [1.0, 0.0, 0.0, 1.0],
+        &[DrawSpec {
+            pipeline,
+            push_constants: &[],
+            count: 3,
+            index_buffer: None,
+        }],
+    )
+    .unwrap();
     for px in pixels.chunks_exact(4) {
         assert_eq!(px, [0, 255, 0, 255], "draw must cover every pixel");
     }
 
     // A dead handle after destruction is an error, not a dangle (§4.4).
     rhi.destroy_pipeline(pipeline).unwrap();
-    let err = rhi
-        .render(
-            [0.0; 4],
-            &[DrawSpec {
-                pipeline,
-                push_constants: &[],
-                count: 3,
-                index_buffer: None,
-            }],
-        )
-        .unwrap_err();
+    let err = common::render(
+        &mut rhi,
+        [0.0; 4],
+        &[DrawSpec {
+            pipeline,
+            push_constants: &[],
+            count: 3,
+            index_buffer: None,
+        }],
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("not live"), "got: {err}");
 
     let report = rhi.shutdown();
@@ -171,38 +174,39 @@ float4 fs_main() : SV_Target { return push.color; }
             fs_spirv: &fs.spirv,
             fs_entry: &fs.spirv_entry,
             push_constant_size: 16,
-            depth: false,
+            color: gg_rhi::ColorTarget::Backbuffer,
+            depth: gg_rhi::DepthMode::Off,
         })
         .unwrap();
 
-    let err = rhi
-        .render(
-            [0.0; 4],
-            &[DrawSpec {
-                pipeline,
-                push_constants: &[0u8; 12], // wrong: pipeline declares 16
-                count: 3,
-                index_buffer: None,
-            }],
-        )
-        .unwrap_err();
+    let err = common::render(
+        &mut rhi,
+        [0.0; 4],
+        &[DrawSpec {
+            pipeline,
+            push_constants: &[0u8; 12], // wrong: pipeline declares 16
+            count: 3,
+            index_buffer: None,
+        }],
+    )
+    .unwrap_err();
     assert!(
         err.to_string().contains("12"),
         "error names the size: {err}"
     );
 
     // The right size draws fine afterwards — the failed call recorded nothing.
-    let pixels = rhi
-        .render(
-            [0.0, 0.0, 0.0, 1.0],
-            &[DrawSpec {
-                pipeline,
-                push_constants: bytemuck::bytes_of(&[1.0f32, 1.0, 1.0, 1.0]),
-                count: 3,
-                index_buffer: None,
-            }],
-        )
-        .unwrap();
+    let pixels = common::render(
+        &mut rhi,
+        [0.0, 0.0, 0.0, 1.0],
+        &[DrawSpec {
+            pipeline,
+            push_constants: bytemuck::bytes_of(&[1.0f32, 1.0, 1.0, 1.0]),
+            count: 3,
+            index_buffer: None,
+        }],
+    )
+    .unwrap();
     assert_eq!(&pixels[0..4], &[255, 255, 255, 255]);
 
     let report = rhi.shutdown();
@@ -267,7 +271,8 @@ float4 fs_main() : SV_Target { return push.color; }
             fs_spirv: &fs.spirv,
             fs_entry: &fs.spirv_entry,
             push_constant_size: 32,
-            depth: false,
+            color: gg_rhi::ColorTarget::Backbuffer,
+            depth: gg_rhi::DepthMode::Off,
         })
         .unwrap();
 
@@ -294,16 +299,16 @@ float4 fs_main() : SV_Target { return push.color; }
             index_buffer: None,
         }
     }
-    let pixels = rhi
-        .render(
-            [0.0, 0.0, 0.0, 1.0],
-            &[
-                draw(pipeline, &red),
-                draw(pipeline, &green),
-                draw(pipeline, &blue),
-            ],
-        )
-        .unwrap();
+    let pixels = common::render(
+        &mut rhi,
+        [0.0, 0.0, 0.0, 1.0],
+        &[
+            draw(pipeline, &red),
+            draw(pipeline, &green),
+            draw(pipeline, &blue),
+        ],
+    )
+    .unwrap();
 
     let pixel = |x: u32, y: u32| {
         let at = ((y * extent.0 + x) * 4) as usize;
@@ -314,4 +319,21 @@ float4 fs_main() : SV_Target { return push.color; }
 
     let report = rhi.shutdown();
     assert!(report.clean(), "unclean: {report:?}");
+}
+
+/// `GG_ADAPTER` is a choice, not a preference: a name nothing matches fails the
+/// run rather than falling back to the highest-scoring device, so a result
+/// reported against the second vendor cannot secretly be the first's. Relies on
+/// nextest's process-per-test; `cargo test` would leak the variable sideways.
+#[test]
+fn an_unmatched_adapter_override_is_an_error_not_a_fallback() {
+    init_tracing();
+    // SAFETY: own process, before anything has touched the Vulkan loader — no
+    // other thread exists to observe the change.
+    unsafe { std::env::set_var("GG_ADAPTER", "no-such-adapter-exists") };
+    let err = OffscreenRhi::new((8, 8)).err().expect("override matched");
+    assert!(
+        matches!(&err, gg_rhi::RhiError::NoSuitableDevice(r) if r.contains("GG_ADAPTER")),
+        "{err:?}"
+    );
 }

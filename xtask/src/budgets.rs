@@ -31,10 +31,54 @@ const DEPENDENCY_BUDGETS: &[(&str, usize)] = &[("gg-ecs", 6), ("gg-core", 8)];
 /// so a game crate reaches it whether or not it names it.
 const GAME_CRATE_PIN: &[&str] = &["gg-abi", "gg-ecs", "gg-ecs-derive", "gg-math"];
 
+/// §4.10's reference-set cap. Per-backend PNG sets grow monotonically and a repo
+/// that takes minutes to clone fails §9's fresh-clone bar long before git
+/// complains; crossing this is a decision (LFS, or a references sub-repo) made in
+/// a PR, not discovered when a clone crawls.
+const REFERENCE_BUDGET: u64 = 50 * 1024 * 1024;
+
 pub fn check() -> anyhow::Result<()> {
     shell_lines()?;
     dependencies()?;
-    game_crate_pin()
+    game_crate_pin()?;
+    reference_images()
+}
+
+/// The golden reference sets, weighed (§4.10).
+fn reference_images() -> anyhow::Result<()> {
+    fn weigh(dir: &Path, total: &mut u64, count: &mut usize) -> anyhow::Result<()> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Ok(()); // no references yet is not a budget failure
+        };
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                weigh(&entry.path(), total, count)?;
+            } else {
+                *total += entry.metadata()?.len();
+                *count += 1;
+            }
+        }
+        Ok(())
+    }
+    let (mut total, mut count) = (0u64, 0usize);
+    weigh(
+        &workspace_root().join("tests/gg-images"),
+        &mut total,
+        &mut count,
+    )?;
+    anyhow::ensure!(
+        total <= REFERENCE_BUDGET,
+        "golden references are {total} B across {count} file(s) against a {REFERENCE_BUDGET} B \
+         budget (§4.10) — Git LFS or a references sub-repository is the decision to make, not a \
+         higher number"
+    );
+    println!(
+        "xtask: golden references {} KiB / {} MiB across {count} file(s) (§4.10)",
+        total / 1024,
+        REFERENCE_BUDGET / (1024 * 1024)
+    );
+    Ok(())
 }
 
 /// Complexity budgets, the CI-counted lines (§3).

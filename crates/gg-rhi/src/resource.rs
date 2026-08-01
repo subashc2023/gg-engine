@@ -30,6 +30,11 @@ pub enum BufferKind {
     /// As [`BufferKind::Storage`], and bindable as an indexed draw's index
     /// stream (`u32` indices).
     Index,
+    /// Host-visible, copied *into* by a readback pass and read with
+    /// [`Rhi::map_buffer`](crate::Rhi::map_buffer). The third variant is a
+    /// memory *location* rather than a usage — the one distinction a device
+    /// address genuinely cannot express (§4.5's readback pass).
+    Readback,
 }
 
 /// Pixel format. Short on purpose (§3 budget): one entry per job that exists,
@@ -91,6 +96,11 @@ pub enum ImageUse {
     Depth,
     /// Written through the bindless storage-image array.
     Storage,
+    /// A graph attachment: written as color, then either sampled by a later
+    /// pass or copied out by a readback one. All three usages at once, because
+    /// which of them a transient is put to is the graph's business and not the
+    /// allocation's (§4.5).
+    ColorTarget,
 }
 
 /// The whole sampler set (§4.3: samplers are a small *immutable* set baked
@@ -274,7 +284,11 @@ impl Resources {
             )));
         }
         let usage = buffer_usage(desc.kind);
-        let buffer = create_raw_buffer(device, desc.name, desc.size, usage)?;
+        let location = match desc.kind {
+            BufferKind::Readback => gpu_allocator::MemoryLocation::GpuToCpu,
+            _ => gpu_allocator::MemoryLocation::GpuOnly,
+        };
+        let buffer = create_raw_buffer_in(device, desc.name, desc.size, usage, location)?;
         let address = {
             let info = vk::BufferDeviceAddressInfo::default().buffer(buffer.raw);
             // SAFETY: the buffer was created with SHADER_DEVICE_ADDRESS and is
@@ -309,6 +323,11 @@ impl Resources {
             ImageUse::Sampled => vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             ImageUse::Depth => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             ImageUse::Storage => vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
+            ImageUse::ColorTarget => {
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_SRC
+            }
         };
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
@@ -402,6 +421,22 @@ impl Resources {
             .ok_or_else(|| RhiError::Loader(format!("buffer handle {} is not live", handle.0)))
     }
 
+    /// A readback buffer's host-visible bytes.
+    pub fn mapped(&self, handle: BufferHandle) -> Result<&[u8], RhiError> {
+        let buffer = self.buffer(handle)?;
+        buffer
+            .alloc
+            .as_ref()
+            .and_then(gpu_allocator::vulkan::Allocation::mapped_slice)
+            .map(|bytes| &bytes[..buffer.size as usize])
+            .ok_or_else(|| {
+                RhiError::Loader(format!(
+                    "buffer handle {} is not host-visible — only BufferKind::Readback is",
+                    handle.0
+                ))
+            })
+    }
+
     pub fn image(&self, handle: ImageHandle) -> Result<&Image, RhiError> {
         self.images
             .get(&handle.0)
@@ -491,24 +526,8 @@ fn buffer_usage(kind: BufferKind) -> vk::BufferUsageFlags {
     match kind {
         BufferKind::Storage => base,
         BufferKind::Index => base | vk::BufferUsageFlags::INDEX_BUFFER,
+        BufferKind::Readback => base,
     }
-}
-
-/// Create + bind a device-local buffer. Shared by [`Resources::create_buffer`]
-/// and the staging ring, which differs only in memory location and usage.
-pub(crate) fn create_raw_buffer(
-    device: &mut Device,
-    name: &str,
-    size: u64,
-    usage: vk::BufferUsageFlags,
-) -> Result<Buffer, RhiError> {
-    create_raw_buffer_in(
-        device,
-        name,
-        size,
-        usage,
-        gpu_allocator::MemoryLocation::GpuOnly,
-    )
 }
 
 pub(crate) fn create_raw_buffer_in(

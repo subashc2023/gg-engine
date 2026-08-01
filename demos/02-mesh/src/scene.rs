@@ -123,11 +123,32 @@ pub fn pipeline_desc() -> PipelineDesc<'static> {
         fs_spirv: shader::FS_MAIN_SPIRV,
         fs_entry: shader::FS_MAIN_ENTRY,
         push_constant_size: core::mem::size_of::<shader::MeshPush>() as u32,
+        color: gg_rhi::ColorTarget::Backbuffer,
         // A closed mesh drawn without back-face culling: every face is
         // rasterized and depth decides, which is exactly what makes this a
         // test of reverse-Z rather than of winding order.
-        depth: true,
+        depth: gg_rhi::DepthMode::Write,
     }
+}
+
+/// The scene's graph: one forward pass into wherever the frame lands, over a
+/// depth attachment the graph pools (§4.5). Shared by the app and by gg-golden
+/// — which appends a readback pass to this same list, so the image it judges is
+/// the frame the demo renders rather than a lookalike (§4.10).
+pub fn declare<'a>(
+    backbuffer: gg_render::graph::ResourceId,
+    depth: gg_render::graph::ResourceId,
+    draws: &'a [gg_rhi::DrawSpec<'a>],
+) -> [gg_render::graph::Declared<'a>; 1] {
+    [gg_render::graph::Declared {
+        name: "forward-opaque",
+        body: gg_render::graph::Body::Draw {
+            color: Some((backbuffer, gg_render::graph::Load::Clear(CLEAR))),
+            depth: Some((depth, gg_render::graph::DepthUse::Write)),
+            samples: &[],
+            draws,
+        },
+    }]
 }
 
 /// The matrix the vertex shader receives: object → clip for one extracted

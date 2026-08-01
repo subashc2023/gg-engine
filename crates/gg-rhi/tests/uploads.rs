@@ -11,6 +11,8 @@
 // unwrap is permitted in tests (§2, Error handling row).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use gg_rhi::{
     BufferDesc, BufferKind, DrawSpec, ImageDesc, ImageFormat, ImageUse, OffscreenRhi, PipelineDesc,
     PipelineHandle,
@@ -26,7 +28,7 @@ fn pipeline(
     rhi: &mut OffscreenRhi,
     name: &str,
     source: &str,
-    depth: bool,
+    depth: gg_rhi::DepthMode,
 ) -> (PipelineHandle, u32) {
     let dir = std::env::temp_dir().join(format!("gg-rhi-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -55,6 +57,7 @@ fn pipeline(
             fs_spirv: &fs.spirv,
             fs_entry: &fs.spirv_entry,
             push_constant_size: push_size,
+            color: gg_rhi::ColorTarget::Backbuffer,
             depth,
         })
         .unwrap();
@@ -104,7 +107,7 @@ float4 fs_main() : SV_Target
 }}
 "#
     );
-    let (handle, push_size) = pipeline(&mut rhi, "bda", &source, false);
+    let (handle, push_size) = pipeline(&mut rhi, "bda", &source, gg_rhi::DepthMode::Off);
     assert_eq!(push_size, 16, "uint64 + 2 uints, std430");
 
     let colors: [f32; 8] = [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
@@ -125,17 +128,17 @@ float4 fs_main() : SV_Target
     push[..8].copy_from_slice(&address.to_le_bytes());
     push[8..12].copy_from_slice(&1u32.to_le_bytes());
 
-    let pixels = rhi
-        .render(
-            [0.0, 0.0, 0.0, 1.0],
-            &[DrawSpec {
-                pipeline: handle,
-                push_constants: &push,
-                count: 3,
-                index_buffer: None,
-            }],
-        )
-        .unwrap();
+    let pixels = common::render(
+        &mut rhi,
+        [0.0, 0.0, 0.0, 1.0],
+        &[DrawSpec {
+            pipeline: handle,
+            push_constants: &push,
+            count: 3,
+            index_buffer: None,
+        }],
+    )
+    .unwrap();
     assert_eq!(
         top_left(&pixels),
         [0, 255, 0, 255],
@@ -169,7 +172,7 @@ float4 fs_main() : SV_Target
 }}
 "#
     );
-    let (handle, push_size) = pipeline(&mut rhi, "bindless", &source, false);
+    let (handle, push_size) = pipeline(&mut rhi, "bindless", &source, gg_rhi::DepthMode::Off);
     assert_eq!(push_size, 8);
 
     let solid = |color: [u8; 4]| -> Vec<u8> { color.repeat(4 * 4) };
@@ -190,7 +193,8 @@ float4 fs_main() : SV_Target
     let draw = |rhi: &mut OffscreenRhi, texture: u32| {
         let mut push = [0u8; 8];
         push[..4].copy_from_slice(&texture.to_le_bytes());
-        rhi.render(
+        common::render(
+            rhi,
             [0.0, 0.0, 0.0, 1.0],
             &[DrawSpec {
                 pipeline: handle,
@@ -260,18 +264,18 @@ VOut vs_main(uint vid: SV_VertexID)
 [shader("fragment")]
 float4 fs_main(VOut i) : SV_Target { return i.color; }
 "#;
-    let (handle, _) = pipeline(&mut rhi, "reversez", source, true);
-    let pixels = rhi
-        .render(
-            [0.0, 0.0, 0.0, 1.0],
-            &[DrawSpec {
-                pipeline: handle,
-                push_constants: &[],
-                count: 12,
-                index_buffer: None,
-            }],
-        )
-        .unwrap();
+    let (handle, _) = pipeline(&mut rhi, "reversez", source, gg_rhi::DepthMode::Write);
+    let pixels = common::render_with_depth(
+        &mut rhi,
+        [0.0, 0.0, 0.0, 1.0],
+        &[DrawSpec {
+            pipeline: handle,
+            push_constants: &[],
+            count: 12,
+            index_buffer: None,
+        }],
+    )
+    .unwrap();
     assert_eq!(
         pixel(&pixels, extent.0, 3, 8),
         [255, 0, 0, 255],
@@ -307,7 +311,7 @@ float4 fs_main() : SV_Target
 }}
 "#
     );
-    let (handle, _) = pipeline(&mut rhi, "ring", &source, false);
+    let (handle, _) = pipeline(&mut rhi, "ring", &source, gg_rhi::DepthMode::Off);
 
     const CHUNK: usize = 3 << 20;
     let buffer = rhi
@@ -331,17 +335,17 @@ float4 fs_main() : SV_Target
     let address = rhi.buffer_address(buffer).unwrap();
     let mut push = [0u8; 16];
     push[..8].copy_from_slice(&address.to_le_bytes());
-    let pixels = rhi
-        .render(
-            [0.0, 0.0, 0.0, 1.0],
-            &[DrawSpec {
-                pipeline: handle,
-                push_constants: &push,
-                count: 3,
-                index_buffer: None,
-            }],
-        )
-        .unwrap();
+    let pixels = common::render(
+        &mut rhi,
+        [0.0, 0.0, 0.0, 1.0],
+        &[DrawSpec {
+            pipeline: handle,
+            push_constants: &push,
+            count: 3,
+            index_buffer: None,
+        }],
+    )
+    .unwrap();
     // Round 3: (1, 1, 0).
     assert_eq!(top_left(&pixels), [255, 255, 0, 255]);
 
@@ -481,7 +485,7 @@ fn uploads_are_clean_on_whichever_queue_topology_this_device_has() {
     // The acquires are recorded by the next render; running one is what proves
     // the barrier pair validates.
     let _ = rhi.register_texture(image).unwrap();
-    let _ = rhi.render([0.0, 0.0, 0.0, 1.0], &[]).unwrap();
+    let _ = common::render(&mut rhi, [0.0, 0.0, 0.0, 1.0], &[]).unwrap();
 
     rhi.destroy_buffer(buffer).unwrap();
     rhi.destroy_image(image).unwrap();

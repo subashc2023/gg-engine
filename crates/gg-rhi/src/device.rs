@@ -186,6 +186,14 @@ impl Device {
 
         let mut candidates = Vec::new();
         let mut chosen: Option<(vk::PhysicalDevice, u32, usize)> = None;
+        // `GG_ADAPTER` — case-insensitive substring of the device name — is how
+        // the second vendor gets tested at all on a desk whose highest score is
+        // always the same card. No match is an error below, never a fallback: a
+        // run reported green on one vendor must not have been green on another.
+        let want = std::env::var("GG_ADAPTER")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_lowercase());
         for pd in physical_devices {
             // SAFETY: pd from the live instance.
             let props = unsafe { inst.get_physical_device_properties(pd) };
@@ -198,14 +206,21 @@ impl Device {
             let (device_type, type_score) = device_type_name(props.device_type);
             let missing = missing_features(inst, pd, props.api_version, surface, &families);
             let score = if missing.is_empty() { type_score } else { 0 };
+            let wanted = want
+                .as_ref()
+                .is_none_or(|w| name.to_lowercase().contains(w));
             tracing::info!(
                 device = %name,
                 r#type = device_type,
                 score,
+                wanted,
                 missing = ?missing,
                 "physical device"
             );
-            if missing.is_empty() && chosen.map(|(_, best, _)| score > best).unwrap_or(true) {
+            if missing.is_empty()
+                && wanted
+                && chosen.map(|(_, best, _)| score > best).unwrap_or(true)
+            {
                 chosen = Some((pd, score, candidates.len()));
             }
             candidates.push(Candidate {
@@ -217,9 +232,15 @@ impl Device {
         }
 
         let Some((pd, _, chosen_idx)) = chosen else {
-            let mut report = String::from(
-                "no Vulkan device satisfies the §4.3 requirements — per-device report:",
-            );
+            let mut report = match &want {
+                Some(w) => format!(
+                    "no Vulkan device satisfies the §4.3 requirements *and* matches \
+                     GG_ADAPTER={w:?} — per-device report:"
+                ),
+                None => String::from(
+                    "no Vulkan device satisfies the §4.3 requirements — per-device report:",
+                ),
+            };
             for c in &candidates {
                 report.push_str(&format!(
                     "\n  {} ({}): missing {}",
@@ -450,6 +471,44 @@ impl Device {
         #[cfg(not(feature = "validation"))]
         {
             let _ = (handle, name);
+        }
+    }
+
+    /// Open a debug label around a pass (§4.5: every pass gets one). Like
+    /// [`Device::set_name`] it compiles to nothing without `validation`, so a
+    /// capture in dev names every pass and dist carries no strings.
+    ///
+    /// # Safety
+    /// `cmd` must be recording, and every label must be closed by
+    /// [`Device::end_label`] on the same command buffer.
+    pub(crate) unsafe fn begin_label(&self, cmd: vk::CommandBuffer, name: &str) {
+        #[cfg(feature = "validation")]
+        {
+            if let Ok(name) = std::ffi::CString::new(name) {
+                let label = vk::DebugUtilsLabelEXT::default().label_name(&name);
+                // SAFETY: caller contract — cmd is recording on this device.
+                unsafe { self.debug_fns.cmd_begin_debug_utils_label(cmd, &label) };
+            }
+        }
+        #[cfg(not(feature = "validation"))]
+        {
+            let _ = (cmd, name);
+        }
+    }
+
+    /// Close the innermost [`Device::begin_label`].
+    ///
+    /// # Safety
+    /// `cmd` must be recording with a label open.
+    pub(crate) unsafe fn end_label(&self, cmd: vk::CommandBuffer) {
+        #[cfg(feature = "validation")]
+        {
+            // SAFETY: caller contract — a label is open on this command buffer.
+            unsafe { self.debug_fns.cmd_end_debug_utils_label(cmd) };
+        }
+        #[cfg(not(feature = "validation"))]
+        {
+            let _ = cmd;
         }
     }
 

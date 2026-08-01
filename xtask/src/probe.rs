@@ -108,6 +108,12 @@ fn probe_device(system: bool) -> anyhow::Result<()> {
     let result = (|| -> anyhow::Result<()> {
         // SAFETY: instance is live.
         let devices = unsafe { instance.enumerate_physical_devices()? };
+        // Same override gg-rhi honours, so the table and the run that follows it
+        // describe one device.
+        let want = std::env::var("GG_ADAPTER")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_lowercase());
         let mut chosen = None;
         for pd in devices {
             // SAFETY: pd comes from the live instance.
@@ -116,13 +122,21 @@ fn probe_device(system: bool) -> anyhow::Result<()> {
                 .device_name_as_c_str()
                 .map(|c| c.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if system || name.to_lowercase().contains("llvmpipe") {
+            let lower = name.to_lowercase();
+            let hit = match (&want, system) {
+                (Some(w), true) => lower.contains(w.as_str()),
+                (_, true) => true,
+                _ => lower.contains("llvmpipe"),
+            };
+            if hit {
                 chosen = Some((pd, props, name));
                 break;
             }
         }
-        let (pd, props, name) = chosen
-            .ok_or_else(|| anyhow::anyhow!("no lavapipe (llvmpipe) device found — pin broken?"))?;
+        let (pd, props, name) = chosen.ok_or_else(|| match (&want, system) {
+            (Some(w), true) => anyhow::anyhow!("no device matches GG_ADAPTER={w:?}"),
+            _ => anyhow::anyhow!("no lavapipe (llvmpipe) device found — pin broken?"),
+        })?;
 
         let api = props.api_version;
         println!(

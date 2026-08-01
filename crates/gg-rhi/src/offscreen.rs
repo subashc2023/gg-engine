@@ -1,22 +1,30 @@
 //! Offscreen rendering (§4.10 v0): no window, no surface, no swapchain — an
-//! RGBA8-sRGB target image, a depth target, a host-visible readback buffer,
-//! and a single-shot render → readback path. This is gg-golden's whole GPU
-//! footprint, which is what lets the harness be headless *by linkage* (§5
-//! gate 7: no winit symbols), not just by configuration.
+//! RGBA8-sRGB target image and a single-shot execute-and-wait path. This is
+//! gg-golden's whole GPU footprint, which is what lets the harness be headless
+//! *by linkage* (§5 gate 7: no winit symbols), not just by configuration.
+//!
+//! It runs the *same* [`Pass`] list a windowed frame does (§4.5): the target
+//! stands in for the swapchain image as [`Target::Backbuffer`], so a graph
+//! written for the screen renders here unchanged, and the pixels come back
+//! through the graph's own readback pass rather than a path only this file
+//! knows.
 
 use crate::gpu::Gpu;
+use crate::graph::{self, Bound};
 use crate::instance::{Instance, validation_message_count};
-use crate::pipeline::{PipelineDesc, PipelineHandle, ResolvedDraw, record_draw};
-use crate::resource::{BufferDesc, BufferHandle, DeviceAddress, ImageDesc, ImageHandle};
-use crate::{DrawSpec, RhiError, ShutdownReport, TextureIndex};
+use crate::pipeline::{PipelineDesc, PipelineHandle};
+use crate::resource::{
+    BufferDesc, BufferHandle, DeviceAddress, ImageDesc, ImageFormat, ImageHandle, ImageUse,
+};
+use crate::{Pass, RhiError, ShutdownReport, TextureIndex};
 use ash::vk;
 
-/// Bytes per pixel of [`OffscreenRhi`]'s fixed RGBA8 target.
-const BYTES_PER_PIXEL: usize = 4;
+/// The offscreen target's format. Fixed: PNG-ready bytes are the point (§4.10).
+const TARGET_FORMAT: ImageFormat = ImageFormat::Rgba8Srgb;
 
-/// A window-less rendering context: bring-up without a display, render into
-/// an offscreen image, read the pixels back. Same accounting rules as [`Rhi`]
-/// (§4.3): every byte allocated is tracked, shutdown reports leaks and
+/// A window-less rendering context: bring-up without a display, execute a graph
+/// into an offscreen target, read the pixels back. Same accounting rules as
+/// [`Rhi`] (§4.3): every byte allocated is tracked, shutdown reports leaks and
 /// validation messages.
 ///
 /// [`Rhi`]: crate::Rhi
@@ -25,13 +33,7 @@ pub struct OffscreenRhi {
     timeline_value: u64,
     transfer_waited: u64,
     extent: (u32, u32),
-    format: vk::Format,
-    image: vk::Image,
-    image_view: vk::ImageView,
-    image_alloc: Option<gpu_allocator::vulkan::Allocation>,
-    depth: ImageHandle,
-    readback: vk::Buffer,
-    readback_alloc: Option<gpu_allocator::vulkan::Allocation>,
+    target: ImageHandle,
     pool: vk::CommandPool,
     cmd: vk::CommandBuffer,
     gpu: Gpu,
@@ -55,25 +57,17 @@ impl OffscreenRhi {
         };
 
         match Self::create_resources(&mut gpu, extent) {
-            Ok((image, image_alloc, image_view, depth, readback, readback_alloc, pool, cmd)) => {
-                Ok(Self {
-                    dead: false,
-                    timeline_value: 0,
-                    transfer_waited: 0,
-                    extent,
-                    format: vk::Format::R8G8B8A8_SRGB,
-                    image,
-                    image_view,
-                    image_alloc: Some(image_alloc),
-                    depth,
-                    readback,
-                    readback_alloc: Some(readback_alloc),
-                    pool,
-                    cmd,
-                    gpu,
-                    instance,
-                })
-            }
+            Ok((target, pool, cmd)) => Ok(Self {
+                dead: false,
+                timeline_value: 0,
+                transfer_waited: 0,
+                extent,
+                target,
+                pool,
+                cmd,
+                gpu,
+                instance,
+            }),
             Err(e) => {
                 gpu.destroy();
                 instance.destroy();
@@ -82,103 +76,20 @@ impl OffscreenRhi {
         }
     }
 
-    #[expect(clippy::type_complexity, reason = "internal one-shot bring-up tuple")]
     fn create_resources(
         gpu: &mut Gpu,
         extent: (u32, u32),
-    ) -> Result<
-        (
-            vk::Image,
-            gpu_allocator::vulkan::Allocation,
-            vk::ImageView,
-            ImageHandle,
-            vk::Buffer,
-            gpu_allocator::vulkan::Allocation,
-            vk::CommandPool,
-            vk::CommandBuffer,
-        ),
-        RhiError,
-    > {
-        let device = &mut gpu.device;
-        let format = vk::Format::R8G8B8A8_SRGB;
-        let image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
-            .extent(vk::Extent3D {
-                width: extent.0,
-                height: extent.1,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
-        // SAFETY: device is live; info valid.
-        let image =
-            unsafe { device.raw().create_image(&image_info, None) }.map_err(RhiError::Vk)?;
-        device.set_name(image, "gg.offscreen.target");
-        // SAFETY: image is live.
-        let requirements = unsafe { device.raw().get_image_memory_requirements(image) };
-        let image_alloc = device.allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
+    ) -> Result<(ImageHandle, vk::CommandPool, vk::CommandBuffer), RhiError> {
+        // A `ColorTarget` image and nothing bespoke: the target is allocated,
+        // named and leak-accounted by the same path every other image is.
+        let target = gpu.create_image(&ImageDesc {
             name: "gg.offscreen.target",
-            requirements,
-            location: gpu_allocator::MemoryLocation::GpuOnly,
-            linear: false,
-            allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
+            extent,
+            format: TARGET_FORMAT,
+            usage: ImageUse::ColorTarget,
         })?;
-        // SAFETY: fresh image, fresh memory, offsets from the allocator.
-        unsafe {
-            device
-                .raw()
-                .bind_image_memory(image, image_alloc.memory(), image_alloc.offset())
-        }
-        .map_err(RhiError::Vk)?;
 
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .level_count(1)
-                    .layer_count(1),
-            );
-        // SAFETY: image is live and bound.
-        let image_view =
-            unsafe { device.raw().create_image_view(&view_info, None) }.map_err(RhiError::Vk)?;
-        device.set_name(image_view, "gg.offscreen.target.view");
-
-        let readback_size = extent.0 as u64 * extent.1 as u64 * BYTES_PER_PIXEL as u64;
-        let buffer_info = vk::BufferCreateInfo::default()
-            .size(readback_size)
-            .usage(vk::BufferUsageFlags::TRANSFER_DST)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        // SAFETY: device is live; info valid.
-        let readback =
-            unsafe { device.raw().create_buffer(&buffer_info, None) }.map_err(RhiError::Vk)?;
-        device.set_name(readback, "gg.offscreen.readback");
-        // SAFETY: buffer is live.
-        let buf_requirements = unsafe { device.raw().get_buffer_memory_requirements(readback) };
-        let readback_alloc = device.allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
-            name: "gg.offscreen.readback",
-            requirements: buf_requirements,
-            location: gpu_allocator::MemoryLocation::GpuToCpu,
-            linear: true,
-            allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
-        })?;
-        // SAFETY: fresh buffer, fresh memory.
-        unsafe {
-            device.raw().bind_buffer_memory(
-                readback,
-                readback_alloc.memory(),
-                readback_alloc.offset(),
-            )
-        }
-        .map_err(RhiError::Vk)?;
-
+        let device = &mut gpu.device;
         let pool_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::TRANSIENT)
             .queue_family_index(device.graphics.family);
@@ -197,18 +108,7 @@ impl OffscreenRhi {
             .next()
             .ok_or_else(|| RhiError::Loader("no command buffer allocated".into()))?;
         device.set_name(cmd, "gg.offscreen.cmd");
-
-        let depth = gpu.create_depth(extent)?;
-        Ok((
-            image,
-            image_alloc,
-            image_view,
-            depth,
-            readback,
-            readback_alloc,
-            pool,
-            cmd,
-        ))
+        Ok((target, pool, cmd))
     }
 
     /// The device-selection report (§4.3).
@@ -221,20 +121,31 @@ impl OffscreenRhi {
         self.extent
     }
 
+    /// The image [`Target::Backbuffer`] resolves to here — what a graph's final
+    /// pass writes and a readback pass copies out.
+    ///
+    /// [`Target::Backbuffer`]: crate::Target::Backbuffer
+    pub fn backbuffer(&self) -> ImageHandle {
+        self.target
+    }
+
     /// Whether uploads cross a queue-family boundary on this device (§4.3).
     pub fn transfer_crosses_queue_families(&self) -> bool {
         self.gpu.device.transfer_crosses_families()
     }
 
-    /// Create a graphics pipeline targeting the offscreen format.
+    /// Create a graphics pipeline. [`ColorTarget::Backbuffer`] means the
+    /// offscreen target's format here.
+    ///
+    /// [`ColorTarget::Backbuffer`]: crate::ColorTarget::Backbuffer
     pub fn create_pipeline(&mut self, desc: &PipelineDesc<'_>) -> Result<PipelineHandle, RhiError> {
         let set_layout = self.gpu.bindless.layout();
         self.gpu
             .pipelines
-            .create(&self.gpu.device, desc, self.format, set_layout)
+            .create(&self.gpu.device, desc, TARGET_FORMAT.vk(), set_layout)
     }
 
-    /// Destroy a pipeline. Offscreen renders are synchronous ([`Self::render`]
+    /// Destroy a pipeline. Offscreen renders are synchronous ([`Self::execute`]
     /// waits for completion before returning), so nothing can be in flight
     /// and destruction is immediate.
     pub fn destroy_pipeline(&mut self, handle: PipelineHandle) -> Result<(), RhiError> {
@@ -249,6 +160,15 @@ impl OffscreenRhi {
     /// The GPU pointer a shader reaches `handle` by.
     pub fn buffer_address(&self, handle: BufferHandle) -> Result<DeviceAddress, RhiError> {
         self.gpu.buffer_address(handle)
+    }
+
+    /// A readback buffer's bytes, valid once [`Self::execute`] returned.
+    ///
+    /// # Errors
+    ///
+    /// The buffer is not [`BufferKind::Readback`](crate::BufferKind).
+    pub fn map_buffer(&self, handle: BufferHandle) -> Result<&[u8], RhiError> {
+        self.gpu.resources.mapped(handle)
     }
 
     /// Allocate an image.
@@ -313,36 +233,28 @@ impl OffscreenRhi {
         Ok(())
     }
 
-    /// Render one frame — clear to `color`, then run every draw in `draws` in
-    /// order — wait for completion, and return the target's pixels: tightly
-    /// packed RGBA8, row-major, sRGB-encoded (PNG-ready bytes, §4.10).
-    pub fn render(&mut self, color: [f32; 4], draws: &[DrawSpec<'_>]) -> Result<Vec<u8>, RhiError> {
-        let resolved = draws
-            .iter()
-            .map(|d| {
-                let entry = *self.gpu.pipelines.get(d.pipeline)?;
-                let index_buffer = d
-                    .index_buffer
-                    .map(|h| self.gpu.resources.buffer(h).map(|b| b.raw))
-                    .transpose()?;
-                Ok::<_, RhiError>(ResolvedDraw {
-                    entry,
-                    push_constants: d.push_constants,
-                    count: d.count,
-                    index_buffer,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let depth = self.gpu.resources.image(self.depth)?;
-        let (depth_image, depth_view) = (depth.raw, depth.view);
+    /// Record and run one compiled graph, blocking until it retires.
+    ///
+    /// Synchronous by design: a harness that has to poll for its own pixels is
+    /// a harness with a race in it. Pixels come back through a readback pass
+    /// into a [`BufferKind::Readback`](crate::BufferKind) buffer, read with
+    /// [`Self::map_buffer`].
+    ///
+    /// # Errors
+    ///
+    /// A stale handle, or a draw whose push constants do not match its
+    /// pipeline — both found while resolving, before anything is recorded.
+    pub fn execute(&mut self, passes: &[Pass<'_>]) -> Result<(), RhiError> {
+        let resolved = graph::resolve(&self.gpu, passes)?;
+        let image = self.gpu.resources.image(self.target)?;
+        let backbuffer = Bound {
+            image: image.raw,
+            view: image.view,
+            extent: image.extent,
+            aspect: image.format.aspect(),
+        };
         let acquires = self.gpu.take_acquires();
-
         let device = self.gpu.device.raw();
-        let subresource = vk::ImageSubresourceRange::default()
-            .aspect_mask(vk::ImageAspectFlags::COLOR)
-            .level_count(1)
-            .layer_count(1);
-
         // SAFETY: single-shot recording; the wait below proves the previous
         // submission retired before the pool is reset.
         unsafe {
@@ -354,122 +266,20 @@ impl OffscreenRhi {
             device
                 .begin_command_buffer(self.cmd, &begin)
                 .map_err(RhiError::Vk)?;
-
             // SAFETY: cmd records on the graphics family and this submit waits
             // on the transfer timeline value the releases signaled.
             crate::upload::Uploader::record_acquires(&self.gpu.device, self.cmd, &acquires);
-
-            let to_attachment = [
-                vk::ImageMemoryBarrier2::default()
-                    .image(self.image)
-                    .subresource_range(subresource)
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .src_stage_mask(vk::PipelineStageFlags2::NONE)
-                    .src_access_mask(vk::AccessFlags2::NONE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE),
-                crate::depth_barrier(depth_image),
-            ];
-            device.cmd_pipeline_barrier2(
+            // SAFETY: as above; every handle came from resolve.
+            graph::record(
+                &self.gpu.device,
                 self.cmd,
-                &vk::DependencyInfo::default().image_memory_barriers(&to_attachment),
+                self.gpu.bindless.set(),
+                &resolved,
+                backbuffer,
             );
-
-            let clear = vk::ClearValue {
-                color: vk::ClearColorValue { float32: color },
-            };
-            let attachment = [vk::RenderingAttachmentInfo::default()
-                .image_view(self.image_view)
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(clear)];
-            let depth_attachment = crate::depth_attachment_info(depth_view);
-            let rendering = vk::RenderingInfo::default()
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D::default(),
-                    extent: vk::Extent2D {
-                        width: self.extent.0,
-                        height: self.extent.1,
-                    },
-                })
-                .layer_count(1)
-                .color_attachments(&attachment)
-                .depth_attachment(&depth_attachment);
-            device.cmd_begin_rendering(self.cmd, &rendering);
-            for draw in &resolved {
-                // SAFETY: cmd is recording inside the pass; every entry is live
-                // and targets these formats; the set is the global one.
-                record_draw(
-                    &self.gpu.device,
-                    self.cmd,
-                    self.extent,
-                    self.gpu.bindless.set(),
-                    draw,
-                )?;
-            }
-            device.cmd_end_rendering(self.cmd);
-
-            let to_transfer = [vk::ImageMemoryBarrier2::default()
-                .image(self.image)
-                .subresource_range(subresource)
-                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::COPY)
-                .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)];
-            device.cmd_pipeline_barrier2(
-                self.cmd,
-                &vk::DependencyInfo::default().image_memory_barriers(&to_transfer),
-            );
-
-            let region = vk::BufferImageCopy2::default()
-                .image_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .layer_count(1),
-                )
-                .image_extent(vk::Extent3D {
-                    width: self.extent.0,
-                    height: self.extent.1,
-                    depth: 1,
-                });
-            let regions = [region];
-            let copy = vk::CopyImageToBufferInfo2::default()
-                .src_image(self.image)
-                .src_image_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .dst_buffer(self.readback)
-                .regions(&regions);
-            device.cmd_copy_image_to_buffer2(self.cmd, &copy);
-
-            let to_host = [vk::BufferMemoryBarrier2::default()
-                .buffer(self.readback)
-                .size(vk::WHOLE_SIZE)
-                .src_stage_mask(vk::PipelineStageFlags2::COPY)
-                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-                .dst_access_mask(vk::AccessFlags2::HOST_READ)];
-            device.cmd_pipeline_barrier2(
-                self.cmd,
-                &vk::DependencyInfo::default().buffer_memory_barriers(&to_host),
-            );
-
             device.end_command_buffer(self.cmd).map_err(RhiError::Vk)?;
         }
-
-        self.submit_and_wait()?;
-
-        let alloc = self
-            .readback_alloc
-            .as_ref()
-            .ok_or_else(|| RhiError::Allocator("readback memory gone".into()))?;
-        let mapped = alloc
-            .mapped_slice()
-            .ok_or_else(|| RhiError::Allocator("readback memory is not host-visible".into()))?;
-        let len = self.extent.0 as usize * self.extent.1 as usize * BYTES_PER_PIXEL;
-        Ok(mapped[..len].to_vec())
+        self.submit_and_wait()
     }
 
     /// Record and run a one-shot graphics command buffer to completion. Used
@@ -547,23 +357,9 @@ impl OffscreenRhi {
             };
         }
         self.gpu.device.wait_idle();
-        // SAFETY: GPU idle; handles belong to this device; destroyed once —
-        // dead is set below and Drop re-entry returns early.
-        unsafe {
-            self.gpu.device.raw().destroy_command_pool(self.pool, None);
-            self.gpu
-                .device
-                .raw()
-                .destroy_image_view(self.image_view, None);
-            self.gpu.device.raw().destroy_image(self.image, None);
-            self.gpu.device.raw().destroy_buffer(self.readback, None);
-        }
-        if let Some(alloc) = self.image_alloc.take() {
-            let _ = self.gpu.device.free(alloc);
-        }
-        if let Some(alloc) = self.readback_alloc.take() {
-            let _ = self.gpu.device.free(alloc);
-        }
+        // SAFETY: GPU idle; the pool belongs to this device and is destroyed
+        // once — `dead` is set below and Drop re-entry returns early.
+        unsafe { self.gpu.device.raw().destroy_command_pool(self.pool, None) };
         let report = ShutdownReport {
             leaked_allocations: self.gpu.destroy(),
             validation_messages: validation_message_count(),

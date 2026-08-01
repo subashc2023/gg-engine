@@ -16,9 +16,7 @@ use crate::deletion::DeletionQueue;
 use crate::device::Device;
 use crate::instance::Instance;
 use crate::pipeline::PipelineStore;
-use crate::resource::{
-    BufferDesc, BufferHandle, DeviceAddress, ImageDesc, ImageHandle, ImageUse, Resources,
-};
+use crate::resource::{BufferDesc, BufferHandle, DeviceAddress, ImageDesc, ImageHandle, Resources};
 use crate::surface::Surface;
 use crate::upload::{Acquire, Uploader};
 use ash::vk;
@@ -210,48 +208,28 @@ impl Gpu {
     /// declares. One-shot on the graphics queue: storage images are written by
     /// shaders rather than uploaded, so nothing else puts them in `GENERAL`.
     ///
+    /// The barrier itself is `graph.rs`'s, like every other one (§4.5).
+    ///
     /// # Safety
     /// `cmd` must be recording on the graphics family.
     pub unsafe fn record_storage_image_transition(&self, cmd: vk::CommandBuffer, image: vk::Image) {
-        let barriers = [vk::ImageMemoryBarrier2::default()
-            .image(image)
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .level_count(1)
-                    .layer_count(1),
-            )
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::GENERAL)
-            .src_stage_mask(vk::PipelineStageFlags2::NONE)
-            .src_access_mask(vk::AccessFlags2::NONE)
-            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-            .dst_access_mask(
-                vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
-            )];
         // SAFETY: caller contract — cmd is recording on the graphics family and
         // the image is live.
         unsafe {
-            self.device.raw().cmd_pipeline_barrier2(
+            crate::graph::one_shot_transition(
+                &self.device,
                 cmd,
-                &vk::DependencyInfo::default().image_memory_barriers(&barriers),
-            )
-        };
+                image,
+                vk::ImageAspectFlags::COLOR,
+                crate::Access::None,
+                crate::Access::StorageReadWrite,
+            );
+        }
     }
 
     /// The ownership-transfer barriers the graphics queue owes, taken out.
     pub fn take_acquires(&mut self) -> Vec<Acquire> {
         self.uploader.take_acquires()
-    }
-
-    /// A depth attachment sized for `extent`.
-    pub fn create_depth(&mut self, extent: (u32, u32)) -> Result<ImageHandle, RhiError> {
-        self.create_image(&ImageDesc {
-            name: "gg.depth",
-            extent,
-            format: crate::resource::ImageFormat::Depth32,
-            usage: ImageUse::Depth,
-        })
     }
 
     /// Teardown in dependency order, returning the §4.3 leak report. Caller

@@ -82,7 +82,8 @@ impl HotReload {
             fs_spirv: &fs.spirv,
             fs_entry: &fs.spirv_entry,
             push_constant_size: push_size,
-            depth: false,
+            color: gg_rhi::ColorTarget::Backbuffer,
+            depth: gg_rhi::DepthMode::Off,
         };
         match rhi.create_pipeline(&desc) {
             Ok(handle) => {
@@ -115,6 +116,23 @@ impl HotReload {
     }
 }
 
+/// One frame through the graph. The present handoff is the graph's.
+fn frame(
+    rhi: &mut Rhi,
+    transients: &mut gg_render::graph::Transients,
+    draws: &[DrawSpec<'_>],
+) -> Result<FrameOutcome, gg_rhi::RhiError> {
+    let token = match rhi.begin_frame()? {
+        gg_rhi::FrameStart::Ready(token) => token,
+        gg_rhi::FrameStart::Skipped(outcome) => return Ok(outcome),
+    };
+    let mut graph = transients.frame(rhi, token.extent())?;
+    let backbuffer = graph.backbuffer();
+    let declared = scene::declare(backbuffer, draws);
+    let compiled = graph.compile(&declared)?;
+    rhi.execute(token, &compiled.passes())
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -136,6 +154,7 @@ fn main() -> anyhow::Result<()> {
     let target_frames = frames_arg.or_else(|| gg_platform::headless().then_some(100));
 
     let mut rhi: Option<Rhi> = None;
+    let mut transients = gg_render::graph::Transients::default();
     let mut pipeline: Option<gg_rhi::PipelineHandle> = None;
     let mut failure: Option<anyhow::Error> = None;
     let mut report = None;
@@ -200,7 +219,7 @@ fn main() -> anyhow::Result<()> {
                 count: scene::VERTEX_COUNT,
                 index_buffer: None,
             };
-            match r.render_frame(scene::CLEAR, std::slice::from_ref(&draw)) {
+            match frame(r, &mut transients, std::slice::from_ref(&draw)) {
                 Ok(FrameOutcome::Presented { .. }) => {
                     frame_count += 1;
                     #[cfg(feature = "hot-reload")]

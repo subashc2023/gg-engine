@@ -1,18 +1,37 @@
-//! The v0 compare (§4.10): exact-ish gate — per-channel tolerance plus a
-//! maximum differing-pixel count. The perceptual gate (FLIP/DSSIM) and the
-//! HTML report land with v1 at M7; the *contract* — every rendering change
-//! answers to a reference image — starts here.
+//! The compare layer (§4.10): two gates over one pair of images.
+//!
+//! The **exact gate** is per-channel tolerance plus a differing-pixel budget —
+//! it answers "did any pixel move?". The **perceptual gate** is DSSIM over
+//! overlapping windows — it answers "did the *picture* move?", which is the
+//! question that separates a driver's last-bit rounding from a regression.
+//! Neither subsumes the other, so every scene answers to both (M7).
 
 /// Per-test comparison policy.
 #[derive(Clone, Copy)]
 pub struct Policy {
     /// Max absolute per-channel delta that still counts as "same pixel".
     pub tolerance: u8,
-    /// Max number of differing pixels that still passes the test.
+    /// Max number of differing pixels that still passes the exact gate.
     pub max_diff_pixels: usize,
+    /// Ceiling on *benign* drift: above this per-channel delta no amount of
+    /// structural agreement rescues a frame. Without it the perceptual gate is
+    /// an escape hatch — with it, drift must be both small everywhere and
+    /// structurally invisible to be forgiven.
+    pub benign_delta: u8,
+    /// Max DSSIM any single window may reach. Worst-window, not mean: a
+    /// structural break is local, and a mean drowns a moved edge in the clean
+    /// 99% of the frame around it.
+    pub max_dssim: f64,
+    /// Max |mean signed error|, in LSB, that still counts as drift. DSSIM is
+    /// contrast-and-structure and is blind to a small *uniform* shift, so
+    /// without this the perceptual gate would forgive a wrong colour constant.
+    /// Rounding noise cancels; a systematic shift does not, which is the whole
+    /// discriminator.
+    pub max_bias: f64,
 }
 
-/// What a comparison found.
+/// What a comparison found. Both gates are always evaluated — the verdict picks
+/// between them, and the report prints both numbers either way.
 pub struct Comparison {
     /// Pixels whose worst channel delta exceeded the tolerance.
     pub diff_pixels: usize,
@@ -20,17 +39,63 @@ pub struct Comparison {
     pub max_delta: u8,
     /// Per-pixel worst-channel delta, for the heatmap (len = w*h).
     pub deltas: Vec<u8>,
+    /// Worst window's DSSIM, in `0.0..=1.0`; 0 is structurally identical.
+    pub dssim_worst: f64,
+    /// Mean DSSIM over all windows — context for the worst, never the gate.
+    pub dssim_mean: f64,
+    /// Mean signed RGB error (actual − reference) in LSB. Near zero for
+    /// rounding noise; the size of the shift for a systematic one.
+    pub mean_bias: f64,
+}
+
+/// The joined verdict of both gates.
+pub enum Verdict {
+    /// Inside the exact gate's budget and structurally clean.
+    Pass,
+    /// Over the pixel budget, but nothing moved far and nothing moved
+    /// structurally: benign precision drift, accepted and *recorded* as such
+    /// (§4.10 — the drift is reported, never silently swallowed).
+    BenignDrift,
+    /// A structural regression, or drift too large to call benign.
+    Fail,
 }
 
 impl Comparison {
-    /// Does this comparison pass under `policy`?
-    pub fn passes(&self, policy: Policy) -> bool {
-        self.diff_pixels <= policy.max_diff_pixels
+    /// Judge against `policy`. Order matters: the exact gate decides first, and
+    /// the perceptual gate can only ever *add* a failure or forgive a drift —
+    /// it cannot overrule a structural objection.
+    pub fn verdict(&self, policy: Policy) -> Verdict {
+        let structural = self.dssim_worst > policy.max_dssim;
+        if self.diff_pixels <= policy.max_diff_pixels {
+            // Exact gate satisfied; the picture can still have moved while every
+            // channel stayed inside `tolerance`, which is the perceptual gate's
+            // whole reason to run on passing frames too.
+            return if structural {
+                Verdict::Fail
+            } else {
+                Verdict::Pass
+            };
+        }
+        // Three conditions, and every one of them is load-bearing: nothing moved
+        // far, nothing moved structurally, and nothing moved *in one direction*.
+        if !structural
+            && self.max_delta <= policy.benign_delta
+            && self.mean_bias.abs() <= policy.max_bias
+        {
+            Verdict::BenignDrift
+        } else {
+            Verdict::Fail
+        }
     }
 }
 
 /// Compare two RGBA8 buffers of identical dimensions.
-pub fn compare(actual: &[u8], reference: &[u8], policy: Policy) -> anyhow::Result<Comparison> {
+pub fn compare(
+    actual: &[u8],
+    reference: &[u8],
+    extent: (u32, u32),
+    policy: Policy,
+) -> anyhow::Result<Comparison> {
     anyhow::ensure!(
         actual.len() == reference.len(),
         "buffer sizes differ: actual {} B vs reference {} B",
@@ -40,6 +105,7 @@ pub fn compare(actual: &[u8], reference: &[u8], policy: Policy) -> anyhow::Resul
     let mut deltas = Vec::with_capacity(actual.len() / 4);
     let mut diff_pixels = 0usize;
     let mut max_delta = 0u8;
+    let mut bias = 0i64;
     for (a, r) in actual.chunks_exact(4).zip(reference.chunks_exact(4)) {
         let delta = (0..4).map(|i| a[i].abs_diff(r[i])).max().unwrap_or(0);
         deltas.push(delta);
@@ -47,12 +113,82 @@ pub fn compare(actual: &[u8], reference: &[u8], policy: Policy) -> anyhow::Resul
         if delta > policy.tolerance {
             diff_pixels += 1;
         }
+        // RGB only: alpha is a flat 255 in a readback frame and would do nothing
+        // but dilute the mean it is averaged into.
+        bias += (0..3)
+            .map(|i| i64::from(a[i]) - i64::from(r[i]))
+            .sum::<i64>();
     }
+    let channels = (deltas.len() * 3).max(1) as f64;
+    let (dssim_worst, dssim_mean) = structural(actual, reference, extent);
     Ok(Comparison {
         diff_pixels,
         max_delta,
         deltas,
+        dssim_worst,
+        dssim_mean,
+        mean_bias: bias as f64 / channels,
     })
+}
+
+/// Overlapping 8×8 windows: sensitive enough that a two-pixel edge shift lands
+/// wholly inside several of them, cheap enough to stay unnoticed in the tier.
+const WINDOW: usize = 8;
+const STRIDE: usize = 4;
+const WINDOW_PIXELS: f64 = (WINDOW * WINDOW) as f64;
+/// The standard 8-bit SSIM stabilisers (K1 = 0.01, K2 = 0.03 over a 255 range).
+/// They exist to keep a flat window from dividing by ~0, nothing more.
+const C1: f64 = 6.5025;
+const C2: f64 = 58.5225;
+
+/// Rec.709 luma. Alpha is the exact gate's business — a readback frame is
+/// opaque, and an alpha regression is a channel delta, not a structural one.
+fn luma(px: &[u8]) -> f64 {
+    0.2126 * f64::from(px[0]) + 0.7152 * f64::from(px[1]) + 0.0722 * f64::from(px[2])
+}
+
+/// `(worst, mean)` DSSIM. Pure `+ - * /` on `f64` — no transcendentals, so the
+/// number is bit-identical on every host that runs the gate, which a threshold
+/// checked into the repo needs to be.
+fn structural(actual: &[u8], reference: &[u8], extent: (u32, u32)) -> (f64, f64) {
+    let (w, h) = (extent.0 as usize, extent.1 as usize);
+    let (mut worst, mut sum, mut windows) = (0.0f64, 0.0f64, 0usize);
+    let mut y = 0;
+    while y + WINDOW <= h {
+        let mut x = 0;
+        while x + WINDOW <= w {
+            let (mut sa, mut sr, mut saa, mut srr, mut sar) = (0.0, 0.0, 0.0, 0.0, 0.0);
+            for row in 0..WINDOW {
+                for col in 0..WINDOW {
+                    let i = ((y + row) * w + x + col) * 4;
+                    let (a, r) = (luma(&actual[i..i + 4]), luma(&reference[i..i + 4]));
+                    sa += a;
+                    sr += r;
+                    saa += a * a;
+                    srr += r * r;
+                    sar += a * r;
+                }
+            }
+            // Naive second moments: luma is 0..255 in f64, so the cancellation
+            // that makes this form dangerous at scale cannot reach here.
+            let (ma, mr) = (sa / WINDOW_PIXELS, sr / WINDOW_PIXELS);
+            let va = saa / WINDOW_PIXELS - ma * ma;
+            let vr = srr / WINDOW_PIXELS - mr * mr;
+            let cov = sar / WINDOW_PIXELS - ma * mr;
+            let ssim = ((2.0 * ma * mr + C1) * (2.0 * cov + C2))
+                / ((ma * ma + mr * mr + C1) * (va + vr + C2));
+            let dssim = ((1.0 - ssim) / 2.0).clamp(0.0, 1.0);
+            worst = worst.max(dssim);
+            sum += dssim;
+            windows += 1;
+            x += STRIDE;
+        }
+        y += STRIDE;
+    }
+    if windows == 0 {
+        return (0.0, 0.0); // frame smaller than one window: nothing to say
+    }
+    (worst, sum / windows as f64)
 }
 
 /// Render the deltas as a heatmap: black where equal, red ramp where not —
@@ -71,4 +207,147 @@ pub fn heatmap(comparison: &Comparison, tolerance: u8) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    const EXTENT: (u32, u32) = (64, 64);
+
+    fn policy() -> Policy {
+        Policy {
+            tolerance: 0,
+            max_diff_pixels: 0,
+            benign_delta: 2,
+            max_dssim: 0.02,
+            max_bias: 0.25,
+        }
+    }
+
+    /// A horizontal luma gradient with a hard vertical edge at `edge` — enough
+    /// structure that SSIM has something to lose.
+    fn scene(edge: usize) -> Vec<u8> {
+        let mut px = Vec::new();
+        for y in 0..EXTENT.1 as usize {
+            for x in 0..EXTENT.0 as usize {
+                let v = if x < edge { (x * 3) as u8 } else { 200 };
+                px.extend_from_slice(&[v, v.wrapping_add(y as u8), 40, 255]);
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn identical_frames_are_structurally_identical() {
+        let a = scene(32);
+        let c = compare(&a, &a, EXTENT, policy()).unwrap();
+        assert_eq!((c.diff_pixels, c.max_delta), (0, 0));
+        assert_eq!(c.dssim_worst, 0.0);
+        assert!(matches!(c.verdict(policy()), Verdict::Pass));
+    }
+
+    /// The M7 exit row: a benign precision change fails the exact gate — every
+    /// pixel differs — and the perceptual gate forgives it, *as a recorded
+    /// verdict* rather than by widening a tolerance until the gate stops asking.
+    /// The drift is signed alternately because that is what rounding noise is:
+    /// a driver rounds both ways, and the next test is what happens when it
+    /// doesn't.
+    #[test]
+    fn one_lsb_rounding_noise_is_benign_and_says_so() {
+        let reference = scene(32);
+        let actual: Vec<u8> = reference
+            .chunks_exact(4)
+            .enumerate()
+            .flat_map(|(i, p)| {
+                let d = if i % 2 == 0 { 1i16 } else { -1 };
+                [nudge(p[0], d), nudge(p[1], -d), nudge(p[2], d), p[3]]
+            })
+            .collect();
+        let c = compare(&actual, &reference, EXTENT, policy()).unwrap();
+        assert_eq!(c.max_delta, 1);
+        assert!(c.diff_pixels > 0, "the exact gate must object first");
+        // Alternating every pixel is the *worst* case a ±1 noise can present to
+        // SSIM — real driver rounding is spatially correlated and scores lower —
+        // and it still sits an order of magnitude under the 0.02 budget.
+        assert!(c.dssim_worst < 0.005, "worst window {}", c.dssim_worst);
+        assert!(c.mean_bias.abs() < 0.02, "bias {}", c.mean_bias);
+        assert!(matches!(c.verdict(policy()), Verdict::BenignDrift));
+    }
+
+    /// The escape hatch, closed. A uniform +1 LSB on every channel is small
+    /// everywhere and — above the stabilisers, which is most of any real frame —
+    /// structurally invisible: DSSIM sees contrast, not level. Without the bias
+    /// term the perceptual gate would wave a wrong colour constant through, and
+    /// the second half of this test is that claim, not an opinion about it.
+    #[test]
+    fn a_uniform_shift_is_not_drift_however_small() {
+        let reference = mid_scene();
+        let actual: Vec<u8> = reference
+            .chunks_exact(4)
+            .flat_map(|p| [nudge(p[0], 1), nudge(p[1], 1), nudge(p[2], 1), p[3]])
+            .collect();
+        let c = compare(&actual, &reference, EXTENT, policy()).unwrap();
+        assert_eq!(c.max_delta, 1);
+        assert!(c.dssim_worst < 0.001, "worst window {}", c.dssim_worst);
+        assert!(c.mean_bias > 0.99, "bias {}", c.mean_bias);
+        assert!(matches!(c.verdict(policy()), Verdict::Fail));
+        let blind = Policy {
+            max_bias: f64::INFINITY,
+            ..policy()
+        };
+        assert!(
+            matches!(c.verdict(blind), Verdict::BenignDrift),
+            "the bias term is what rejects this — drop it and the frame passes"
+        );
+    }
+
+    /// Mid-tone everywhere: SSIM's stabilisers only matter near black, so this
+    /// is where "invisible to DSSIM" is a real claim rather than an artifact of
+    /// C1 dominating a dark window.
+    fn mid_scene() -> Vec<u8> {
+        let mut px = Vec::new();
+        for y in 0..EXTENT.1 as usize {
+            for x in 0..EXTENT.0 as usize {
+                px.extend_from_slice(&[120 + (x % 40) as u8, 140 + (y % 30) as u8, 160, 255]);
+            }
+        }
+        px
+    }
+
+    fn nudge(v: u8, d: i16) -> u8 {
+        (i16::from(v) + d).clamp(0, 255) as u8
+    }
+
+    /// The other half: a *structural* change — the same edge, two pixels over —
+    /// is rejected however the pixel budget is set, because DSSIM sees the
+    /// picture move rather than the numbers.
+    #[test]
+    fn a_shifted_edge_is_structural_and_no_budget_forgives_it() {
+        let c = compare(&scene(34), &scene(32), EXTENT, policy()).unwrap();
+        assert!(c.dssim_worst > 0.02, "worst window {}", c.dssim_worst);
+        let generous = Policy {
+            tolerance: 255,
+            max_diff_pixels: usize::MAX,
+            ..policy()
+        };
+        assert!(matches!(c.verdict(generous), Verdict::Fail));
+    }
+
+    /// Small *and* structurally invisible are both required: a handful of pixels
+    /// wrenched to a different colour stays inside a generous pixel budget and
+    /// is still not benign.
+    #[test]
+    fn a_large_delta_is_never_benign_drift() {
+        let reference = scene(32);
+        let mut actual = reference.clone();
+        for p in actual.chunks_exact_mut(4).take(4) {
+            p[0] = p[0].wrapping_add(120);
+        }
+        let c = compare(&actual, &reference, EXTENT, policy()).unwrap();
+        assert_eq!(c.max_delta, 120);
+        assert!(matches!(c.verdict(policy()), Verdict::Fail));
+    }
 }

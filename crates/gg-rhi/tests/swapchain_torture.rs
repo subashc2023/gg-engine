@@ -18,7 +18,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gg_platform::{Event, Pump, WindowDesc};
-use gg_rhi::{FrameOutcome, Rhi};
+use gg_rhi::{
+    Access, ColorAttachment, FrameOutcome, FrameStart, Pass, PassKind, Rhi, Target, Transition,
+};
 
 /// Deterministic extent stream — no `rand`, reproducible failures.
 struct Lcg(u64);
@@ -30,6 +32,46 @@ impl Lcg {
             .wrapping_add(1442695040888963407);
         lo + ((self.0 >> 33) as u32) % (hi - lo)
     }
+}
+
+/// One frame, one pass: clear the backbuffer and present it. The smallest
+/// graph there is — declared here rather than borrowed from `gg-render`, which
+/// this crate cannot depend on, and which these tests are below anyway.
+fn clear_frame(rhi: &mut Rhi, color: [f32; 4]) -> FrameOutcome {
+    let token = match rhi.begin_frame().expect("begin frame") {
+        FrameStart::Ready(token) => token,
+        FrameStart::Skipped(outcome) => return outcome,
+    };
+    let to_attachment = [Transition {
+        target: Target::Backbuffer,
+        from: Access::None,
+        to: Access::ColorWrite,
+    }];
+    let to_present = [Transition {
+        target: Target::Backbuffer,
+        from: Access::ColorWrite,
+        to: Access::Present,
+    }];
+    let passes = [
+        Pass {
+            name: "clear",
+            transitions: &to_attachment,
+            kind: PassKind::Render {
+                color: Some(ColorAttachment {
+                    target: Target::Backbuffer,
+                    clear: Some(color),
+                }),
+                depth: None,
+                draws: &[],
+            },
+        },
+        Pass {
+            name: "present",
+            transitions: &to_present,
+            kind: PassKind::Barriers,
+        },
+    ];
+    rhi.execute(token, &passes).expect("frame")
 }
 
 fn init_tracing() {
@@ -62,7 +104,7 @@ fn recreation_survives_1000_synthetic_extents() {
         // deletion-queue path every frame, whatever the surface finally says.
         let extent = (lcg.next(1, 3000), lcg.next(1, 2000));
         rhi.resize(extent.0, extent.1);
-        match rhi.render_clear_frame([0.1, 0.2, 0.3, 1.0]).expect("frame") {
+        match clear_frame(&mut rhi, [0.1, 0.2, 0.3, 1.0]) {
             FrameOutcome::Presented { .. } => presented += 1,
             FrameOutcome::SkippedSuspended | FrameOutcome::SkippedOutOfDate => {}
         }
@@ -121,7 +163,7 @@ fn interactive_resize_minimize_spam_1000() {
                 | Event::MouseMotion { .. } => {}
             }
         }
-        match rhi.render_clear_frame([0.3, 0.2, 0.1, 1.0]).expect("frame") {
+        match clear_frame(&mut rhi, [0.3, 0.2, 0.1, 1.0]) {
             FrameOutcome::Presented { .. } => presented += 1,
             FrameOutcome::SkippedSuspended | FrameOutcome::SkippedOutOfDate => {}
         }

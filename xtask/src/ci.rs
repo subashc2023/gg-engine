@@ -107,7 +107,7 @@ fn nightly() -> anyhow::Result<()> {
     golden_suite()?;
     println!(
         "xtask ci --nightly: green (windowless by construction — windowed WSI coverage is \
-         `cargo xtask interactive`, manual; golden suite grows to v1 at M7)"
+         `cargo xtask interactive`, manual)"
     );
     Ok(())
 }
@@ -254,8 +254,8 @@ fn gpu_tests() -> anyhow::Result<()> {
     exec(&mut cmd, "headless GPU tests on pinned lavapipe (§5.4)")
 }
 
-/// Gate 5 (§5), v0 spine (§4.10): the golden suite on the pinned lavapipe —
-/// offscreen render, readback, compare against the checked-in references.
+/// Gate 5 (§5), §4.10's harness: the golden suite on the pinned lavapipe —
+/// offscreen render, readback, both gates against the checked-in references.
 /// Also gate 7's winit half: the harness binary must be headless *by linkage*,
 /// so its bytes are scanned for winit before it runs.
 fn golden_suite() -> anyhow::Result<()> {
@@ -281,7 +281,46 @@ fn golden_suite() -> anyhow::Result<()> {
     let mut cmd = cargo();
     cmd.args(["run", "-p", "gg-golden", "--", "run"]);
     lavapipe_env(&mut cmd)?;
-    exec(&mut cmd, "golden suite v0 on pinned lavapipe (§4.10)")
+    exec(&mut cmd, "golden suite on pinned lavapipe (§4.10)")?;
+
+    // The gate's own gate (§4.10, M7): a suite that cannot fail is not a suite.
+    // It runs *after* the compare so a green suite is never the reason this was
+    // skipped, and on the same pin so the numbers it prints are the tier's.
+    let mut cmd = cargo();
+    cmd.args(["run", "-p", "gg-golden", "--", "verify-gates"]);
+    lavapipe_env(&mut cmd)?;
+    exec(
+        &mut cmd,
+        "golden gates reject a one-pixel change and forgive rounding noise (§4.10)",
+    )?;
+    render_graph_dump()
+}
+
+/// §4.5's `--dump-render-graph`, as a gate rather than a convenience.
+///
+/// It runs against `gg-golden` and not the shell for a reason worth stating: the
+/// shell is *windowless* under `GG_HEADLESS`, so it has no renderer to ask and a
+/// flag on it could never run in an automated tier (§1.5) — an artifact no gate
+/// can produce is an artifact that rots. Here the dump comes off the same
+/// compiled graph the harness just rendered with, so it is the executed order by
+/// construction; `gg-render`'s offscreen test asserts that equality directly.
+fn render_graph_dump() -> anyhow::Result<()> {
+    let mut cmd = cargo();
+    cmd.args(["run", "-q", "-p", "gg-golden", "--", "graph"]);
+    lavapipe_env(&mut cmd)?;
+    let dump = run_capture(&mut cmd, "gg-golden graph")?;
+    for expected in ["forward-opaque", "readback", "frame-end", "barrier"] {
+        anyhow::ensure!(
+            dump.contains(expected),
+            "the render-graph dump names no `{expected}` — §4.5's dump must be readable and \
+             complete:\n{dump}"
+        );
+    }
+    println!(
+        "xtask: render-graph dump readable ({} lines)",
+        dump.lines().count()
+    );
+    Ok(())
 }
 
 /// The demo WSI runs (part of the manual windowed suite): every demo runs 100
@@ -748,11 +787,37 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
                 "{rel_str}: static mut / thread_local! in a game crate (§4.2.2)"
             ));
         }
+
+        // Hand-written barriers (§4.5, §6 M6): every `synchronization2` barrier
+        // in the engine is *derived* by the render graph, so the tokens that
+        // spell one live in the graph's execution layer and in the staging
+        // ring's queue-family ownership transfers — which are a property of a
+        // transfer paired across two queues, not a pass dependency the
+        // single-queue v1 graph models.
+        if !BARRIER_SITES.contains(&rel_str.as_str())
+            && let Some(tok) = BARRIER_TOKENS.into_iter().find(|t| contains_path(&text, t))
+        {
+            violations.push(format!(
+                "{rel_str}: `{tok}` — barriers are derived by the render graph, not written \
+                 (§4.5); the derivation lives in {}",
+                BARRIER_SITES[0]
+            ));
+        }
     }
-    // Hand-written barrier grep joins at M6, when the render graph owns barriers.
 
     Ok((violations, files.len()))
 }
+
+/// What spelling a hand-written barrier out looks like.
+const BARRIER_TOKENS: [&str; 4] = [
+    "cmd_pipeline_barrier2",
+    "ImageMemoryBarrier2",
+    "BufferMemoryBarrier2",
+    "MemoryBarrier2",
+];
+
+/// The two files allowed to name them, and why (see the gate above).
+const BARRIER_SITES: [&str; 2] = ["crates/gg-rhi/src/graph.rs", "crates/gg-rhi/src/upload.rs"];
 
 /// The `rayon` ban's wrappers in deny.toml must cover every exemption in
 /// determinism-allowlist.toml (§4.1) — two files, one truth, machine-checked.
@@ -922,6 +987,45 @@ mod tests {
         let found = violations(&root);
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].starts_with("crates/gg-a/"), "{found:?}");
+    }
+
+    /// §6 M6: a barrier written by hand is rejected wherever it is — including
+    /// inside `gg-rhi`, where the tokens are legal Rust — and the graph's own
+    /// execution layer is not.
+    #[test]
+    fn a_hand_written_barrier_outside_the_graph_is_rejected() {
+        let root = plant(
+            "barrier",
+            &[
+                (
+                    "crates/gg-rhi/src/frame.rs",
+                    "// SAFETY: fine.\nunsafe { d.cmd_pipeline_barrier2(cmd, &info) };\n",
+                ),
+                (
+                    "crates/gg-rhi/src/graph.rs",
+                    "// SAFETY: fine.\nunsafe { d.cmd_pipeline_barrier2(cmd, &info) };\n",
+                ),
+                (
+                    "crates/gg-render/src/lib.rs",
+                    "let b = ImageMemoryBarrier2::default();\n",
+                ),
+            ],
+        );
+        let found = violations(&root);
+        assert!(
+            found.iter().any(|v| v.contains("frame.rs")),
+            "the derivation belongs to the graph alone: {found:?}"
+        );
+        assert!(
+            found.iter().any(|v| v.contains("gg-render")),
+            "and above the seam it is not even spellable: {found:?}"
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|v| v.starts_with("crates/gg-rhi/src/graph.rs")),
+            "the graph's own execution layer is where they live: {found:?}"
+        );
     }
 
     /// The other half of the evidence: a tree with nothing planted is silent.

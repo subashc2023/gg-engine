@@ -20,9 +20,19 @@ tracing-subscriber.workspace = true
 png.workspace = true
 bytemuck.workspace = true
 gg-rhi = { path = "../../crates/gg-rhi" }
+# The render graph: the harness runs each scene's own declared passes and
+# appends §4.5's readback pass to them.
+gg-render = { path = "../../crates/gg-render" }
 gg-extract = { path = "../../crates/gg-extract" }
+# The v1 pass-list scenes declare their boxes the way a game does: two ordinary
+# components in a World, read through the same typed query the shell uses.
+gg-ecs = { path = "../../crates/gg-ecs" }
 gg-math = { path = "../../crates/gg-math" }
 demo-01-triangle = { path = "../../demos/01-triangle", default-features = false }
+# `gate` as well as `scene`: it carries the curated replay §4.10's replay-driven
+# scene is played back from. Still no `app`, so the graph stays winit-free.
 demo-02-mesh = { path = "../../demos/02-mesh", default-features = false, features = [
     "scene",
+    "gate",
 ] }
+gg-input = { path = "../../crates/gg-input" }

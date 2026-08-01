@@ -22,7 +22,27 @@ use demo_02_mesh as scene;
 use gg_extract::Extracted;
 use gg_input::{Drive, Recorder, Replay, ReplayMeta};
 use gg_platform::{Control, Event, Key, WindowDesc};
-use gg_rhi::{DrawSpec, FrameOutcome, Rhi};
+use gg_render::graph::Transients;
+use gg_rhi::{DrawSpec, FrameOutcome, FrameStart, Rhi, RhiError};
+
+/// One frame through the graph (§4.5): the scene's declarations, compiled, with
+/// the depth attachment and the present handoff both the graph's business.
+fn frame(
+    rhi: &mut Rhi,
+    transients: &mut Transients,
+    draws: &[DrawSpec<'_>],
+) -> Result<FrameOutcome, RhiError> {
+    let token = match rhi.begin_frame()? {
+        FrameStart::Ready(token) => token,
+        FrameStart::Skipped(outcome) => return Ok(outcome),
+    };
+    let mut graph = transients.frame(rhi, token.extent())?;
+    let backbuffer = graph.backbuffer();
+    let depth = graph.depth("scene.depth")?;
+    let declared = scene::declare(backbuffer, depth, draws);
+    let compiled = graph.compile(&declared)?;
+    rhi.execute(token, &compiled.passes())
+}
 
 /// Which tier this binary was built as, for the replay header (§4.7). Not a
 /// guess: the tier features are the ones the build actually enabled.
@@ -106,6 +126,7 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| gg_platform::headless().then_some(100));
 
     let mut rhi: Option<Rhi> = None;
+    let mut transients = Transients::default();
     let mut resources: Option<scene::SceneResources> = None;
     let mut failure: Option<anyhow::Error> = None;
     let mut report = None;
@@ -209,7 +230,7 @@ fn main() -> anyhow::Result<()> {
                     index_buffer: Some(s.indices),
                 })
                 .collect();
-            match r.render_frame(scene::CLEAR, &draws) {
+            match frame(r, &mut transients, &draws) {
                 Ok(FrameOutcome::Presented { .. })
                 | Ok(FrameOutcome::SkippedSuspended | FrameOutcome::SkippedOutOfDate) => {}
                 Err(e) => {

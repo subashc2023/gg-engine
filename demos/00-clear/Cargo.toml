@@ -20,11 +20,13 @@ tracing-subscriber.workspace = true
 gg-math = { path = "../../crates/gg-math" }
 gg-platform = { path = "../../crates/gg-platform" }
 gg-rhi = { path = "../../crates/gg-rhi", default-features = false }
+# The render graph. A demo declares passes; it never writes a barrier (§4.5).
+gg-render = { path = "../../crates/gg-render", default-features = false }
 
 [features]
 # Mirrors gg-runtime's tier discipline (§3): named combinations only.
 default = ["tier-dev"]
-validation = ["gg-rhi/validation"]
+validation = ["gg-rhi/validation", "gg-render/validation"]
 fp-assert = []
 tier-dev = ["validation", "fp-assert"]
 tier-dist = []

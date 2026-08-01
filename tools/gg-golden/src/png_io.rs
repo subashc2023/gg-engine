@@ -6,21 +6,32 @@
 use std::path::Path;
 
 pub fn write(path: &Path, pixels: &[u8], extent: (u32, u32)) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, encode(pixels, extent)?)?;
+    Ok(())
+}
+
+/// The same PNG, in memory — what the HTML report embeds so the artifact is one
+/// file a reviewer can open or attach without carrying a directory with it.
+pub fn encode(pixels: &[u8], extent: (u32, u32)) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(
         pixels.len() == extent.0 as usize * extent.1 as usize * 4,
         "pixel buffer does not match {}x{} RGBA8",
         extent.0,
         extent.1
     );
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file = std::fs::File::create(path)?;
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), extent.0, extent.1);
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, extent.0, extent.1);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.write_header()?.write_image_data(pixels)?;
-    Ok(())
+    // Finish explicitly: the IEND chunk is otherwise written by `Drop`, where a
+    // write error has nowhere to go and a truncated PNG rides into the report.
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(pixels)?;
+    writer.finish()?;
+    Ok(out)
 }
 
 pub fn read(path: &Path) -> anyhow::Result<(Vec<u8>, (u32, u32))> {

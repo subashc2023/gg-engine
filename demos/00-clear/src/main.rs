@@ -5,7 +5,26 @@
 //! (§1.6) enforced at the demo's own front door.
 
 use gg_platform::{Control, Event, WindowDesc};
-use gg_rhi::{FrameOutcome, Rhi};
+use gg_render::graph::{Load, Transients, single_pass};
+use gg_rhi::{FrameOutcome, FrameStart, Rhi, RhiError};
+
+/// One frame, one pass: clear the backbuffer through the graph (§4.5). The
+/// present handoff is the graph's, which is why nothing here mentions one.
+fn clear_frame(
+    rhi: &mut Rhi,
+    transients: &mut Transients,
+    color: [f32; 4],
+) -> Result<FrameOutcome, RhiError> {
+    let token = match rhi.begin_frame()? {
+        FrameStart::Ready(token) => token,
+        FrameStart::Skipped(outcome) => return Ok(outcome),
+    };
+    let mut frame = transients.frame(rhi, token.extent())?;
+    let backbuffer = frame.backbuffer();
+    let declared = single_pass("clear", backbuffer, Load::Clear(color), &[]);
+    let compiled = frame.compile(&declared)?;
+    rhi.execute(token, &compiled.passes())
+}
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -30,6 +49,7 @@ fn main() -> anyhow::Result<()> {
     let target_frames = frames_arg.or_else(|| gg_platform::headless().then_some(100));
 
     let mut rhi: Option<Rhi> = None;
+    let mut transients = Transients::default();
     let mut failure: Option<anyhow::Error> = None;
     let mut report = None;
     let mut frame_count: u64 = 0;
@@ -68,7 +88,7 @@ fn main() -> anyhow::Result<()> {
             let Some(r) = rhi.as_mut() else {
                 return Control::Continue;
             };
-            match r.render_clear_frame(clear_color(frame_count)) {
+            match clear_frame(r, &mut transients, clear_color(frame_count)) {
                 Ok(FrameOutcome::Presented { .. }) => frame_count += 1,
                 Ok(FrameOutcome::SkippedSuspended | FrameOutcome::SkippedOutOfDate) => {}
                 Err(e) => {

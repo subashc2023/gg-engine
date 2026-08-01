@@ -16,8 +16,37 @@ use ash::vk;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// What a pipeline writes color into. Dynamic rendering makes a pipeline agree
+/// with its pass on attachment formats, and a graph pass targets either where
+/// the frame lands or an attachment the graph made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorTarget {
+    /// Whatever this context presents into — the swapchain's format, or the
+    /// offscreen target's. The context supplies it, so callers never name it.
+    Backbuffer,
+    /// A graph attachment of this format.
+    Format(crate::ImageFormat),
+    /// No color attachment at all — a depth prepass.
+    None,
+}
+
+/// How a pipeline participates in depth. Reverse-Z throughout (§2, Math row):
+/// the buffer clears to `0.0` and the comparison is *greater*-or-equal, so a
+/// fragment survives by being nearer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepthMode {
+    /// Neither tested nor written — a fullscreen pass.
+    Off,
+    /// Tested and written.
+    Write,
+    /// Tested only. What a forward pass does over a depth prepass's result:
+    /// `GREATER_OR_EQUAL` lets the same geometry re-draw exactly where the
+    /// prepass put it. Pair with `DepthAttachment { read_only: true, .. }`.
+    TestOnly,
+}
+
 /// What a graphics pipeline is made of: one vertex + one fragment entry point,
-/// a push-constant block, and whether it participates in depth.
+/// a push-constant block, and how it meets its pass's attachments.
 pub struct PipelineDesc<'a> {
     /// Debug name (§1.6) — shows up in validation messages and logs.
     pub name: &'a str,
@@ -32,12 +61,13 @@ pub struct PipelineDesc<'a> {
     /// Push-constant block size in bytes (0 for none). Draws must pass
     /// exactly this many bytes — checked, not assumed.
     pub push_constant_size: u32,
-    /// Test and write depth. Reverse-Z (§2, Math row): the buffer clears to
-    /// `0.0` and the comparison is *greater*-or-equal, so a fragment survives
-    /// by being nearer. A pipeline that sets this `false` still declares the
-    /// depth format — dynamic rendering requires the pipeline and the pass to
-    /// agree on attachment formats whether or not the pipeline reads them.
-    pub depth: bool,
+    /// Where color goes.
+    pub color: ColorTarget,
+    /// What it does with depth. [`DepthMode::Off`] declares *no* depth
+    /// attachment: dynamic rendering makes the pipeline and the pass agree on
+    /// formats, so a pipeline that ignores depth cannot run in a pass that has
+    /// one.
+    pub depth: DepthMode,
 }
 
 /// An opaque handle to a created pipeline. Plain data on purpose: handles
@@ -103,13 +133,14 @@ impl PipelineStore {
         })
     }
 
-    /// Build a graphics pipeline for `color_format` via dynamic rendering.
-    /// Creation is timed and logged (§4.4).
+    /// Build a graphics pipeline via dynamic rendering. `backbuffer_format` is
+    /// the context's own, used when the desc targets
+    /// [`ColorTarget::Backbuffer`]. Creation is timed and logged (§4.4).
     pub fn create(
         &mut self,
         device: &Device,
         desc: &PipelineDesc<'_>,
-        color_format: vk::Format,
+        backbuffer_format: vk::Format,
         set_layout: vk::DescriptorSetLayout,
     ) -> Result<PipelineHandle, RhiError> {
         let started = std::time::Instant::now();
@@ -123,7 +154,7 @@ impl PipelineStore {
             }
         };
 
-        let result = self.create_with_modules(device, desc, color_format, set_layout, vs, fs);
+        let result = self.create_with_modules(device, desc, backbuffer_format, set_layout, vs, fs);
         // SAFETY: pipeline creation retains no reference to the modules.
         unsafe {
             device.raw().destroy_shader_module(vs, None);
@@ -142,7 +173,7 @@ impl PipelineStore {
         &mut self,
         device: &Device,
         desc: &PipelineDesc<'_>,
-        color_format: vk::Format,
+        backbuffer_format: vk::Format,
         set_layout: vk::DescriptorSetLayout,
         vs: vk::ShaderModule,
         fs: vk::ShaderModule,
@@ -193,27 +224,44 @@ impl PipelineStore {
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-        let blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(false)
-            .color_write_mask(vk::ColorComponentFlags::RGBA)];
+        // One blend state per color attachment, so a depth prepass gets none —
+        // the counts must agree or creation is invalid.
+        let blend_attachments: Vec<vk::PipelineColorBlendAttachmentState> =
+            match desc.color == ColorTarget::None {
+                true => Vec::new(),
+                false => vec![
+                    vk::PipelineColorBlendAttachmentState::default()
+                        .blend_enable(false)
+                        .color_write_mask(vk::ColorComponentFlags::RGBA),
+                ],
+            };
         let blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-        // Reverse-Z: clear to 0.0, keep the *greater* fragment. Equal passes so
-        // a depth prepass can re-draw the same geometry (§4.5 v1 targets).
+        // Reverse-Z: clear to 0.0, keep the *greater* fragment. `GREATER_OR_EQUAL`
+        // rather than `GREATER` is what lets a forward pass re-draw exactly the
+        // geometry a depth prepass already placed (§4.5 v1 targets).
         let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(desc.depth)
-            .depth_write_enable(desc.depth)
+            .depth_test_enable(desc.depth != DepthMode::Off)
+            .depth_write_enable(desc.depth == DepthMode::Write)
             .depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL)
             .min_depth_bounds(0.0)
             .max_depth_bounds(1.0);
 
-        let color_formats = [color_format];
+        let color_formats = match desc.color {
+            ColorTarget::Backbuffer => vec![backbuffer_format],
+            ColorTarget::Format(format) => vec![format.vk()],
+            ColorTarget::None => Vec::new(),
+        };
+        let depth_format = match desc.depth {
+            DepthMode::Off => vk::Format::UNDEFINED,
+            DepthMode::Write | DepthMode::TestOnly => crate::ImageFormat::Depth32.vk(),
+        };
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&color_formats)
-            .depth_attachment_format(crate::resource::ImageFormat::Depth32.vk());
+            .depth_attachment_format(depth_format);
 
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
@@ -347,8 +395,11 @@ pub(crate) struct ResolvedDraw<'a> {
 
 /// Record one draw inside an active dynamic-rendering pass: full-target
 /// viewport/scissor, the global bindless set, push constants, and an indexed
-/// or non-indexed draw. Shared by the swapchain and offscreen paths so a draw
-/// means the same thing everywhere.
+/// or non-indexed draw. Every pass records draws through here, so a draw means
+/// the same thing everywhere.
+///
+/// Infallible: the push-constant length is checked when the draw is resolved,
+/// which happens before the swapchain acquire (see `graph::resolve`).
 ///
 /// # Safety
 /// `cmd` must be recording inside `cmd_begin_rendering`; the pipeline must be
@@ -360,16 +411,8 @@ pub(crate) unsafe fn record_draw(
     extent: (u32, u32),
     set: vk::DescriptorSet,
     draw: &ResolvedDraw<'_>,
-) -> Result<(), RhiError> {
+) {
     let entry = &draw.entry;
-    if draw.push_constants.len() != entry.push_constant_size as usize {
-        return Err(RhiError::Loader(format!(
-            "draw passed {} push-constant bytes; the pipeline declares {} (§4.4: layouts are \
-             checked, not assumed)",
-            draw.push_constants.len(),
-            entry.push_constant_size
-        )));
-    }
     let device = device.raw();
     let viewport = [vk::Viewport::default()
         .width(extent.0 as f32)
@@ -414,7 +457,6 @@ pub(crate) unsafe fn record_draw(
             None => device.cmd_draw(cmd, draw.count, 1, 0, 0),
         }
     }
-    Ok(())
 }
 
 fn create_shader_module(

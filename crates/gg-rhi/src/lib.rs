@@ -18,6 +18,7 @@ mod deletion;
 mod device;
 mod frame;
 mod gpu;
+mod graph;
 mod instance;
 mod offscreen;
 mod pipeline;
@@ -30,9 +31,10 @@ mod upload;
 pub use bindless::{StorageImageIndex, TextureIndex};
 pub use device::{Candidate, DeviceReport};
 pub use frame::FRAMES_IN_FLIGHT;
+pub use graph::{Access, ColorAttachment, DepthAttachment, Pass, PassKind, Target, Transition};
 pub use instance::validation_message_count;
 pub use offscreen::OffscreenRhi;
-pub use pipeline::{PipelineDesc, PipelineHandle};
+pub use pipeline::{ColorTarget, DepthMode, PipelineDesc, PipelineHandle};
 pub use resource::{
     BufferDesc, BufferHandle, BufferKind, DeviceAddress, ImageDesc, ImageFormat, ImageHandle,
     ImageUse, Sampler,
@@ -42,8 +44,8 @@ pub use suppressions::{parse as parse_suppressions, validated as validated_suppr
 use ash::vk;
 use frame::Frames;
 use gpu::Gpu;
+use graph::Bound;
 use instance::Instance;
-use pipeline::ResolvedDraw;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use surface::Surface;
 use swapchain::{Acquired, Swapchain};
@@ -85,7 +87,7 @@ pub enum RhiError {
     Allocator(String),
 }
 
-/// What a [`Rhi::render_clear_frame`] call did.
+/// What a [`Rhi::execute`] call did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameOutcome {
     /// A frame was recorded, submitted, and presented.
@@ -116,8 +118,36 @@ impl ShutdownReport {
     }
 }
 
-/// The windowed RHI: one window, one device, one swapchain, frames that clear,
-/// draw, and present. Grows engine-shaped surface with its consumers (§9).
+/// A frame whose swapchain is current, waiting for a graph.
+///
+/// Held between [`Rhi::begin_frame`] and [`Rhi::execute`] so the two are one
+/// frame rather than two calls that happen to be adjacent: recreation is
+/// already done, the extent below is final, and no image has been acquired yet
+/// — which is what lets graph compilation (and its allocations) fail safely.
+#[must_use = "a begun frame must be executed or the swapchain stalls"]
+pub struct FrameToken {
+    extent: (u32, u32),
+}
+
+impl FrameToken {
+    /// The swapchain's extent, which the graph sizes its attachments to.
+    pub fn extent(&self) -> (u32, u32) {
+        self.extent
+    }
+}
+
+/// What [`Rhi::begin_frame`] produced.
+#[must_use]
+pub enum FrameStart {
+    /// Compile a graph against this and call [`Rhi::execute`].
+    Ready(FrameToken),
+    /// Nothing to render into — the surface is zero-extent (minimized).
+    Skipped(FrameOutcome),
+}
+
+/// The windowed RHI: one window, one device, one swapchain, and frames that
+/// execute a compiled graph and present. Grows engine-shaped surface with its
+/// consumers (§9).
 pub struct Rhi {
     frame_index: u64,
     desired_extent: (u32, u32),
@@ -126,8 +156,6 @@ pub struct Rhi {
     /// Transfer timeline value the graphics queue has already waited on, so a
     /// flush is ordered before the first frame that reads it exactly once.
     transfer_waited: u64,
-    depth: ImageHandle,
-    depth_extent: (u32, u32),
     gpu: Gpu,
     frames: Frames,
     swapchain: Swapchain,
@@ -183,24 +211,9 @@ impl Rhi {
                 return Err(e);
             }
         };
-        let mut frames = match Frames::new(&gpu.device) {
+        let frames = match Frames::new(&gpu.device) {
             Ok(f) => f,
             Err(e) => {
-                swapchain.destroy(&gpu.device);
-                gpu.destroy();
-                surface.destroy();
-                instance.destroy();
-                return Err(e);
-            }
-        };
-        // The depth target follows the swapchain's extent, not the requested
-        // one: a minimized surface clamps to a nonzero swapchain extent, and
-        // the attachment has to match what the pass renders into.
-        let depth_extent = swapchain.extent();
-        let depth = match gpu.create_depth(depth_extent) {
-            Ok(d) => d,
-            Err(e) => {
-                frames.destroy(&gpu.device);
                 swapchain.destroy(&gpu.device);
                 gpu.destroy();
                 surface.destroy();
@@ -214,8 +227,6 @@ impl Rhi {
             pending_recreate: false,
             dead: false,
             transfer_waited: 0,
-            depth,
-            depth_extent,
             gpu,
             frames,
             swapchain,
@@ -287,6 +298,15 @@ impl Rhi {
         self.gpu.register_texture(handle)
     }
 
+    /// A readback buffer's bytes, valid once the frame that filled it retired.
+    ///
+    /// # Errors
+    ///
+    /// The buffer is not [`BufferKind::Readback`], or the handle is stale.
+    pub fn map_buffer(&self, handle: BufferHandle) -> Result<&[u8], RhiError> {
+        self.gpu.resources.mapped(handle)
+    }
+
     /// Retire a buffer behind the frame timeline.
     pub fn destroy_buffer(&mut self, handle: BufferHandle) -> Result<(), RhiError> {
         self.gpu.retire_buffer(handle, self.frame_index)
@@ -337,49 +357,33 @@ impl Rhi {
         validation_message_count()
     }
 
-    /// Record, submit, and present one frame that clears the swapchain image
-    /// to `color` (linear values; the sRGB target encodes). Handles resize,
-    /// minimize, out-of-date, and suboptimal as normal events (§4.3).
-    pub fn render_clear_frame(&mut self, color: [f32; 4]) -> Result<FrameOutcome, RhiError> {
-        self.render_frame(color, &[])
-    }
-
-    /// Record, submit, and present one frame: clear to `color`, then run every
-    /// draw in `draws`, in order, into one pass (the render graph owns passes
-    /// from M6). Resize/minimize/out-of-date handled as in
-    /// [`Rhi::render_clear_frame`].
+    /// Make the swapchain current and hand back the extent to compile against.
     ///
-    /// A slice and not one draw: the sim decides how many things exist, and a
-    /// caller forced to present per object would show only the last one. It is
-    /// still *one* pass and one present — batching and instancing are M6's, and
-    /// a draw call per object is the honest cost until then.
-    pub fn render_frame(
-        &mut self,
-        color: [f32; 4],
-        draws: &[DrawSpec<'_>],
-    ) -> Result<FrameOutcome, RhiError> {
+    /// Recreation, minimize and the frames-in-flight wait all happen here, so
+    /// that everything after it — graph compilation and the transient
+    /// allocations it makes — sees a final extent and may still fail safely
+    /// (see [`Rhi::execute`]).
+    pub fn begin_frame(&mut self) -> Result<FrameStart, RhiError> {
         if self.pending_recreate || self.swapchain.suspended() {
             // Recreation is a normal event but a *structural* one: presents
             // in flight hold the retired per-image semaphores with no signal
             // to key their deletion to, so this path — and only this path —
             // waits the queue idle before retiring (see wait_graphics_idle).
             self.gpu.device.wait_graphics_idle();
-            let retire = self.frame_index;
             let rebuilt = self.swapchain.recreate(
                 &self.gpu.device,
                 &self.surface,
                 self.desired_extent,
                 &mut self.gpu.deletions,
-                retire,
+                self.frame_index,
             )?;
             self.pending_recreate = false;
             if !rebuilt {
-                return Ok(FrameOutcome::SkippedSuspended);
+                return Ok(FrameStart::Skipped(FrameOutcome::SkippedSuspended));
             }
-            self.resize_depth(retire)?;
         }
         if self.swapchain.suspended() {
-            return Ok(FrameOutcome::SkippedSuspended);
+            return Ok(FrameStart::Skipped(FrameOutcome::SkippedSuspended));
         }
 
         // §4.3: frames-in-flight = 2, expressed as a wait on
@@ -390,16 +394,33 @@ impl Rhi {
         }
         let completed = self.gpu.device.graphics_timeline_value()?;
         self.gpu.collect(completed);
+        Ok(FrameStart::Ready(FrameToken {
+            extent: self.swapchain.extent(),
+        }))
+    }
 
-        // Resolve the draw's handles BEFORE acquiring. A stale handle (retired
-        // by hot reload) is a normal, caller-reachable error, and acquire
-        // signals `slot.acquire` — so returning between the two would leave a
-        // signaled semaphore with no waiter, which the next frame to reuse this
-        // slot trips over as a validation error, permanently failing the §4.3
-        // zero-message shutdown report. Nothing may fail in between.
-        let draws = self.resolve_draws(draws)?;
-        let depth = self.gpu.resources.image(self.depth)?;
-        let (depth_image, depth_view) = (depth.raw, depth.view);
+    /// Record, submit and present one compiled graph.
+    ///
+    /// The passes run in the order given; every barrier between them is
+    /// derived from the [`Transition`]s they carry, and this crate writes no
+    /// others (§4.5). Out-of-date and suboptimal are handled as normal events.
+    ///
+    /// # Errors
+    ///
+    /// A stale handle or a draw whose push constants do not match its pipeline.
+    /// Both are found while resolving, which happens *before* the swapchain
+    /// acquire: acquire signals a semaphore that only a submit can wait on, so
+    /// returning between the two would leave it signaled with no waiter — which
+    /// the next frame to reuse that slot trips over as a validation error,
+    /// permanently failing the §4.3 zero-message shutdown report. Nothing may
+    /// fail in between, and after `resolve` nothing can.
+    pub fn execute(
+        &mut self,
+        frame: FrameToken,
+        passes: &[Pass<'_>],
+    ) -> Result<FrameOutcome, RhiError> {
+        let _ = frame;
+        let resolved = graph::resolve(&self.gpu, passes)?;
 
         let slot = &self.frames.slots[(self.frame_index % FRAMES_IN_FLIGHT) as usize];
         let (image_index, acquire_suboptimal) =
@@ -411,16 +432,14 @@ impl Rhi {
                 }
             };
 
+        let backbuffer = Bound {
+            image: self.swapchain.image(image_index),
+            view: self.swapchain.view(image_index),
+            extent: self.swapchain.extent(),
+            aspect: vk::ImageAspectFlags::COLOR,
+        };
         let acquires = self.gpu.take_acquires();
-        self.record_pass(
-            slot.pool,
-            slot.cmd,
-            image_index,
-            color,
-            (depth_image, depth_view),
-            &acquires,
-            &draws,
-        )?;
+        self.record(slot.pool, slot.cmd, &acquires, &resolved, backbuffer)?;
 
         // Submit: wait the acquire binary (and the transfer timeline when an
         // upload has been flushed since the last frame), signal the per-image
@@ -503,56 +522,15 @@ impl Rhi {
         }
     }
 
-    /// Resolve a draw's handles to Vulkan objects, so the record path cannot
-    /// fail. See the call site for why this must happen before acquire.
-    fn resolve_draws<'a>(&self, draws: &[DrawSpec<'a>]) -> Result<Vec<ResolvedDraw<'a>>, RhiError> {
-        draws
-            .iter()
-            .map(|d| {
-                let entry = *self.gpu.pipelines.get(d.pipeline)?;
-                let index_buffer = d
-                    .index_buffer
-                    .map(|h| self.gpu.resources.buffer(h).map(|b| b.raw))
-                    .transpose()?;
-                Ok(ResolvedDraw {
-                    entry,
-                    push_constants: d.push_constants,
-                    count: d.count,
-                    index_buffer,
-                })
-            })
-            .collect()
-    }
-
-    /// Rebuild the depth target to match a recreated swapchain. The old one is
-    /// retired behind the timeline like any other resource — the queue-idle
-    /// wait above has already proven it unused, but the deletion queue is the
-    /// one path that accounts for it in the leak report.
-    fn resize_depth(&mut self, retire_at: u64) -> Result<(), RhiError> {
-        let extent = self.swapchain.extent();
-        if extent == self.depth_extent {
-            return Ok(());
-        }
-        let old = self.depth;
-        self.depth = self.gpu.create_depth(extent)?;
-        self.depth_extent = extent;
-        self.gpu.retire_image(old, retire_at)
-    }
-
-    /// Record the frame's pass: the ownership acquires an upload left owing,
-    /// the color and depth layout barriers, dynamic rendering with clear load
-    /// ops (plus the draw, when given), then color-attachment → present.
-    /// `draw` arrives already resolved (see `resolve_draw`).
-    #[expect(clippy::too_many_arguments, reason = "one frame's recording inputs")]
-    fn record_pass(
+    /// Record the frame: the ownership acquires an upload left owing, then the
+    /// graph. Everything here arrived resolved (see [`Rhi::execute`]).
+    fn record(
         &self,
         pool: vk::CommandPool,
         cmd: vk::CommandBuffer,
-        image_index: u32,
-        color: [f32; 4],
-        depth: (vk::Image, vk::ImageView),
         acquires: &[upload::Acquire],
-        draws: &[ResolvedDraw<'_>],
+        passes: &[graph::ResolvedPass<'_>],
+        backbuffer: Bound,
     ) -> Result<(), RhiError> {
         let device = self.gpu.device.raw();
         // SAFETY: the timeline wait proved this slot's previous frame retired,
@@ -570,81 +548,14 @@ impl Rhi {
             // SAFETY: cmd records on the graphics family and this submit waits
             // on the transfer timeline value the releases signaled.
             upload::Uploader::record_acquires(&self.gpu.device, cmd, acquires);
-
-            let subresource = vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .level_count(1)
-                .layer_count(1);
-            let image = self.swapchain.image(image_index);
-
-            let to_attachment = [
-                vk::ImageMemoryBarrier2::default()
-                    .image(image)
-                    .subresource_range(subresource)
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .src_access_mask(vk::AccessFlags2::NONE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                    .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE),
-                depth_barrier(depth.0),
-            ];
-            device.cmd_pipeline_barrier2(
+            // SAFETY: as above; the backbuffer is this frame's acquired image.
+            graph::record(
+                &self.gpu.device,
                 cmd,
-                &vk::DependencyInfo::default().image_memory_barriers(&to_attachment),
+                self.gpu.bindless.set(),
+                passes,
+                backbuffer,
             );
-
-            let clear = vk::ClearValue {
-                color: vk::ClearColorValue { float32: color },
-            };
-            let attachment = [vk::RenderingAttachmentInfo::default()
-                .image_view(self.swapchain.view(image_index))
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(clear)];
-            let depth_attachment = depth_attachment_info(depth.1);
-            let extent = self.swapchain.extent();
-            let rendering = vk::RenderingInfo::default()
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D::default(),
-                    extent: vk::Extent2D {
-                        width: extent.0,
-                        height: extent.1,
-                    },
-                })
-                .layer_count(1)
-                .color_attachments(&attachment)
-                .depth_attachment(&depth_attachment);
-            device.cmd_begin_rendering(cmd, &rendering);
-            for draw in draws {
-                // SAFETY: cmd is recording inside the rendering pass; every
-                // entry came from the live store and targets these formats, and
-                // the set is the one every pipeline layout declares.
-                pipeline::record_draw(
-                    &self.gpu.device,
-                    cmd,
-                    extent,
-                    self.gpu.bindless.set(),
-                    draw,
-                )?;
-            }
-            device.cmd_end_rendering(cmd);
-
-            let to_present = [vk::ImageMemoryBarrier2::default()
-                .image(image)
-                .subresource_range(subresource)
-                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::NONE)
-                .dst_access_mask(vk::AccessFlags2::NONE)];
-            device.cmd_pipeline_barrier2(
-                cmd,
-                &vk::DependencyInfo::default().image_memory_barriers(&to_present),
-            );
-
             device.end_command_buffer(cmd).map_err(RhiError::Vk)?;
         }
         Ok(())
@@ -684,39 +595,83 @@ impl Drop for Rhi {
     }
 }
 
-/// Depth attachments are cleared every frame, so the previous contents are
-/// discarded: `UNDEFINED` as the old layout is the cheap, correct answer, not
-/// a shortcut.
-pub(crate) fn depth_barrier(image: vk::Image) -> vk::ImageMemoryBarrier2<'static> {
-    vk::ImageMemoryBarrier2::default()
-        .image(image)
-        .subresource_range(
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                .level_count(1)
-                .layer_count(1),
-        )
-        .old_layout(vk::ImageLayout::UNDEFINED)
-        .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-        .src_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
-        .src_access_mask(vk::AccessFlags2::NONE)
-        .dst_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS)
-        .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+/// What a render graph needs from the context it runs on: the attachments it
+/// owns, and which frame slot it is building for.
+///
+/// **Not a backend abstraction** (§3): that ban is over graphics *APIs*, and
+/// both implementors here are the same Vulkan. What varies is where the frame
+/// lands — a swapchain or an offscreen target — and this exists so one graph
+/// serves the shell, the demos and the golden harness rather than three that
+/// drift.
+pub trait GraphContext {
+    /// Allocate an attachment.
+    ///
+    /// # Errors
+    /// Out of memory, or a format/usage pair the RHI refuses.
+    fn create_image(&mut self, desc: &ImageDesc<'_>) -> Result<ImageHandle, RhiError>;
+
+    /// Retire one, behind the timeline where there is one.
+    ///
+    /// # Errors
+    /// The handle is stale.
+    fn destroy_image(&mut self, handle: ImageHandle) -> Result<(), RhiError>;
+
+    /// Give an attachment a bindless slot so a later pass can sample it.
+    ///
+    /// # Errors
+    /// The array is full, or the image is a depth attachment.
+    fn register_texture(&mut self, handle: ImageHandle) -> Result<TextureIndex, RhiError>;
+
+    /// Which frame-in-flight slot the next frame records into. A transient
+    /// shared between two frames in flight is a write racing a read with no
+    /// barrier between them, so the pool keys on this.
+    fn frame_slot(&self) -> u64;
+
+    /// Whether the backbuffer is handed to a presentation engine. Only a
+    /// swapchain image may end a frame in [`Access::Present`]; an offscreen
+    /// target put there is an invalid layout for an image no WSI owns.
+    fn presents(&self) -> bool;
 }
 
-/// Reverse-Z (§2, Math row): clear to `0.0` — the far plane — and let nearer
-/// fragments win by comparing *greater*. Nothing reads depth after the pass at
-/// M4A, so it is never stored.
-pub(crate) fn depth_attachment_info(view: vk::ImageView) -> vk::RenderingAttachmentInfo<'static> {
-    vk::RenderingAttachmentInfo::default()
-        .image_view(view)
-        .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::DONT_CARE)
-        .clear_value(vk::ClearValue {
-            depth_stencil: vk::ClearDepthStencilValue {
-                depth: 0.0,
-                stencil: 0,
-            },
-        })
+impl GraphContext for Rhi {
+    fn create_image(&mut self, desc: &ImageDesc<'_>) -> Result<ImageHandle, RhiError> {
+        Rhi::create_image(self, desc)
+    }
+    fn destroy_image(&mut self, handle: ImageHandle) -> Result<(), RhiError> {
+        Rhi::destroy_image(self, handle)
+    }
+    fn register_texture(&mut self, handle: ImageHandle) -> Result<TextureIndex, RhiError> {
+        Rhi::register_texture(self, handle)
+    }
+    fn frame_slot(&self) -> u64 {
+        self.frame_index % FRAMES_IN_FLIGHT
+    }
+    fn presents(&self) -> bool {
+        true
+    }
 }
+
+impl GraphContext for OffscreenRhi {
+    fn create_image(&mut self, desc: &ImageDesc<'_>) -> Result<ImageHandle, RhiError> {
+        OffscreenRhi::create_image(self, desc)
+    }
+    fn destroy_image(&mut self, handle: ImageHandle) -> Result<(), RhiError> {
+        OffscreenRhi::destroy_image(self, handle)
+    }
+    fn register_texture(&mut self, handle: ImageHandle) -> Result<TextureIndex, RhiError> {
+        OffscreenRhi::register_texture(self, handle)
+    }
+    /// One slot: an offscreen execute blocks until the GPU is done with it.
+    fn frame_slot(&self) -> u64 {
+        0
+    }
+    fn presents(&self) -> bool {
+        false
+    }
+}
+
+/// Reverse-Z's clear value (§2, Math row): the far plane is `0.0`, and nearer
+/// fragments win by comparing *greater*. Passes name this rather than a
+/// literal, because a depth attachment cleared the ordinary way renders a
+/// scene that is subtly, consistently wrong.
+pub const DEPTH_CLEAR: f32 = 0.0;
