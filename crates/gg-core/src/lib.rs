@@ -48,7 +48,7 @@ pub mod frame;
 pub mod reload;
 
 pub use clock::{DEFAULT_TICK_HZ, Due, MAX_TICKS_PER_FRAME, Pace, TickClock};
-pub use cvar::{CVar, CVarError, CVarKind};
+pub use cvar::{CVar, CVarError, CVarKind, CVarSource};
 pub use event::{AppEvent, Events};
 pub use frame::{Flow, FrameLoop, Stages};
 pub use reload::rejuvenate::Handoff;

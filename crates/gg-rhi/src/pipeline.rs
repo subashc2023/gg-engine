@@ -45,6 +45,19 @@ pub enum DepthMode {
     TestOnly,
 }
 
+/// How a pipeline's fragments meet what is already in the color target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Blend {
+    /// Replace. Every opaque pass, and the depth prepass that has no color at
+    /// all.
+    Off,
+    /// Straight (non-premultiplied) source alpha over the destination — glyph
+    /// coverage and a translucent panel are the same operation (§4.9's draw
+    /// layer). On an sRGB target Vulkan decodes before blending, so the mix is
+    /// linear and the encode happens after.
+    Alpha,
+}
+
 /// What a graphics pipeline is made of: one vertex + one fragment entry point,
 /// a push-constant block, and how it meets its pass's attachments.
 pub struct PipelineDesc<'a> {
@@ -63,6 +76,9 @@ pub struct PipelineDesc<'a> {
     pub push_constant_size: u32,
     /// Where color goes.
     pub color: ColorTarget,
+    /// How it combines with what is there. Ignored when there is no color
+    /// attachment to combine with.
+    pub blend: Blend,
     /// What it does with depth. [`DepthMode::Off`] declares *no* depth
     /// attachment: dynamic rendering makes the pipeline and the pass agree on
     /// formats, so a pipeline that ignores depth cannot run in a pass that has
@@ -229,11 +245,7 @@ impl PipelineStore {
         let blend_attachments: Vec<vk::PipelineColorBlendAttachmentState> =
             match desc.color == ColorTarget::None {
                 true => Vec::new(),
-                false => vec![
-                    vk::PipelineColorBlendAttachmentState::default()
-                        .blend_enable(false)
-                        .color_write_mask(vk::ColorComponentFlags::RGBA),
-                ],
+                false => vec![blend_attachment(desc.blend)],
             };
         let blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
@@ -456,6 +468,25 @@ pub(crate) unsafe fn record_draw(
             }
             None => device.cmd_draw(cmd, draw.count, 1, 0, 0),
         }
+    }
+}
+
+fn blend_attachment(blend: Blend) -> vk::PipelineColorBlendAttachmentState {
+    let state = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA);
+    match blend {
+        Blend::Off => state.blend_enable(false),
+        // Destination alpha accumulates rather than being overwritten, so
+        // stacking translucent quads leaves a target whose alpha means what it
+        // says — which matters the moment anything composites this one.
+        Blend::Alpha => state
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD),
     }
 }
 

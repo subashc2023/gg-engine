@@ -36,3 +36,8 @@ demo-02-mesh = { path = "../../demos/02-mesh", default-features = false, feature
     "gate",
 ] }
 gg-input = { path = "../../crates/gg-input" }
+# The capture trigger (§4.8). `gg-debug` is winit-free by its own dependency
+# list, so `capture` reaches this binary without touching gate 7's linkage
+# claim — which is the point: RenderDoc's own hotkey needs a Present, and
+# nothing here presents.
+gg-debug = { path = "../../crates/gg-debug" }

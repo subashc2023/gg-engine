@@ -58,6 +58,7 @@ fn pipeline(
             fs_entry: &fs.spirv_entry,
             push_constant_size: push_size,
             color: gg_rhi::ColorTarget::Backbuffer,
+            blend: gg_rhi::Blend::Off,
             depth,
         })
         .unwrap();

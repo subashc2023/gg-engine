@@ -158,6 +158,29 @@ fn main() {
         ratio(hash)
     );
 
+    // `--json` for `xtask bench --record`, which archives this run as a baseline
+    // (§4.11). Emitted before the assertions below so the numbers reach the
+    // archive of a run that ends red as well — the reader wants to see how far.
+    if std::env::args().any(|a| a == "--json") {
+        let ns = |d: Duration| d.as_secs_f64() * 1e9 / f64::from(ENTITIES);
+        println!(
+            "{{\"entities\":{ENTITIES},\"reps\":{REPS},\"ns_per_entity\":{{\"native\":{:.4},\
+             \"column_views\":{:.4},\"typed_each\":{:.4},\"boundary_each\":{:.4},\
+             \"canonical_hash\":{:.4}}},\"ratios\":{{\"column_views\":{:.4},\"typed_each\":{:.4},\
+             \"boundary_each\":{:.4},\"seam\":{:.4},\"canonical_hash\":{:.4}}}}}",
+            ns(native),
+            ns(views),
+            ns(typed),
+            ns(boundary),
+            ns(hash),
+            ratio(views),
+            ratio(typed),
+            ratio(boundary),
+            boundary.as_secs_f64() / typed.as_secs_f64(),
+            ratio(hash)
+        );
+    }
+
     // "Within noise" as a falsifiable bound rather than a feeling. The gap this
     // would catch is structural — a per-entity indirection or bounds-check
     // pattern the native loop does not pay — not a few percent of jitter.

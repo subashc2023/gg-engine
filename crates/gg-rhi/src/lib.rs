@@ -14,6 +14,7 @@
 #![warn(missing_docs)]
 
 mod bindless;
+mod crash;
 mod deletion;
 mod device;
 mod frame;
@@ -26,6 +27,7 @@ mod resource;
 mod suppressions;
 mod surface;
 mod swapchain;
+mod timing;
 mod upload;
 
 pub use bindless::{StorageImageIndex, TextureIndex};
@@ -34,12 +36,13 @@ pub use frame::FRAMES_IN_FLIGHT;
 pub use graph::{Access, ColorAttachment, DepthAttachment, Pass, PassKind, Target, Transition};
 pub use instance::validation_message_count;
 pub use offscreen::OffscreenRhi;
-pub use pipeline::{ColorTarget, DepthMode, PipelineDesc, PipelineHandle};
+pub use pipeline::{Blend, ColorTarget, DepthMode, PipelineDesc, PipelineHandle};
 pub use resource::{
     BufferDesc, BufferHandle, BufferKind, DeviceAddress, ImageDesc, ImageFormat, ImageHandle,
-    ImageUse, Sampler,
+    ImageUse, MemoryUse, Sampler,
 };
 pub use suppressions::{parse as parse_suppressions, validated as validated_suppressions};
+pub use timing::{GpuClock, PassTiming};
 
 use ash::vk;
 use frame::Frames;
@@ -76,6 +79,12 @@ pub enum RhiError {
     /// A Vulkan call failed.
     #[error("vulkan: {0:?}")]
     Vk(vk::Result),
+    /// The device was lost. Separate from [`RhiError::Vk`] because the code
+    /// itself says nothing: what is worth reporting is the pass the breadcrumbs
+    /// caught in flight and whatever `VK_EXT_device_fault` saw (§4.8), and this
+    /// carries that whole report.
+    #[error("{0}")]
+    DeviceLost(String),
     /// The `validation` feature needs the Khronos layer and it is absent.
     #[error("{0}")]
     MissingLayer(String),
@@ -158,6 +167,7 @@ pub struct Rhi {
     transfer_waited: u64,
     gpu: Gpu,
     frames: Frames,
+    timings: Option<timing::Timings>,
     swapchain: Swapchain,
     surface: Surface,
     instance: Instance,
@@ -194,7 +204,7 @@ impl Rhi {
                 return Err(e);
             }
         };
-        let mut gpu = match Gpu::new(&instance, Some(&surface)) {
+        let mut gpu = match Gpu::new(&instance, Some(&surface), FRAMES_IN_FLIGHT as usize) {
             Ok(g) => g,
             Err(e) => {
                 surface.destroy();
@@ -211,9 +221,20 @@ impl Rhi {
                 return Err(e);
             }
         };
-        let frames = match Frames::new(&gpu.device) {
+        let mut frames = match Frames::new(&gpu.device) {
             Ok(f) => f,
             Err(e) => {
+                swapchain.destroy(&gpu.device);
+                gpu.destroy();
+                surface.destroy();
+                instance.destroy();
+                return Err(e);
+            }
+        };
+        let timings = match timing::Timings::new(&gpu.device, FRAMES_IN_FLIGHT as usize) {
+            Ok(t) => t,
+            Err(e) => {
+                frames.destroy(&gpu.device);
                 swapchain.destroy(&gpu.device);
                 gpu.destroy();
                 surface.destroy();
@@ -229,6 +250,7 @@ impl Rhi {
             transfer_waited: 0,
             gpu,
             frames,
+            timings,
             swapchain,
             surface,
             instance,
@@ -284,6 +306,31 @@ impl Rhi {
     /// image, tightly packed for its format.
     pub fn upload_image(&mut self, handle: ImageHandle, bytes: &[u8]) -> Result<(), RhiError> {
         self.gpu.upload_image(handle, bytes)
+    }
+
+    /// Write into a [`BufferKind::Dynamic`] buffer's mapping — the per-frame
+    /// stream path, with no staging copy and no submit (§4.3).
+    ///
+    /// Visible to the next submit on this queue without a barrier: a host write
+    /// before a submit is ordered by the submit itself. What is *not* ordered
+    /// is a write over bytes an in-flight frame is still reading, which is the
+    /// caller's to avoid — see [`BufferKind::Dynamic`].
+    ///
+    /// # Errors
+    ///
+    /// A buffer that is not host-visible, or a write past its end.
+    pub fn write_buffer(
+        &mut self,
+        handle: BufferHandle,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), RhiError> {
+        self.gpu.write_buffer(handle, offset, bytes)
+    }
+
+    /// Live buffer and image allocations — the overlay's memory row (§4.8).
+    pub fn memory(&self) -> MemoryUse {
+        self.gpu.memory()
     }
 
     /// Submit the staging batch and wait for it — the §4.3 "upload now" path.
@@ -357,6 +404,33 @@ impl Rhi {
         validation_message_count()
     }
 
+    /// Per-pass GPU time from the most recently *retired* frame — one to two
+    /// frames behind what was last submitted, which is the price of not
+    /// stalling to ask (§4.8). Empty without the `gpu-timings` feature, on a
+    /// device whose graphics queue writes no timestamp, and before the first
+    /// frame has come back.
+    pub fn pass_timings(&self) -> &[PassTiming] {
+        self.timings.as_ref().map(|t| t.last()).unwrap_or_default()
+    }
+
+    /// The device clock now, paired with its period — what puts a
+    /// [`PassTiming`]'s raw ticks on a profiler's CPU timeline (§4.8). `None`
+    /// without `VK_EXT_calibrated_timestamps`, which is reported and never
+    /// required.
+    pub fn gpu_clock(&self) -> Option<GpuClock> {
+        self.timings.as_ref()?.clock(&self.gpu.device)
+    }
+
+    /// What the last recorded frame's breadcrumbs say it reached (§4.8).
+    ///
+    /// On a live device this is a health check — every pass completed — and the
+    /// reading worth having comes after a loss, where it names the pass that was
+    /// in flight. A device-lost error already carries this text; this is for
+    /// tests and for a canary that survives to ask.
+    pub fn breadcrumbs(&self) -> String {
+        self.gpu.breadcrumbs()
+    }
+
     /// Make the swapchain current and hand back the extent to compile against.
     ///
     /// Recreation, minimize and the frames-in-flight wait all happen here, so
@@ -390,10 +464,21 @@ impl Rhi {
         // timeline >= frame_index - 1 (submit N signals value N + 1).
         let horizon = self.frame_index.saturating_sub(FRAMES_IN_FLIGHT - 1);
         if horizon > 0 {
-            self.gpu.device.wait_graphics_timeline(horizon)?;
+            self.gpu
+                .device
+                .wait_graphics_timeline(horizon)
+                .map_err(|e| self.gpu.detail(e))?;
         }
         let completed = self.gpu.device.graphics_timeline_value()?;
         self.gpu.collect(completed);
+        // The wait above is exactly the proof the timestamps this slot holds are
+        // written and complete, so the read never blocks (§4.8).
+        if let Some(timings) = &mut self.timings {
+            timings.collect(
+                &self.gpu.device,
+                (self.frame_index % FRAMES_IN_FLIGHT) as usize,
+            );
+        }
         Ok(FrameStart::Ready(FrameToken {
             extent: self.swapchain.extent(),
         }))
@@ -422,7 +507,20 @@ impl Rhi {
         let _ = frame;
         let resolved = graph::resolve(&self.gpu, passes)?;
 
-        let slot = &self.frames.slots[(self.frame_index % FRAMES_IN_FLIGHT) as usize];
+        let slot_index = (self.frame_index % FRAMES_IN_FLIGHT) as usize;
+        // Named here, while the graph's borrows are alive; read back a frame
+        // later, when the names are all that is left of it.
+        if let Some(timings) = &mut self.timings {
+            timing::warn_pass_overflow(passes.len());
+            timings.expect(slot_index, passes.iter().map(|p| p.name.to_owned()));
+        }
+        let stamps = self.timings.as_ref().map(|t| t.stamps(slot_index));
+        // Before the acquire, like everything else that can fail (see above):
+        // this clears the slot's marks and names the passes about to write them.
+        let crumbs = self
+            .gpu
+            .prepare_crumbs(slot_index, passes.iter().map(|p| p.name))?;
+        let slot = &self.frames.slots[slot_index];
         let (image_index, acquire_suboptimal) =
             match self.swapchain.acquire(&self.gpu.device, slot.acquire)? {
                 Acquired::Image { index, suboptimal } => (index, suboptimal),
@@ -439,7 +537,15 @@ impl Rhi {
             aspect: vk::ImageAspectFlags::COLOR,
         };
         let acquires = self.gpu.take_acquires();
-        self.record(slot.pool, slot.cmd, &acquires, &resolved, backbuffer)?;
+        let instruments = graph::Instruments { stamps, crumbs };
+        self.record(
+            slot.pool,
+            slot.cmd,
+            &acquires,
+            &resolved,
+            backbuffer,
+            instruments,
+        )?;
 
         // Submit: wait the acquire binary (and the transfer timeline when an
         // upload has been flushed since the last frame), signal the per-image
@@ -486,7 +592,7 @@ impl Rhi {
                 vk::Fence::null(),
             )
         }
-        .map_err(RhiError::Vk)?;
+        .map_err(|e| self.gpu.explain(e))?;
         self.transfer_waited = transfer_value;
 
         // Present, waiting the per-image render-done semaphore.
@@ -518,7 +624,7 @@ impl Rhi {
                 self.pending_recreate = true;
                 Ok(FrameOutcome::Presented { suboptimal: true })
             }
-            Err(err) => Err(RhiError::Vk(err)),
+            Err(err) => Err(self.gpu.explain(err)),
         }
     }
 
@@ -531,6 +637,7 @@ impl Rhi {
         acquires: &[upload::Acquire],
         passes: &[graph::ResolvedPass<'_>],
         backbuffer: Bound,
+        instruments: graph::Instruments,
     ) -> Result<(), RhiError> {
         let device = self.gpu.device.raw();
         // SAFETY: the timeline wait proved this slot's previous frame retired,
@@ -555,6 +662,7 @@ impl Rhi {
                 self.gpu.bindless.set(),
                 passes,
                 backbuffer,
+                instruments,
             );
             device.end_command_buffer(cmd).map_err(RhiError::Vk)?;
         }
@@ -575,6 +683,9 @@ impl Rhi {
             };
         }
         self.gpu.device.wait_idle();
+        if let Some(timings) = &mut self.timings {
+            timings.destroy(&self.gpu.device);
+        }
         self.frames.destroy(&self.gpu.device);
         self.swapchain.destroy(&self.gpu.device);
         let report = ShutdownReport {

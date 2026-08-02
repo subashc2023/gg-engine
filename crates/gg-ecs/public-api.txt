@@ -185,8 +185,10 @@ pub fn gg_ecs::boundary::layout_of<T: gg_ecs::component::Component>() -> gg_abi:
 pub unsafe fn gg_ecs::boundary::read_verbs(&gg_abi::verb::VerbsTable) -> gg_ecs::boundary::Verbs
 pub unsafe fn gg_ecs::boundary::run(*mut gg_abi::host::WorldHandle, *const gg_abi::system::TickCtx, fn(&mut gg_ecs::GameWorld<'_>)) -> gg_abi::system::SystemStatus
 pub fn gg_ecs::boundary::set_logger(fn(u32, &str)) -> core::result::Result<(), fn(u32, &str)>
+pub fn gg_ecs::boundary::set_system_zone(gg_ecs::boundary::SystemZone) -> core::result::Result<(), gg_ecs::boundary::SystemZone>
 pub fn gg_ecs::boundary::system_id(&str) -> u64
 pub fn gg_ecs::boundary::verbs(&'static gg_ecs::boundary::Table<gg_abi::verb::VerbName>, &'static gg_ecs::boundary::Table<gg_abi::verb::VerbName>, &[&'static str], &[&'static str]) -> gg_abi::verb::VerbsTable
+pub type gg_ecs::boundary::SystemZone = fn(&str, &mut dyn core::ops::function::FnMut())
 pub mod gg_ecs::chunked
 pub struct gg_ecs::chunked::ChunkedHash<const VERSION: u64>(_)
 impl<const VERSION: u64> gg_ecs::chunked::ChunkedHash<VERSION>

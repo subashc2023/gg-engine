@@ -22,18 +22,25 @@ workspace = true
 # The GPU. `gg-render` speaks the RHI's safe API only — `ash`/`vk::` are banned
 # outside gg-rhi by cargo-deny and by a grep gate (§3).
 gg-rhi = { path = "../gg-rhi", default-features = false }
+# The CVar registry only (§4.8). Downhill by §3's ordering, and the reason the
+# registry is homed in `gg-core` rather than in the observability crate.
+gg-core = { path = "../gg-core" }
 # What a frame draws, already narrowed through the §1.4 membrane.
 gg-extract = { path = "../gg-extract" }
 # The render half only: this crate is downstream of the membrane and has no
 # business with sim types.
 gg-math = { path = "../gg-math" }
 bytemuck.workspace = true
+tracing.workspace = true
 # The window is the shell's; this crate only needs the handles a surface is
 # built from, which is what keeps `gg-platform` out of its graph.
 raw-window-handle = { workspace = true }
 
 [features]
 validation = ["gg-rhi/validation"]
+# Forwarded, not local: the query pool is the RHI's and the tier meta-features
+# in `gg-runtime` are the only place that decides it exists (§4.8).
+gpu-timings = ["gg-rhi/gpu-timings"]
 
 [dev-dependencies]
 # The offscreen render test builds its world out of the render protocol's own

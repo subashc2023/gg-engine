@@ -35,5 +35,9 @@ tracing-subscriber.workspace = true
 # this crate with default-features off (§2 Build tiers row). `validation`
 # carries the layer + sync validation, the debug messenger, the suppressions
 # mechanism, and debug_utils object names — all lab equipment (§1.13).
-default = ["validation"]
+default = ["validation", "gpu-timings"]
 validation = []
+# Per-pass timestamps (§4.8): the query pool, the readback, and the per-frame
+# pass names. Off in dist, where `Timings::new` folds to `None` and the rest
+# goes with it.
+gpu-timings = []

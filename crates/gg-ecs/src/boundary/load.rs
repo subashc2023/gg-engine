@@ -87,12 +87,35 @@ impl World {
         ctx: &TickCtx,
     ) -> Result<(), SystemPanic> {
         let handle = super::handle(self);
+        // Read once per tick, not per system: a `OnceLock` cannot change under
+        // the loop, and the zone-less path is then one branch on a local.
+        let zone = super::host::system_zone();
         // SAFETY: the caller's obligation — one live array of entries.
         for entry in unsafe { slice(table.entries, table.len) } {
             // SAFETY: `handle` is this call's world and `ctx` outlives the call,
             // which is the whole of `SystemFn`'s contract. The shim on the other
             // side catches panics, so this cannot unwind.
-            let status = unsafe { (entry.run)(handle, core::ptr::from_ref(ctx)) };
+            let call = || unsafe { (entry.run)(handle, core::ptr::from_ref(ctx)) };
+            let status = match zone {
+                None => call(),
+                Some(zone) => {
+                    // SAFETY: the name is the table's, valid for the process.
+                    let name = unsafe { text(entry.name, entry.name_len) };
+                    let mut status = None;
+                    zone(name, &mut || status = Some(call()));
+                    let Some(status) = status else {
+                        // A hook that returned without running the body left the
+                        // tick half-simulated. Reported rather than assumed away:
+                        // a silent `ok` here is a determinism break with an
+                        // instrument as its cause (§4.8).
+                        return Err(SystemPanic {
+                            system: name.to_owned(),
+                            message: "the installed system zone never ran the system".to_owned(),
+                        });
+                    };
+                    status
+                }
+            };
             if !status.is_ok() {
                 // SAFETY: the name is the table's; the message is leaked by the
                 // shim and valid for the process (§4.2.2).

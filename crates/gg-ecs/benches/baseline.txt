@@ -5,6 +5,12 @@ machine-specific and not a gate; the **ratios** are, and they are what
 `benches/query.rs` asserts. Re-record this file when the machine changes, not
 when a number moves — a moved number is the finding.
 
+Since M8 this file has a machine half beside it: `cargo xtask bench --record`
+writes `bench/<machine>.json`, which carries the same numbers with the commit,
+the toolchain and the box attached, rewritten in place so its git diff is the
+regression report (§4.11). This file is the *readings* — what the numbers mean
+and what is unexplained — and stays hand-written for that reason.
+
 Recorded 2026-08-01 (M5 close; adds the boundary leg)
   Windows 11 Pro 26200, Ryzen (host desk machine), rustc 1.97.1
   cargo bench -p gg-ecs, release, 100000 entities, one archetype, best of 25

@@ -1,0 +1,61 @@
+# gg-debug (§4.8) — the instruments. Tracy init, the log tail a crash report
+# attaches, GPU zones fed by `gg-rhi`'s timestamps, and the CVar console.
+#
+# Absent from every dist graph by §3 ("tools/harness/instrumentation never in
+# its dist graph"), which is what makes the shell's observability init two
+# shapes rather than one: dist keeps a console subscriber and nothing else.
+# What ships in dist instead of this crate is the *dump* plus symbols (§4.8).
+
+[package]
+name = "gg-debug"
+version = "0.1.0"
+description = "Instruments: Tracy, log tail, GPU zones, CVar console (PLAN.md §4.8)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The registry the console sets through. The registry is `gg-core`'s precisely
+# so this arrow points that way and not the reverse (§4.8).
+gg-core = { path = "../gg-core" }
+# `PassTiming` and `GpuClock` — the numbers, measured once (§4.8). Feature-free:
+# this crate reads the types, and whether they carry readings is the shell's
+# choice of tier.
+gg-rhi = { path = "../gg-rhi", default-features = false }
+# The UI pass and its vertex format (§4.9). The arrow §4.8 predicted: "the
+# overlay simultaneously needed the renderer" is why the CVar registry is
+# `gg-core`'s and not this crate's.
+gg-render = { path = "../gg-render" }
+# Physical key identity, so the console's bindings live here rather than being
+# a match arm the shell grows (§4.7, §3).
+gg-input = { path = "../gg-input" }
+# RenderDoc's in-application API, reached through the module already injected
+# into this process — `open_already_loaded` / the global namespace, never a load
+# of our own (§4.8, and `capture`'s module docs for why that distinction is the
+# whole feature).
+libloading.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+profiling.workspace = true
+tracy-client = { workspace = true, optional = true }
+tracing-tracy = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The GPU-zone test drives a real offscreen context, because a mock would
+# reproduce this crate's assumptions rather than the device's (§1.10).
+gg-rhi = { path = "../gg-rhi", features = ["gpu-timings"] }
+# The overlay's pixel test renders through the same offscreen entry point the
+# golden harness uses, so what it proves is the pass the screen runs (§1.5).
+gg-extract = { path = "../gg-extract" }
+
+[features]
+default = []
+# Tracy, and the `profiling` macro bodies across the whole workspace with it —
+# one switch, because a build with zones but no client is a build that pays for
+# instrumentation it cannot read.
+tracy = ["dep:tracy-client", "dep:tracing-tracy", "profiling/profile-with-tracy"]

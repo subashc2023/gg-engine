@@ -3,3 +3,5 @@ target/
 *.md
 !README.md
 .claude/scheduled_tasks.lock
+# The CVar config file (§4.8) is one machine's knobs, never the repo's.
+gg.cfg

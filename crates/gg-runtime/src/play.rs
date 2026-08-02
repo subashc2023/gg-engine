@@ -39,12 +39,18 @@ pub fn play(app: &mut App, title: &str, target: Option<u64>) -> anyhow::Result<u
                     app.resize(width, height);
                     Ok(Control::Continue)
                 }
+                // The instruments get first refusal, because an open console
+                // has to be able to claim Escape from the arm below (§4.8).
+                Event::Key { key, pressed, text } if app.debug_key(key, pressed, text) => {
+                    Ok(Control::Continue)
+                }
                 // Escape is the *app's* key, not the sim's: quitting is not
                 // simulated state and must work identically while a replay is
                 // driving, which is also why it never reaches the action map.
                 Event::Key {
                     key: Key::Escape,
                     pressed: true,
+                    ..
                 } => {
                     window.set_pointer_held(false);
                     Ok(Control::Exit)

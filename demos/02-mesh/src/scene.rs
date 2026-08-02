@@ -127,6 +127,7 @@ pub fn pipeline_desc() -> PipelineDesc<'static> {
         // A closed mesh drawn without back-face culling: every face is
         // rasterized and depth decides, which is exactly what makes this a
         // test of reverse-Z rather than of winding order.
+        blend: gg_rhi::Blend::Off,
         depth: gg_rhi::DepthMode::Write,
     }
 }

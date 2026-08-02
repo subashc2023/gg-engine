@@ -230,10 +230,59 @@ fn probe_device(system: bool) -> anyhow::Result<()> {
             "{missing} required capabilities missing — the M4A bindless path is not viable on this pin (§6 M0A spike 2)"
         );
         println!("probe: all capabilities present");
+        report_instruments(&instance, pd, &props);
         Ok(())
     })();
 
     // SAFETY: created above; no live child objects.
     unsafe { instance.destroy_instance(None) };
     result
+}
+
+/// §4.8's instruments, reported and never required — an absent row costs a
+/// column on the overlay or detail in a crash report, not the engine. Kept
+/// beside the required table anyway, because "which backend can tell me what"
+/// is the first question of every device-lost investigation.
+fn report_instruments(
+    instance: &ash::Instance,
+    pd: ash::vk::PhysicalDevice,
+    props: &ash::vk::PhysicalDeviceProperties,
+) {
+    // SAFETY: pd comes from the live instance.
+    let extensions =
+        unsafe { instance.enumerate_device_extension_properties(pd) }.unwrap_or_default();
+    let has = |name: &str| {
+        extensions.iter().any(|e| {
+            e.extension_name_as_c_str()
+                .is_ok_and(|c| c.to_string_lossy() == name)
+        })
+    };
+    // SAFETY: as above.
+    let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
+    let bits = families
+        .iter()
+        .filter(|f| f.queue_flags.contains(ash::vk::QueueFlags::GRAPHICS))
+        .map(|f| f.timestamp_valid_bits)
+        .max()
+        .unwrap_or(0);
+
+    println!("probe: optional instruments (§4.8) — absence degrades, never fails");
+    let mark = |ok: bool| if ok { "HAVE" } else { "none" };
+    println!(
+        "  {} graphics-queue timestamps ({bits} valid bits, {} ns/tick)",
+        mark(bits > 0),
+        props.limits.timestamp_period
+    );
+    println!(
+        "  {} VK_EXT_calibrated_timestamps (GPU/CPU clock correlation for Tracy)",
+        mark(has("VK_EXT_calibrated_timestamps"))
+    );
+    println!(
+        "  {} VK_EXT_device_fault (address and vendor code in a device-lost report)",
+        mark(has("VK_EXT_device_fault"))
+    );
+    println!(
+        "  {} VK_AMD_buffer_marker (stage-ordered breadcrumbs; else cmd_fill_buffer)",
+        mark(has("VK_AMD_buffer_marker"))
+    );
 }

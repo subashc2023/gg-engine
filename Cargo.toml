@@ -6,6 +6,7 @@ resolver = "3"
 members = [
     "crates/gg-abi",
     "crates/gg-core",
+    "crates/gg-debug",
     "crates/gg-ecs",
     "crates/gg-ecs-derive",
     "crates/gg-extract",
@@ -145,6 +146,14 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"          # split-debug artifact archived per release, not shipped
+# `strip` with nothing to strip archives nothing: without these two the dist
+# build emits no debug info at all and §3's "archived per release" names a file
+# that never existed. `1` is names + line tables — what symbolizing a crash
+# report needs; full types are what a *debugger* wants and cost artifact size
+# nobody reads. `packed` is the PDB on MSVC and the `.dwp` on ELF; the shipped
+# bytes are unchanged either way, which is what makes this free (§6 M8).
+debug = 1
+split-debuginfo = "packed"
 
 [profile.bench]
 inherits = "instrumented"

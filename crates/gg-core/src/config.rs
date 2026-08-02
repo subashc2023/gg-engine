@@ -25,7 +25,7 @@
 
 use std::path::Path;
 
-use crate::cvar;
+use crate::cvar::{self, CVarSource};
 
 /// The command-line form: `--set name=value`, repeatable.
 pub const SET_FLAG: &str = "--set";
@@ -91,7 +91,9 @@ pub fn apply_str(text: &str) -> Report {
             continue;
         }
         match line.split_once('=') {
-            Some((name, value)) => apply_one(name.trim(), value.trim(), &mut report),
+            Some((name, value)) => {
+                apply_one(name.trim(), value.trim(), CVarSource::Config, &mut report)
+            }
             None => report.rejected.push(Rejection {
                 name: line.to_owned(),
                 value: String::new(),
@@ -138,7 +140,9 @@ where
             break;
         };
         match setting.as_ref().split_once('=') {
-            Some((name, value)) => apply_one(name.trim(), value.trim(), &mut report),
+            Some((name, value)) => {
+                apply_one(name.trim(), value.trim(), CVarSource::Cli, &mut report)
+            }
             None => report.rejected.push(Rejection {
                 name: setting.as_ref().to_owned(),
                 value: String::new(),
@@ -157,8 +161,25 @@ pub fn apply(path: &Path, args: &[String]) -> std::io::Result<Report> {
     Ok(report)
 }
 
-fn apply_one(name: &str, value: &str, report: &mut Report) {
-    match cvar::set(name, value) {
+/// [`apply`], plus the two logs a shell owes §4.8: what each pass refused, and
+/// then one line per CVar naming the source that won. Whole reason the shell's
+/// share of the CVar system is a single call — precedence is a property of the
+/// engine, not a thing each host re-decides.
+///
+/// Each pass logs under its own source name, because a stale line is a different
+/// bug in a config file than in a flag typed thirty seconds ago.
+pub fn boot(path: &Path, args: &[String]) -> std::io::Result<Report> {
+    let mut report = apply_file(path)?;
+    report.log(CVarSource::Config.as_str());
+    let cli = apply_args(args);
+    cli.log(CVarSource::Cli.as_str());
+    report.merge(cli);
+    cvar::log_sources();
+    Ok(report)
+}
+
+fn apply_one(name: &str, value: &str, source: CVarSource, report: &mut Report) {
+    match cvar::set(name, value, source) {
         Ok(()) => report.applied += 1,
         Err(cvar::CVarError::Unknown { .. }) => report.unknown.push(name.to_owned()),
         Err(e) => report.rejected.push(Rejection {

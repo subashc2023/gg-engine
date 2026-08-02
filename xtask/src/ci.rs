@@ -51,6 +51,23 @@ fn fast() -> anyhow::Result<()> {
 fn push() -> anyhow::Result<()> {
     exec(cargo().args(["fmt", "--check"]), "cargo fmt --check")?;
     clippy(&All)?;
+    // The workspace lint above resolves features *unified*: `gg-runtime`'s
+    // `tier-dev` turns on `gg-debug/tracy` for everyone, so the Tracy-less
+    // `gg-debug` that `gg-golden` actually links is linted by nothing. That
+    // configuration has hidden dead code twice this milestone, so it gets its
+    // own leg — one package, its own default features (§6 M8).
+    exec(
+        cargo().args([
+            "clippy",
+            "-p",
+            "gg-debug",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]),
+        "cargo clippy -p gg-debug (default features: no tracy)",
+    )?;
     exec(cargo().args(["deny", "check"]), "cargo deny check")?;
     greps()?;
     allowlist_crosscheck()?;
@@ -102,7 +119,7 @@ fn nightly() -> anyhow::Result<()> {
     // the reload-latency instrument (§6 M5): everything that needs the shell
     // driving a real game dylib.
     crate::shell::gates(&[])?;
-    crate::bench()?;
+    crate::bench::run(&[])?;
     gpu_tests()?;
     golden_suite()?;
     println!(
@@ -158,6 +175,16 @@ fn stress_and_miri() -> anyhow::Result<()> {
 /// "invisible" is not a property CI may rely on (WSLg mirrors mapped windows
 /// onto the real desktop; minimize/restore maps them everywhere). A human runs
 /// this when touching WSI code — expect window activity on WSLg/taskbar.
+/// The manual WSI suite — and what it actually puts on the screen is less than
+/// its name suggests, which is worth writing down rather than rediscovering.
+///
+/// Every test leg below uses `WindowDesc::invisible`, and both demo legs run
+/// under `GG_HEADLESS=1`: **on Windows this suite is very nearly windowless.**
+/// They are `#[ignore]`d anyway because §1.5's enforcement is real on Win32 and
+/// X11 only — on Wayland `set_visible` is a no-op, so the same tests do reach a
+/// desktop there, and an automated tier that ran them would violate §1.5 on one
+/// platform out of three. What *does* present visibly, on every platform, is
+/// [`shell_run`] and [`replay_run`]: 100 frames each, a second or two apiece.
 pub fn interactive() -> anyhow::Result<()> {
     // The window-creating tests: swapchain recreation + resize/minimize storm
     // (gg-rhi) and the off-screen-parking §1.5 regressions (gg-platform).
@@ -171,6 +198,15 @@ pub fn interactive() -> anyhow::Result<()> {
         "gg-platform",
         "--run-ignored",
         "ignored-only",
+        // `#[ignore]` is not one reason. Every other ignored test in these two
+        // crates is ignored for §1.5 — it creates a window — and this suite is
+        // where those run. `device_lost` is ignored because it *wedges the GPU
+        // on purpose*, and sweeping it in here ran it on the pinned lavapipe,
+        // where the hang is this process on every core rather than a device
+        // with a watchdog behind it. The test now refuses a software rasterizer
+        // itself; this is the other half of that fix (§6 M8).
+        "-E",
+        "not binary(device_lost)",
     ]);
     lavapipe_env(&mut cmd)?;
     // Linux runs over X11 (XWayland): WSLg's Weston drops the Wayland
@@ -251,7 +287,14 @@ fn gpu_tests() -> anyhow::Result<()> {
     let mut cmd = cargo();
     cmd.args(["nextest", "run", "-p", "gg-rhi", "-p", "gg-platform"]);
     lavapipe_env(&mut cmd)?;
-    exec(&mut cmd, "headless GPU tests on pinned lavapipe (§5.4)")
+    exec(&mut cmd, "headless GPU tests on pinned lavapipe (§5.4)")?;
+    // A build of its own, because Tracy's GPU path is `#[cfg]`-absent without
+    // the feature and the shell that exercises it for real needs a window
+    // (§1.5). An offscreen context stands in and produces the same readings.
+    let mut cmd = cargo();
+    cmd.args(["nextest", "run", "-p", "gg-debug", "--features", "tracy"]);
+    lavapipe_env(&mut cmd)?;
+    exec(&mut cmd, "Tracy GPU zones on pinned lavapipe (§4.8)")
 }
 
 /// Gate 5 (§5), §4.10's harness: the golden suite on the pinned lavapipe —

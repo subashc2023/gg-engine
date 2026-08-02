@@ -165,11 +165,11 @@ fn main() -> anyhow::Result<()> {
         }
         // Escape is the *app's* key, not the sim's: quitting is not simulated
         // state and must work identically while a replay is driving.
-        Event::Key { key, pressed } if key == Key::Escape && pressed => {
+        Event::Key { key, pressed, .. } if key == Key::Escape && pressed => {
             report = rhi.take().map(Rhi::shutdown);
             Control::Exit
         }
-        Event::Key { key, pressed } => {
+        Event::Key { key, pressed, .. } => {
             input.key(key, pressed);
             Control::Continue
         }

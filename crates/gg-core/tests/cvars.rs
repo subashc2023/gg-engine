@@ -9,7 +9,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gg_core::config;
-use gg_core::cvar::{self, CVar, CVarError, CVarKind};
+use gg_core::cvar::{self, CVar, CVarError, CVarKind, CVarSource};
 
 #[test]
 fn a_declared_cvar_starts_at_its_default_and_reads_without_a_lookup() {
@@ -49,7 +49,7 @@ fn the_three_front_doors_agree_on_what_a_value_means() {
 
     for text in ["0", "false", "off", "no"] {
         VSYNC.set_bool(true);
-        cvar::set("c.vsync", text).unwrap();
+        cvar::set("c.vsync", text, CVarSource::Console).unwrap();
         assert!(!VSYNC.bool(), "`{text}` should read as false");
     }
     for text in ["1", "true", "on", "yes"] {
@@ -66,7 +66,7 @@ fn a_knob_refuses_a_value_of_the_wrong_shape() {
     cvar::register_all(&[&WIDTH, &SCALE]).unwrap();
 
     assert!(matches!(
-        cvar::set("d.width", "wide"),
+        cvar::set("d.width", "wide", CVarSource::Cli),
         Err(CVarError::BadValue { .. })
     ));
     // Non-finite floats are rejected by name: a render scale of NaN is a bug
@@ -74,15 +74,20 @@ fn a_knob_refuses_a_value_of_the_wrong_shape() {
     for text in ["inf", "-inf", "NaN"] {
         assert!(
             matches!(
-                cvar::set("d.renderscale", text),
+                cvar::set("d.renderscale", text, CVarSource::Config),
                 Err(CVarError::BadValue { .. })
             ),
             "`{text}` should not be settable"
         );
     }
     assert_eq!(WIDTH.int(), 1280, "a rejected set leaves the old value");
+    assert_eq!(
+        WIDTH.source(),
+        CVarSource::Default,
+        "and leaves the source alone: a typo is not a source"
+    );
     assert!(matches!(
-        cvar::set("d.nosuchthing", "1"),
+        cvar::set("d.nosuchthing", "1", CVarSource::Console),
         Err(CVarError::Unknown { .. })
     ));
 }
@@ -177,6 +182,34 @@ fn to_text_round_trips_through_set_from_str() {
     let text = SCALE.to_text();
     SCALE.reset();
     assert!(SCALE.is_default());
-    SCALE.set_from_str(&text).unwrap();
+    SCALE.set_from_str(&text, CVarSource::Console).unwrap();
     assert_eq!(SCALE.float(), 0.625);
+}
+
+#[test]
+fn every_source_is_recorded_on_the_cvar_it_set() {
+    // §4.8's exit criterion: settable from all three, and the winner is named.
+    // Per-CVar rather than per-pass, because the question a session log has to
+    // answer is about one knob and not about one pass.
+    static SCALE: CVar = CVar::new_float("j.renderscale", 1.0, "");
+    cvar::register(&SCALE).unwrap();
+    assert_eq!(SCALE.source(), CVarSource::Default);
+
+    config::apply_str("j.renderscale = 0.5");
+    assert_eq!(SCALE.source(), CVarSource::Config);
+    config::apply_args(["--set", "j.renderscale=0.75"]);
+    assert_eq!(SCALE.source(), CVarSource::Cli, "the last writer wins both");
+    cvar::set("j.renderscale", "0.9", CVarSource::Console).unwrap();
+    assert_eq!(SCALE.source(), CVarSource::Console);
+
+    // Not "the value at startup": a reset undoes the source with the value, or
+    // a listing would keep crediting a config line no longer in effect.
+    SCALE.reset();
+    assert_eq!(SCALE.source(), CVarSource::Default);
+    assert_eq!(SCALE.float(), 1.0);
+
+    // A typed setter is a source too — the one case where a knob moves with
+    // nobody having asked for it, which is exactly what a log should say.
+    SCALE.set_float(0.25);
+    assert_eq!(SCALE.source(), CVarSource::Code);
 }

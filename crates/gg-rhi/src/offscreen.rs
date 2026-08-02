@@ -36,6 +36,7 @@ pub struct OffscreenRhi {
     target: ImageHandle,
     pool: vk::CommandPool,
     cmd: vk::CommandBuffer,
+    timings: Option<crate::timing::Timings>,
     gpu: Gpu,
     instance: Instance,
 }
@@ -48,7 +49,8 @@ impl OffscreenRhi {
             return Err(RhiError::Loader("offscreen extent must be nonzero".into()));
         }
         let mut instance = Instance::new(None)?;
-        let mut gpu = match Gpu::new(&instance, None) {
+        // One slot: an offscreen execute blocks until the GPU is done with it.
+        let mut gpu = match Gpu::new(&instance, None, 1) {
             Ok(g) => g,
             Err(e) => {
                 instance.destroy();
@@ -56,24 +58,39 @@ impl OffscreenRhi {
             }
         };
 
-        match Self::create_resources(&mut gpu, extent) {
-            Ok((target, pool, cmd)) => Ok(Self {
-                dead: false,
-                timeline_value: 0,
-                transfer_waited: 0,
-                extent,
-                target,
-                pool,
-                cmd,
-                gpu,
-                instance,
-            }),
+        let (target, pool, cmd) = match Self::create_resources(&mut gpu, extent) {
+            Ok(r) => r,
             Err(e) => {
                 gpu.destroy();
                 instance.destroy();
-                Err(e)
+                return Err(e);
             }
-        }
+        };
+        // One slot: an offscreen execute blocks until the GPU is done with it,
+        // so there is never a second frame's timestamps to keep apart.
+        let timings = match crate::timing::Timings::new(&gpu.device, 1) {
+            Ok(t) => t,
+            Err(e) => {
+                // SAFETY: the pool was just created on this device and nothing
+                // has been submitted, so no command buffer of it is in flight.
+                unsafe { gpu.device.raw().destroy_command_pool(pool, None) };
+                gpu.destroy();
+                instance.destroy();
+                return Err(e);
+            }
+        };
+        Ok(Self {
+            dead: false,
+            timeline_value: 0,
+            transfer_waited: 0,
+            extent,
+            target,
+            pool,
+            cmd,
+            timings,
+            gpu,
+            instance,
+        })
     }
 
     fn create_resources(
@@ -191,6 +208,25 @@ impl OffscreenRhi {
         self.gpu.upload_image(handle, bytes)
     }
 
+    /// Write into a dynamic buffer's mapping — see [`crate::Rhi::write_buffer`].
+    ///
+    /// # Errors
+    ///
+    /// A buffer that is not host-visible, or a write past its end.
+    pub fn write_buffer(
+        &mut self,
+        handle: BufferHandle,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), RhiError> {
+        self.gpu.write_buffer(handle, offset, bytes)
+    }
+
+    /// Live buffer and image allocations (§4.8).
+    pub fn memory(&self) -> crate::MemoryUse {
+        self.gpu.memory()
+    }
+
     /// Submit the staging batch and wait for it (§4.3 "upload now").
     pub fn flush_uploads(&mut self) -> Result<(), RhiError> {
         self.gpu.flush_uploads_blocking()
@@ -246,6 +282,12 @@ impl OffscreenRhi {
     /// pipeline — both found while resolving, before anything is recorded.
     pub fn execute(&mut self, passes: &[Pass<'_>]) -> Result<(), RhiError> {
         let resolved = graph::resolve(&self.gpu, passes)?;
+        if let Some(timings) = &mut self.timings {
+            crate::timing::warn_pass_overflow(passes.len());
+            timings.expect(0, passes.iter().map(|p| p.name.to_owned()));
+        }
+        let stamps = self.timings.as_ref().map(|t| t.stamps(0));
+        let crumbs = self.gpu.prepare_crumbs(0, passes.iter().map(|p| p.name))?;
         let image = self.gpu.resources.image(self.target)?;
         let backbuffer = Bound {
             image: image.raw,
@@ -276,10 +318,36 @@ impl OffscreenRhi {
                 self.gpu.bindless.set(),
                 &resolved,
                 backbuffer,
+                graph::Instruments { stamps, crumbs },
             );
             device.end_command_buffer(self.cmd).map_err(RhiError::Vk)?;
         }
-        self.submit_and_wait()
+        self.submit_and_wait()?;
+        // The wait is inside submit_and_wait, so by here the timestamps are
+        // complete and this read never blocks.
+        if let Some(timings) = &mut self.timings {
+            timings.collect(&self.gpu.device, 0);
+        }
+        Ok(())
+    }
+
+    /// Per-pass GPU time from the last [`Self::execute`] — current rather than a
+    /// frame behind, because an offscreen render blocks until it retires.
+    /// Empty without the `gpu-timings` feature or on a device whose graphics
+    /// queue writes no timestamp.
+    pub fn pass_timings(&self) -> &[crate::PassTiming] {
+        self.timings.as_ref().map(|t| t.last()).unwrap_or_default()
+    }
+
+    /// The device clock now — see [`crate::Rhi::gpu_clock`].
+    pub fn gpu_clock(&self) -> Option<crate::GpuClock> {
+        self.timings.as_ref()?.clock(&self.gpu.device)
+    }
+
+    /// What the last [`Self::execute`]'s breadcrumbs say it reached — see
+    /// [`crate::Rhi::breadcrumbs`].
+    pub fn breadcrumbs(&self) -> String {
+        self.gpu.breadcrumbs()
     }
 
     /// Record and run a one-shot graphics command buffer to completion. Used
@@ -338,10 +406,21 @@ impl OffscreenRhi {
                 vk::Fence::null(),
             )
         }
-        .map_err(RhiError::Vk)?;
+        .map_err(|e| self.gpu.explain(e))?;
         self.timeline_value = signal_value;
         self.transfer_waited = transfer_value;
-        self.gpu.device.wait_graphics_timeline(signal_value)
+        self.gpu
+            .device
+            .wait_graphics_timeline(signal_value)
+            .map_err(|e| self.gpu.detail(e))?;
+        // A completed wait is not proof of a live device — see `check_alive`.
+        // Only this path needs the probe: the windowed frame path presents
+        // immediately after its wait, and `queue_present` reports the loss
+        // while the crumbs still belong to the frame that caused it.
+        self.gpu
+            .device
+            .check_alive()
+            .map_err(|e| self.gpu.detail(e))
     }
 
     /// Orderly teardown with the §4.3 accounting.
@@ -357,6 +436,9 @@ impl OffscreenRhi {
             };
         }
         self.gpu.device.wait_idle();
+        if let Some(timings) = &mut self.timings {
+            timings.destroy(&self.gpu.device);
+        }
         // SAFETY: GPU idle; the pool belongs to this device and is destroyed
         // once — `dead` is set below and Drop re-entry returns early.
         unsafe { self.gpu.device.raw().destroy_command_pool(self.pool, None) };

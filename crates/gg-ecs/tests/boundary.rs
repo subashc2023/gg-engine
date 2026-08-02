@@ -167,6 +167,23 @@ fn record(level: u32, message: &str) {
     LOGGED.lock().unwrap().push((level, message.to_owned()));
 }
 
+/// What the installed [`boundary::SystemZone`] saw, in call order.
+static ZONED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The thread whose zones swallow the system instead of running it — the failure
+/// `run_systems` has to report. Keyed to a thread rather than a bare flag so the
+/// one test that arms it cannot reach a test running beside it.
+static SWALLOW: std::sync::Mutex<Option<std::thread::ThreadId>> = std::sync::Mutex::new(None);
+
+fn zone(name: &str, body: &mut dyn FnMut()) {
+    ZONED.lock().unwrap().push(format!("enter {name}"));
+    if *SWALLOW.lock().unwrap() == Some(std::thread::current().id()) {
+        return;
+    }
+    body();
+    ZONED.lock().unwrap().push(format!("leave {name}"));
+}
+
 // ---- the host half ------------------------------------------------------
 
 // The generated symbols are exported, not named: `const _` scopes the items and
@@ -550,6 +567,62 @@ fn game_output_arrives_on_the_hosts_stream() {
             .any(|(level, message)| *level == boundary::log_level::INFO
                 && message == "the ugly game says hello"),
         "the line crossed with its level intact: {logged:?}"
+    );
+}
+
+#[test]
+fn the_system_zone_brackets_each_system_by_its_declared_name() {
+    // §4.8's per-system CPU zones. What a profiler needs is the *name* — table
+    // data read out of a dylib, which is why this is a hook and not a
+    // `profiling::scope!` — and a bracket that closes around the call rather
+    // than beside it.
+    let loaded = load();
+    let _ = boundary::set_system_zone(zone);
+    let mut world = world();
+    ZONED.lock().unwrap().clear();
+    loaded.tick(&mut world, 1).unwrap();
+
+    let zoned = ZONED.lock().unwrap();
+    assert_eq!(
+        *zoned,
+        [
+            "enter movement",
+            "leave movement",
+            "enter stamp",
+            "leave stamp",
+            "enter spawner",
+            "leave spawner",
+            "enter talker",
+            "leave talker",
+            "enter exploder",
+            "leave exploder",
+            "enter aliaser",
+            "leave aliaser",
+        ],
+        "one closed bracket per system, in the table's order (§4.1)"
+    );
+}
+
+#[test]
+fn a_zone_that_never_runs_the_system_is_reported_rather_than_passed_off_as_a_tick() {
+    // An instrument that swallowed the call would leave the tick half
+    // simulated with nothing to show for it — a determinism break whose cause
+    // is the profiler. It halts the sim like any other system failure.
+    let loaded = load();
+    let _ = boundary::set_system_zone(zone);
+    let mut world = world();
+    *SWALLOW.lock().unwrap() = Some(std::thread::current().id());
+    let outcome = loaded.tick(&mut world, 1);
+    *SWALLOW.lock().unwrap() = None;
+
+    let failed = outcome.expect_err("a swallowed system is not a completed tick");
+    assert_eq!(
+        failed.system, "movement",
+        "reported by name, at the first one"
+    );
+    assert!(
+        failed.message.contains("never ran"),
+        "and says what happened: {failed}"
     );
 }
 

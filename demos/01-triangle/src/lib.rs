@@ -36,6 +36,7 @@ pub fn pipeline_desc() -> gg_rhi::PipelineDesc<'static> {
         // One triangle, nothing behind it: this pass declares no depth
         // attachment at all, which under dynamic rendering is what a pipeline
         // that ignores depth has to say.
+        blend: gg_rhi::Blend::Off,
         depth: gg_rhi::DepthMode::Off,
     }
 }

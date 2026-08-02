@@ -688,6 +688,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "gg-debug"
+version = "0.1.0"
+dependencies = [
+ "gg-core",
+ "gg-extract",
+ "gg-input",
+ "gg-render",
+ "gg-rhi",
+ "libloading",
+ "profiling",
+ "thiserror 2.0.19",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-tracy",
+ "tracy-client",
+]
+
+[[package]]
 name = "gg-ecs"
 version = "0.1.0"
 dependencies = [
@@ -726,6 +744,7 @@ dependencies = [
  "bytemuck",
  "demo-01-triangle",
  "demo-02-mesh",
+ "gg-debug",
  "gg-ecs",
  "gg-extract",
  "gg-input",
@@ -772,11 +791,13 @@ name = "gg-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "gg-core",
  "gg-ecs",
  "gg-extract",
  "gg-math",
  "gg-rhi",
  "raw-window-handle",
+ "tracing",
 ]
 
 [[package]]
@@ -801,17 +822,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gg-core",
+ "gg-debug",
  "gg-ecs",
  "gg-extract",
  "gg-input",
  "gg-math",
  "gg-platform",
  "gg-render",
- "profiling",
  "tracing",
  "tracing-subscriber",
- "tracing-tracy",
- "tracy-client",
 ]
 
 [[package]]

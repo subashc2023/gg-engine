@@ -10,6 +10,8 @@
 //! can reproduce, so its absence is a gate failure exactly like Tracy's
 //! presence is.
 
+use std::path::{Path, PathBuf};
+
 use crate::util::{cargo, run as exec, run_capture, workspace_root};
 
 /// Shipped binaries that must carry the input recorder (§5.8, §2). Demos 00 and
@@ -24,6 +26,10 @@ const BANNED_DIST_CRATES: &[&str] = &[
     "notify",
     "ggc",
     "gg-golden",
+    // The instruments (§3: instrumentation never in the dist graph, §4.8).
+    // Banning the crate and not only Tracy is what keeps the console and the
+    // overlay out too — they are absent, not disabled.
+    "gg-debug",
 ];
 
 pub fn gate() -> anyhow::Result<()> {
@@ -209,6 +215,11 @@ pub fn gate() -> anyhow::Result<()> {
         }
     }
 
+    // Before the dist-verify build below, which overwrites the shell's binary
+    // and its artifact: what a release archives is the `tier-dist` pair, and
+    // archiving whatever was linked last is how the two get swapped silently.
+    symbolization()?;
+
     // dist-verify must also build here; it is exercised for real by §5.6c (M4B).
     exec(
         cargo().args([
@@ -231,6 +242,210 @@ pub fn gate() -> anyhow::Result<()> {
 
     println!("xtask dist: gate green (lab equipment absent, SPIR-V and the recorder present)");
     Ok(())
+}
+
+/// The frame the canary's backtrace must name. Cargo builds the example as
+/// `crash_canary`, hyphen normalized — the module path a backtrace prints, not
+/// the target name.
+const CANARY_FRAME: &str = "crash_canary::the_pass_that_faulted";
+
+/// The same function as a bare symbol, which is how it appears in an artifact's
+/// string tables — `.debug_str` in a `.dwp`, the symbol records in a PDB.
+const CANARY_SYMBOL: &str = "the_pass_that_faulted";
+
+/// §6 M8's last exit criterion: a dist crash dump symbolizes cleanly against the
+/// archived split-debug artifact.
+///
+/// Two claims, and the second is not reachable everywhere:
+///
+/// 1. **The symbols left the binary and landed in the artifact** — the stripped
+///    dist binary does not contain the faulting function's name and the archived
+///    artifact does. Checked on every platform, and the half that would catch a
+///    `strip` that stopped stripping or a `debug` setting that stopped emitting.
+/// 2. **A crash actually resolves against it**, run rather than asserted: the
+///    artifact is *moved* into the archive and the binary crashed alone, whose
+///    backtrace must be anonymous; then the artifact is put back beside it and
+///    the same crash must name the frame and its line. That pair is the release
+///    workflow. It runs on MSVC, where the platform's own symbolizer loads the
+///    PDB the binary points at. On ELF it does not: `strip = "symbols"` leaves
+///    the backtrace with addresses and nothing else, and a `.dwp` is not
+///    something the in-process symbolizer will pick up — putting a Linux dump
+///    back together is `llvm-symbolizer`'s job, offline, and driving one from
+///    here would gate a tool rather than the artifact. Named as a residual in §6
+///    M8 rather than skipped quietly.
+fn symbolization() -> anyhow::Result<()> {
+    let root = workspace_root();
+    let archive = root.join("target/dist-symbols").join(commit()?);
+    std::fs::create_dir_all(&archive)?;
+
+    // The shell's own artifact first: it is the one a release actually archives.
+    // Nothing runs against it here — `gg-runtime` has no way to be told to die
+    // and should not grow one — so what is checked is that the build produced it
+    // at all, which is what §3's "archived per release" had been promising about
+    // a file that did not exist until the profile said `debug`.
+    let shell = split_debug(&root.join("target/dist"), "gg-runtime")?;
+    let bytes = std::fs::copy(&shell, archive.join(file_name(&shell)?))?;
+    anyhow::ensure!(
+        bytes > 64 * 1024,
+        "the archived split-debug artifact for the dist shell is {bytes} bytes — too small to \
+         carry symbols, so `strip` has nothing to have stripped (§3)"
+    );
+    println!(
+        "xtask dist: archived {} ({} KiB) → {}",
+        file_name(&shell)?,
+        bytes / 1024,
+        archive.display()
+    );
+
+    // The canary is an example target of the shell's own crate, so it is this
+    // profile's codegen — fat LTO, one codegen unit, stripped — and enters no
+    // shipped binary (§6 M8).
+    exec(
+        cargo().args([
+            "build",
+            "-p",
+            "gg-runtime",
+            "--example",
+            "crash-canary",
+            "--profile",
+            "dist",
+            "--no-default-features",
+            "--features",
+            "tier-dist",
+        ]),
+        "build the dist symbolization canary [tier-dist, dist profile]",
+    )?;
+    let examples = root.join("target/dist/examples");
+    let exe = examples.join(if cfg!(windows) {
+        "crash-canary.exe"
+    } else {
+        "crash-canary"
+    });
+    let artifact = split_debug(&examples, "crash-canary")?;
+    let archived = archive.join(file_name(&artifact)?);
+
+    // Claim 1, on every platform: the names are in the artifact and out of the
+    // binary. A byte scan rather than a parser — one function name in a string
+    // table is not worth a PDB reader and a DWARF reader to read it out of two
+    // formats, and what would be wrong here is `strip` or `debug`, not parsing.
+    anyhow::ensure!(
+        contains(&artifact, CANARY_SYMBOL)?,
+        "the split-debug artifact {} carries no `{CANARY_SYMBOL}` — the dist profile's `debug` \
+         emitted nothing worth archiving (§3)",
+        artifact.display()
+    );
+    anyhow::ensure!(
+        !contains(&exe, CANARY_SYMBOL)?,
+        "the shipped dist binary {} still carries `{CANARY_SYMBOL}` — `strip` did not strip, so \
+         the artifact beside it is a copy rather than the only place the symbols live (§3)",
+        exe.display()
+    );
+
+    // A *move*, not a copy: what ships is the binary with nothing beside it, and
+    // a check run with the artifact still in place would pass for the wrong
+    // reason. On MSVC the binary records the artifact's absolute path, so this
+    // genuinely takes it out of reach.
+    std::fs::rename(&artifact, &archived)?;
+    if !cfg!(target_env = "msvc") {
+        println!(
+            "xtask dist: {} archived; the symbols are in it and out of the binary. The crash \
+             round trip is MSVC-only — an ELF dump is symbolized offline (§6 M8 residual).",
+            file_name(&archived)?
+        );
+        return Ok(());
+    }
+
+    let stripped = crash(&exe)?;
+    anyhow::ensure!(
+        !stripped.contains(CANARY_FRAME),
+        "the stripped dist binary named `{CANARY_FRAME}` with its split-debug artifact archived \
+         away — the symbols never left the binary, so this gate is proving nothing:\n{stripped}"
+    );
+
+    // And back together, the way an engineer meets a dump from the field.
+    std::fs::copy(&archived, &artifact)?;
+    let symbolized = crash(&exe)?;
+    anyhow::ensure!(
+        symbolized.contains(CANARY_FRAME),
+        "a dist crash did not symbolize against the archived artifact {}: no `{CANARY_FRAME}` \
+         frame (§6 M8 exit)\n{symbolized}",
+        archived.display()
+    );
+    anyhow::ensure!(
+        symbolized.contains("crash-canary.rs:"),
+        "the archived artifact named the frame but no line — `debug` is too thin to symbolize a \
+         crash report against (§3)\n{symbolized}"
+    );
+    println!(
+        "xtask dist: a dist crash is anonymous stripped and names `{CANARY_FRAME}` with its \
+         archived artifact restored (§6 M8)"
+    );
+    Ok(())
+}
+
+/// Whether `path`'s bytes contain `needle`. Artifacts are megabytes, which is
+/// the same scale the gate's other byte checks already read whole.
+fn contains(path: &Path, needle: &str) -> anyhow::Result<bool> {
+    let bytes = std::fs::read(path)?;
+    Ok(bytes.windows(needle.len()).any(|w| w == needle.as_bytes()))
+}
+
+/// Run the canary and hand back its panic output. The failure *is* the result,
+/// so a successful exit is the error case.
+fn crash(exe: &Path) -> anyhow::Result<String> {
+    let out = std::process::Command::new(exe)
+        .env("RUST_BACKTRACE", "1")
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to spawn the symbolization canary: {e}"))?;
+    anyhow::ensure!(
+        !out.status.success(),
+        "the symbolization canary exited cleanly — it exists to crash"
+    );
+    Ok(crate::util::plain(&out.stderr))
+}
+
+/// The `.pdb`/`.dwp` a `split-debuginfo = "packed"` build left beside `target`.
+/// Matched on a hyphen-normalized stem because cargo names the binary after the
+/// target and the artifact after the crate, and the two spell the same name
+/// differently.
+fn split_debug(dir: &Path, target: &str) -> anyhow::Result<PathBuf> {
+    let wanted = target.replace('-', "_");
+    let found = std::fs::read_dir(dir)?.flatten().find(|entry| {
+        let path = entry.path();
+        path.extension().is_some_and(|e| e == "pdb" || e == "dwp")
+            && path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.replace('-', "_") == wanted)
+    });
+    found.map(|e| e.path()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no split-debug artifact for `{target}` in {} — the dist profile must carry `debug` \
+             and `split-debuginfo` for §3's archived artifact to exist",
+            dir.display()
+        )
+    })
+}
+
+fn file_name(path: &Path) -> anyhow::Result<String> {
+    Ok(path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("unnamed path {}", path.display()))?
+        .to_string())
+}
+
+/// The commit the archive is keyed on. A dirty tree still archives — the
+/// artifact is keyed by what produced it, and refusing here would only mean no
+/// artifact for exactly the builds most likely to crash.
+fn commit() -> anyhow::Result<String> {
+    let out = run_capture(
+        std::process::Command::new("git")
+            .current_dir(workspace_root())
+            .args(["rev-parse", "--short", "HEAD"]),
+        "git rev-parse HEAD",
+    )?;
+    Ok(out.trim().to_string())
 }
 
 /// Game crates under dist (§5.8, live from M5). They are dylibs, not binaries,

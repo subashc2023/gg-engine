@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "recorded": "2026-08-02",
+  "unix_time": 1785674617,
+  "machine": "tower-windows-x86_64",
+  "commit": "0fb3721",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "profile": "instrumented",
+  "ecs": {"entities":100000,"reps":25,"ns_per_entity":{"native":0.6450,"column_views":0.6820,"typed_each":0.7450,"boundary_each":0.5950,"canonical_hash":109.8940},"ratios":{"column_views":1.0574,"typed_each":1.1550,"boundary_each":0.9225,"seam":0.7987,"canonical_hash":170.3783}},
+  "frame": {"scene":"boxes","extent":[1280,720],"device":"NVIDIA GeForce RTX 4090","frames":300,"warmup":30,"cpu_frame_ms":{"p50":0.9370,"p95":1.1558,"p99":1.3347,"min":0.8667},"passes":[{"name":"depth-prepass","mean_ms":0.0039,"max_ms":0.0066},{"name":"forward-opaque","mean_ms":0.0032,"max_ms":0.0041},{"name":"post","mean_ms":0.0044,"max_ms":0.0051},{"name":"readback","mean_ms":0.1401,"max_ms":0.1506},{"name":"frame-end","mean_ms":0.0023,"max_ms":0.0037}]}
+}

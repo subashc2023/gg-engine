@@ -19,9 +19,11 @@
 //! graph is single-queue and models pass dependencies, not queue handoffs.
 
 use crate::RhiError;
+use crate::crash::Crumbs;
 use crate::gpu::Gpu;
 use crate::pipeline::{ResolvedDraw, record_draw};
 use crate::resource::{BufferHandle, ImageHandle};
+use crate::timing::Stamps;
 use crate::{DrawSpec, device::Device};
 use ash::vk;
 
@@ -212,6 +214,17 @@ pub struct Pass<'a> {
     pub transitions: &'a [Transition],
     /// The body.
     pub kind: PassKind<'a>,
+}
+
+/// What the recorder writes *beside* a frame's own commands (§4.8): the
+/// timestamp pair and the breadcrumb marks. One argument because they bracket
+/// the same span, are prepared together, and neither is the frame's business.
+#[derive(Clone, Copy)]
+pub(crate) struct Instruments {
+    /// Absent without the `gpu-timings` feature or on a device that writes no
+    /// usable timestamp; the breadcrumbs are unconditional.
+    pub stamps: Option<Stamps>,
+    pub crumbs: Crumbs,
 }
 
 /// An image resolved to the handles recording needs.
@@ -407,6 +420,12 @@ fn resolve_draws<'a>(gpu: &Gpu, draws: &[DrawSpec<'a>]) -> Result<Vec<ResolvedDr
 /// Record every pass into `cmd`: its barriers, then its body. Infallible by
 /// construction — [`resolve`] did everything that can fail.
 ///
+/// `stamps` brackets each pass with a timestamp pair (§4.8). The opening one is
+/// written *before* the barrier deliberately: §4.5 makes every barrier belong to
+/// a pass, so a pass that stalls on its own transition should read as expensive
+/// rather than as free. `crumbs` brackets the same span with breadcrumb marks,
+/// which is what names the pass a lost device was inside.
+///
 /// # Safety
 /// `cmd` must be recording on the graphics family, `backbuffer` must name a live
 /// image of this device, and `set` must be the global bindless set.
@@ -416,11 +435,26 @@ pub(crate) unsafe fn record(
     set: vk::DescriptorSet,
     passes: &[ResolvedPass<'_>],
     backbuffer: Bound,
+    instruments: Instruments,
 ) {
-    for pass in passes {
+    let Instruments { stamps, crumbs } = instruments;
+    if let Some(stamps) = stamps {
+        // SAFETY: caller contract — cmd is recording, and the range is the
+        // caller's slot, whose previous frame the caller proved retired.
+        unsafe { stamps.reset(device, cmd) };
+    }
+    for (index, pass) in passes.iter().enumerate() {
+        let timed = stamps.filter(|s| s.covers(index));
+        let tracked = crumbs.covers(index);
         // SAFETY: caller contract, and every handle below came from resolve.
         unsafe {
             device.begin_label(cmd, pass.name);
+            if let Some(stamps) = timed {
+                stamps.begin(device, cmd, index);
+            }
+            if tracked {
+                crumbs.begin(device, cmd, index);
+            }
             barrier(device, cmd, &pass.transitions, &backbuffer);
             match &pass.kind {
                 ResolvedKind::Render {
@@ -432,6 +466,12 @@ pub(crate) unsafe fn record(
                     readback(device, cmd, source.get(&backbuffer), *dest);
                 }
                 ResolvedKind::Barriers => {}
+            }
+            if let Some(stamps) = timed {
+                stamps.end(device, cmd, index);
+            }
+            if tracked {
+                crumbs.end(device, cmd, index);
             }
             device.end_label(cmd);
         }

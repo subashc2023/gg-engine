@@ -12,6 +12,7 @@
 
 use crate::RhiError;
 use crate::bindless::{Bindless, StorageImageIndex, TextureIndex};
+use crate::crash::{self, Breadcrumbs, Crumbs};
 use crate::deletion::DeletionQueue;
 use crate::device::Device;
 use crate::instance::Instance;
@@ -38,13 +39,20 @@ pub(crate) struct Gpu {
     pub uploader: Uploader,
     pub pipelines: PipelineStore,
     pub deletions: DeletionQueue,
+    crumbs: Breadcrumbs,
     pending_slots: Vec<(u64, PendingSlot)>,
 }
 
 impl Gpu {
     /// Bring up the device and everything under it. `surface` is `None` for
-    /// offscreen contexts (§4.10). Every failure path unwinds what it built.
-    pub fn new(instance: &Instance, surface: Option<&Surface>) -> Result<Self, RhiError> {
+    /// offscreen contexts (§4.10). `frame_slots` is the caller's frames in
+    /// flight, which the breadcrumb buffer is divided by. Every failure path
+    /// unwinds what it built.
+    pub fn new(
+        instance: &Instance,
+        surface: Option<&Surface>,
+        frame_slots: usize,
+    ) -> Result<Self, RhiError> {
         let mut device = Device::new(instance, surface)?;
 
         let mut resources = match Resources::new(&device) {
@@ -71,9 +79,21 @@ impl Gpu {
                 return Err(e);
             }
         };
-        let pipelines = match PipelineStore::new(&device) {
+        let mut pipelines = match PipelineStore::new(&device) {
             Ok(p) => p,
             Err(e) => {
+                uploader.destroy(&mut device);
+                bindless.destroy(&device);
+                resources.destroy(&mut device);
+                device.destroy();
+                return Err(e);
+            }
+        };
+
+        let crumbs = match Breadcrumbs::new(&mut device, &mut resources, frame_slots) {
+            Ok(c) => c,
+            Err(e) => {
+                pipelines.destroy(&device);
                 uploader.destroy(&mut device);
                 bindless.destroy(&device);
                 resources.destroy(&mut device);
@@ -89,8 +109,55 @@ impl Gpu {
             uploader,
             pipelines,
             deletions: DeletionQueue::default(),
+            crumbs,
             pending_slots: Vec::new(),
         })
+    }
+
+    /// Clear `slot`'s breadcrumbs and record the names the frame about to be
+    /// recorded will write there (§4.8). Called once per frame, before
+    /// recording; the caller has already proven that slot's last frame retired.
+    pub fn prepare_crumbs<'a>(
+        &mut self,
+        slot: usize,
+        names: impl Iterator<Item = &'a str>,
+    ) -> Result<Crumbs, RhiError> {
+        self.crumbs.prepare(&mut self.resources, slot, names)
+    }
+
+    /// Turn a Vulkan result into an error, explaining a lost device rather than
+    /// forwarding its code (§4.8). Every submit, present and timeline wait goes
+    /// through here: `DEVICE_LOST` is the one code whose cause is somewhere else
+    /// entirely, and the breadcrumbs are the only record of where.
+    pub fn explain(&self, err: vk::Result) -> RhiError {
+        if err != vk::Result::ERROR_DEVICE_LOST {
+            return RhiError::Vk(err);
+        }
+        let report = crash::report(
+            self.device.marker_mechanism(),
+            &self.breadcrumbs(),
+            self.device.fault_info().as_ref(),
+        );
+        // Logged here rather than left to whoever receives the error: this is
+        // the one path where the caller may never get to print anything, and
+        // the log tail is what a crash report attaches (§4.8).
+        tracing::error!(target: "gg::crash", "{report}");
+        RhiError::DeviceLost(report)
+    }
+
+    /// Re-explain an error a device call already wrapped. A lost device reaches
+    /// a caller through whichever call happened to notice — a wait, a submit, a
+    /// present — and only this crate can turn that code into the report.
+    pub fn detail(&self, err: RhiError) -> RhiError {
+        match err {
+            RhiError::Vk(code) => self.explain(code),
+            other => other,
+        }
+    }
+
+    /// What the last recorded frame's marks say it reached.
+    pub fn breadcrumbs(&self) -> String {
+        self.crumbs.report(&self.resources)
     }
 
     /// Everything the GPU is provably past: deferred destructions and the
@@ -158,6 +225,35 @@ impl Gpu {
         let (raw, size) = (dst.raw, dst.size);
         self.uploader
             .upload_buffer(&self.device, raw, size, offset, bytes)
+    }
+
+    /// Copy straight into a [`BufferKind::Dynamic`](crate::BufferKind::Dynamic)
+    /// buffer's mapping — no staging, no submit.
+    pub fn write_buffer(
+        &mut self,
+        handle: BufferHandle,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), RhiError> {
+        let mapping = self.resources.mapped_mut(handle)?;
+        let at = offset as usize;
+        let end = at
+            .checked_add(bytes.len())
+            .filter(|end| *end <= mapping.len());
+        let Some(end) = end else {
+            return Err(RhiError::Loader(format!(
+                "write of {} bytes at offset {offset} runs off a {}-byte buffer",
+                bytes.len(),
+                mapping.len()
+            )));
+        };
+        mapping[at..end].copy_from_slice(bytes);
+        Ok(())
+    }
+
+    /// What the device is holding right now (§4.8).
+    pub fn memory(&self) -> crate::MemoryUse {
+        self.resources.memory()
     }
 
     /// Record an image upload into the staging batch. `bytes` is the tightly

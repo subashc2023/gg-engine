@@ -78,6 +78,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             fs_entry: &fs.spirv_entry,
             push_constant_size: 0,
             color: gg_rhi::ColorTarget::Backbuffer,
+            blend: gg_rhi::Blend::Off,
             depth: gg_rhi::DepthMode::Off,
         })
         .unwrap();
@@ -175,6 +176,7 @@ float4 fs_main() : SV_Target { return push.color; }
             fs_entry: &fs.spirv_entry,
             push_constant_size: 16,
             color: gg_rhi::ColorTarget::Backbuffer,
+            blend: gg_rhi::Blend::Off,
             depth: gg_rhi::DepthMode::Off,
         })
         .unwrap();
@@ -272,6 +274,7 @@ float4 fs_main() : SV_Target { return push.color; }
             fs_entry: &fs.spirv_entry,
             push_constant_size: 32,
             color: gg_rhi::ColorTarget::Backbuffer,
+            blend: gg_rhi::Blend::Off,
             depth: gg_rhi::DepthMode::Off,
         })
         .unwrap();

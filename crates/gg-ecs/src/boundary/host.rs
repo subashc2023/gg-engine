@@ -35,6 +35,45 @@ pub fn set_logger(logger: fn(level: u32, message: &str)) -> Result<(), fn(u32, &
     LOGGER.set(logger)
 }
 
+/// How the host brackets one system call (§4.8's per-system CPU zones).
+///
+/// Scoped rather than the `begin(name)`/`end()` pair the obvious shape suggests:
+/// a profiler zone is a *guard*, and a pair would make `gg-ecs` responsible for
+/// pairing calls the host has to store the guard between — `tracy_client::Span`
+/// is `!Send` and would need a `thread_local!` on the host to survive the gap.
+/// Handing the body over instead makes the zone's lifetime the host's stack
+/// frame, so it cannot be left open by an early return here.
+///
+/// `&mut dyn FnMut()` and not `FnOnce`: a `fn` pointer cannot be generic, and
+/// the boundary's execution order (§4.1) is a table walk, not a schedule the
+/// host may reorder — so the hook is passed a closure it must call exactly once
+/// and may not keep.
+pub type SystemZone = fn(name: &str, body: &mut dyn FnMut());
+
+/// Where per-system profiler zones go. Unset means "no instruments", which is
+/// every dist build by construction: `gg-debug` is absent from that graph (§3),
+/// so nothing there can call this.
+static ZONE: std::sync::OnceLock<SystemZone> = std::sync::OnceLock::new();
+
+/// Bracket every system call in [`World::run_systems`] with the host's zone.
+/// Once per process, like [`set_logger`] and for the same reason.
+///
+/// `gg-ecs` has no `tracing` and no `profiling` dependency by an explicit §3
+/// decision, and `profiling::scope!` cannot take a dynamic name — a system's
+/// name is table data. This is the whole of what the crate buys instead.
+///
+/// # Errors
+///
+/// Returns the hook back if one is already installed.
+pub fn set_system_zone(zone: SystemZone) -> Result<(), SystemZone> {
+    ZONE.set(zone)
+}
+
+/// The installed zone, if any. Crate-internal: the call site is `run_systems`.
+pub(crate) fn system_zone() -> Option<SystemZone> {
+    ZONE.get().copied()
+}
+
 /// The host function table for this build.
 ///
 /// A `&'static` because the dylib keeps the pointer for as long as it can be

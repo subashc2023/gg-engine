@@ -35,6 +35,17 @@ pub enum BufferKind {
     /// memory *location* rather than a usage — the one distinction a device
     /// address genuinely cannot express (§4.5's readback pass).
     Readback,
+    /// Host-visible the other way: written by the CPU with
+    /// [`Rhi::write_buffer`](crate::Rhi::write_buffer) and read by shaders
+    /// through its address, with no staging copy and no submit.
+    ///
+    /// The staging ring (§4.3) is for data that outlives the frame that uploads
+    /// it; a stream rebuilt from scratch every frame would pay a transfer
+    /// submit and a wait to hand over what one pass reads once. Nothing here
+    /// waits, so **the caller owns the frames-in-flight hazard** — one region
+    /// per [`FRAMES_IN_FLIGHT`](crate::FRAMES_IN_FLIGHT) slot, or a frame
+    /// overwrites what its predecessor is still reading.
+    Dynamic,
 }
 
 /// Pixel format. Short on purpose (§3 budget): one entry per job that exists,
@@ -193,6 +204,27 @@ pub struct ImageDesc<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BufferHandle(u64);
 
+/// What the device is holding, live (§4.8). Counts beside bytes because the
+/// number that says a frame is leaking is the count, not the total.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryUse {
+    /// Live buffers.
+    pub buffers: u32,
+    /// Bytes allocated for them.
+    pub buffer_bytes: u64,
+    /// Live images, including the graph's pooled attachments.
+    pub images: u32,
+    /// Bytes allocated for them.
+    pub image_bytes: u64,
+}
+
+impl MemoryUse {
+    /// Buffers and images together.
+    pub fn total_bytes(&self) -> u64 {
+        self.buffer_bytes + self.image_bytes
+    }
+}
+
 /// An opaque handle to an image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ImageHandle(u64);
@@ -286,6 +318,11 @@ impl Resources {
         let usage = buffer_usage(desc.kind);
         let location = match desc.kind {
             BufferKind::Readback => gpu_allocator::MemoryLocation::GpuToCpu,
+            // CpuToGpu, so a discrete part places it in write-combined BAR
+            // memory the GPU can read directly: the CPU writes it sequentially
+            // and never reads it back, which is exactly what that memory is bad
+            // and good at respectively.
+            BufferKind::Dynamic => gpu_allocator::MemoryLocation::CpuToGpu,
             _ => gpu_allocator::MemoryLocation::GpuOnly,
         };
         let buffer = create_raw_buffer_in(device, desc.name, desc.size, usage, location)?;
@@ -429,12 +466,40 @@ impl Resources {
             .as_ref()
             .and_then(gpu_allocator::vulkan::Allocation::mapped_slice)
             .map(|bytes| &bytes[..buffer.size as usize])
-            .ok_or_else(|| {
-                RhiError::Loader(format!(
-                    "buffer handle {} is not host-visible — only BufferKind::Readback is",
-                    handle.0
-                ))
-            })
+            .ok_or_else(|| host_visible_error(handle))
+    }
+
+    /// A [`BufferKind::Dynamic`] buffer's mapping, to write into.
+    pub fn mapped_mut(&mut self, handle: BufferHandle) -> Result<&mut [u8], RhiError> {
+        let buffer = self
+            .buffers
+            .get_mut(&handle.0)
+            .ok_or_else(|| RhiError::Loader(format!("buffer handle {} is not live", handle.0)))?;
+        let size = buffer.size as usize;
+        buffer
+            .alloc
+            .as_mut()
+            .and_then(gpu_allocator::vulkan::Allocation::mapped_slice_mut)
+            .map(|bytes| &mut bytes[..size])
+            .ok_or_else(|| host_visible_error(handle))
+    }
+
+    /// What the device is holding right now, for the overlay's memory row
+    /// (§4.8). Allocated bytes rather than requested: alignment and the
+    /// allocator's block size are real, and a row that hid them would report a
+    /// number no tool agrees with.
+    pub fn memory(&self) -> MemoryUse {
+        let bytes = |alloc: &Option<gpu_allocator::vulkan::Allocation>| {
+            alloc
+                .as_ref()
+                .map_or(0, gpu_allocator::vulkan::Allocation::size)
+        };
+        MemoryUse {
+            buffers: self.buffers.len() as u32,
+            buffer_bytes: self.buffers.values().map(|b| bytes(&b.alloc)).sum(),
+            images: self.images.len() as u32,
+            image_bytes: self.images.values().map(|i| bytes(&i.alloc)).sum(),
+        }
     }
 
     pub fn image(&self, handle: ImageHandle) -> Result<&Image, RhiError> {
@@ -517,6 +582,13 @@ impl Resources {
     }
 }
 
+fn host_visible_error(handle: BufferHandle) -> RhiError {
+    RhiError::Loader(format!(
+        "buffer handle {} is not host-visible — only BufferKind::Readback and ::Dynamic are",
+        handle.0
+    ))
+}
+
 fn buffer_usage(kind: BufferKind) -> vk::BufferUsageFlags {
     // SHADER_DEVICE_ADDRESS on every buffer is the §4.3 bindless rule, not a
     // convenience: shaders have no other way to reach one.
@@ -524,9 +596,8 @@ fn buffer_usage(kind: BufferKind) -> vk::BufferUsageFlags {
         | vk::BufferUsageFlags::STORAGE_BUFFER
         | vk::BufferUsageFlags::TRANSFER_DST;
     match kind {
-        BufferKind::Storage => base,
+        BufferKind::Storage | BufferKind::Readback | BufferKind::Dynamic => base,
         BufferKind::Index => base | vk::BufferUsageFlags::INDEX_BUFFER,
-        BufferKind::Readback => base,
     }
 }
 

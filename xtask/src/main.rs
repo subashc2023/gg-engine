@@ -3,6 +3,7 @@
 //! bench, capture, probe, dist — the ones whose first consumer hasn't arrived
 //! yet are stubs that say which milestone brings it.
 
+mod bench;
 mod budgets;
 mod ci;
 mod dist;
@@ -34,8 +35,7 @@ fn main() {
         Some("run") => run::run(&rest),
         Some("timers") => timers::run(&rest),
         Some("assets") => stub("assets", "M9 (asset pipeline; `ggc` does not exist yet)"),
-        Some("bench") => bench(),
-        Some("capture") => stub("capture", "M8 (RenderDoc in-application API)"),
+        Some("bench") => bench::run(&rest),
         _ => usage(),
     };
 
@@ -45,19 +45,6 @@ fn main() {
         // to the agent (§6 M0A); plain failures exit 1.
         std::process::exit(if hook { 2 } else { 1 });
     }
-}
-
-/// `cargo xtask bench` — the gg-ecs baseline (§4.2, and §6 M5's measured exit
-/// criterion). Release, harness-free, and self-asserting: it fails if column-view
-/// iteration drifts away from parity with a native loop, and if the same query
-/// issued *through the boundary* costs measurably more than the host-side one —
-/// which is §4.2.2's one-FFI-call-per-archetype claim as a number. Part of the
-/// nightly tier (§5 gate 11).
-pub(crate) fn bench() -> anyhow::Result<()> {
-    util::run(
-        util::cargo().args(["bench", "-p", "gg-ecs"]),
-        "cargo bench -p gg-ecs",
-    )
 }
 
 fn stub(name: &str, lands: &str) -> anyhow::Result<()> {
@@ -70,12 +57,13 @@ fn usage() -> anyhow::Result<()> {
         "usage: cargo xtask <command>\n\
          \n\
          ci [--fast|--push|--nightly|--weekly] [--hook]   local-first CI tiers (§5) — windowless by construction (§1.5)\n\
-         interactive                                      manual windowed suite: storms + demo WSI runs (creates windows)\n\
+         interactive                                      manual WSI suite: storms + demo runs; two legs present visibly\n\
          run <demo> [shell flags]                         manual: build the game dylib, play it under gg-runtime (creates a window)\n\
          probe [--system]                                 capability table vs pinned lavapipe (spike 2)\n\
          shaders [--check]                                offline shader build + codegen (in-process Slang)\n\
-         dist                                             dist gate: build+run tier-dist, symbol absence (§5.8)\n\
+         dist                                             dist gate: build+run tier-dist, symbol absence, crash symbolization (§5.8)\n\
          reload [--cross-tier|--segments|--chaos|--latency]  the M5 shell gates over demo 03; no flag runs the set\n\
-         assets | capture                                 stubs until their milestone"
+         bench [--record]                                 smoke on lavapipe; --record archives real numbers per machine (§4.11)\n\
+         assets                                           a stub until M9 (RenderDoc capture is `gg-golden capture`)"
     )
 }

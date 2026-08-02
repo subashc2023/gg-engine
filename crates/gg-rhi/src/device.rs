@@ -6,9 +6,11 @@
 //! GPU memory and tattles on leaks at shutdown.
 
 use crate::RhiError;
+use crate::crash::{Fault, FaultAddress, FaultVendor, address_kind};
 use crate::instance::Instance;
 use crate::surface::Surface;
 use ash::vk;
+use std::ffi::CStr;
 
 /// One queue: family, handle, and its monotonic timeline semaphore (§4.3:
 /// timeline semaphores only, plus WSI binaries where presentation demands).
@@ -65,8 +67,63 @@ pub struct Device {
     pub(crate) graphics: Queue,
     pub(crate) transfer: Queue,
     descriptor_limits: DescriptorLimits,
+    /// Nanoseconds per timestamp tick, and which bits of a tick are real.
+    /// A zero mask means the graphics queue writes no usable timestamp, which
+    /// is a device property and not a failure (§4.8).
+    timestamps: (f32, u64),
+    /// `VK_EXT_calibrated_timestamps`, when the device has it and this build
+    /// times passes. What it buys is the device clock *without a submit*, which
+    /// is the only way to anchor a GPU zone to a CPU one without the anchor
+    /// itself costing a round trip (§4.8).
+    calibrated: Option<ash::ext::calibrated_timestamps::Device>,
+    /// `VK_AMD_buffer_marker`, when advertised: a breadcrumb written *at* a
+    /// pipeline stage rather than as a loose transfer command (§4.8).
+    buffer_marker: Option<ash::amd::buffer_marker::Device>,
+    /// `VK_EXT_device_fault`, when advertised *and* its feature enabled — what
+    /// turns `DEVICE_LOST` into an address and a vendor code. Absent on
+    /// lavapipe (§6 M8, measured by `xtask probe`).
+    fault: Option<ash::ext::device_fault::Device>,
     allocator: Option<gpu_allocator::vulkan::Allocator>,
     report: DeviceReport,
+}
+
+/// Whether the physical device advertises `extension`.
+fn has_extension(instance: &ash::Instance, pd: vk::PhysicalDevice, extension: &CStr) -> bool {
+    // SAFETY: pd comes from the live instance.
+    let extensions = unsafe { instance.enumerate_device_extension_properties(pd) };
+    extensions.is_ok_and(|list| {
+        list.iter().any(|e| {
+            e.extension_name_as_c_str()
+                .is_ok_and(|name| name == extension)
+        })
+    })
+}
+
+/// Whether the device *implements* device fault, not merely advertises the
+/// extension. Only ever asked once the extension is known present: querying a
+/// feature struct a device does not support is invalid usage, not a `false`.
+fn has_device_fault(instance: &ash::Instance, pd: vk::PhysicalDevice) -> bool {
+    let mut fault = vk::PhysicalDeviceFaultFeaturesEXT::default();
+    let mut f2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut fault);
+    // SAFETY: pd comes from the live instance; the chain is default-initialized
+    // and the extension was proven advertised by the caller.
+    unsafe { instance.get_physical_device_features2(pd, &mut f2) };
+    fault.device_fault == vk::TRUE
+}
+
+/// Whether the *device* time domain is calibrateable. Advertising the extension
+/// is not the same claim — a driver may offer host domains only — and asking for
+/// a domain it did not list is invalid usage, not an empty answer.
+fn device_time_domain(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    pd: vk::PhysicalDevice,
+) -> bool {
+    let fns = ash::ext::calibrated_timestamps::Instance::new(entry, instance);
+    // SAFETY: pd comes from the live instance, and the instance-level entry
+    // points of this extension need no device-level enable.
+    let domains = unsafe { fns.get_physical_device_calibrateable_time_domains(pd) };
+    domains.is_ok_and(|d| d.contains(&vk::TimeDomainEXT::DEVICE))
 }
 
 /// The §4.3 required-feature list. Names match `xtask probe`'s table so a
@@ -162,6 +219,17 @@ fn missing_features(
         ("maintenance4", f13.maintenance4 == vk::TRUE),
     ];
     rows.iter().filter(|(_, ok)| !ok).map(|(n, _)| *n).collect()
+}
+
+/// A driver-supplied fixed-size description. Bounded rather than pointer-walked:
+/// this reads memory a *lost* device's driver filled in, which is the worst
+/// place to trust a terminator that may not be there.
+fn c_str(bytes: &[std::ffi::c_char; vk::MAX_DESCRIPTION_SIZE]) -> String {
+    // SAFETY: c_char and u8 have the same layout and size; the array is live.
+    let bytes = unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<u8>(), bytes.len()) };
+    CStr::from_bytes_until_nul(bytes)
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "<undescribed>".into())
 }
 
 fn device_type_name(t: vk::PhysicalDeviceType) -> (&'static str, u32) {
@@ -340,7 +408,29 @@ impl Device {
             .push_next(&mut f12)
             .push_next(&mut f13);
 
-        let device_extensions = [ash::khr::swapchain::NAME.as_ptr()];
+        let mut device_extensions = vec![ash::khr::swapchain::NAME.as_ptr()];
+        // Optional and asked for only by a build that profiles: absence costs a
+        // Tracy column, never the engine, so it is checked rather than required
+        // (§4.8) — and `cfg!` keeps dist from requesting it at all.
+        let wants_calibration = cfg!(feature = "gpu-timings")
+            && has_extension(inst, pd, ash::ext::calibrated_timestamps::NAME)
+            && device_time_domain(instance.entry(), inst, pd);
+        if wants_calibration {
+            device_extensions.push(ash::ext::calibrated_timestamps::NAME.as_ptr());
+        }
+        // The crash path, in every tier: §1.6 promises no mystery crashes where
+        // it matters most, which is the build nobody can attach a debugger to.
+        let wants_markers = has_extension(inst, pd, ash::amd::buffer_marker::NAME);
+        if wants_markers {
+            device_extensions.push(ash::amd::buffer_marker::NAME.as_ptr());
+        }
+        let wants_fault =
+            has_extension(inst, pd, ash::ext::device_fault::NAME) && has_device_fault(inst, pd);
+        let mut fault_features = vk::PhysicalDeviceFaultFeaturesEXT::default().device_fault(true);
+        if wants_fault {
+            device_extensions.push(ash::ext::device_fault::NAME.as_ptr());
+            features2 = features2.push_next(&mut fault_features);
+        }
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&device_extensions)
@@ -349,6 +439,10 @@ impl Device {
         // SAFETY: all pointed-to arrays outlive the call; pd is valid.
         let raw = unsafe { inst.create_device(pd, &device_info, None) }.map_err(RhiError::Vk)?;
         let swapchain_fns = ash::khr::swapchain::Device::new(inst, &raw);
+        let calibrated =
+            wants_calibration.then(|| ash::ext::calibrated_timestamps::Device::new(inst, &raw));
+        let buffer_marker = wants_markers.then(|| ash::amd::buffer_marker::Device::new(inst, &raw));
+        let fault = wants_fault.then(|| ash::ext::device_fault::Device::new(inst, &raw));
         #[cfg(feature = "validation")]
         let debug_fns = ash::ext::debug_utils::Device::new(inst, &raw);
 
@@ -382,6 +476,15 @@ impl Device {
             })
             .map_err(|e| RhiError::Allocator(e.to_string()))?;
 
+        // 64 valid bits is the common case and `1u64 << 64` is UB, so the full
+        // width is spelled separately rather than reached by shifting.
+        let valid_bits = families[graphics_family as usize].timestamp_valid_bits;
+        let timestamp_mask = match valid_bits {
+            0 => 0,
+            64.. => u64::MAX,
+            bits => (1u64 << bits) - 1,
+        };
+
         let api = props.api_version;
         let report = DeviceReport {
             chosen: candidates[chosen_idx].name.clone(),
@@ -397,6 +500,8 @@ impl Device {
             chosen = %report.chosen,
             api = ?report.api_version,
             transfer_dedicated,
+            device_fault = wants_fault,
+            buffer_marker = wants_markers,
             "device created"
         );
 
@@ -417,6 +522,10 @@ impl Device {
                 timeline: transfer_timeline,
             },
             descriptor_limits,
+            timestamps: (props.limits.timestamp_period, timestamp_mask),
+            calibrated,
+            buffer_marker,
+            fault,
             allocator: Some(allocator),
             report,
         };
@@ -444,6 +553,130 @@ impl Device {
 
     pub(crate) fn descriptor_limits(&self) -> DescriptorLimits {
         self.descriptor_limits
+    }
+
+    /// Nanoseconds one timestamp tick represents.
+    pub(crate) fn timestamp_period(&self) -> f32 {
+        self.timestamps.0
+    }
+
+    /// Which bits of a written timestamp carry a value. `0` means the graphics
+    /// queue cannot time anything — a legal device, so callers degrade rather
+    /// than fail (§4.8).
+    pub(crate) fn timestamp_mask(&self) -> u64 {
+        self.timestamps.1
+    }
+
+    /// The device clock right now, in the same ticks a pass timestamp is
+    /// written in — read host-side, with no submit and no wait. `None` when the
+    /// device lacks `VK_EXT_calibrated_timestamps` or this build does not
+    /// profile, which costs a profiler its anchor and costs the engine nothing.
+    pub(crate) fn gpu_ticks_now(&self) -> Option<u64> {
+        let calibrated = self.calibrated.as_ref()?;
+        let info =
+            [vk::CalibratedTimestampInfoEXT::default().time_domain(vk::TimeDomainEXT::DEVICE)];
+        // SAFETY: the extension was enabled at device creation, and `DEVICE` was
+        // proven calibrateable before that handle was kept.
+        let (ticks, _deviation) = unsafe { calibrated.get_calibrated_timestamps(&info) }.ok()?;
+        Some(ticks.first()? & self.timestamps.1)
+    }
+
+    /// Write one breadcrumb (§4.8).
+    ///
+    /// `VK_AMD_buffer_marker` writes it *at* `stage`, which is what lets a mark
+    /// mean "the pass reached this stage". The portable fallback is an ordinary
+    /// transfer write, unordered against the draws around it — looser, and
+    /// still enough to name the pass a lost device was inside.
+    ///
+    /// # Safety
+    /// `cmd` must be recording outside a render pass, `buffer` must be live with
+    /// `TRANSFER_DST` usage, and `offset` must be 4-byte aligned and in range.
+    pub(crate) unsafe fn write_marker(
+        &self,
+        cmd: vk::CommandBuffer,
+        stage: vk::PipelineStageFlags,
+        buffer: vk::Buffer,
+        offset: u64,
+        value: u32,
+    ) {
+        match &self.buffer_marker {
+            // SAFETY: caller contract; the extension was enabled at creation.
+            Some(fns) => unsafe { fns.cmd_write_buffer_marker(cmd, stage, buffer, offset, value) },
+            // SAFETY: caller contract.
+            None => unsafe { self.raw.cmd_fill_buffer(cmd, buffer, offset, 4, value) },
+        }
+    }
+
+    /// Which mechanism [`Device::write_marker`] uses — named in the report,
+    /// because how much a mark's position can be trusted depends on it.
+    pub(crate) fn marker_mechanism(&self) -> &'static str {
+        match self.buffer_marker {
+            Some(_) => "VK_AMD_buffer_marker (stage-ordered)",
+            None => "cmd_fill_buffer (submission-ordered)",
+        }
+    }
+
+    /// What the driver saw, after the device was lost. `None` without
+    /// `VK_EXT_device_fault`, and on any driver that declines to answer.
+    ///
+    /// Called *only* on a lost device: the extension's contract is about the
+    /// fault that lost it, and there is nothing to ask about before then.
+    pub(crate) fn fault_info(&self) -> Option<Fault> {
+        let fns = self.fault.as_ref()?;
+        let mut counts = vk::DeviceFaultCountsEXT::default();
+        // SAFETY: the extension was enabled at device creation, the device
+        // handle is this one, and a null info pointer is the spec's own way of
+        // asking for counts only.
+        let result = unsafe {
+            (fns.fp().get_device_fault_info_ext)(
+                self.raw.handle(),
+                &mut counts,
+                std::ptr::null_mut(),
+            )
+        };
+        if result != vk::Result::SUCCESS {
+            return None;
+        }
+        let mut addresses =
+            vec![vk::DeviceFaultAddressInfoEXT::default(); counts.address_info_count as usize];
+        let mut vendors =
+            vec![vk::DeviceFaultVendorInfoEXT::default(); counts.vendor_info_count as usize];
+        // The vendor binary is a crash dump for the vendor's own tooling, not
+        // something a report can read; asking for none keeps the call to two.
+        counts.vendor_binary_size = 0;
+        let mut info = vk::DeviceFaultInfoEXT {
+            p_address_infos: addresses.as_mut_ptr(),
+            p_vendor_infos: vendors.as_mut_ptr(),
+            ..Default::default()
+        };
+        // SAFETY: as above, and both arrays are sized by the counts just read.
+        let result = unsafe {
+            (fns.fp().get_device_fault_info_ext)(self.raw.handle(), &mut counts, &mut info)
+        };
+        if result != vk::Result::SUCCESS {
+            return None;
+        }
+        addresses.truncate(counts.address_info_count as usize);
+        vendors.truncate(counts.vendor_info_count as usize);
+        Some(Fault {
+            description: c_str(&info.description),
+            addresses: addresses
+                .iter()
+                .map(|a| FaultAddress {
+                    kind: address_kind(a.address_type),
+                    address: a.reported_address,
+                    precision: a.address_precision,
+                })
+                .collect(),
+            vendors: vendors
+                .iter()
+                .map(|v| FaultVendor {
+                    description: c_str(&v.description),
+                    code: v.vendor_fault_code,
+                    data: v.vendor_fault_data,
+                })
+                .collect(),
+        })
     }
 
     /// Whether uploads cross a queue-family boundary. `false` on lavapipe,
@@ -557,6 +790,20 @@ impl Device {
     pub(crate) fn wait_idle(&self) {
         // SAFETY: device is live.
         let _ = unsafe { self.raw.device_wait_idle() };
+    }
+
+    /// Ask the device whether it is still there, after a wait that said yes.
+    ///
+    /// A reset does not fail the wait it unblocks: a TDR force-signals the
+    /// timeline and the loss surfaces on some *later* call (measured on
+    /// NVIDIA/Windows, §6 M8 — a hung draw's `vkWaitSemaphores` returned
+    /// `SUCCESS` and the next frame's submit reported the loss). One frame late
+    /// is too late for §4.8: by then the next frame's `prepare_crumbs` has
+    /// cleared the marks naming the pass that hung. Free on the path that calls
+    /// it — the queue it idles has just been waited to completion.
+    pub(crate) fn check_alive(&self) -> Result<(), RhiError> {
+        // SAFETY: device is live or lost; both are legal receivers here.
+        unsafe { self.raw.device_wait_idle() }.map_err(RhiError::Vk)
     }
 
     /// Allocate GPU memory. Every byte in the engine flows through here so

@@ -70,6 +70,14 @@ pub struct App {
     /// The window's GPU state, absent in a headless run — and that absence is
     /// the extract and render stages' off switch.
     gpu: Option<Renderer>,
+    /// Tracy's GPU zones, fed the same readings the overlay shows, so the two
+    /// views of one frame cannot disagree (§4.8).
+    #[cfg(feature = "debug-tools")]
+    zones: Option<gg_debug::GpuZones>,
+    /// The overlay, and the UI vertices it built this frame (§4.8). Absent from
+    /// dist entirely — `gg-debug` is not in that graph (§3).
+    #[cfg(feature = "overlay")]
+    overlay: gg_debug::Overlay,
 }
 
 impl App {
@@ -145,16 +153,52 @@ impl App {
             extracted: Extracted::default(),
             view: View::default(),
             gpu: None,
+            #[cfg(feature = "debug-tools")]
+            zones: None,
+            #[cfg(feature = "overlay")]
+            overlay: gg_debug::Overlay::default(),
         })
+    }
+
+    /// Offer a key to the instruments before anything else sees it. `true` means
+    /// the overlay took it — see `gg_debug::Overlay::key` for why only presses
+    /// are ever taken.
+    #[cfg(feature = "overlay")]
+    pub fn debug_key(&mut self, key: gg_input::Key, pressed: bool, text: Option<char>) -> bool {
+        // Text first: the keystroke that *opens* the console also produces a
+        // character, and it is only filtered once the console is open.
+        if let Some(c) = text {
+            self.overlay.text(c);
+        }
+        self.overlay.key(key, pressed)
+    }
+
+    /// Dist has no instruments to offer it to (§3).
+    #[cfg(not(feature = "overlay"))]
+    pub fn debug_key(&mut self, _key: gg_input::Key, _pressed: bool, _text: Option<char>) -> bool {
+        false
     }
 
     /// Bring up the GPU against a live window. Called once, from
     /// `Event::WindowReady` — the surface may not outlive the window it came
     /// from, which is what [`App::detach`] is for at the other end.
     pub fn attach(&mut self, window: &Window) -> anyhow::Result<()> {
-        let renderer = Renderer::new(window, window.inner_size())?;
+        #[cfg_attr(not(feature = "overlay"), expect(unused_mut, reason = "atlas upload"))]
+        let mut renderer = Renderer::new(window, window.inner_size())?;
+        // The renderer never learns what a glyph is; it takes coverage texels
+        // and a rectangle (§4.9).
+        #[cfg(feature = "overlay")]
+        renderer.set_ui_atlas(&gg_debug::atlas())?;
         let device = renderer.device();
         info!(device = %device.chosen, api = ?device.api_version, "gpu online");
+        // Opened here and not at construction: the context is anchored to the
+        // device clock, and there is no device until now.
+        #[cfg(feature = "debug-tools")]
+        {
+            self.zones = renderer
+                .gpu_clock()
+                .and_then(|clock| gg_debug::GpuZones::new("gg.graphics", clock));
+        }
         self.gpu = Some(renderer);
         Ok(())
     }
@@ -412,16 +456,44 @@ impl Stages for App {
             return Ok(());
         }
         let eye = Eye::of(&self.world)?;
-        self.view.yaw = eye.yaw;
-        self.view.pitch = eye.pitch;
+        // Rebuilt, not mutated: `View::default()` is where the render CVars are
+        // read, so a console edit lands on the next frame (§4.8).
+        self.view = View {
+            yaw: eye.yaw,
+            pitch: eye.pitch,
+            ..View::default()
+        };
         self.extracted
             .transforms::<Renderable>(&self.world, eye.position)?;
         Ok(())
     }
 
     fn render(&mut self, _alpha: f32) -> anyhow::Result<()> {
-        if let Some(renderer) = &mut self.gpu {
-            renderer.frame(&self.extracted, &self.view, CLEAR)?;
+        let Some(renderer) = &mut self.gpu else {
+            return Ok(());
+        };
+        // The overlay reads the readings the frame already took rather than
+        // asking the device again, so its rows and Tracy's zones cannot
+        // disagree about one frame (§4.8).
+        #[cfg(feature = "overlay")]
+        let ui = self.overlay.build(&gg_debug::overlay::Stats {
+            extent: renderer.extent(),
+            tick: self.next_tick,
+            passes: renderer.pass_timings(),
+            memory: renderer.memory(),
+        });
+        #[cfg(not(feature = "overlay"))]
+        let ui = &[];
+        // Dropped at the end of this method, which is before the device is and
+        // after the only submit — what RenderDoc records is exactly one frame.
+        #[cfg(feature = "debug-tools")]
+        let _capture = gg_debug::capture::frame();
+        renderer.frame(&self.extracted, &self.view, CLEAR, ui)?;
+        // A frame or two behind, which is what not stalling costs; a zone is
+        // placed by its GPU timestamps, not by when it was sent (§4.8).
+        #[cfg(feature = "debug-tools")]
+        if let Some(zones) = &mut self.zones {
+            zones.frame(renderer.pass_timings(), renderer.gpu_clock());
         }
         Ok(())
     }

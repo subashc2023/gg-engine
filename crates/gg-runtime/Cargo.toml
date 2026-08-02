@@ -29,12 +29,15 @@ gg-extract = { path = "../gg-extract" }
 gg-input = { path = "../gg-input" }
 # The replay header's determinism contract, and the default eye's position.
 gg-math = { path = "../gg-math" }
+# The instruments (§4.8), and optional because §3 keeps them out of the dist
+# graph entirely — which is why the observability init below has two shapes and
+# not a feature flag inside one.
+gg-debug = { path = "../gg-debug", optional = true }
 anyhow.workspace = true
 tracing.workspace = true
+# The dist subscriber. In every other tier `gg-debug` installs a richer one, but
+# a shipped build still logs, so this is not optional.
 tracing-subscriber.workspace = true
-profiling.workspace = true
-tracy-client = { workspace = true, optional = true }
-tracing-tracy = { workspace = true, optional = true }
 
 [features]
 default = ["tier-dev"]
@@ -44,20 +47,29 @@ default = ["tier-dev"]
 # (§3). Most are declared ahead of their machinery (§6 M0A: forty features
 # retrofitted into a tier system later is the archaeology this prevents).
 validation = ["gg-render/validation"]
-tracy = ["dep:tracy-client", "dep:tracing-tracy", "profiling/profile-with-tracy"]
+tracy = ["debug-tools", "gg-debug/tracy"]
+# The instruments crate itself, which the three lab features below all need.
+# Named separately so `cfg(feature = "debug-tools")` is the one question the
+# shell asks — "is gg-debug linked" — rather than a disjunction it must keep in
+# step with the tier list.
+debug-tools = ["dep:gg-debug"]
+# Per-pass GPU timestamps (§4.8) — what the overlay's milliseconds and Tracy's
+# GPU zones are both read from, so it rides with either.
+gpu-timings = ["gg-render/gpu-timings"]
 state-hash = []
 nan-scan = []
 # Forwarded rather than local: the machinery is `gg-core`'s and the tier
 # meta-features below are the only place that decides it is present.
 fp-assert = ["gg-core/fp-assert"]
 hot-reload = ["gg-core/hot-reload"]
-cvar-console = []
-overlay = []
+cvar-console = ["debug-tools"]
+overlay = ["debug-tools"]
 
 # Tier meta-features (§2 Build tiers row, §3).
 tier-dev = [
     "validation",
     "tracy",
+    "gpu-timings",
     "state-hash",
     "nan-scan",
     "fp-assert",
@@ -65,6 +77,6 @@ tier-dev = [
     "cvar-console",
     "overlay",
 ]
-tier-instrumented = ["tracy", "state-hash"]
+tier-instrumented = ["tracy", "gpu-timings", "state-hash"]
 tier-dist = []                      # input recorder is unconditional, never a feature (§2)
 tier-dist-verify = ["state-hash"]   # dist codegen + the hash, CI-only, gates §5.6c

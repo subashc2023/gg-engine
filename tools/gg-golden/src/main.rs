@@ -11,7 +11,10 @@
 //!                              `--dump-render-graph`)
 //!   gg-golden verify-gates     prove both gates can fail and can forgive
 //!   gg-golden chaos [seed]     render chaos streams' terminal frames (§5.11)
+//!   gg-golden capture [scene]  render under RenderDoc, write a `.rdc` (§4.8)
+//!   gg-golden bench [--json] [--frames N]   §4.11's frame macro
 
+mod bench;
 mod compare;
 mod png_io;
 mod report;
@@ -301,7 +304,12 @@ fn render_mesh_of(sim: demo_02_mesh::sim::Sim) -> Render {
     declared.push(readback_pass(backbuffer, into));
     let compiled = frame.compile(&declared)?;
     let graph = compiled.dump();
-    rhi.execute(&compiled.passes())?;
+    {
+        // Scoped, so the capture closes before `shutdown` destroys the device it
+        // was opened against (§4.8). Inert unless `capture` armed it.
+        let _capture = gg_debug::capture::frame();
+        rhi.execute(&compiled.passes())?;
+    }
     let pixels = rhi.map_buffer(dest)?.to_vec();
 
     let report = rhi.shutdown();
@@ -371,7 +379,13 @@ fn render_boxes_from(view: gg_render::View) -> Render {
     let extracted = boxes_world()?;
     let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
     tracing::info!(device = %renderer.device().chosen, "offscreen device");
-    let frame = renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0])?;
+    // No UI layer: these scenes gate the *renderer*, and an overlay in them
+    // would put a frame counter in every reference image. The UI pass's own
+    // pixels are gated offscreen in `gg-debug` instead.
+    let frame = {
+        let _capture = gg_debug::capture::frame();
+        renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?
+    };
     let report = renderer.shutdown();
     anyhow::ensure!(
         report.clean(),
@@ -422,7 +436,12 @@ fn render_triangle_scaled(scale: f32) -> Render {
     declared.push(readback_pass(backbuffer, into));
     let compiled = frame.compile(&declared)?;
     let graph = compiled.dump();
-    rhi.execute(&compiled.passes())?;
+    {
+        // Scoped for the same reason as `render_mesh_of`'s: the capture must
+        // close before the device it was opened against does.
+        let _capture = gg_debug::capture::frame();
+        rhi.execute(&compiled.passes())?;
+    }
     let pixels = rhi.map_buffer(dest)?.to_vec();
 
     let report = rhi.shutdown();
@@ -830,6 +849,43 @@ fn graph(filter: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `gg-golden capture [scene]` — §4.8's "one command": render the scene exactly
+/// as `run` renders it, with a RenderDoc capture bracketed around the submit,
+/// and print the `.rdc`. What lands in the capture is the frame the gate judges,
+/// not a re-staged lookalike of it.
+///
+/// Windowless, which is the whole reason the in-application API is here:
+/// RenderDoc's own hotkey hangs itself on a Present, and nothing in this binary
+/// presents (§1.5).
+fn capture(filter: Option<&str>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        gg_debug::capture::available(),
+        "not running under RenderDoc, so there is nothing to capture with — launch this command \
+         from the RenderDoc UI (Launch Application) or under `renderdoccmd capture`. RenderDoc \
+         must be in the process before the Vulkan instance is created, so it cannot be attached \
+         from here (§4.8)"
+    );
+    let root = artifacts_root().join("captures");
+    std::fs::create_dir_all(&root)?;
+    let mut captured = 0usize;
+    for scene in SCENES {
+        if filter.is_some_and(|f| f != scene.name) {
+            continue;
+        }
+        // A stem, not a path: RenderDoc appends the suffix itself — `_capture`
+        // for these, since an offscreen frame has no present to number.
+        gg_debug::capture::set_path_template(&root.join(scene.name).to_string_lossy());
+        gg_debug::capture::request(1);
+        let _ = (scene.render)()?;
+        let path = gg_debug::capture::latest()
+            .ok_or_else(|| anyhow::anyhow!("{}: RenderDoc wrote no capture", scene.name))?;
+        println!("gg-golden: {} → {}", scene.name, path.display());
+        captured += 1;
+    }
+    anyhow::ensure!(captured > 0, "no scene matched the filter");
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -839,13 +895,35 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let filter = args.get(1).map(String::as_str);
+    let filter = args
+        .get(1)
+        .map(String::as_str)
+        .filter(|a| !a.starts_with('-'));
     match args.first().map(String::as_str) {
         Some("run") => run(filter),
         Some("bless") => bless(filter),
         Some("graph") => graph(filter),
         Some("verify-gates") => verify_gates(),
         Some("chaos") => chaos(filter),
-        _ => anyhow::bail!("usage: gg-golden <run|bless|graph|verify-gates|chaos> [scene|seed]"),
+        Some("capture") => capture(filter),
+        Some("bench") => bench::run(
+            &boxes_world()?,
+            flag(&args, "--frames").unwrap_or(BENCH_FRAMES),
+            args.iter().any(|a| a == "--json"),
+        ),
+        _ => anyhow::bail!(
+            "usage: gg-golden <run|bless|graph|verify-gates|chaos|capture|bench> [scene|seed]"
+        ),
     }
+}
+
+/// Long enough for a p99 to mean something (a 300-frame run's p99 is its third
+/// worst frame), short enough that a recording is seconds.
+const BENCH_FRAMES: usize = 300;
+
+/// `--name <value>`, parsed. The only flag-shaped argument this binary takes;
+/// a parser crate for one integer would be a dependency per option.
+fn flag(args: &[String], name: &str) -> Option<usize> {
+    let at = args.iter().position(|a| a == name)?;
+    args.get(at + 1)?.parse().ok()
 }

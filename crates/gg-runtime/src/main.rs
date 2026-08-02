@@ -45,11 +45,18 @@ struct Args {
 /// the two would make a twice-rejuvenated session accumulate argv.
 const RESTORE_FLAG: &str = "--restore";
 
+/// The config file, read from the working directory. Not having written one is
+/// the normal case (§4.8), so there is no flag to point elsewhere: a run that
+/// wants one value wants `--set`, and a run that wants a different *file* is
+/// choosing a different working directory anyway.
+const CONFIG: &str = "gg.cfg";
+
 fn main() -> anyhow::Result<()> {
     // Bound to a named local, not `_`: the guard *is* the Tracy client's
     // lifetime, and `let _ = ..` would drop it here (see `Observability`).
     let _observability = init_observability()?;
-    let args = parse_args()?;
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let args = parse_args(&argv)?;
 
     {
         let _startup = info_span!("startup").entered();
@@ -65,6 +72,19 @@ fn main() -> anyhow::Result<()> {
         if gg_ecs::boundary::set_logger(log_from_game).is_err() {
             warn!("a logger was already installed");
         }
+        // Per-system CPU zones (§4.8). Only the instrumented graph has anywhere
+        // to send them: `gg-debug` is absent from dist (§3), so the ECS's hook
+        // stays unset there and its loop keeps a null check.
+        #[cfg(feature = "debug-tools")]
+        if gg_ecs::boundary::set_system_zone(gg_debug::cpu::system_zone).is_err() {
+            warn!("a system zone was already installed");
+        }
+        // Every crate's knobs registered before anything is applied, or a name
+        // the config file uses would be unknown by an accident of ordering.
+        gg_render::cvars::register()?;
+        #[cfg(feature = "debug-tools")]
+        gg_debug::register()?;
+        gg_core::config::boot(std::path::Path::new(CONFIG), &argv)?;
     }
 
     let staging = std::env::temp_dir().join(format!("gg-runtime-{}", std::process::id()));
@@ -126,7 +146,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_args() -> anyhow::Result<Args> {
+fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
     let mut args = Args {
         game: PathBuf::new(),
         frames: None,
@@ -136,10 +156,13 @@ fn parse_args() -> anyhow::Result<Args> {
         restore: None,
         leak_budget: None,
     };
-    let mut argv = std::env::args().skip(1);
+    let mut argv = argv.iter().cloned();
     while let Some(flag) = argv.next() {
         let mut value = || argv.next().with_context(|| format!("{flag} needs a value"));
         match flag.as_str() {
+            // Consumed and dropped: `gg_core::config` reads the same argv for
+            // these, and the shell's job here is only to not call them unknown.
+            gg_core::config::SET_FLAG => drop(value()?),
             "--game" => args.game = PathBuf::from(value()?),
             "--frames" => args.frames = Some(value()?.parse()?),
             "--input" => args.input = Some(PathBuf::from(value()?)),
@@ -189,34 +212,35 @@ pub fn active_tier() -> &'static str {
     }
 }
 
-/// Process-lifetime guard for the observability stack. Tracy stays enabled only
-/// while a client guard is alive — dropping the last one discards anything not
-/// yet delivered — so `start()` with the result thrown away starts and
-/// immediately stops it. `TracyLayer` holds a client of its own, which would
-/// mask that; relying on it makes all output hostage to construction order.
-struct Observability {
-    #[cfg(feature = "tracy")]
-    _tracy: tracy_client::Client,
+/// `gg::hash` off by default: it is one line per sim tick (§5.6c) and wanted
+/// only by the gate that compares two runs, which asks for it by `RUST_LOG`.
+const LOG_FILTER: &str = "debug,gg::hash=off";
+
+/// The instruments (§4.8): Tracy, the log tail a crash report attaches, the
+/// console. `gg-debug` is absent from every dist graph by §3, so this is two
+/// bodies rather than one with a flag in it — dist keeps the terminal and loses
+/// the rest, which is the whole difference.
+#[cfg(feature = "debug-tools")]
+fn init_observability() -> anyhow::Result<gg_debug::Guard> {
+    let guard = gg_debug::init(LOG_FILTER)?;
+    // After the tail exists, never before: a report from a process whose logging
+    // had not come up yet would attach nothing (§4.8).
+    gg_debug::crash::install(gg_debug::crash::Product {
+        name: env!("CARGO_PKG_NAME"),
+        version: env!("CARGO_PKG_VERSION"),
+        tier: active_tier(),
+    });
+    Ok(guard)
 }
 
-fn init_observability() -> anyhow::Result<Observability> {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    #[cfg(feature = "tracy")]
-    let tracy = tracy_client::Client::start();
-    let fmt = tracing_subscriber::fmt::layer().with_target(true);
-    // `gg::hash` off by default: it is one line per sim tick (§5.6c) and wanted
-    // only by the gate that compares two runs, which asks for it by `RUST_LOG`.
+#[cfg(not(feature = "debug-tools"))]
+fn init_observability() -> anyhow::Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug,gg::hash=off"));
-    let registry = tracing_subscriber::registry().with(filter).with(fmt);
-    #[cfg(feature = "tracy")]
-    let registry = registry.with(tracing_tracy::TracyLayer::default());
-
-    registry.try_init()?;
-    Ok(Observability {
-        #[cfg(feature = "tracy")]
-        _tracy: tracy,
-    })
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(LOG_FILTER));
+    tracing_subscriber::fmt()
+        .with_target(true)
+        .with_env_filter(filter)
+        .try_init()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
 }

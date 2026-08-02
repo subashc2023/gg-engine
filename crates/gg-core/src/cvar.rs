@@ -38,7 +38,7 @@
 //! knob, and anything that needs a string wants config or an asset, not a knob.
 
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// What a [`CVar`]'s bits mean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +62,52 @@ impl CVarKind {
     }
 }
 
+/// Who last set a CVar (§4.8). Recorded per variable rather than per pass,
+/// because the question a session log has to answer is "why is this 0", and the
+/// value never answers it — the source does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CVarSource {
+    /// Never set: still the value its declaration gave it.
+    Default = 0,
+    /// A `name = value` line in the config file.
+    Config = 1,
+    /// A `--set name=value` on the command line.
+    Cli = 2,
+    /// Typed at the console. Dev tiers only — dist has no console, so a dist
+    /// session cannot produce this and a report claiming it is from a dev build.
+    Console = 3,
+    /// A typed setter. Engine code holding a value already is a source like any
+    /// other, and calling it anything else would hide the one case where a knob
+    /// moved with nobody asking.
+    Code = 4,
+}
+
+impl CVarSource {
+    /// The word this source goes by in a log line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CVarSource::Default => "default",
+            CVarSource::Config => "config",
+            CVarSource::Cli => "cli",
+            CVarSource::Console => "console",
+            CVarSource::Code => "code",
+        }
+    }
+
+    /// Unknown bits read back as [`CVarSource::Default`]: the field is only ever
+    /// written from this enum, so the arm is unreachable rather than lossy.
+    fn from_bits(bits: u8) -> Self {
+        match bits {
+            1 => CVarSource::Config,
+            2 => CVarSource::Cli,
+            3 => CVarSource::Console,
+            4 => CVarSource::Code,
+            _ => CVarSource::Default,
+        }
+    }
+}
+
 /// A registered runtime variable.
 ///
 /// Declare it as a `static`; the value lives in the `static`, so a read is one
@@ -75,6 +121,10 @@ pub struct CVar {
     kind: CVarKind,
     default: u64,
     bits: AtomicU64,
+    /// A [`CVarSource`] discriminant. Separate from `bits` on purpose: pairing
+    /// them in one word would cap values at 56 bits to buy an atomicity nothing
+    /// reads them as a pair anyway.
+    source: AtomicU8,
 }
 
 impl CVar {
@@ -102,7 +152,13 @@ impl CVar {
             kind,
             default,
             bits: AtomicU64::new(default),
+            source: AtomicU8::new(CVarSource::Default as u8),
         }
+    }
+
+    fn store(&self, bits: u64, source: CVarSource) {
+        self.bits.store(bits, Ordering::Relaxed);
+        self.source.store(source as u8, Ordering::Relaxed);
     }
 
     /// The name config, CLI and console reach it by.
@@ -118,6 +174,11 @@ impl CVar {
     /// Which accessor is the right one.
     pub fn kind(&self) -> CVarKind {
         self.kind
+    }
+
+    /// Who set the current value. [`CVarSource::Default`] until something does.
+    pub fn source(&self) -> CVarSource {
+        CVarSource::from_bits(self.source.load(Ordering::Relaxed))
     }
 
     /// Reading with the wrong accessor is a `debug_assert` and, past that, a
@@ -156,26 +217,27 @@ impl CVar {
         f64::from_bits(self.bits.load(Ordering::Relaxed))
     }
 
-    /// Set directly, skipping the parse. Code paths that hold a value already.
+    /// Set directly, skipping the parse. Code paths that hold a value already,
+    /// and recorded as [`CVarSource::Code`] — see that variant for why.
     pub fn set_bool(&self, value: bool) {
-        self.bits.store(value as u64, Ordering::Relaxed);
+        self.store(value as u64, CVarSource::Code);
     }
 
     /// Set directly, skipping the parse.
     pub fn set_int(&self, value: i64) {
-        self.bits.store(value as u64, Ordering::Relaxed);
+        self.store(value as u64, CVarSource::Code);
     }
 
     /// Set directly, skipping the parse — including the finite check, which is
     /// [`CVar::set_from_str`]'s and not the type's.
     pub fn set_float(&self, value: f64) {
-        self.bits.store(value.to_bits(), Ordering::Relaxed);
+        self.store(value.to_bits(), CVarSource::Code);
     }
 
-    /// Back to the declared default. Not "the value at startup" — a config file
-    /// applied over it is a setting like any other.
+    /// Back to the declared default, source included. Not "the value at
+    /// startup" — a config file applied over it is a setting like any other.
     pub fn reset(&self) {
-        self.bits.store(self.default, Ordering::Relaxed);
+        self.store(self.default, CVarSource::Default);
     }
 
     /// Whether the current value is still the declared one — what a config
@@ -194,21 +256,25 @@ impl CVar {
     }
 
     /// Parse and store — the one entry point config, CLI and console share, so
-    /// the three cannot drift on what `on` means.
-    pub fn set_from_str(&self, text: &str) -> Result<(), CVarError> {
+    /// the three cannot drift on what `on` means, and so `source` is recorded on
+    /// exactly the path that can set a knob without code saying so.
+    ///
+    /// A rejected value leaves both the value and the source untouched: a typo
+    /// is not a source.
+    pub fn set_from_str(&self, text: &str, source: CVarSource) -> Result<(), CVarError> {
         let text = text.trim();
         let bad = || CVarError::BadValue {
             name: self.name,
             kind: self.kind,
             value: text.to_owned(),
         };
-        match self.kind {
+        let bits = match self.kind {
             CVarKind::Bool => match text {
-                "1" | "true" | "on" | "yes" => self.set_bool(true),
-                "0" | "false" | "off" | "no" => self.set_bool(false),
+                "1" | "true" | "on" | "yes" => 1,
+                "0" | "false" | "off" | "no" => 0,
                 _ => return Err(bad()),
             },
-            CVarKind::Int => self.set_int(text.parse::<i64>().map_err(|_| bad())?),
+            CVarKind::Int => text.parse::<i64>().map_err(|_| bad())? as u64,
             // Rejects `inf` and `NaN` by name: a knob set to either is a bug
             // report about the renderer three days later, not a setting.
             CVarKind::Float => {
@@ -216,9 +282,10 @@ impl CVar {
                 if !value.is_finite() {
                     return Err(bad());
                 }
-                self.set_float(value);
+                value.to_bits()
             }
-        }
+        };
+        self.store(bits, source);
         Ok(())
     }
 }
@@ -305,11 +372,33 @@ pub fn find(name: &str) -> Option<&'static CVar> {
 }
 
 /// Set by name, as config, CLI and console all do.
-pub fn set(name: &str, value: &str) -> Result<(), CVarError> {
+pub fn set(name: &str, value: &str, source: CVarSource) -> Result<(), CVarError> {
     let cvar = find(name).ok_or_else(|| CVarError::Unknown {
         name: name.to_owned(),
     })?;
-    cvar.set_from_str(value)
+    cvar.set_from_str(value, source)
+}
+
+/// One line per registered CVar, naming the source that won (§4.8) — called
+/// once, after every source has had its say.
+///
+/// Anything still at its declared value goes to `debug` and the rest to `info`:
+/// a startup listing where every knob looks alike is a listing nobody reads,
+/// and the set that was *changed* is the set a bug report needs.
+pub fn log_sources() {
+    for cvar in all() {
+        let (value, source) = (cvar.to_text(), cvar.source());
+        if source == CVarSource::Default {
+            tracing::debug!(cvar = cvar.name(), value, source = source.as_str());
+        } else {
+            tracing::info!(
+                cvar = cvar.name(),
+                value,
+                source = source.as_str(),
+                "cvar set"
+            );
+        }
+    }
 }
 
 /// Every registered CVar, ascending by name — the console's listing, and the

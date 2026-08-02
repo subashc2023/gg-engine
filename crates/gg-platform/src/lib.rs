@@ -327,6 +327,15 @@ pub enum Event {
         key: Key,
         /// `true` on press, `false` on release.
         pressed: bool,
+        /// The character this press produced under the user's layout, when it
+        /// produced one — the debug console's input, and nothing else's (§4.8).
+        ///
+        /// Carried *on* the key event rather than sent as a second one: they
+        /// arrive from the OS together, and splitting them would invent an
+        /// ordering question every consumer has to answer the same way. The
+        /// sim never reads it; [`feed`] drops it, so no character can reach an
+        /// action map or a replay.
+        text: Option<char>,
     },
     /// A mouse button changed state.
     MouseButton {
@@ -380,7 +389,7 @@ pub use gg_input::{Key, MouseButton};
 /// called: quitting is not simulated state and must not reach the action map.
 pub fn feed(input: &mut gg_input::Input, event: &Event) -> bool {
     match *event {
-        Event::Key { key, pressed } => input.key(key, pressed),
+        Event::Key { key, pressed, .. } => input.key(key, pressed),
         Event::MouseButton { button, pressed } => input.mouse_button(button, pressed),
         Event::MouseMotion { dx, dy } => input.motion(dx, dy),
         _ => return false,
@@ -406,9 +415,13 @@ mod feed_tests {
         let map = gg_input::ActionMap::parse("", &[], &[]).unwrap();
         let mut input = gg_input::Input::new(map);
         for event in [
+            // With a character on it, which `feed` must ignore: a keystroke
+            // that reached the action map as text would be a replay recording
+            // what the console typed.
             Event::Key {
                 key: Key::W,
                 pressed: true,
+                text: Some('w'),
             },
             Event::MouseButton {
                 button: MouseButton::Left,
@@ -547,6 +560,15 @@ fn key_event(event: &winit::event::KeyEvent) -> Option<Event> {
     key_from_winit(code).map(|key| Event::Key {
         key,
         pressed: event.state.is_pressed(),
+        // One character, not a string: a dead key or an IME commit can produce
+        // several, and routing those correctly is text *input* rather than a
+        // debug console's keystrokes (§4.9 rents shaping at M13). Releases
+        // carry none — a character is produced by pressing.
+        text: event
+            .state
+            .is_pressed()
+            .then(|| event.text.as_ref()?.chars().next())
+            .flatten(),
     })
 }
 
