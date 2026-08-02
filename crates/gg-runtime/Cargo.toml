@@ -24,6 +24,9 @@ gg-ecs = { path = "../gg-ecs" }
 gg-platform = { path = "../gg-platform" }
 gg-render = { path = "../gg-render" }
 gg-extract = { path = "../gg-extract" }
+# §4.7's hierarchy. A dependency rather than a module for the same reason
+# `gg-render` is one: the shell takes delivery of stages, it does not host them.
+gg-scene = { path = "../gg-scene" }
 # Action maps and the replay recorder — the recorder is unconditional in every
 # tier (§2, Build tiers row), which is why it is not behind a feature.
 gg-input = { path = "../gg-input" }
@@ -66,9 +69,22 @@ cvar-console = ["debug-tools"]
 overlay = ["debug-tools"]
 
 # Tier meta-features (§2 Build tiers row, §3).
+# `tracy` is deliberately **not** here, though `tier-instrumented` keeps it.
+# `tracy-client` opens a TCP listener from a static constructor, so every binary
+# that links `gg-debug` binds a socket before `main` — and feature unification
+# put that in 63 of them, including `xtask` and every test binary in the
+# workspace. On Windows that is a firewall prompt per executable *path*, and
+# nextest names test binaries with a build hash, so every rebuild asked again.
+# A port-keyed firewall rule does not suppress it: the prompt is raised per
+# application, not per port (§6 M9's residual, measured twice).
+#
+# What this costs is nothing that was being read. Tracy is a tool someone
+# attaches on purpose: `xtask run --tracy` puts it back for a play session,
+# `tier-instrumented` has it for `xtask bench --record`, and Tracy's own GPU
+# path keeps its dedicated `-p gg-debug --features tracy` leg in the nightly
+# tier. What it buys is that a normal build listens on nothing at all.
 tier-dev = [
     "validation",
-    "tracy",
     "gpu-timings",
     "state-hash",
     "nan-scan",

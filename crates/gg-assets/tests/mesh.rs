@@ -102,3 +102,39 @@ fn a_run_at_an_offset_its_records_cannot_be_read_from_is_refused() {
     assert!(matches!(err, MeshError::Misaligned { .. }), "{err}");
     assert!(format!("{err}").contains("the indices"));
 }
+
+#[test]
+fn the_bounding_radius_reaches_the_farthest_corner_from_the_object_origin() {
+    // The tetrahedron spans 0..2 in x, 0..3 in y and -4..0 in z, so the corner
+    // the culler has to contain is (2, 3, -4) — even though no vertex is there.
+    let header = MeshHeader {
+        vertex_count: 0,
+        index_count: 0,
+        vertices: 0,
+        indices: 0,
+        bounds_min: [0.0, 0.0, -4.0],
+        bounds_max: [2.0, 3.0, 0.0],
+        material: AssetId::NONE,
+        reserved: [0; 4],
+    };
+    let expected = (4.0f32 + 9.0 + 16.0).sqrt();
+    assert!((header.bounding_radius() - expected).abs() < 1e-6);
+}
+
+#[test]
+fn a_mesh_straddling_the_origin_bounds_by_its_larger_side() {
+    // Not the box's diagonal: the sphere is about the origin, which is where an
+    // instance is placed, so the short side does not shrink it.
+    let header = MeshHeader {
+        vertex_count: 0,
+        index_count: 0,
+        vertices: 0,
+        indices: 0,
+        bounds_min: [-1.0, -10.0, 0.0],
+        bounds_max: [5.0, 2.0, 0.0],
+        material: AssetId::NONE,
+        reserved: [0; 4],
+    };
+    let expected = (25.0f32 + 100.0).sqrt();
+    assert!((header.bounding_radius() - expected).abs() < 1e-6);
+}

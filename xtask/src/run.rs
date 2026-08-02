@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use crate::util;
 
 /// Run `<demo>` under the shell. Extra flags after the demo name are forwarded
-/// to `gg-runtime` (`--frames`, `--record`, `--replay`).
+/// to `gg-runtime` (`--frames`, `--record`, `--replay`), except `--tracy`,
+/// which is this command's own and builds the shell with the profiler in.
 pub fn run(args: &[&str]) -> anyhow::Result<()> {
     let demo = args
         .iter()
@@ -34,8 +35,17 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
         util::cargo().args(["build", "-p", &package]),
         "cargo build (game dylib)",
     )?;
+    // `--tracy` rather than always: the client binds a TCP listener from a
+    // static constructor, so a shell built with it prompts the firewall on
+    // every fresh build path even when nobody attaches a profiler (§6 M9).
+    // Consumed here, never forwarded — the shell has no such flag.
+    let features = if args.contains(&"--tracy") {
+        "tier-dev,tracy"
+    } else {
+        "tier-dev"
+    };
     util::run(
-        util::cargo().args(["build", "-p", "gg-runtime", "--features", "tier-dev"]),
+        util::cargo().args(["build", "-p", "gg-runtime", "--features", features]),
         "cargo build (shell)",
     )?;
 
@@ -66,7 +76,7 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
             .arg("--pack")
             .arg(root.join(format!("target/assets/{demo}.ggpack")));
     }
-    shell.args(args.iter().filter(|a| a != &demo));
+    shell.args(args.iter().filter(|a| *a != demo && **a != "--tracy"));
     util::run(&mut shell, "gg-runtime")
 }
 

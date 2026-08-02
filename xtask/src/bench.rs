@@ -103,6 +103,36 @@ fn record() -> anyhow::Result<()> {
     let frame = json_line(&macro_out)
         .ok_or_else(|| anyhow::anyhow!("the frame macro emitted no JSON record:\n{macro_out}"))?;
     let device = field(frame, "device").unwrap_or_default();
+
+    // §6 M10's exit row: ten thousand parented objects, culled, at under 4 ms of
+    // CPU frame. A second run rather than a second scene inside one, because the
+    // pack has to stream in first and a warmup that included a load would put a
+    // one-off in the percentiles.
+    println!("xtask bench: recording the ten-thousand-object frame (§6 M10)");
+    crate::assets::run(&[])?;
+    let field_out = run_capture(
+        cargo().args([
+            "run",
+            "-q",
+            "-p",
+            "gg-golden",
+            "--profile",
+            "instrumented",
+            "--",
+            "bench",
+            "field",
+            "--json",
+            "--frames",
+            RECORD_FRAMES,
+        ]),
+        "gg-golden field macro (instrumented, real device)",
+    )?;
+    let field_frame = json_line(&field_out).ok_or_else(|| {
+        anyhow::anyhow!(
+            "the field macro emitted no JSON record:
+{field_out}"
+        )
+    })?;
     anyhow::ensure!(
         !is_software(&device),
         "refusing to archive a baseline measured on `{device}` — software-rasterizer timings are \
@@ -116,11 +146,12 @@ fn record() -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, archive(&machine, ecs, frame)?)?;
+    std::fs::write(&path, archive(&machine, ecs, frame, field_frame)?)?;
 
     // The human half, straight from the run that was archived — a recording that
     // only writes a file leaves the operator with nothing to react to.
     println!("\n{}", macro_out.trim());
+    println!("\n{}", field_out.trim());
     println!(
         "\nxtask bench: baseline archived to {} on `{device}`. It is one file per machine, \
          rewritten in place: the git diff of this file is the regression report (§4.11).",
@@ -133,7 +164,7 @@ fn record() -> anyhow::Result<()> {
 /// commit and the toolchain that produced it is not a baseline — it is a
 /// rumour, and §5's recovery bar says baselines are re-recorded rather than
 /// compared when the box changes.
-fn archive(machine: &str, ecs: &str, frame: &str) -> anyhow::Result<String> {
+fn archive(machine: &str, ecs: &str, frame: &str, field: &str) -> anyhow::Result<String> {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -151,7 +182,8 @@ fn archive(machine: &str, ecs: &str, frame: &str) -> anyhow::Result<String> {
     Ok(format!(
         "{{\n  \"schema\": 1,\n  \"recorded\": \"{}\",\n  \"unix_time\": {secs},\n  \
          \"machine\": \"{machine}\",\n  \"commit\": \"{}\",\n  \"rustc\": \"{}\",\n  \
-         \"profile\": \"instrumented\",\n  \"ecs\": {ecs},\n  \"frame\": {frame}\n}}\n",
+         \"profile\": \"instrumented\",\n  \"ecs\": {ecs},\n  \"frame\": {frame},\n  \
+         \"field\": {field}\n}}\n",
         date(secs),
         commit.trim(),
         rustc.trim()

@@ -51,22 +51,23 @@ fn fast() -> anyhow::Result<()> {
 fn push() -> anyhow::Result<()> {
     exec(cargo().args(["fmt", "--check"]), "cargo fmt --check")?;
     clippy(&All)?;
-    // The workspace lint above resolves features *unified*: `gg-runtime`'s
-    // `tier-dev` turns on `gg-debug/tracy` for everyone, so the Tracy-less
-    // `gg-debug` that `gg-golden` actually links is linted by nothing. That
-    // configuration has hidden dead code twice this milestone, so it gets its
-    // own leg — one package, its own default features (§6 M8).
+    // The workspace lint above resolves features *unified*, and since M10 no
+    // tier turns `gg-debug/tracy` on, so it is now the Tracy-*ful* build that
+    // nothing lints. Same leg, opposite polarity: one package, one feature, on
+    // its own (§6 M8 found dead code hiding in the unlinted half twice).
     exec(
         cargo().args([
             "clippy",
             "-p",
             "gg-debug",
+            "--features",
+            "tracy",
             "--all-targets",
             "--",
             "-D",
             "warnings",
         ]),
-        "cargo clippy -p gg-debug (default features: no tracy)",
+        "cargo clippy -p gg-debug --features tracy (the half no tier links)",
     )?;
     exec(cargo().args(["deny", "check"]), "cargo deny check")?;
     greps()?;
@@ -586,6 +587,24 @@ fn aarch64_leg() -> anyhow::Result<()> {
             &format!(
                 "gg-math + gg-ecs + replay determinism on aarch64 under qemu ({profile} profile)"
             ),
+        )?;
+        // demo-05-many joins at M10, and it is a separate invocation because it
+        // has no `gate` feature to select — it is a game crate whose whole graph
+        // is sim, plus `gg-scene` as a dev-dependency. What it adds to the leg
+        // is the *hierarchy*: five thousand transforms composed host-side per
+        // tick, inside what the canonical hash covers (§4.7).
+        exec(
+            cargo().args([
+                "nextest",
+                "run",
+                "-p",
+                "demo-05-many",
+                "--target",
+                "aarch64-unknown-linux-gnu",
+                "--cargo-profile",
+                profile,
+            ]),
+            &format!("hierarchy determinism on aarch64 under qemu ({profile} profile)"),
         )?;
     }
     Ok(())

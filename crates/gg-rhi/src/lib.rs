@@ -67,7 +67,61 @@ pub struct DrawSpec<'a> {
     /// Index stream for an indexed draw (`u32` indices from byte 0). `None`
     /// draws non-indexed, as shader-generated geometry does.
     pub index_buffer: Option<BufferHandle>,
+    /// Where the draw's parameters come from. `None` takes them from
+    /// [`count`](DrawSpec::count) on the CPU; `Some` reads a
+    /// [`VkDrawIndexedIndirectCommand`] out of GPU memory (§6 M10).
+    ///
+    /// [`VkDrawIndexedIndirectCommand`]: Indirect
+    pub indirect: Option<Indirect>,
 }
+
+/// Where an indirect draw reads its parameters.
+///
+/// # What this buys today, and what it does not
+///
+/// One command per call — not a multi-draw. That is deliberate: `drawCount > 1`
+/// would need every batch's geometry in one index buffer, and each mesh owns its
+/// own (§4.6). What the indirect path buys *now* is that the index count and the
+/// instance count live in device memory, which is the whole prerequisite for a
+/// GPU culling pass writing them (P2, §7). Saying it that way rather than
+/// implying a draw-call reduction is the honest version: against
+/// `cmd_draw_indexed` with the same instance count, this costs one buffer read.
+///
+/// It also needs neither `multiDrawIndirect` nor `drawIndirectFirstInstance`,
+/// which is why no capability probe row moved for it.
+#[derive(Clone, Copy, Debug)]
+pub struct Indirect {
+    /// The buffer holding the command. Must be [`BufferKind::Indirect`].
+    pub buffer: BufferHandle,
+    /// Byte offset of the command. Must be 4-aligned, per the spec.
+    pub offset: u64,
+}
+
+/// One `VkDrawIndexedIndirectCommand`, in the layout the spec fixes.
+///
+/// Declared here rather than reached through `ash` because §3 keeps `vk::`
+/// inside this crate, and a caller building a draw list needs to *write* these.
+/// `Pod`, so a whole list is one `write_buffer`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct IndirectCommand {
+    /// Indices to consume.
+    pub index_count: u32,
+    /// Instances to draw. Zero draws nothing — which is how a culling pass
+    /// rejects a batch without rewriting the list.
+    pub instance_count: u32,
+    /// First index, in elements.
+    pub first_index: u32,
+    /// Added to every index before the vertex fetch. Zero here: geometry is
+    /// pulled by device address (§4.3), so there is no vertex buffer to offset.
+    pub vertex_offset: i32,
+    /// First instance id, as seen by the shader. Zero here too — the batch's
+    /// base is a push constant instead, which is what keeps
+    /// `drawIndirectFirstInstance` off the required-capability list.
+    pub first_instance: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<IndirectCommand>() == 20);
 
 /// Errors from the RHI. Vulkan result codes surface as their spec names; the
 /// §3 containment grep keeps callers from matching on raw codes anyway.

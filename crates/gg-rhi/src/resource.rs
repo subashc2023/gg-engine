@@ -46,6 +46,17 @@ pub enum BufferKind {
     /// per [`FRAMES_IN_FLIGHT`](crate::FRAMES_IN_FLIGHT) slot, or a frame
     /// overwrites what its predecessor is still reading.
     Dynamic,
+    /// As [`BufferKind::Dynamic`], and readable by an indirect draw as its
+    /// parameters (§6 M10).
+    ///
+    /// The enum's own doc says it records "only what the fixed-function index
+    /// stream also needs" — this is the second such consumer, and the last one
+    /// core Vulkan has. It is `Dynamic` rather than `Storage` because a
+    /// CPU-built draw list is rebuilt every frame, so **the caller owns the
+    /// frames-in-flight hazard exactly as it does there**: one region per
+    /// [`FRAMES_IN_FLIGHT`](crate::FRAMES_IN_FLIGHT) slot, or a frame overwrites
+    /// the commands its predecessor is still executing.
+    Indirect,
 }
 
 /// Pixel format. Short on purpose (§3 budget): one entry per job that exists,
@@ -361,7 +372,7 @@ impl Resources {
             // memory the GPU can read directly: the CPU writes it sequentially
             // and never reads it back, which is exactly what that memory is bad
             // and good at respectively.
-            BufferKind::Dynamic => gpu_allocator::MemoryLocation::CpuToGpu,
+            BufferKind::Dynamic | BufferKind::Indirect => gpu_allocator::MemoryLocation::CpuToGpu,
             _ => gpu_allocator::MemoryLocation::GpuOnly,
         };
         let buffer = create_raw_buffer_in(device, desc.name, desc.size, usage, location)?;
@@ -632,7 +643,7 @@ impl Resources {
 
 fn host_visible_error(handle: BufferHandle) -> RhiError {
     RhiError::Loader(format!(
-        "buffer handle {} is not host-visible — only BufferKind::Readback and ::Dynamic are",
+        "buffer handle {} is not host-visible — only BufferKind::Readback, ::Dynamic and          ::Indirect are",
         handle.0
     ))
 }
@@ -646,6 +657,7 @@ fn buffer_usage(kind: BufferKind) -> vk::BufferUsageFlags {
     match kind {
         BufferKind::Storage | BufferKind::Readback | BufferKind::Dynamic => base,
         BufferKind::Index => base | vk::BufferUsageFlags::INDEX_BUFFER,
+        BufferKind::Indirect => base | vk::BufferUsageFlags::INDIRECT_BUFFER,
     }
 }
 

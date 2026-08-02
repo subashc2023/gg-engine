@@ -135,6 +135,7 @@ fn a_hung_pass_is_named_by_the_device_lost_report() {
         push_constants: &push,
         count: 3,
         index_buffer: None,
+        indirect: None,
     }];
     let passes = [Pass {
         name: "hang.draw",
@@ -250,6 +251,7 @@ fn the_hang_shader_loops_on_a_trip_count_it_reads_from_memory() {
             push_constants: &push,
             count: 3,
             index_buffer: None,
+            indirect: None,
         }],
     )
     .unwrap();

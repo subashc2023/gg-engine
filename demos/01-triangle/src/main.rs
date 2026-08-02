@@ -219,6 +219,7 @@ fn main() -> anyhow::Result<()> {
                 push_constants: bytemuck::bytes_of(&push),
                 count: scene::VERTEX_COUNT,
                 index_buffer: None,
+                indirect: None,
             };
             match frame(r, &mut transients, std::slice::from_ref(&draw)) {
                 Ok(FrameOutcome::Presented { .. }) => {

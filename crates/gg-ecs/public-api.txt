@@ -95,6 +95,20 @@ pub const gg_ecs::boundary::Model::FIELDS: &'static [gg_ecs::component::FieldDes
 pub const gg_ecs::boundary::Model::TYPE_NAME: &'static str
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Model
 pub fn gg_ecs::boundary::Model::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+#[repr(C)] pub struct gg_ecs::boundary::Node
+pub gg_ecs::boundary::Node::parent: gg_abi::entity::Entity
+pub gg_ecs::boundary::Node::position: gg_math::sim::DVec3
+pub gg_ecs::boundary::Node::rotation: gg_math::sim::DQuat
+impl gg_ecs::boundary::Node
+pub fn gg_ecs::boundary::Node::at(gg_abi::entity::Entity, gg_math::sim::DVec3) -> Self
+impl bytemuck::pod::Pod for gg_ecs::boundary::Node
+impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Node
+impl gg_ecs::component::Component for gg_ecs::boundary::Node
+pub const gg_ecs::boundary::Node::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Node::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Node::TYPE_NAME: &'static str
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
+pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 #[repr(C)] pub struct gg_ecs::boundary::Renderable
 pub gg_ecs::boundary::Renderable::color: u32
 pub gg_ecs::boundary::Renderable::half_extent: gg_math::sim::Vec3
@@ -233,6 +247,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Model
 pub const gg_ecs::boundary::Model::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Model::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Model::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Node
+pub const gg_ecs::boundary::Node::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Node::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Node::TYPE_NAME: &'static str
 impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
 pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
@@ -462,6 +480,8 @@ impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Eye
 pub fn gg_ecs::boundary::Eye::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Model
 pub fn gg_ecs::boundary::Model::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
+pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
@@ -616,6 +636,7 @@ pub fn gg_ecs::world::World::side_table_count(&self) -> usize
 pub fn gg_ecs::world::World::side_table_mut<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<&mut T>
 pub fn gg_ecs::world::World::spawn(&mut self) -> gg_abi::entity::Entity
 pub fn gg_ecs::world::World::views<'q>(&mut self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'_, 'q>))
+pub fn gg_ecs::world::World::views_ref<'w, 'q>(&'w self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'w, 'q>))
 impl gg_ecs::world::World
 pub fn gg_ecs::world::World::restore(&mut self, &gg_ecs::world::snapshot::Snapshot) -> core::result::Result<gg_ecs::world::snapshot::MigrationReport, gg_ecs::world::snapshot::SnapshotError>
 pub fn gg_ecs::world::World::snapshot(&self) -> gg_ecs::world::snapshot::Snapshot
@@ -857,6 +878,7 @@ pub fn gg_ecs::world::World::side_table_count(&self) -> usize
 pub fn gg_ecs::world::World::side_table_mut<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<&mut T>
 pub fn gg_ecs::world::World::spawn(&mut self) -> gg_abi::entity::Entity
 pub fn gg_ecs::world::World::views<'q>(&mut self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'_, 'q>))
+pub fn gg_ecs::world::World::views_ref<'w, 'q>(&'w self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'w, 'q>))
 impl gg_ecs::world::World
 pub fn gg_ecs::world::World::restore(&mut self, &gg_ecs::world::snapshot::Snapshot) -> core::result::Result<gg_ecs::world::snapshot::MigrationReport, gg_ecs::world::snapshot::SnapshotError>
 pub fn gg_ecs::world::World::snapshot(&self) -> gg_ecs::world::snapshot::Snapshot
@@ -872,6 +894,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Model
 pub const gg_ecs::boundary::Model::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Model::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Model::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Node
+pub const gg_ecs::boundary::Node::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Node::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Node::TYPE_NAME: &'static str
 impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
 pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
@@ -971,6 +997,8 @@ impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Eye
 pub fn gg_ecs::boundary::Eye::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Model
 pub fn gg_ecs::boundary::Model::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
+pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId

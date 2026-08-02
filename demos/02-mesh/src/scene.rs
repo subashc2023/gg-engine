@@ -10,7 +10,7 @@
 use crate::bc7;
 use crate::shaders_gen::mesh as shader;
 use crate::sim::{CameraRig, Cube, Sim, SimError};
-use gg_extract::{Extracted, Instance};
+use gg_extract::{Extracted, Frustum, Instance};
 use gg_math::{render, sim};
 use gg_rhi::{
     BufferDesc, BufferHandle, BufferKind, DeviceAddress, ImageDesc, ImageFormat, ImageHandle,
@@ -396,7 +396,11 @@ pub fn upload(host: &mut impl SceneHost) -> Result<SceneResources, RhiError> {
 /// lookalike that happens to agree today.
 pub fn extract(sim: &Sim, out: &mut Extracted) -> Result<Camera, SimError> {
     let rig = sim.camera()?;
-    out.transforms::<Cube>(&sim.world, rig.position)?;
+    // Unculled on purpose: this demo draws one cube that is always in frame, so
+    // a frustum here could only ever change a blessed image (§4.10) without
+    // removing a draw. M10's culler is gated by demo 05 and by the suite's
+    // other scenes, which do build one.
+    out.transforms::<Cube>(&sim.world, rig.position, Frustum::UNBOUNDED)?;
     Ok(Camera::from_rig(rig))
 }
 

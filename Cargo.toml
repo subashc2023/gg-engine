@@ -17,12 +17,14 @@ members = [
     "crates/gg-render",
     "crates/gg-rhi",
     "crates/gg-runtime",
+    "crates/gg-scene",
     "crates/gg-shaders",
     "demos/00-clear",
     "demos/01-triangle",
     "demos/02-mesh",
     "demos/03-reload",
     "demos/04-scene",
+    "demos/05-many",
     "tools/gg-golden",
     "tools/gg-static-link",
     "tools/ggc",
@@ -94,6 +96,9 @@ winit = { version = "0.30", default-features = false, features = [
     "wayland-csd-adwaita-notitle",
 ] }
 raw-window-handle = "0.6"
+# §4.1: work-stealing is banned near the state hash and allowed downstream of
+# it. deny.toml holds the ban and determinism-allowlist.toml the exemptions.
+rayon = "1"
 # M9 (§4.6), the pack's *runtime* side and therefore the only two of this group
 # that may reach a shipping graph: `memmap2` maps a pack so its sections are
 # cast in place rather than deserialized, and `zstd` is the codec a KTX2 level

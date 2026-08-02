@@ -43,7 +43,7 @@ use std::path::Path;
 
 use content::{Content, ContentError};
 use gg_assets::AssetId;
-use gg_extract::{Extracted, Instance, Scenes};
+use gg_extract::{Extracted, Frustum, Instance, Scenes};
 use gg_math::render;
 use gg_rhi::{
     Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthMode, DeviceAddress,
@@ -110,6 +110,17 @@ impl View {
         // YXZ: yaw about world +Y first, then pitch about the rotated right
         // axis — the fly-camera order, and the one that never rolls.
         render::Quat::from_euler(render::EulerRot::YXZ, self.yaw, self.pitch, 0.0)
+    }
+
+    /// This view's culling frustum, for the extract stage.
+    ///
+    /// Built here rather than in `gg-extract` because the projection convention
+    /// is this crate's (§2, Math row) and a second construction of it is a
+    /// second thing to get subtly wrong. The shell hands the result across,
+    /// which is the whole of its part in culling.
+    #[must_use]
+    pub fn frustum(&self, extent: (u32, u32)) -> Frustum {
+        Frustum::from_view_projection(self.view_projection(extent))
     }
 
     /// Camera-relative world → clip.
@@ -179,6 +190,16 @@ impl Renderer {
     pub fn open_pack(&mut self, path: &Path) -> Result<(), ContentError> {
         self.content = Some(Content::open(path)?);
         Ok(())
+    }
+
+    /// Instances staged and draws issued by the pack pass last frame (§6 M10).
+    ///
+    /// Public because "ten thousand objects, four draws" is an exit claim, and a
+    /// claim a harness cannot count is a claim nobody checks — `gg-golden`'s
+    /// `field` scene asserts on this.
+    #[must_use]
+    pub fn draw_counts(&self) -> (usize, usize) {
+        self.scene.counts()
     }
 
     /// The pack, for a host reporting on its load (§6 M9's exit row).
@@ -281,11 +302,15 @@ impl Renderer {
         };
         let extent = token.extent();
         self.pass.build(extent, extracted, view);
-        self.scene
-            .build(extent, extracted, view, self.content.as_ref());
         // After `begin_frame`, which is where this slot's previous frame is
-        // waited out — the wait that makes writing its region safe.
+        // waited out — the wait that makes writing its region safe. Both the
+        // scene pass and the UI pass stage into per-slot regions, so both have
+        // to be on this side of it.
         let slot = GraphContext::frame_slot(&self.rhi);
+        let content = self.content.as_ref();
+        self.scene
+            .build(&mut self.rhi, slot, extent, extracted, view, content)?;
+        report_draws(&self.scene, extracted);
         self.ui.write(&mut self.rhi, slot, ui)?;
         let ui_push = self.ui.push(extent);
 
@@ -443,6 +468,16 @@ impl OffscreenRenderer {
         Ok(())
     }
 
+    /// Instances staged and draws issued by the pack pass last frame (§6 M10).
+    ///
+    /// Public because "ten thousand objects, four draws" is an exit claim, and a
+    /// claim a harness cannot count is a claim nobody checks — `gg-golden`'s
+    /// `field` scene asserts on this.
+    #[must_use]
+    pub fn draw_counts(&self) -> (usize, usize) {
+        self.scene.counts()
+    }
+
     /// The pack — see [`Renderer::pack`].
     #[must_use]
     pub fn pack(&self) -> Option<&Content> {
@@ -508,10 +543,12 @@ impl OffscreenRenderer {
     ) -> Result<OffscreenFrame, RhiError> {
         stream(&mut self.content, &mut self.rhi, extracted)?;
         self.pass.build(self.extent, extracted, view);
-        self.scene
-            .build(self.extent, extracted, view, self.content.as_ref());
         // One slot and a blocking submit per frame here, so nothing is in
-        // flight to race the write.
+        // flight to race either write.
+        let content = self.content.as_ref();
+        self.scene
+            .build(&mut self.rhi, 0, self.extent, extracted, view, content)?;
+        report_draws(&self.scene, extracted);
         self.ui.write(&mut self.rhi, 0, ui)?;
         let ui_push = self.ui.push(self.extent);
         let mut frame = self.transients.frame(&mut self.rhi, self.extent)?;
@@ -605,6 +642,24 @@ fn stream(
 /// Boxes then pack meshes, as one list. Two pipelines inside one pass rather
 /// than a pass each: they write the same attachments, so a second prepass would
 /// be a second set of derived barriers around no new resource.
+/// One line per frame naming what batching bought: entities extracted, of which
+/// culled, staged as instances, issued as draws. On a target of its own and at
+/// `debug`, exactly like the per-tick hash (§5.6c) — a human's terminal must not
+/// see sixty of these a second, and "ten thousand objects, four draws" is a
+/// claim that should be countable rather than asserted (§6 M10).
+fn report_draws(scene: &ScenePass, extracted: &Extracted) {
+    if tracing::enabled!(target: "gg::draws", tracing::Level::DEBUG) {
+        let (instances, draws) = scene.counts();
+        tracing::debug!(
+            target: "gg::draws",
+            models = extracted.models.len(),
+            culled = extracted.culled,
+            instances,
+            draws,
+        );
+    }
+}
+
 fn prepass_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass) -> Vec<DrawSpec<'a>> {
     let mut draws = pass.draws(pass.prepass);
     draws.extend(scene.draws(scene.prepass()));
@@ -800,6 +855,7 @@ impl BoxPass {
                 push_constants: bytemuck::bytes_of(push),
                 count: self.index_count,
                 index_buffer: Some(self.indices),
+                indirect: None,
             })
             .collect()
     }
@@ -825,6 +881,7 @@ impl BoxPass {
             push_constants: bytemuck::bytes_of(push),
             count: FULLSCREEN_VERTICES,
             index_buffer: None,
+            indirect: None,
         }
     }
 
@@ -1120,7 +1177,7 @@ mod tests {
             .unwrap();
         let mut extracted = Extracted::default();
         extracted
-            .transforms::<Renderable>(&world, sim::DVec3::ZERO)
+            .transforms::<Renderable>(&world, sim::DVec3::ZERO, Frustum::UNBOUNDED)
             .unwrap();
 
         // Through the public offscreen entry point, not around it: this is the

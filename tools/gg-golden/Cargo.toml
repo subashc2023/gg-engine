@@ -38,6 +38,10 @@ demo-02-mesh = { path = "../../demos/02-mesh", default-features = false, feature
 # Demo 04's constants — the asset it names and where it stands. Linked rather
 # than restated so its golden reference moves with the demo (§4.10).
 demo-04-scene = { path = "../../demos/04-scene" }
+# Demo 05 supplies the field's layout as pure functions; the scene below builds
+# the world from them rather than restating a hundred hub positions.
+demo-05-many = { path = "../../demos/05-many", default-features = false }
+gg-scene = { path = "../../crates/gg-scene" }
 gg-input = { path = "../../crates/gg-input" }
 # The capture trigger (§4.8). `gg-debug` is winit-free by its own dependency
 # list, so `capture` reaches this binary without touching gate 7's linkage

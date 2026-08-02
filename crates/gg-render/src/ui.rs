@@ -180,6 +180,7 @@ impl UiPass {
             push_constants: bytemuck::bytes_of(push),
             count: self.pending.0,
             index_buffer: None,
+            indirect: None,
         })
     }
 

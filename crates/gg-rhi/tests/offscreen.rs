@@ -90,6 +90,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             push_constants: &[],
             count: 3,
             index_buffer: None,
+            indirect: None,
         }],
     )
     .unwrap();
@@ -107,6 +108,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             push_constants: &[],
             count: 3,
             index_buffer: None,
+            indirect: None,
         }],
     )
     .unwrap_err();
@@ -189,6 +191,7 @@ float4 fs_main() : SV_Target { return push.color; }
             push_constants: &[0u8; 12], // wrong: pipeline declares 16
             count: 3,
             index_buffer: None,
+            indirect: None,
         }],
     )
     .unwrap_err();
@@ -206,6 +209,7 @@ float4 fs_main() : SV_Target { return push.color; }
             push_constants: bytemuck::bytes_of(&[1.0f32, 1.0, 1.0, 1.0]),
             count: 3,
             index_buffer: None,
+            indirect: None,
         }],
     )
     .unwrap();
@@ -300,6 +304,7 @@ float4 fs_main() : SV_Target { return push.color; }
             push_constants: bytes,
             count: 6,
             index_buffer: None,
+            indirect: None,
         }
     }
     let pixels = common::render(

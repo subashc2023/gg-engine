@@ -30,6 +30,7 @@ use gg_extract::Extracted;
 use gg_input::{ActionMap, Drive, Input, InputFrame, Recorder, Replay, ReplayMeta};
 use gg_platform::Window;
 use gg_render::{Renderer, View};
+use gg_scene::Hierarchy;
 use tracing::{error, info, warn};
 
 /// Background clear (linear values; the sRGB target encodes).
@@ -65,6 +66,9 @@ pub struct App {
     /// is why it survives a rejuvenation (§4.2.2) rather than restarting at zero.
     next_tick: u64,
     previous: InputFrame,
+    /// The §4.7 hierarchy's frame-to-frame memory. Host-owned rather than a
+    /// side table: what it holds is derived from state the hash already covers.
+    hierarchy: Hierarchy,
     extracted: Extracted,
     view: View,
     /// The window's GPU state, absent in a headless run — and that absence is
@@ -156,6 +160,7 @@ impl App {
             drive,
             next_tick: 0,
             previous: InputFrame::default(),
+            hierarchy: Hierarchy::new(),
             extracted: Extracted::default(),
             view: View::default(),
             gpu: None,
@@ -447,6 +452,16 @@ impl Stages for App {
             );
             self.halted = true;
         }
+        // §4.7, and *before* the hash on purpose: a derived world transform is
+        // hashed state, so the three-way gate covers the compose and not merely
+        // the locals feeding it. A refused hierarchy halts like a panicking
+        // system — same reason, and a reload is what clears it.
+        if !self.halted
+            && let Err(refused) = self.hierarchy.propagate(&mut self.world)
+        {
+            error!(error = %refused, tick, "hierarchy refused — sim halted until the next reload");
+            self.halted = true;
+        }
         // §5.6c's material: one canonical hash per tick, on a target of its own
         // so a human's terminal never sees 60 of these a second. Emitted rather
         // than accumulated — the shell keeps no determinism ledger, and a run's
@@ -472,8 +487,12 @@ impl Stages for App {
             pitch: eye.pitch,
             ..View::default()
         };
+        // The frustum crosses from the renderer, which owns the projection, to
+        // extract, which owns the narrowing. Building it here would put §2's
+        // reverse-Z convention in the shell.
+        let frustum = self.view.frustum(renderer.extent());
         self.extracted
-            .transforms::<Renderable>(&self.world, eye.position)?;
+            .transforms::<Renderable>(&self.world, eye.position, frustum)?;
         // Pack content, expanded through whatever the renderer has mapped. A
         // run with no `--pack` expands nothing and this is a query over an
         // empty archetype (§4.6).

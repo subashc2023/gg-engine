@@ -1,0 +1,46 @@
+# demo 05-many: ten thousand objects under a transform hierarchy (§6 M10).
+# Game code, like demos 03 and 04 — a dylib the host loads, three engine
+# dependencies and no fourth.
+#
+# It names four meshes and parents ten thousand entities to a hundred hubs. What
+# it does *not* do is compose a single transform: `Node` says who the parent is
+# and `gg-scene` does the arithmetic, host-side, inside the tick.
+
+[package]
+name = "demo-05-many"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "demo_05_many"
+path = "src/lib.rs"
+# cdylib is what the host loads; rlib is what the tests link. Both from one
+# build, so the artifact under test is the artifact that ships.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `gg_game!` exports `extern "C"` symbols with fixed names (§4.2.2), so two game
+# rlibs cannot be linked into one binary — and `gg-golden` links demo 04's. The
+# harness takes this crate with `default-features = false` for its *layout*
+# functions, which are pure and need no boundary at all. Default-on, so the
+# cdylib and this crate's own tests are unaffected.
+default = ["game"]
+game = []
+
+[dependencies]
+bytemuck.workspace = true
+gg-ecs = { path = "../../crates/gg-ecs" }
+gg-math = { path = "../../crates/gg-math" }
+
+# Host-side, and only for the tests: the demo's whole subject is a hierarchy
+# *the host composes*, so a test that did not run `gg-scene` would be asserting
+# about half of it. `cargo tree -e normal` is what the §3 pin reads, and a
+# dev-dependency is not in it — the shipped dylib links the pinned four.
+[dev-dependencies]
+gg-scene = { path = "../../crates/gg-scene" }

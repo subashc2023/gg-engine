@@ -451,6 +451,34 @@ impl World {
         }
     }
 
+    /// [`views`](Self::views) over `&self`, yielding views that outlive the
+    /// call.
+    ///
+    /// The lifetime is the point: the columns come back as `&'w` slices tied to
+    /// the world borrow rather than to the callback, so a caller can *collect*
+    /// them and work over them afterwards. That is what lets the extract stage
+    /// (§4.1) split one archetype into row ranges and narrow them in parallel —
+    /// per-archetype parallelism would be no parallelism at all when ten
+    /// thousand entities share a component set, which is the normal case.
+    ///
+    /// No [`ReadOnly`] bound because there is no `D` here; `access` carrying a
+    /// write is what would be unsound, and `QueryAccess` is only constructible
+    /// from a [`Query`], which checks it.
+    pub fn views_ref<'w, 'q>(
+        &'w self,
+        access: &'q QueryAccess,
+        mut f: impl FnMut(ArchetypeView<'w, 'q>),
+    ) {
+        for archetype in &self.archetypes {
+            if archetype.is_empty() {
+                continue;
+            }
+            if let Some(view) = crate::view::build_ref(archetype, access) {
+                f(view);
+            }
+        }
+    }
+
     /// Visit every matching entity as a typed tuple of borrows (§4.2).
     ///
     /// The ergonomic face of [`views`](Self::views), and the same cost model:

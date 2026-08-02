@@ -403,6 +403,7 @@ pub(crate) struct ResolvedDraw<'a> {
     pub push_constants: &'a [u8],
     pub count: u32,
     pub index_buffer: Option<vk::Buffer>,
+    pub indirect: Option<(vk::Buffer, u64)>,
 }
 
 /// Record one draw inside an active dynamic-rendering pass: full-target
@@ -461,12 +462,22 @@ pub(crate) unsafe fn record_draw(
                 draw.push_constants,
             );
         }
-        match draw.index_buffer {
-            Some(buffer) => {
+        match (draw.index_buffer, draw.indirect) {
+            // Indirect: the counts come out of device memory, so `count` is
+            // unread here — which is the point (§6 M10). One command per call;
+            // `drawCount` of 1 needs no `multiDrawIndirect`.
+            (Some(buffer), Some((parameters, offset))) => {
+                device.cmd_bind_index_buffer(cmd, buffer, 0, vk::IndexType::UINT32);
+                device.cmd_draw_indexed_indirect(cmd, parameters, offset, 1, 0);
+            }
+            (Some(buffer), None) => {
                 device.cmd_bind_index_buffer(cmd, buffer, 0, vk::IndexType::UINT32);
                 device.cmd_draw_indexed(cmd, draw.count, 1, 0, 0, 0);
             }
-            None => device.cmd_draw(cmd, draw.count, 1, 0, 0),
+            // An indirect draw with no index stream would be
+            // `cmd_draw_indirect`, which nothing asks for: every indirect
+            // consumer here draws meshes, and a mesh has indices.
+            (None, _) => device.cmd_draw(cmd, draw.count, 1, 0, 0),
         }
     }
 }

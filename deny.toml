@@ -49,5 +49,5 @@ deny = [
     # Determinism (§4.1): no work-stealing near the state hash. Exemptions only
     # via determinism-allowlist.toml; this wrappers list must mirror that file
     # plus the render/tools crates rayon is chartered for — xtask ci cross-checks.
-    { crate = "rayon", wrappers = [] },
+    { crate = "rayon", wrappers = ["gg-extract"] },
 ]

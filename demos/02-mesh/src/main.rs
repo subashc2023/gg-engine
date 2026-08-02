@@ -228,6 +228,7 @@ fn main() -> anyhow::Result<()> {
                     push_constants: bytemuck::bytes_of(push),
                     count: s.index_count,
                     index_buffer: Some(s.indices),
+                    indirect: None,
                 })
                 .collect();
             match frame(r, &mut transients, &draws) {

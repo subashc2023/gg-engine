@@ -94,6 +94,12 @@ pub struct Content {
     residency: Residency,
     /// Per-mesh draw facts, keyed by mesh id.
     materials: BTreeMap<AssetId, DrawMaterial>,
+    /// Per-mesh bounding radius, from the bounds the pack precomputed (§4.6).
+    /// Cached at request time rather than read per instance per frame: the
+    /// header is in the mapping, and 10k culls a frame should not be 10k page
+    /// touches. It is also why culling works before a mesh is *resident* —
+    /// bounds are known the moment the file is mapped.
+    bounds: BTreeMap<AssetId, f32>,
     /// Scene handles, so [`Scenes::expand`] reads without loading — that method
     /// takes `&self` and expansion must never be what triggers a load.
     scenes: BTreeMap<AssetId, Handle<asset::Scene>>,
@@ -125,6 +131,7 @@ impl Content {
             assets: Assets::open(path)?,
             residency: Residency::new(),
             materials: BTreeMap::new(),
+            bounds: BTreeMap::new(),
             scenes: BTreeMap::new(),
             wanted: BTreeMap::new(),
             path: path.to_path_buf(),
@@ -177,10 +184,11 @@ impl Content {
             Ok(None) => return,
             Err(error) => return warn(id, &error),
         };
-        let material_id = match self.assets.mesh(&handle) {
-            Ok(mesh) => mesh.header.material,
+        let (material_id, radius) = match self.assets.mesh(&handle) {
+            Ok(mesh) => (mesh.header.material, mesh.header.bounding_radius()),
             Err(error) => return warn(id, &error),
         };
+        self.bounds.insert(id, radius);
         self.residency.want_mesh(&handle);
         let material = self.resolve_material(material_id);
         self.materials.insert(id, material);
@@ -387,7 +395,16 @@ impl Scenes for Content {
                     f64::from(node.rotation[3]),
                 ),
                 scale: sim::Vec3::new(node.scale[0], node.scale[1], node.scale[2]),
+                // A node whose mesh has not been requested yet is unbounded,
+                // which keeps it. `request_scene` asks for every node's mesh,
+                // so this is the window between a scene arriving and its meshes
+                // being walked, not a steady state.
+                radius: self.radius(node.mesh.0).unwrap_or(f32::INFINITY),
             });
         }
+    }
+
+    fn radius(&self, asset: u64) -> Option<f32> {
+        self.bounds.get(&AssetId(asset)).copied()
     }
 }

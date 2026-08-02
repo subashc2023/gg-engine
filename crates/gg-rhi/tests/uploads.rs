@@ -137,6 +137,7 @@ float4 fs_main() : SV_Target
             push_constants: &push,
             count: 3,
             index_buffer: None,
+            indirect: None,
         }],
     )
     .unwrap();
@@ -203,6 +204,7 @@ float4 fs_main() : SV_Target
                 push_constants: &push,
                 count: 3,
                 index_buffer: None,
+                indirect: None,
             }],
         )
         .unwrap()
@@ -275,6 +277,7 @@ float4 fs_main(VOut i) : SV_Target { return i.color; }
             push_constants: &[],
             count: 12,
             index_buffer: None,
+            indirect: None,
         }],
     )
     .unwrap();
@@ -345,6 +348,7 @@ float4 fs_main() : SV_Target
             push_constants: &push,
             count: 3,
             index_buffer: None,
+            indirect: None,
         }],
     )
     .unwrap();
@@ -457,6 +461,7 @@ float4 fs_main() : SV_Target
                 push_constants: &push,
                 count: 3,
                 index_buffer: None,
+                indirect: None,
             }],
         )
         .unwrap();
@@ -638,6 +643,156 @@ fn a_storage_image_takes_a_slot_in_the_storage_array() {
     let index = rhi.register_storage_image(image).unwrap();
     assert_eq!(index.get(), 0, "first registration takes slot 0");
     rhi.destroy_image(image).unwrap();
+    let report = rhi.shutdown();
+    assert!(report.clean(), "unclean: {report:?}");
+}
+
+/// The indirect path (§6 M10): the same geometry, drawn twice, once with the
+/// counts on the CPU and once with them in device memory. Equality is the whole
+/// assertion — an indirect draw that renders *something* proves far less than
+/// one that renders exactly what its direct equivalent does.
+///
+/// It lives beside the BDA and bindless tests rather than in `offscreen.rs`
+/// because it is the same claim they make: geometry is reached through §4.3's
+/// resource rules and nothing is bound but the index stream.
+#[test]
+fn an_indirect_draw_renders_what_the_direct_one_does_and_zero_instances_render_nothing() {
+    init_tracing();
+    let mut rhi = OffscreenRhi::new((8, 8)).unwrap();
+    // No `format!`: this fixture interpolates nothing, unlike the ones above
+    // that splice `FULLSCREEN_VS` in.
+    let source = r#"
+struct P { uint64_t positions; }
+[[vk::push_constant]] ConstantBuffer<P> push;
+[shader("vertex")]
+float4 vs_main(uint vid : SV_VertexID) : SV_Position
+{
+    float* p = (float*)(push.positions + uint64_t(vid) * 8);
+    return float4(p[0], p[1], 0.5, 1.0);
+}
+[shader("fragment")]
+float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
+"#;
+    let (handle, push_size) = pipeline(&mut rhi, "indirect", source, gg_rhi::DepthMode::Off);
+    assert_eq!(push_size, 8);
+
+    // One oversized triangle, so every pixel is covered whichever way it is
+    // drawn — this test is about the draw parameters, not about rasterization.
+    let positions: [f32; 6] = [-3.0, -3.0, 3.0, -3.0, 0.0, 3.0];
+    let vertices = rhi
+        .create_buffer(&BufferDesc {
+            name: "test.indirect.positions",
+            size: std::mem::size_of_val(&positions) as u64,
+            kind: BufferKind::Storage,
+        })
+        .unwrap();
+    let indices = rhi
+        .create_buffer(&BufferDesc {
+            name: "test.indirect.indices",
+            size: 12,
+            kind: BufferKind::Index,
+        })
+        .unwrap();
+    rhi.upload_buffer(vertices, 0, bytemuck::cast_slice(&positions))
+        .unwrap();
+    rhi.upload_buffer(indices, 0, bytemuck::cast_slice(&[0u32, 1, 2]))
+        .unwrap();
+    rhi.flush_uploads().unwrap();
+    let push = rhi.buffer_address(vertices).unwrap().to_le_bytes();
+
+    // Host-visible and written without a submit: a draw list is rebuilt every
+    // frame, which is why `Indirect` is `Dynamic`-shaped (§4.3).
+    let commands = rhi
+        .create_buffer(&BufferDesc {
+            name: "test.indirect.commands",
+            size: 64,
+            kind: BufferKind::Indirect,
+        })
+        .unwrap();
+
+    let direct = common::render(
+        &mut rhi,
+        [0.0, 0.0, 0.0, 1.0],
+        &[DrawSpec {
+            pipeline: handle,
+            push_constants: &push,
+            count: 3,
+            index_buffer: Some(indices),
+            indirect: None,
+        }],
+    )
+    .unwrap();
+    assert_eq!(top_left(&direct), [0, 255, 0, 255], "the control drew");
+
+    rhi.write_buffer(
+        commands,
+        0,
+        bytemuck::bytes_of(&gg_rhi::IndirectCommand {
+            index_count: 3,
+            instance_count: 1,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let indirect = common::render(
+        &mut rhi,
+        [0.0, 0.0, 0.0, 1.0],
+        &[DrawSpec {
+            pipeline: handle,
+            push_constants: &push,
+            // Deliberately wrong: the count in the buffer is what must win, and
+            // a path that quietly read this one would still pass a test that
+            // set both to 3.
+            count: 0,
+            index_buffer: Some(indices),
+            indirect: Some(gg_rhi::Indirect {
+                buffer: commands,
+                offset: 0,
+            }),
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        indirect, direct,
+        "indirect must match the direct draw exactly"
+    );
+
+    // Zero instances is how a culling pass rejects a batch without rewriting
+    // the list, so it has to mean "draw nothing" rather than "draw one".
+    rhi.write_buffer(
+        commands,
+        0,
+        bytemuck::bytes_of(&gg_rhi::IndirectCommand {
+            index_count: 3,
+            instance_count: 0,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let culled = common::render(
+        &mut rhi,
+        [0.0, 0.0, 0.0, 1.0],
+        &[DrawSpec {
+            pipeline: handle,
+            push_constants: &push,
+            count: 3,
+            index_buffer: Some(indices),
+            indirect: Some(gg_rhi::Indirect {
+                buffer: commands,
+                offset: 0,
+            }),
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        top_left(&culled),
+        [0, 0, 0, 255],
+        "zero instances drew nothing"
+    );
+
+    rhi.destroy_buffer(commands).unwrap();
+    rhi.destroy_buffer(indices).unwrap();
+    rhi.destroy_buffer(vertices).unwrap();
     let report = rhi.shutdown();
     assert!(report.clean(), "unclean: {report:?}");
 }

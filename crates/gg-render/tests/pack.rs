@@ -115,7 +115,7 @@ fn settle(renderer: &mut OffscreenRenderer, world: &World) -> Vec<u8> {
     let mut extracted = Extracted::default();
     let mut pixels = Vec::new();
     for _ in 0..SETTLE_FRAMES {
-        extracted.clear(sim::DVec3::ZERO);
+        extracted.clear(sim::DVec3::ZERO, gg_extract::Frustum::UNBOUNDED);
         extracted
             .append_models::<Model>(world, renderer.scenes())
             .unwrap();

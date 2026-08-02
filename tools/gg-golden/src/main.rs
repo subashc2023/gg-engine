@@ -200,6 +200,23 @@ const SCENES: &[Scene] = &[
         },
         render: render_hall,
     },
+    Scene {
+        name: "field",
+        // Demo 05's ten thousand objects (§6 M10): four meshes, four materials,
+        // a hundred hubs and a transform hierarchy the *host* composed. Judged
+        // like `hall` — same pack pipeline, same BC7 filtering — but what it
+        // guards that no other scene does is the batcher and the sort key: a
+        // batch that dropped its tail, a key that ordered materials wrongly, or
+        // an instance array staged at the wrong offset all land here as pixels.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.25,
+        },
+        render: render_field,
+    },
 ];
 
 /// Render demo 02's scene — the same buffers, the same upload path through
@@ -310,6 +327,7 @@ fn render_mesh_of(sim: demo_02_mesh::sim::Sim) -> Render {
             push_constants: bytemuck::bytes_of(push),
             count: scene.index_count,
             index_buffer: Some(scene.indices),
+            indirect: None,
         })
         .collect();
 
@@ -356,6 +374,7 @@ const BOXES_EXTENT: (u32, u32) = (320, 180);
 /// Demo 04's pack, as `cargo xtask assets` compiles it. Build output, never
 /// checked in — so a missing one is a missing *step*, and says so.
 const HALL_PACK: &str = "target/assets/04-scene.ggpack";
+const FIELD_PACK: &str = "target/assets/05-many.ggpack";
 
 /// §6 M9's exit row: a pack must be on the device within this. Measured from
 /// `open` to the frame where nothing is pending, which is the span a player
@@ -407,6 +426,9 @@ fn load(pack: Option<&str>) -> anyhow::Result<()> {
             half_extent: gg_math::render::Vec3::splat(1.0),
             color: 0x00ff_ffff,
             asset: *asset,
+            // Unbounded: this harness exists to time a *load*, and an id culled
+            // before it streams in would stop the clock by never asking.
+            radius: f32::INFINITY,
         });
     }
 
@@ -514,7 +536,7 @@ fn render_hall() -> Render {
     let mut extracted = gg_extract::Extracted::default();
     let mut frame = None;
     for _ in 0..HALL_FRAMES {
-        extracted.clear(demo_04_scene::START_POSITION);
+        extracted.clear(demo_04_scene::START_POSITION, view.frustum(extent));
         extracted.append::<Renderable>(&world)?;
         extracted.append_models::<Model>(&world, renderer.scenes())?;
         let _capture = gg_debug::capture::frame();
@@ -544,7 +566,122 @@ fn render_hall() -> Render {
     })
 }
 
-fn boxes_world() -> anyhow::Result<gg_extract::Extracted> {
+/// Demo 05's field: ten thousand parented objects over four meshes (§6 M10).
+///
+/// The world is built from the demo's own layout functions and composed by the
+/// host's own `gg-scene`, so the reference moves when either changes rather than
+/// quietly disagreeing with the game. It is the one scene that judges *batching*
+/// — and it asserts the batch count as well as the pixels, because "four draws"
+/// is an exit claim and a claim a harness cannot count is one nobody checks.
+fn render_field() -> Render {
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Model, Node};
+    use gg_math::sim;
+
+    let extent = BOXES_EXTENT;
+    let pack = field_pack()?;
+    let mut world = World::new();
+    world.register::<Model>()?;
+    world.register::<Node>()?;
+    for index in 0..demo_05_many::HUBS {
+        let hub = world.spawn();
+        world.insert(
+            hub,
+            Model::at(demo_05_many::MESHES[0], demo_05_many::hub_position(index)),
+        )?;
+        for slot in 0..demo_05_many::PER_HUB {
+            let (offset, mesh) = demo_05_many::child_placement(slot);
+            let child = world.spawn();
+            world.insert(child, Node::at(hub, offset))?;
+            world.insert(
+                child,
+                Model::at(demo_05_many::MESHES[mesh], sim::DVec3::ZERO),
+            )?;
+        }
+    }
+    // The hubs are unrotated here: this scene judges placement and batching, and
+    // a pose that advanced with a tick would make the reference a clock.
+    let mut hierarchy = gg_scene::Hierarchy::new();
+    let composed = hierarchy.propagate(&mut world)?;
+    anyhow::ensure!(
+        composed.composed == demo_05_many::HUBS * demo_05_many::PER_HUB,
+        "the hierarchy composed {} of {} nodes",
+        composed.composed,
+        demo_05_many::HUBS * demo_05_many::PER_HUB
+    );
+
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    renderer.open_pack(&pack)?;
+    let view = gg_render::View {
+        yaw: 0.22,
+        pitch: -0.16,
+        ..gg_render::View::default()
+    };
+    let mut extracted = gg_extract::Extracted::default();
+    let mut frame = None;
+    for _ in 0..HALL_FRAMES {
+        extracted.clear(demo_05_many::START_POSITION, view.frustum(extent));
+        extracted.append_models::<Model>(&world, renderer.scenes())?;
+        let _capture = gg_debug::capture::frame();
+        frame = Some(renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?);
+    }
+    let pending = renderer
+        .pack()
+        .map_or(0, gg_render::content::Content::pending);
+    anyhow::ensure!(
+        pending == 0,
+        "the field was still streaming after {HALL_FRAMES} frames ({pending} asset(s) pending)"
+    );
+    // The exit claim, counted: every drawn object is an instance, and the draw
+    // count is a property of the *content* — four meshes — not of how many
+    // objects named them.
+    let (instances, draws) = renderer.draw_counts();
+    let total = demo_05_many::HUBS * (demo_05_many::PER_HUB + 1);
+    anyhow::ensure!(
+        draws == demo_05_many::MESHES.len(),
+        "{total} objects batched into {draws} draws, expected {}",
+        demo_05_many::MESHES.len()
+    );
+    anyhow::ensure!(
+        instances > 0 && instances + extracted.culled == total,
+        "{instances} instances + {} culled != {total} objects",
+        extracted.culled
+    );
+    tracing::info!(
+        objects = total,
+        culled = extracted.culled,
+        instances,
+        draws,
+        "field batched"
+    );
+
+    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
+    let report = renderer.shutdown();
+    anyhow::ensure!(
+        report.clean(),
+        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
+        report.validation_messages,
+        report.leaked_allocations.len(),
+        report.leaked_allocations,
+    );
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
+
+fn field_pack() -> anyhow::Result<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(FIELD_PACK);
+    anyhow::ensure!(
+        path.is_file(),
+        "{FIELD_PACK} is not there — `cargo xtask assets` compiles it (§4.6)."
+    );
+    Ok(path)
+}
+
+fn boxes_world(frustum: gg_extract::Frustum) -> anyhow::Result<gg_extract::Extracted> {
     use gg_ecs::World;
     use gg_ecs::boundary::Renderable;
     use gg_math::sim;
@@ -566,7 +703,7 @@ fn boxes_world() -> anyhow::Result<gg_extract::Extracted> {
         )?;
     }
     let mut extracted = gg_extract::Extracted::default();
-    extracted.transforms::<Renderable>(&world, gg_math::sim::DVec3::ZERO)?;
+    extracted.transforms::<Renderable>(&world, gg_math::sim::DVec3::ZERO, frustum)?;
     Ok(extracted)
 }
 
@@ -586,7 +723,11 @@ fn render_boxes_occluded() -> Render {
 /// shell submits, with the readback pass where the present would be.
 fn render_boxes_from(view: gg_render::View) -> Render {
     let extent = BOXES_EXTENT;
-    let extracted = boxes_world()?;
+    // The real frustum, not `UNBOUNDED`: these references were blessed before
+    // there was a culler, so a culler that rejects anything visible changes
+    // them and the suite says so. Sphere bounds over-keep and never under-keep,
+    // so a *correct* culler leaves every one of these images byte-identical.
+    let extracted = boxes_world(view.frustum(extent))?;
     let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
     tracing::info!(device = %renderer.device().chosen, "offscreen device");
     // No UI layer: these scenes gate the *renderer*, and an overlay in them
@@ -635,6 +776,7 @@ fn render_triangle_scaled(scale: f32) -> Render {
         push_constants: bytemuck::bytes_of(&push),
         count: demo_01_triangle::VERTEX_COUNT,
         index_buffer: None,
+        indirect: None,
     }];
 
     let dest = readback_buffer(&mut rhi, extent)?;
@@ -1116,8 +1258,16 @@ fn main() -> anyhow::Result<()> {
         Some("verify-gates") => verify_gates(),
         Some("chaos") => chaos(filter),
         Some("capture") => capture(filter),
+        // Two scenes, deliberately: `boxes` is M8's pass-list macro and the
+        // baseline the archive already holds, `field` is §6 M10's ten-thousand-
+        // object frame and measures the whole per-frame chain rather than only
+        // the renderer's share of it.
+        Some("bench") if filter == Some("field") => bench::field(
+            flag(&args, "--frames").unwrap_or(BENCH_FRAMES),
+            args.iter().any(|a| a == "--json"),
+        ),
         Some("bench") => bench::run(
-            &boxes_world()?,
+            &boxes_world(gg_render::View::default().frustum(BOXES_EXTENT))?,
             flag(&args, "--frames").unwrap_or(BENCH_FRAMES),
             args.iter().any(|a| a == "--json"),
         ),

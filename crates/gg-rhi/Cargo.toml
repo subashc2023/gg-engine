@@ -22,12 +22,15 @@ ash = { workspace = true }
 ash-window = { workspace = true }
 gpu-allocator = { workspace = true }
 raw-window-handle = { workspace = true }
+# `IndirectCommand` is `Pod` so a caller can hand a whole draw list to
+# `write_buffer` as bytes (§6 M10). No new crate in any graph: `gg-ecs` already
+# requires bytemuck of every component, so it ships everywhere this does.
+bytemuck.workspace = true
 
 [dev-dependencies]
 gg-platform = { path = "../gg-platform" }
 # Offscreen tests compile their fixture shaders in-process (same layer, §3).
 gg-shaders = { path = "../gg-shaders" }
-bytemuck.workspace = true
 tracing-subscriber.workspace = true
 
 [features]

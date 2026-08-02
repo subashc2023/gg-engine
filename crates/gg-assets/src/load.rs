@@ -236,7 +236,13 @@ pub struct Assets {
     /// entry's name is wanted after the borrow that would produce it is gone.
     names: BTreeMap<AssetId, String>,
     requests: Option<mpsc::Sender<Request>>,
-    finished: mpsc::Receiver<Finished>,
+    /// The workers' outbox. `Mutex` for one reason only: `mpsc::Receiver` is
+    /// `!Sync`, and `gg-extract` expands scenes from several threads at once
+    /// (§6 M10), which needs every field of an `Assets` to be shareable. It is
+    /// never actually locked — both readers hold `&mut self` and go through
+    /// `Mutex::get_mut`, so the cost of making the type `Sync` is zero
+    /// instructions rather than an uncontended lock per frame.
+    finished: Mutex<mpsc::Receiver<Finished>>,
     workers: Vec<thread::JoinHandle<()>>,
     /// Textures still with a worker. `pump` is done when this reaches zero,
     /// which is what [`Assets::pump_until_idle`] waits on.
@@ -301,7 +307,7 @@ impl Assets {
             textures: BTreeMap::new(),
             names: BTreeMap::new(),
             requests: Some(requests),
-            finished,
+            finished: Mutex::new(finished),
             workers,
             in_flight: 0,
         }
@@ -430,13 +436,23 @@ impl Assets {
         }
     }
 
+    /// The outbox, without locking. A poisoned mutex is meaningless here —
+    /// nothing ever holds this lock, so there is no critical section a panic
+    /// could have left half-finished — which is why the poison is discarded
+    /// rather than reported.
+    fn outbox(finished: &mut Mutex<mpsc::Receiver<Finished>>) -> &mut mpsc::Receiver<Finished> {
+        finished
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Apply everything the workers have finished. Call once a frame.
     ///
     /// Returns how many assets became `Ready` or `Failed`. Applied in id order
     /// rather than arrival order, so two runs of the same load produce the same
     /// sequence of states whatever the threads did (§4.1).
     pub fn pump(&mut self) -> usize {
-        let mut batch: Vec<Finished> = self.finished.try_iter().collect();
+        let mut batch: Vec<Finished> = Self::outbox(&mut self.finished).try_iter().collect();
         batch.sort_unstable_by_key(|done| done.id);
         let count = batch.len();
         for done in batch {
@@ -452,7 +468,7 @@ impl Assets {
     pub fn pump_until_idle(&mut self) {
         self.pump();
         while self.in_flight > 0 {
-            let Ok(done) = self.finished.recv() else {
+            let Ok(done) = Self::outbox(&mut self.finished).recv() else {
                 // Every worker is gone and nothing more can arrive; the slots
                 // still Loading are failed by `submit`'s inline fallback next
                 // time, and leaving them here would be a silent hang.

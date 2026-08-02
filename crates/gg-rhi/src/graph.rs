@@ -407,11 +407,16 @@ fn resolve_draws<'a>(gpu: &Gpu, draws: &[DrawSpec<'a>]) -> Result<Vec<ResolvedDr
                 .index_buffer
                 .map(|h| gpu.resources.buffer(h).map(|b| b.raw))
                 .transpose()?;
+            let indirect = d
+                .indirect
+                .map(|i| gpu.resources.buffer(i.buffer).map(|b| (b.raw, i.offset)))
+                .transpose()?;
             Ok(ResolvedDraw {
                 entry,
                 push_constants: d.push_constants,
                 count: d.count,
                 index_buffer,
+                indirect,
             })
         })
         .collect()

@@ -20,6 +20,13 @@ workspace = true
 [dependencies]
 gg-ecs = { path = "../gg-ecs" }
 gg-math = { path = "../gg-math" }
+# §6 M10: the extract stage is parallel over row chunks. Extract is *downstream*
+# of the canonical hash, so this needs no determinism-allowlist entry — but
+# deny.toml's `rayon` wrappers must name this crate, and `xtask ci` cross-checks
+# the two files. Order stability is not inherited from that fact and has its own
+# test: parallel extract may not permute the draw list, or golden images become
+# schedule-dependent.
+rayon.workspace = true
 
 [dev-dependencies]
 bytemuck.workspace = true

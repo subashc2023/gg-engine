@@ -68,6 +68,26 @@ pub struct MeshHeader {
     pub reserved: [u32; 4],
 }
 
+impl MeshHeader {
+    /// Radius of the sphere about the **object origin** that contains the
+    /// bounds, metres.
+    ///
+    /// About the origin rather than about the box's centre because that is
+    /// where an instance is placed: a sphere around the centre would need the
+    /// centre carried alongside it through extract and the culler, to tighten a
+    /// bound that is already loose. The farthest corner is therefore the one
+    /// whose per-axis extent is the larger of the two faces.
+    #[must_use]
+    pub fn bounding_radius(&self) -> f32 {
+        let mut square = 0.0;
+        for axis in 0..3 {
+            let extent = self.bounds_min[axis].abs().max(self.bounds_max[axis].abs());
+            square += extent * extent;
+        }
+        square.sqrt()
+    }
+}
+
 const _: () = assert!(size_of::<MeshHeader>() == 64);
 const _: () = assert!((size_of::<MeshHeader>() as u64).is_multiple_of(SECTION_ALIGN));
 
