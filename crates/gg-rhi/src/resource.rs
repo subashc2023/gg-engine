@@ -74,6 +74,11 @@ pub enum ImageFormat {
     Bc5Unorm,
     /// BC4, one linear channel — masks. Half the block size of the other two.
     Bc4Unorm,
+    /// 16-bit float RGBA — the scene attachment since M11. Radiance leaves the
+    /// forward pass unbounded above 1.0 and the tonemapper is what brings it
+    /// down, so an 8-bit target would clip every highlight before the curve that
+    /// exists to shape them ever ran.
+    Rgba16F,
     /// 32-bit float depth. The only depth format we ask for: reverse-Z's
     /// precision argument *is* a float-depth argument (§2, Math row).
     Depth32,
@@ -87,6 +92,7 @@ impl ImageFormat {
             ImageFormat::Bc7Srgb => vk::Format::BC7_SRGB_BLOCK,
             ImageFormat::Bc5Unorm => vk::Format::BC5_UNORM_BLOCK,
             ImageFormat::Bc4Unorm => vk::Format::BC4_UNORM_BLOCK,
+            ImageFormat::Rgba16F => vk::Format::R16G16B16A16_SFLOAT,
             ImageFormat::Depth32 => vk::Format::D32_SFLOAT,
         }
     }
@@ -110,7 +116,10 @@ impl ImageFormat {
     pub fn block_extent(self) -> u32 {
         match self {
             ImageFormat::Bc7Srgb | ImageFormat::Bc5Unorm | ImageFormat::Bc4Unorm => 4,
-            ImageFormat::Rgba8Srgb | ImageFormat::Rgba8Unorm | ImageFormat::Depth32 => 1,
+            ImageFormat::Rgba8Srgb
+            | ImageFormat::Rgba8Unorm
+            | ImageFormat::Rgba16F
+            | ImageFormat::Depth32 => 1,
         }
     }
 
@@ -123,6 +132,7 @@ impl ImageFormat {
             ImageFormat::Bc7Srgb | ImageFormat::Bc5Unorm => w.div_ceil(4) * h.div_ceil(4) * 16,
             ImageFormat::Bc4Unorm => w.div_ceil(4) * h.div_ceil(4) * 8,
             ImageFormat::Rgba8Srgb | ImageFormat::Rgba8Unorm | ImageFormat::Depth32 => w * h * 4,
+            ImageFormat::Rgba16F => w * h * 8,
         }
     }
 }
@@ -149,8 +159,13 @@ pub fn full_mip_count(extent: (u32, u32)) -> u32 {
 pub enum ImageUse {
     /// Uploaded once, then read through the bindless sampled-image array.
     Sampled,
-    /// A depth attachment. Never uploaded, never sampled at M4A.
+    /// A depth attachment. Never uploaded, never sampled.
     Depth,
+    /// A depth attachment a later pass also samples — the shadow map (§6 M11).
+    /// Separate from [`ImageUse::Depth`] because `SAMPLED` costs some drivers
+    /// the compressed depth layout, and the prepass target that is never read
+    /// back should not pay for the one that is.
+    DepthSampled,
     /// Written through the bindless storage-image array.
     Storage,
     /// A graph attachment: written as color, then either sampled by a later
@@ -158,6 +173,15 @@ pub enum ImageUse {
     /// which of them a transient is put to is the graph's business and not the
     /// allocation's (§4.5).
     ColorTarget,
+}
+
+impl ImageUse {
+    /// Whether this usage is a depth attachment — the question
+    /// [`ImageFormat::is_depth`] has to agree with.
+    #[must_use]
+    pub fn is_depth(self) -> bool {
+        matches!(self, ImageUse::Depth | ImageUse::DepthSampled)
+    }
 }
 
 /// The whole sampler set (§4.3: samplers are a small *immutable* set baked
@@ -297,6 +321,9 @@ pub(crate) struct Image {
     pub alloc: Option<gpu_allocator::vulkan::Allocation>,
     pub extent: (u32, u32),
     pub format: ImageFormat,
+    /// What it was created for — the only thing that says whether a depth image
+    /// is allowed a bindless slot.
+    pub usage: ImageUse,
     pub mip_levels: u32,
     /// Bindless slots this image occupies, so retiring it returns them rather
     /// than leaking the array one entry at a time.
@@ -399,7 +426,7 @@ impl Resources {
                 desc.name, desc.extent
             )));
         }
-        if desc.format.is_depth() != (desc.usage == ImageUse::Depth) {
+        if desc.format.is_depth() != desc.usage.is_depth() {
             return Err(RhiError::Loader(format!(
                 "image `{}`: {:?} and {:?} disagree — a depth format is a depth attachment and \
                  nothing else",
@@ -418,6 +445,9 @@ impl Resources {
         let usage = match desc.usage {
             ImageUse::Sampled => vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             ImageUse::Depth => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            ImageUse::DepthSampled => {
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED
+            }
             ImageUse::Storage => vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
             ImageUse::ColorTarget => {
                 vk::ImageUsageFlags::COLOR_ATTACHMENT
@@ -503,6 +533,7 @@ impl Resources {
                 alloc: Some(alloc),
                 extent: desc.extent,
                 format: desc.format,
+                usage: desc.usage,
                 mip_levels: desc.mip_levels,
                 texture_slot: None,
                 storage_slot: None,

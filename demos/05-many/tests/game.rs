@@ -56,7 +56,7 @@ impl Game {
             let declared = world.adopt(&gg_game_components()).unwrap();
             (gg_game_systems(), declared)
         };
-        assert_eq!(declared, 5, "observer, hub, and the three protocol types");
+        assert_eq!(declared, 6, "observer, hub, and the four protocol types");
         Game {
             world,
             table,

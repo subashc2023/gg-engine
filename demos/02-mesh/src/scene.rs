@@ -129,6 +129,7 @@ pub fn pipeline_desc() -> PipelineDesc<'static> {
         // test of reverse-Z rather than of winding order.
         blend: gg_rhi::Blend::Off,
         depth: gg_rhi::DepthMode::Write,
+        depth_bias: false,
     }
 }
 

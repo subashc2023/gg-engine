@@ -14,7 +14,7 @@ use crate::{CompiledModule, ShaderError, Stage};
 
 /// Bumped whenever generated output changes shape; part of the header line the
 /// incremental/diff-clean machinery compares.
-pub const GENERATOR_VERSION: u32 = 4;
+pub const GENERATOR_VERSION: u32 = 5;
 
 /// The header line carrying the identity of the inputs. `xtask shaders` skips
 /// recompilation when the on-disk header matches the current source hash.
@@ -123,8 +123,21 @@ fn generate_struct(out: &mut String, push: &crate::StructLayout) -> Result<(), S
          pub struct {name} {{\n{body}}}\n\n",
         push.name, push.size
     ));
+    // A constructor mirrors a struct, so its arity is the shader's business and
+    // not a design smell the caller can act on. Emitted only past the threshold,
+    // and as an `expect` rather than an `allow`, so the day a block shrinks the
+    // attribute is a lint of its own instead of dead text.
+    let arity = match ctor_params.len() > CLIPPY_ARGUMENT_LIMIT {
+        true => concat!(
+            "    #[expect(\n",
+            "        clippy::too_many_arguments,\n",
+            "        reason = \"one field per push-constant member; the shader decides how many\"\n",
+            "    )]\n"
+        ),
+        false => "",
+    };
     out.push_str(&format!(
-        "impl {name} {{\n    /// Construct with every padding byte zeroed.\n    pub fn new({}) -> Self {{\n        Self {{{}}}\n    }}\n}}\n\n",
+        "impl {name} {{\n    /// Construct with every padding byte zeroed.\n{arity}    pub fn new({}) -> Self {{\n        Self {{{}}}\n    }}\n}}\n\n",
         wrap_list(&ctor_params, "    pub fn new(".len() + ") -> Self {".len(), 8),
         wrap_braced(&ctor_fields, 12),
     ));
@@ -134,6 +147,11 @@ fn generate_struct(out: &mut String, push: &crate::StructLayout) -> Result<(), S
     ));
     Ok(())
 }
+
+/// `clippy::too_many_arguments`' default threshold. Named here because the
+/// generator has to know it to stay lint-clean, and a magic 7 in a format string
+/// is the kind of number nobody can look up later.
+const CLIPPY_ARGUMENT_LIMIT: usize = 7;
 
 /// rustfmt's max width. Generated output has to be a *fixed point* of `cargo
 /// fmt`, or the formatter and the diff-clean gate (§5, gate 3) disagree about

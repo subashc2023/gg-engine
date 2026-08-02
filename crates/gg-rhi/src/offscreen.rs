@@ -11,7 +11,7 @@
 
 use crate::gpu::Gpu;
 use crate::graph::{self, Bound};
-use crate::instance::{Instance, validation_message_count};
+use crate::instance::{Instance, Presentation, validation_message_count};
 use crate::pipeline::{PipelineDesc, PipelineHandle};
 use crate::resource::{
     BufferDesc, BufferHandle, DeviceAddress, ImageDesc, ImageFormat, ImageHandle, ImageUse,
@@ -48,7 +48,7 @@ impl OffscreenRhi {
         if extent.0 == 0 || extent.1 == 0 {
             return Err(RhiError::Loader("offscreen extent must be nonzero".into()));
         }
-        let mut instance = Instance::new(None)?;
+        let mut instance = Instance::new(Presentation::None)?;
         // One slot: an offscreen execute blocks until the GPU is done with it.
         let mut gpu = match Gpu::new(&instance, None, 1) {
             Ok(g) => g,

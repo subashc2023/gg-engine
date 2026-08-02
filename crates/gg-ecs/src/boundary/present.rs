@@ -108,6 +108,103 @@ impl Model {
     }
 }
 
+/// What a [`Light`] is. Associated constants rather than an `enum` field: a
+/// bare enum in a component is refused by the derive (a value outside the
+/// declared discriminants is UB the moment it is read, and the dylib on the
+/// other side of the boundary is not the compiler that wrote it), so the
+/// discriminant crosses as a `u32` and the host treats an unknown one as
+/// nothing to shade with.
+pub mod light {
+    /// Parallel rays from infinitely far away — a sun. Position is unread;
+    /// direction and colour are the whole of it.
+    pub const DIRECTIONAL: u32 = 0;
+    /// A point emitting in every direction, falling off with distance. Position
+    /// and range are read; direction is unread.
+    pub const POINT: u32 = 1;
+}
+
+/// One light, in world space (§6 M11).
+///
+/// A component for the same reason [`Renderable`] is one: the host holds no
+/// game types, so "there is a sun here, and it is this colour" has to be data
+/// the game *declares* rather than a renderer setting somebody edits in the
+/// engine. A game with no lights renders unlit, which is visible and obviously
+/// wrong — the same choice [`Eye::ORIGIN`] makes.
+///
+/// Intensity is separate from colour because they answer different questions:
+/// colour is the light's tint and lives in eight bits a human picks, intensity
+/// is a physical quantity with no upper bound and lives in a float. Multiplying
+/// them into one `f32` triple at the boundary would make "twice as bright"
+/// unrepresentable above white.
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "gg.light")]
+#[repr(C)]
+pub struct Light {
+    /// World-space position, `f64` and un-narrowed — as [`Renderable::position`].
+    /// Unread for [`light::DIRECTIONAL`].
+    pub position: sim::DVec3,
+    /// The direction the light *travels*, unit length, for
+    /// [`light::DIRECTIONAL`]. Travel rather than "toward the light", because
+    /// that is the one a game author can point at the ground without thinking
+    /// about the shading equation.
+    ///
+    /// `f32` because a direction is not a position: it never gains planetary
+    /// magnitude, which is the only thing `f64` buys on this side of §1.4.
+    pub direction: sim::Vec3,
+    /// `0x00RRGGBB`, sRGB — the light's tint, as [`Renderable::color`].
+    pub color: u32,
+    /// Radiance multiplier, linear. Unbounded above: an outdoor sun and a candle
+    /// differ by orders of magnitude, which is the whole reason the scene
+    /// attachment is a float target.
+    pub intensity: f32,
+    /// Metres at which a [`light::POINT`] contributes nothing. The falloff is
+    /// inverse-square windowed to reach exactly zero here, so a range is a
+    /// culling bound the renderer can trust rather than a fade that never quite
+    /// ends. Unread for [`light::DIRECTIONAL`].
+    pub range: f32,
+    /// One of [`light`]'s constants.
+    pub kind: u32,
+    /// Padding, spelled out. `Pod` refuses a struct with holes in it, and the
+    /// alternative to naming this field is a layout that changes the moment
+    /// somebody reorders the ones above.
+    pub reserved: u32,
+}
+
+impl Light {
+    /// A sun: parallel rays travelling in `direction`.
+    ///
+    /// # Panics
+    /// Never — a zero direction is left as it is and shades nothing, which is
+    /// the same "visible and obviously wrong" rule the rest of the protocol
+    /// follows.
+    #[must_use]
+    pub fn sun(direction: sim::Vec3, color: u32, intensity: f32) -> Self {
+        Light {
+            position: sim::DVec3::ZERO,
+            direction,
+            color,
+            intensity,
+            range: 0.0,
+            kind: light::DIRECTIONAL,
+            reserved: 0,
+        }
+    }
+
+    /// A point light at `position`, dark by `range` metres.
+    #[must_use]
+    pub fn point(position: sim::DVec3, color: u32, intensity: f32, range: f32) -> Self {
+        Light {
+            position,
+            direction: sim::Vec3::ZERO,
+            color,
+            intensity,
+            range,
+            kind: light::POINT,
+            reserved: 0,
+        }
+    }
+}
+
 /// Where the game is looked at from.
 ///
 /// Yaw and pitch rather than a quaternion: the host builds a fly camera's basis
@@ -137,6 +234,19 @@ impl Eye {
         yaw: 0.0,
         pitch: 0.0,
     };
+
+    /// An eye at `position`, looking along `yaw`/`pitch` in radians. Spelled
+    /// once here so a game does not repeat a three-field literal, on the same
+    /// reasoning as [`Renderable::boxed`] — and because the M12 template
+    /// criterion counts every line of ceremony a game pays (§6 M12).
+    #[must_use]
+    pub fn at(position: sim::DVec3, yaw: f32, pitch: f32) -> Self {
+        Eye {
+            position,
+            yaw,
+            pitch,
+        }
+    }
 
     /// The eye a host renders from: the first one in world iteration order, or
     /// [`Eye::ORIGIN`].
@@ -169,6 +279,26 @@ mod tests {
         assert_eq!(align_of::<Eye>(), 8);
         assert_eq!(size_of::<Model>(), 80);
         assert_eq!(align_of::<Model>(), 8);
+        assert_eq!(size_of::<Light>(), 56);
+        assert_eq!(align_of::<Light>(), 8);
+    }
+
+    #[test]
+    fn a_sun_carries_no_position_and_a_point_light_no_direction() {
+        // The unread field of each is *zero* rather than left over: a component
+        // is `Pod` and a game may memcpy one, so an unread field that happened
+        // to hold a stale value would hash differently for two lights that are
+        // the same light.
+        let sun = Light::sun(sim::Vec3::new(0.0, -1.0, 0.0), 0x00ff_eedd, 3.0);
+        assert_eq!(sun.kind, light::DIRECTIONAL);
+        assert_eq!(sun.position, sim::DVec3::ZERO);
+        assert_eq!(sun.range, 0.0);
+
+        let lamp = Light::point(sim::DVec3::new(1.0, 2.0, 3.0), 0x00ff_8800, 12.0, 8.0);
+        assert_eq!(lamp.kind, light::POINT);
+        assert_eq!(lamp.direction, sim::Vec3::ZERO);
+        assert_eq!(lamp.range, 8.0);
+        assert_eq!(lamp.reserved, 0, "padding is written, not inherited");
     }
 
     #[test]

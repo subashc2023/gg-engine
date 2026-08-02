@@ -11,7 +11,7 @@
 //! Complexity budget (§3): no backend abstraction, no render concepts (meshes,
 //! materials live above), resource newtypes only.
 
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 mod bindless;
 mod crash;
@@ -24,6 +24,10 @@ mod instance;
 mod offscreen;
 mod pipeline;
 mod resource;
+// Dead without the layer it serves — `validation` off means no messenger, so
+// nothing consults a lease. The tests inside still run in every tier and are the
+// §5.4 gate on the checked-in file, which is why the module is not itself gated.
+#[cfg_attr(not(feature = "validation"), allow(dead_code))]
 mod suppressions;
 mod surface;
 mod swapchain;
@@ -34,21 +38,20 @@ pub use bindless::{StorageImageIndex, TextureIndex};
 pub use device::{Candidate, DeviceReport};
 pub use frame::FRAMES_IN_FLIGHT;
 pub use graph::{Access, ColorAttachment, DepthAttachment, Pass, PassKind, Target, Transition};
-pub use instance::validation_message_count;
+use instance::validation_message_count;
 pub use offscreen::OffscreenRhi;
 pub use pipeline::{Blend, ColorTarget, DepthMode, PipelineDesc, PipelineHandle};
 pub use resource::{
     BufferDesc, BufferHandle, BufferKind, DeviceAddress, ImageDesc, ImageFormat, ImageHandle,
     ImageUse, MemoryUse, Sampler, full_mip_count, mip_extent,
 };
-pub use suppressions::{parse as parse_suppressions, validated as validated_suppressions};
 pub use timing::{GpuClock, PassTiming};
 
 use ash::vk;
 use frame::Frames;
 use gpu::Gpu;
 use graph::Bound;
-use instance::Instance;
+use instance::{Instance, Presentation};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use surface::Surface;
 use swapchain::{Acquired, Swapchain};
@@ -73,6 +76,26 @@ pub struct DrawSpec<'a> {
     ///
     /// [`VkDrawIndexedIndirectCommand`]: Indirect
     pub indirect: Option<Indirect>,
+    /// Depth bias for this draw. Required exactly when the pipeline declares
+    /// [`PipelineDesc::depth_bias`], and refused otherwise — a pipeline whose
+    /// dynamic state nothing set draws with undefined bias, which is a shadow
+    /// that acnes on one driver and not another (§6 M11).
+    pub depth_bias: Option<DepthBias>,
+}
+
+/// Depth bias, in the two terms Vulkan takes.
+///
+/// Dynamic rather than baked into the pipeline because §6 M11's exit row makes
+/// these CVars: a value that needed a pipeline rebuild to change is a value
+/// nobody tunes against a real scene, and acne and peter-panning are found by
+/// turning the knob while looking at the wall.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DepthBias {
+    /// Constant offset, in units of the smallest resolvable depth difference.
+    pub constant: f32,
+    /// Offset proportional to the fragment's depth slope — the term that covers
+    /// a surface seen edge-on, where a constant one cannot.
+    pub slope: f32,
 }
 
 /// Where an indirect draw reads its parameters.
@@ -250,14 +273,68 @@ impl Rhi {
         let display = window
             .display_handle()
             .map_err(|e| RhiError::Loader(format!("no display handle: {e}")))?;
-        let mut instance = Instance::new(Some(display.as_raw()))?;
-        let mut surface = match Surface::new(&instance, window) {
+        let mut instance = Instance::new(Presentation::Window(display.as_raw()))?;
+        let surface = match Surface::new(&instance, window) {
             Ok(s) => s,
             Err(e) => {
                 instance.destroy();
                 return Err(e);
             }
         };
+        Self::bring_up(instance, surface, extent)
+    }
+
+    /// Whether [`Rhi::headless`] can run here — that is, whether the loader
+    /// offers `VK_EXT_headless_surface`.
+    ///
+    /// A gate that needs the swapchain path calls this and skips rather than
+    /// fails: the extension is a Mesa build option, present on the Linux
+    /// lavapipe and absent from the pinned Windows one (§6 M12).
+    #[must_use]
+    pub fn headless_supported() -> bool {
+        Instance::headless_supported()
+    }
+
+    /// Bring up the full windowed path — swapchain, frames in flight, present —
+    /// against a surface with **no window behind it**.
+    ///
+    /// This is not [`OffscreenRhi`], which has no surface and no swapchain at
+    /// all: everything here is the real WSI code, and present really is called.
+    /// What it buys is the one thing §1.5 otherwise makes impossible — swapchain
+    /// recreation under automated CI. What it does *not* cover is the OS event
+    /// path (resize and minimize as a window manager delivers them), which needs
+    /// a window by definition and stays in `cargo xtask interactive`.
+    ///
+    /// # Errors
+    /// [`RhiError::Loader`] if the loader has no `VK_EXT_headless_surface` —
+    /// check [`Rhi::headless_supported`] first to skip instead.
+    pub fn headless(extent: (u32, u32)) -> Result<Self, RhiError> {
+        if !Instance::headless_supported() {
+            return Err(RhiError::Loader(
+                "VK_EXT_headless_surface is not available on this loader — \
+                 Rhi::headless_supported() is the question to ask first"
+                    .into(),
+            ));
+        }
+        let mut instance = Instance::new(Presentation::Headless)?;
+        let surface = match Surface::headless(&instance) {
+            Ok(s) => s,
+            Err(e) => {
+                instance.destroy();
+                return Err(e);
+            }
+        };
+        Self::bring_up(instance, surface, extent)
+    }
+
+    /// Device, swapchain, frames and timings over a surface that is already
+    /// live — shared by the windowed and headless constructors so bring-up
+    /// order and failure-unwind order exist once (§4.3).
+    fn bring_up(
+        mut instance: Instance,
+        mut surface: Surface,
+        extent: (u32, u32),
+    ) -> Result<Self, RhiError> {
         let mut gpu = match Gpu::new(&instance, Some(&surface), FRAMES_IN_FLIGHT as usize) {
             Ok(g) => g,
             Err(e) => {

@@ -7,6 +7,13 @@
 //! - `interactive_resize_minimize_spam_1000` — the *OS event path* (real
 //!   resize/minimize plumbing through winit and WSI).
 //!
+//! M12 gave the first of those an automated sibling in `swapchain_headless.rs`,
+//! over `VK_EXT_headless_surface` — same logic, no window, so it runs in the
+//! tiers. This file is not thereby redundant: behind a real window the surface
+//! *dictates* `currentExtent`, so what is under test here is the clamp path and
+//! a real WSI's capabilities, which the headless surface never exercises. The
+//! two cover opposite branches of the same `if`.
+//!
 //! Both create OS windows and present to them, so both are `#[ignore]`: the
 //! automated tiers are windowless by construction (§1.5 — presenting maps a
 //! Wayland surface, un-minimize maps an X11/Win32 one, and WSLg mirrors any

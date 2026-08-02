@@ -40,9 +40,9 @@
 use gg_extract::Extracted;
 use gg_math::render;
 use gg_rhi::{
-    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthMode, DeviceAddress, DrawSpec,
-    FRAMES_IN_FLIGHT, ImageDesc, ImageFormat, ImageHandle, ImageUse, Indirect, IndirectCommand,
-    PipelineDesc, PipelineHandle, RhiError, Sampler, TextureIndex,
+    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthBias, DepthMode, DeviceAddress,
+    DrawSpec, FRAMES_IN_FLIGHT, ImageDesc, ImageFormat, ImageHandle, ImageUse, Indirect,
+    IndirectCommand, PipelineDesc, PipelineHandle, RhiError, Sampler, TextureIndex,
 };
 
 use crate::content::Content;
@@ -53,9 +53,10 @@ use crate::{GpuHost, SCENE_FORMAT, View, srgb_to_linear};
 /// `gg_assets::Vertex` is what `scene.slang`'s `VERTEX_STRIDE` says it is, so a
 /// change to the file format is a build error rather than a garbled mesh.
 const _: () = {
-    assert!(core::mem::size_of::<gg_assets::Vertex>() == 32);
+    assert!(core::mem::size_of::<gg_assets::Vertex>() == 48);
     assert!(core::mem::offset_of!(gg_assets::Vertex, normal) == 12);
     assert!(core::mem::offset_of!(gg_assets::Vertex, uv) == 24);
+    assert!(core::mem::offset_of!(gg_assets::Vertex, tangent) == 32);
 };
 
 /// One instance as the shader reads it: the finished object-to-clip matrix, the
@@ -71,9 +72,17 @@ struct GpuInstance {
     mvp: [[f32; 4]; 4],
     tint: [f32; 4],
     rotation: [f32; 4],
+    /// Camera-relative translation in `xyz`; `w` unused. Carried *beside* the
+    /// matrix rather than read out of it because lighting needs the world
+    /// position and a clip coordinate cannot be inverted back to one — and
+    /// because the matrix is the finished product, whose low bits are the whole
+    /// reason it is precomputed.
+    offset: [f32; 4],
+    /// Per-axis scale in `xyz`, applied before the rotation; `w` unused.
+    scale: [f32; 4],
 }
 
-const _: () = assert!(core::mem::size_of::<GpuInstance>() == 96);
+const _: () = assert!(core::mem::size_of::<GpuInstance>() == 128);
 
 /// Instances one frame may draw, per frame-in-flight slot.
 ///
@@ -109,8 +118,14 @@ struct Batch {
 pub(crate) struct ScenePass {
     prepass: PipelineHandle,
     forward: PipelineHandle,
+    shadow: PipelineHandle,
     white: ImageHandle,
     white_index: TextureIndex,
+    /// The flat-normal fallback. A separate texel from `white`, because white
+    /// decodes to a tangent normal of `(1, 1, ?)` whose reconstructed z is the
+    /// square root of a negative number — a NaN normal, and a black mesh.
+    flat: ImageHandle,
+    flat_index: TextureIndex,
     /// Per-instance data, one region per frame in flight — `BufferKind::Dynamic`
     /// does not wait, so a single region would be this frame overwriting what
     /// its predecessor is still reading.
@@ -123,6 +138,8 @@ pub(crate) struct ScenePass {
     staged: Vec<GpuInstance>,
     batches: Vec<Batch>,
     written: Vec<IndirectCommand>,
+    /// This frame's lighting block, patched into every batch's push.
+    frame: DeviceAddress,
 }
 
 impl ScenePass {
@@ -137,6 +154,16 @@ impl ScenePass {
             mip_levels: 1,
         })?;
         rhi.upload_image(white, 0, &[0xff; 4])?;
+        let flat = rhi.create_image(&ImageDesc {
+            name: "render.scene.flat-normal",
+            extent: (1, 1),
+            // Unorm, not sRGB: a normal map is data and must not be decoded.
+            format: ImageFormat::Rgba8Unorm,
+            usage: ImageUse::Sampled,
+            mip_levels: 1,
+        })?;
+        // (0.5, 0.5) decodes to a tangent-space (0, 0, 1) — the flat normal.
+        rhi.upload_image(flat, 0, &[0x80, 0x80, 0xff, 0xff])?;
         rhi.flush_uploads()?;
         let instances = rhi.create_buffer(&BufferDesc {
             name: "render.scene.instances",
@@ -151,8 +178,11 @@ impl ScenePass {
         Ok(ScenePass {
             prepass: rhi.create_pipeline(&prepass_desc())?,
             forward: rhi.create_pipeline(&forward_desc())?,
+            shadow: rhi.create_pipeline(&shadow_desc())?,
             white,
             white_index: rhi.register_texture(white)?,
+            flat,
+            flat_index: rhi.register_texture(flat)?,
             instances,
             instance_address: rhi.buffer_address(instances)?,
             commands,
@@ -160,6 +190,7 @@ impl ScenePass {
             staged: Vec::new(),
             batches: Vec::new(),
             written: Vec::new(),
+            frame: 0,
         })
     }
 
@@ -173,6 +204,7 @@ impl ScenePass {
     /// # Errors
     ///
     /// Whatever the two buffer writes refuse.
+    #[expect(clippy::too_many_arguments, reason = "one frame's inputs")]
     pub(crate) fn build(
         &mut self,
         rhi: &mut impl GpuHost,
@@ -181,7 +213,9 @@ impl ScenePass {
         extracted: &Extracted,
         view: &View,
         content: Option<&Content>,
+        frame: DeviceAddress,
     ) -> Result<(), RhiError> {
+        self.frame = frame;
         self.keyed.clear();
         self.staged.clear();
         self.batches.clear();
@@ -220,6 +254,8 @@ impl ScenePass {
                         1.0,
                     ],
                     rotation: instance.rotation.to_array(),
+                    offset: instance.offset.extend(0.0).to_array(),
+                    scale: instance.half_extent.extend(0.0).to_array(),
                 },
             });
         }
@@ -265,20 +301,28 @@ impl ScenePass {
                 start = end;
                 continue;
             };
-            let texture = content
-                .texture(material.base_color_texture)
-                .map_or(self.white_index, |t| t.index);
+            // A map still on its way falls back to the neutral texel rather than
+            // to nothing: a mesh that turned black for the two frames its normal
+            // map took to arrive would look like a shading bug (§4.6).
+            let map = |id, fallback: TextureIndex| {
+                content.texture(id).map_or(fallback, |t| t.index).get()
+            };
             self.batches.push(Batch {
                 push: shader::ScenePush::new(
                     // Patched in `stage`, once the slot's byte offset is known.
                     0,
                     resident.address,
+                    self.frame,
                     self.staged.len() as u32,
-                    texture.get(),
+                    map(material.base_color_texture, self.white_index),
+                    map(material.normal_texture, self.flat_index),
+                    map(material.metallic_roughness_texture, self.white_index),
+                    map(material.occlusion_texture, self.white_index),
                     // Repeat, not clamp: a glTF uv is free to leave [0,1] and
                     // tiling is how a floor is authored.
                     Sampler::LinearRepeat.index(),
-                    0,
+                    material.metallic,
+                    material.roughness,
                 ),
                 indices,
                 command_offset: (self.written.len() * core::mem::size_of::<IndirectCommand>())
@@ -323,11 +367,20 @@ impl ScenePass {
     }
 
     /// This frame's mesh draws through `pipeline`.
-    pub(crate) fn draws(&self, pipeline: PipelineHandle) -> Vec<DrawSpec<'_>> {
+    ///
+    /// `depth_bias` is required exactly where the pipeline declared it, which is
+    /// the shadow one and nowhere else — the RHI refuses the mismatch in both
+    /// directions rather than drawing with whatever the command buffer held.
+    pub(crate) fn draws(
+        &self,
+        pipeline: PipelineHandle,
+        depth_bias: Option<DepthBias>,
+    ) -> Vec<DrawSpec<'_>> {
         self.batches
             .iter()
             .map(|batch| DrawSpec {
                 pipeline,
+                depth_bias,
                 push_constants: bytemuck::bytes_of(&batch.push),
                 // Unread: the indirect command carries the counts (§6 M10).
                 count: 0,
@@ -356,12 +409,19 @@ impl ScenePass {
         self.forward
     }
 
-    /// Release the pipelines, the white texel and the per-frame streams.
+    /// The shadow pipeline (§6 M11).
+    pub(crate) fn shadow(&self) -> PipelineHandle {
+        self.shadow
+    }
+
+    /// Release the pipelines, both fallback texels and the per-frame streams.
     pub(crate) fn destroy(self, rhi: &mut impl GpuHost) -> Result<(), RhiError> {
         rhi.destroy_pipeline(self.prepass)?;
         rhi.destroy_pipeline(self.forward)?;
+        rhi.destroy_pipeline(self.shadow)?;
         rhi.destroy_buffer(self.instances)?;
         rhi.destroy_buffer(self.commands)?;
+        rhi.destroy_image(self.flat)?;
         rhi.destroy_image(self.white)
     }
 }
@@ -403,6 +463,7 @@ fn prepass_desc() -> PipelineDesc<'static> {
         color: ColorTarget::None,
         blend: Blend::Off,
         depth: DepthMode::Write,
+        depth_bias: false,
     }
 }
 
@@ -419,6 +480,25 @@ fn forward_desc() -> PipelineDesc<'static> {
         color: ColorTarget::Format(SCENE_FORMAT),
         blend: Blend::Off,
         depth: DepthMode::TestOnly,
+        depth_bias: false,
+    }
+}
+
+/// The shadow pass: the same geometry through the sun's projection, depth only,
+/// biased. The bias is dynamic so the CVars behind it move without a pipeline
+/// rebuild (§6 M11's exit row).
+fn shadow_desc() -> PipelineDesc<'static> {
+    PipelineDesc {
+        name: "scene.shadow",
+        vs_spirv: shader::VS_SHADOW_SPIRV,
+        vs_entry: shader::VS_SHADOW_ENTRY,
+        fs_spirv: shader::FS_DEPTH_SPIRV,
+        fs_entry: shader::FS_DEPTH_ENTRY,
+        push_constant_size: core::mem::size_of::<shader::ScenePush>() as u32,
+        color: ColorTarget::None,
+        blend: Blend::Off,
+        depth: DepthMode::Write,
+        depth_bias: true,
     }
 }
 
@@ -454,8 +534,10 @@ mod tests {
     fn the_instance_record_is_what_the_shader_strides_by() {
         // `scene.slang` hardcodes INSTANCE_STRIDE; this is the other half of
         // that agreement, the way the vertex assertions above are.
-        assert_eq!(core::mem::size_of::<GpuInstance>(), 96);
+        assert_eq!(core::mem::size_of::<GpuInstance>(), 128);
         assert_eq!(core::mem::offset_of!(GpuInstance, tint), 64);
         assert_eq!(core::mem::offset_of!(GpuInstance, rotation), 80);
+        assert_eq!(core::mem::offset_of!(GpuInstance, offset), 96);
+        assert_eq!(core::mem::offset_of!(GpuInstance, scale), 112);
     }
 }

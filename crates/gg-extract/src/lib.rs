@@ -28,6 +28,11 @@ mod frustum;
 
 pub use frustum::Frustum;
 
+/// The light-kind discriminants, re-exported so a consumer downstream of the
+/// membrane can read [`ExtractedLight::kind`] without linking `gg-ecs` — which
+/// `gg-render` does not, and should not have to for two constants.
+pub use gg_ecs::boundary::light;
+
 use gg_ecs::{AliasError, Component, Entity, Query, World};
 use gg_math::{render, sim};
 use rayon::prelude::*;
@@ -118,6 +123,44 @@ pub struct Instance {
     pub radius: f32,
 }
 
+/// Directional lights one frame may carry. Small on purpose: a scene has a sun,
+/// occasionally a fill, and a game that wants a third is describing something
+/// the shading model would be the wrong place to fix.
+pub const MAX_DIRECTIONAL: usize = 4;
+
+/// Point lights one frame may carry.
+///
+/// A forward pass loops over every one of these per fragment, so the cap is a
+/// per-pixel cost and not a memory one — which is why it is a small number
+/// rather than a large one, and why raising it is a measurement rather than a
+/// preference. Clustered assignment is the answer that makes it large, and it
+/// is P1.
+pub const MAX_POINT: usize = 32;
+
+/// One light in render space: camera-relative, narrowed, ready to shade with.
+///
+/// Colour stays `0x00RRGGBB` rather than becoming a linear triple here. Extract
+/// carries what the game said and converts geometry, not colour — the sRGB
+/// decode belongs beside the one that already happens to every tint, in the
+/// renderer (§4.5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExtractedLight {
+    /// Position relative to the camera origin. Zero for a directional light,
+    /// which has no position to be relative to.
+    pub offset: render::Vec3,
+    /// The direction the light travels, unit length. Zero for a point light.
+    pub direction: render::Vec3,
+    /// `0x00RRGGBB`, sRGB.
+    pub color: u32,
+    /// Linear radiance multiplier.
+    pub intensity: f32,
+    /// Metres at which a point light reaches exactly zero. Zero for a
+    /// directional one, which never does.
+    pub range: f32,
+    /// One of [`gg_ecs::boundary::light`]'s constants.
+    pub kind: u32,
+}
+
 /// One mesh placed inside a scene asset, in that scene's own space (§4.6).
 ///
 /// `f64` translation because the pack stores it that way and narrowing it
@@ -198,6 +241,13 @@ pub struct Extracted {
     /// claim §6 M10 makes, and an unmeasured culler is one that might be
     /// keeping everything.
     pub culled: usize,
+    /// This frame's lights, directional first (§6 M11). Never more than
+    /// [`MAX_DIRECTIONAL`] + [`MAX_POINT`].
+    pub lights: Vec<ExtractedLight>,
+    /// Lights this frame had and could not carry, because a cap was reached.
+    /// Counted rather than logged: a corner of a room going dark is the symptom,
+    /// and a number on the overlay is what turns it into a diagnosis.
+    pub lights_dropped: usize,
     /// Per-chunk staging for the parallel pass, kept so a frame allocates
     /// nothing. Never read by a consumer: [`gather`] is what turns it into the
     /// arrays above, in chunk order.
@@ -215,6 +265,8 @@ impl Default for Extracted {
             camera_origin: sim::DVec3::ZERO,
             frustum: Frustum::UNBOUNDED,
             culled: 0,
+            lights: Vec::new(),
+            lights_dropped: 0,
             scratch: Vec::new(),
         }
     }
@@ -235,6 +287,8 @@ impl Extracted {
         self.camera_origin = camera_origin;
         self.frustum = frustum;
         self.culled = 0;
+        self.lights.clear();
+        self.lights_dropped = 0;
     }
 
     /// Append every entity carrying `T`, narrowed through `camera_origin` and
@@ -324,6 +378,94 @@ impl Extracted {
                 }
             });
         gather(scratch, &mut self.models, &mut self.culled);
+        Ok(())
+    }
+
+    /// Fill [`Extracted::lights`] from the render protocol's
+    /// [`Light`](gg_ecs::boundary::Light) (§6 M11).
+    ///
+    /// Concrete rather than generic, unlike [`Extracted::append`]: a game with
+    /// its own lamp component writes a system that fills in `Light`, which is
+    /// what the protocol is for. A trait here would be surface added for a
+    /// caller that does not exist.
+    ///
+    /// Serial, and that is not an oversight — there are tens of lights where
+    /// there are ten thousand instances, so rayon's per-task cost would be the
+    /// whole of the work. It also keeps this the one place order comes from.
+    ///
+    /// # Selection, stated
+    ///
+    /// - **Directional lights are never culled** and are kept in world order up
+    ///   to [`MAX_DIRECTIONAL`]. They have no position to test.
+    /// - **Point lights are culled by their own range**, through the same
+    ///   frustum every instance goes through: a light whose sphere of influence
+    ///   misses the view lights nothing in it. That is exact rather than
+    ///   heuristic, which is why [`Light::range`](gg_ecs::boundary::Light::range)
+    ///   is defined as the distance the falloff *reaches zero* at.
+    /// - Of the survivors, the **nearest [`MAX_POINT`]** are kept. Nearest and
+    ///   not brightest: brightest would need the shading model here, and a
+    ///   ranking that disagrees with the one the fragment shader would compute
+    ///   is worse than a simple rule stated out loud.
+    ///
+    /// # Errors
+    ///
+    /// If the world refuses the query, which one read alone cannot cause.
+    pub fn append_lights(&mut self, world: &World) -> Result<(), AliasError> {
+        use gg_ecs::boundary::{Light, light};
+
+        let query = Query::<&Light>::new()?;
+        let origin = self.camera_origin;
+        let frustum = self.frustum;
+        // Two passes over a handful of rows, because directional lights go
+        // first in the output and the point ones need ranking before they can
+        // be truncated. Collected rather than streamed for the same reason.
+        let mut suns = Vec::new();
+        let mut points: Vec<(f32, ExtractedLight)> = Vec::new();
+        world.each_ref(&query, |_, light: &Light| match light.kind {
+            light::DIRECTIONAL => suns.push(ExtractedLight {
+                offset: render::Vec3::ZERO,
+                direction: render::to_render(light.direction).normalize_or_zero(),
+                color: light.color,
+                intensity: light.intensity,
+                range: 0.0,
+                kind: light.kind,
+            }),
+            light::POINT => {
+                let offset = render::camera_relative(light.position, origin);
+                if !frustum.contains(offset, light.range) {
+                    return;
+                }
+                points.push((
+                    offset.length_squared(),
+                    ExtractedLight {
+                        offset,
+                        direction: render::Vec3::ZERO,
+                        color: light.color,
+                        intensity: light.intensity,
+                        range: light.range,
+                        kind: light.kind,
+                    },
+                ));
+            }
+            // A kind this build does not know shades nothing. Silent rather
+            // than an error: a dylib built against a later boundary is a
+            // reload away from being right, and a frame is not the place to
+            // fail over it (§4.2.2).
+            _ => {}
+        });
+
+        // Stable, and keyed on the squared distance rather than the distance:
+        // the ordering is the same and the square root is not. `total_cmp`
+        // because a NaN position would otherwise make the sort's output depend
+        // on the comparison order.
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        self.lights_dropped +=
+            suns.len().saturating_sub(MAX_DIRECTIONAL) + points.len().saturating_sub(MAX_POINT);
+        suns.truncate(MAX_DIRECTIONAL);
+        self.lights.extend(suns);
+        self.lights
+            .extend(points.into_iter().take(MAX_POINT).map(|(_, light)| light));
         Ok(())
     }
 }
@@ -888,6 +1030,128 @@ mod tests {
         assert_eq!(out.models.len(), 1, "kept, though it is behind the camera");
         assert_eq!(out.culled, 0);
         assert!(!out.models[0].radius.is_finite());
+    }
+
+    fn lit_world(lights: &[gg_ecs::boundary::Light]) -> World {
+        use gg_ecs::boundary::Light;
+        let mut world = World::new();
+        world.register::<Light>().unwrap();
+        for &light in lights {
+            let e = world.spawn();
+            world.insert(e, light).unwrap();
+        }
+        world
+    }
+
+    fn extract_lights(world: &World, origin: sim::DVec3, frustum: Frustum) -> Extracted {
+        let mut out = Extracted::default();
+        out.clear(origin, frustum);
+        out.append_lights(world).unwrap();
+        out
+    }
+
+    #[test]
+    fn a_point_light_narrows_through_the_camera_and_a_sun_has_no_position() {
+        use gg_ecs::boundary::{Light, light};
+        // The membrane again, on a light: 10^12 m out, an absolute `f32`
+        // position would put the lamp and the wall it lights on the same point.
+        let far = 1.0e12;
+        let world = lit_world(&[
+            Light::sun(sim::Vec3::new(0.0, -1.0, 0.0), 0x00ff_ffff, 3.0),
+            Light::point(
+                sim::DVec3::new(far + 2.0, 0.0, 0.0),
+                0x00ff_8800,
+                20.0,
+                50.0,
+            ),
+        ]);
+        let out = extract_lights(&world, sim::DVec3::new(far, 0.0, 0.0), Frustum::UNBOUNDED);
+
+        assert_eq!(out.lights.len(), 2);
+        // Directional first, whatever order the world held them in.
+        assert_eq!(out.lights[0].kind, light::DIRECTIONAL);
+        assert_eq!(out.lights[0].offset, render::Vec3::ZERO);
+        assert_eq!(out.lights[0].direction, render::Vec3::NEG_Y);
+        assert_eq!(out.lights[1].kind, light::POINT);
+        assert_eq!(out.lights[1].offset, render::Vec3::new(2.0, 0.0, 0.0));
+        assert_eq!(out.lights[1].direction, render::Vec3::ZERO);
+        assert_eq!(out.lights_dropped, 0);
+    }
+
+    #[test]
+    fn a_point_light_whose_reach_misses_the_view_is_culled_and_a_sun_never_is() {
+        use gg_ecs::boundary::Light;
+        let world = lit_world(&[
+            // Behind the camera and short-range: nothing it lights is on screen.
+            Light::point(sim::DVec3::new(0.0, 0.0, 40.0), 0x00ff_ffff, 5.0, 1.0),
+            // Also behind the camera, but reaching well past it — a lamp behind
+            // your head still lights the wall in front of you.
+            Light::point(sim::DVec3::new(0.0, 0.0, 4.0), 0x00ff_ffff, 5.0, 60.0),
+            Light::sun(sim::Vec3::new(0.0, -1.0, 0.0), 0x00ff_ffff, 1.0),
+        ]);
+        let out = extract_lights(&world, sim::DVec3::ZERO, looking_forward());
+        assert_eq!(out.lights.len(), 2, "{:?}", out.lights);
+        assert_eq!(out.lights[1].range, 60.0, "the far-reaching one survived");
+    }
+
+    #[test]
+    fn past_the_cap_the_nearest_lights_win_and_the_rest_are_counted() {
+        use gg_ecs::boundary::Light;
+        // Spawned far-to-near, so world order is the *opposite* of the answer:
+        // a truncation that kept spawn order would keep exactly the wrong set.
+        let lights: Vec<Light> = (0..MAX_POINT + 8)
+            .map(|i| {
+                let z = -((MAX_POINT + 8 - i) as f64);
+                Light::point(sim::DVec3::new(0.0, 0.0, z), 0x00ff_ffff, 1.0, 100.0)
+            })
+            .collect();
+        let out = extract_lights(&lit_world(&lights), sim::DVec3::ZERO, Frustum::UNBOUNDED);
+
+        assert_eq!(out.lights.len(), MAX_POINT);
+        assert_eq!(out.lights_dropped, 8);
+        // Nearest first, and the nearest of all is the last one spawned.
+        assert_eq!(out.lights[0].offset.z, -1.0);
+        let mut previous = f32::NEG_INFINITY;
+        for light in &out.lights {
+            let distance = light.offset.length();
+            assert!(distance >= previous, "{:?} is out of order", light.offset);
+            previous = distance;
+        }
+    }
+
+    #[test]
+    fn the_light_list_is_the_same_every_run() {
+        use gg_ecs::boundary::Light;
+        // Equal distances on purpose: the sort has to be stable for the frame
+        // to be, and ties are where an unstable one shows.
+        let lights: Vec<Light> = (0..12)
+            .map(|i| {
+                Light::point(
+                    sim::DVec3::new(0.0, 0.0, -5.0),
+                    0x0011_0000 * (i + 1),
+                    1.0,
+                    10.0,
+                )
+            })
+            .collect();
+        let world = lit_world(&lights);
+        let first = extract_lights(&world, sim::DVec3::ZERO, Frustum::UNBOUNDED);
+        for _ in 0..8 {
+            let again = extract_lights(&world, sim::DVec3::ZERO, Frustum::UNBOUNDED);
+            assert_eq!(again.lights, first.lights);
+        }
+    }
+
+    #[test]
+    fn clearing_a_frame_forgets_last_frames_lights() {
+        use gg_ecs::boundary::Light;
+        let world = lit_world(&[Light::sun(sim::Vec3::new(0.0, -1.0, 0.0), 0x00ff_ffff, 1.0)]);
+        let mut out = Extracted::default();
+        out.clear(sim::DVec3::ZERO, Frustum::UNBOUNDED);
+        out.append_lights(&world).unwrap();
+        out.clear(sim::DVec3::ZERO, Frustum::UNBOUNDED);
+        out.append_lights(&world).unwrap();
+        assert_eq!(out.lights.len(), 1, "appended twice, not accumulated");
     }
 
     #[test]

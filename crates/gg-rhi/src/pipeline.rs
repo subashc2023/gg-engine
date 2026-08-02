@@ -84,6 +84,11 @@ pub struct PipelineDesc<'a> {
     /// formats, so a pipeline that ignores depth cannot run in a pass that has
     /// one.
     pub depth: DepthMode,
+    /// Whether fragments are depth-biased, with the amount supplied per draw
+    /// through [`DrawSpec::depth_bias`](crate::DrawSpec::depth_bias). Only the
+    /// shadow pass wants it, and it is dynamic so a CVar can move it while the
+    /// wall it is acne-ing on is on screen (§6 M11).
+    pub depth_bias: bool,
 }
 
 /// An opaque handle to a created pipeline. Plain data on purpose: handles
@@ -100,6 +105,7 @@ pub(crate) struct PipelineEntry {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
     pub push_constant_size: u32,
+    pub depth_bias: bool,
 }
 
 /// The pipelines plus the disk-backed `vk::PipelineCache` behind them.
@@ -237,6 +243,7 @@ impl PipelineStore {
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .depth_bias_enable(desc.depth_bias)
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
@@ -249,7 +256,10 @@ impl PipelineStore {
             };
         let blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let mut dynamic_states = vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        if desc.depth_bias {
+            dynamic_states.push(vk::DynamicState::DEPTH_BIAS);
+        }
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         // Reverse-Z: clear to 0.0, keep the *greater* fragment. `GREATER_OR_EQUAL`
@@ -316,6 +326,7 @@ impl PipelineStore {
                 pipeline,
                 layout,
                 push_constant_size: desc.push_constant_size,
+                depth_bias: desc.depth_bias,
             },
         );
         Ok(PipelineHandle(id))
@@ -404,6 +415,7 @@ pub(crate) struct ResolvedDraw<'a> {
     pub count: u32,
     pub index_buffer: Option<vk::Buffer>,
     pub indirect: Option<(vk::Buffer, u64)>,
+    pub depth_bias: Option<crate::DepthBias>,
 }
 
 /// Record one draw inside an active dynamic-rendering pass: full-target
@@ -444,6 +456,11 @@ pub(crate) unsafe fn record_draw(
     unsafe {
         device.cmd_set_viewport(cmd, 0, &viewport);
         device.cmd_set_scissor(cmd, 0, &scissor);
+        // Clamp stays 0: clamping needs `depthBiasClamp`, an optional feature
+        // §4.3 does not require, and the shadow pass has no use for it.
+        if let Some(bias) = draw.depth_bias {
+            device.cmd_set_depth_bias(cmd, bias.constant, 0.0, bias.slope);
+        }
         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, entry.pipeline);
         device.cmd_bind_descriptor_sets(
             cmd,

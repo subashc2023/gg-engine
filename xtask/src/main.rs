@@ -4,10 +4,12 @@
 //! every subcommand now runs something.
 
 mod assets;
+mod backlog;
 mod bench;
 mod budgets;
 mod ci;
 mod dist;
+mod dx;
 mod fresh;
 mod probe;
 mod public_api;
@@ -37,6 +39,8 @@ fn main() {
         Some("timers") => timers::run(&rest),
         Some("assets") => assets::run(&rest),
         Some("bench") => bench::run(&rest),
+        Some("dx") => dx::run(&rest),
+        Some("backlog") => backlog::run(),
         _ => usage(),
     };
 
@@ -60,6 +64,8 @@ fn usage() -> anyhow::Result<()> {
          dist                                             dist gate: build+run tier-dist, symbol absence, crash symbolization (§5.8)\n\
          reload [--cross-tier|--segments|--chaos|--latency]  the M5 shell gates over demo 03; no flag runs the set\n\
          bench [--record]                                 smoke on lavapipe; --record archives real numbers per machine (§4.11)\n\
+         dx [--record]                                    developer-experience benchmarks: steps, lines, rebuild latency (§8)\n\
+         backlog                                          the P1/P2 items, found in the doc comments that defer them (§6 M12)\n\
          assets [--check]                                 compile every demo's asset tree; --check proves two clean runs agree byte for byte (§4.6)"
     )
 }

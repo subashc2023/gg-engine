@@ -178,6 +178,27 @@ impl<'a> GameWorld<'a> {
         }
     }
 
+    /// [`insert`](Self::insert), logging a refusal instead of returning it.
+    ///
+    /// Every game crate wrote this by hand — five identical `fn report`s, and
+    /// the M12 template criterion is what counted them (§6 M12). There is
+    /// nothing a system can *do* with a `BoundaryError`: it means this build
+    /// declared a component the host was never told about, so the only correct
+    /// response is to say so loudly and carry on. [`insert`](Self::insert)
+    /// stays for the caller that genuinely wants to branch.
+    pub fn put<T: Component>(&mut self, entity: Entity, value: T) {
+        if let Err(refused) = self.insert(entity, value) {
+            self.log(crate::boundary::log_level::ERROR, &refused.to_string());
+        }
+    }
+
+    /// Spawn one entity carrying `value`, as [`put`](Self::put) reports.
+    pub fn spawn_with<T: Component>(&mut self, value: T) -> Entity {
+        let entity = self.spawn();
+        self.put(entity, value);
+        entity
+    }
+
     /// Drop a component. `false` if the entity did not have it.
     pub fn remove<T: Component>(&mut self, entity: Entity) -> bool {
         // SAFETY: as `spawn`.

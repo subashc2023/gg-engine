@@ -285,9 +285,15 @@ impl Gpu {
     /// are indices). Update-after-bind, so this is legal mid-flight.
     pub fn register_texture(&mut self, handle: ImageHandle) -> Result<TextureIndex, RhiError> {
         let image = self.resources.image(handle)?;
-        if image.format.is_depth() {
+        // A depth image gets a slot only if it asked for one at creation:
+        // `SAMPLED` has to be in the usage flags, and a prepass target that
+        // never declared it would fail validation at the descriptor write
+        // rather than here, where the name is still in hand.
+        if image.format.is_depth() && image.usage != crate::ImageUse::DepthSampled {
             return Err(RhiError::Loader(
-                "a depth image is an attachment, not a bindless texture".into(),
+                "a depth image is an attachment, not a bindless texture — create it as \
+                 `ImageUse::DepthSampled` if a later pass reads it"
+                    .into(),
             ));
         }
         let view = image.view;

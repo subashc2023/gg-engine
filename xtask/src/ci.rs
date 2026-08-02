@@ -69,6 +69,7 @@ fn push() -> anyhow::Result<()> {
         ]),
         "cargo clippy -p gg-debug --features tracy (the half no tier links)",
     )?;
+    tracy_stays_on_loopback()?;
     exec(cargo().args(["deny", "check"]), "cargo deny check")?;
     greps()?;
     allowlist_crosscheck()?;
@@ -126,6 +127,11 @@ fn nightly() -> anyhow::Result<()> {
     // driving a real game dylib.
     crate::shell::gates(&[])?;
     crate::bench::run(&[])?;
+    // Not `--record`: the numbers are a manual act like `bench --record` (§8).
+    // What the tier is for is the other failure — every scenario is a text edit
+    // against real source, and a rename should turn this red rather than
+    // quietly measuring nothing.
+    crate::dx::run(&[])?;
     gpu_tests()?;
     golden_suite()?;
     println!(
@@ -607,6 +613,46 @@ fn aarch64_leg() -> anyhow::Result<()> {
             &format!("hierarchy determinism on aarch64 under qemu ({profile} profile)"),
         )?;
     }
+    Ok(())
+}
+
+/// §1.5's neighbour: no automated tier may put a *socket* on the user's network
+/// either. Tracy's client binds a listener from a static constructor — before
+/// `main`, with no profiler attached — and Windows raises its firewall dialog
+/// once per binary path that binds a non-loopback one, which nextest's build
+/// hashes make new on every rebuild. `only-localhost` is what holds it at
+/// 127.0.0.1. Asserted rather than assumed because features arrive by *union*:
+/// `profiling` already re-enables `broadcast` through `profile-with-tracy`, and
+/// the same route could as easily drop ours in a bump.
+fn tracy_stays_on_loopback() -> anyhow::Result<()> {
+    let out = cargo()
+        .args([
+            "tree",
+            "-p",
+            "gg-runtime",
+            "--no-default-features",
+            "--features",
+            "tier-instrumented",
+            "-e",
+            "features",
+            "-i",
+            "tracy-client",
+        ])
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to spawn `cargo tree`: {e}"))?;
+    // Absent from the graph is the stronger form of the same guarantee, and
+    // that is what `-i` failing means here.
+    if !out.status.success() {
+        println!("xtask: tier-instrumented links no tracy-client — nothing binds");
+        return Ok(());
+    }
+    anyhow::ensure!(
+        String::from_utf8_lossy(&out.stdout).contains("only-localhost"),
+        "tier-instrumented resolves tracy-client without `only-localhost`: its listener would \
+         bind every interface, and the desk would collect a firewall prompt per build hash. \
+         Fix the feature list in the workspace Cargo.toml, not this gate."
+    );
+    println!("xtask: tracy's listener stays on loopback (`only-localhost` resolved)");
     Ok(())
 }
 

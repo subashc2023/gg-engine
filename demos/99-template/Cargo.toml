@@ -1,0 +1,37 @@
+# demo 99-template (§6 M12): the shortest complete game crate, and the
+# "write a demo in ten minutes" guide. Being a demo, it compiles in CI forever —
+# which is the point: a prose guide rots, this one goes red.
+#
+# Three engine dependencies and no fourth, like every game crate: §3's deny pin
+# is what keeps the boundary fingerprint's scope and a dylib's link set the same
+# list. `gg-abi` arrives through `gg-ecs`'s re-exports.
+
+[package]
+name = "demo-99-template"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "demo_99_template"
+path = "src/lib.rs"
+# cdylib is what the host loads; rlib is what the tests link. Both from one
+# build, so the artifact under test is the artifact that ships.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `gg_game!` exports fixed `extern "C"` symbol names, so two game rlibs cannot
+# link into one binary. Default-on: the cdylib and this crate's own tests are
+# unaffected, and a harness that wants the pure functions takes it off.
+default = ["game"]
+game = []
+
+[dependencies]
+bytemuck.workspace = true
+gg-ecs = { path = "../../crates/gg-ecs" }
+gg-math = { path = "../../crates/gg-math" }

@@ -50,6 +50,40 @@ pub fn perspective_reverse_z(vertical_fov: f32, aspect_ratio: f32, near: f32) ->
     camera::rh::proj::vulkan::perspective_infinite_reverse(vertical_fov, aspect_ratio, near)
 }
 
+/// The shadow map's projection (§6 M11): right-handed Y-up view space in,
+/// Vulkan NDC out, **reverse-Z with a finite far plane** — `near` maps to depth
+/// 1 and `far` to depth 0.
+///
+/// Finite rather than infinite, unlike [`perspective_reverse_z`], and that is
+/// the difference worth naming: a directional light has no position, so its
+/// depth range is a *choice* — the slab of the world the cascade covers. An
+/// infinite far plane would put every unlit metre of the scene into the same
+/// depth budget as the metre the shadow is being tested at.
+///
+/// Reverse-Z is not an optimisation here but a compatibility requirement: the
+/// shadow map is compared against with the same `GREATER_OR_EQUAL` and cleared
+/// to the same `0.0` as every other depth buffer in the engine (§2, Math row),
+/// and one buffer with the other convention would read as a shadow covering
+/// exactly what is lit.
+pub fn orthographic_reverse_z(half_width: f32, half_height: f32, near: f32, far: f32) -> Mat4 {
+    // Built rather than borrowed from glam for the same reason
+    // `perspective_reverse_z` is a named function: the convention has one home.
+    // Columns, because glam is column-major.
+    //
+    // `z_ndc = (z + far) / (far - near)` for a view-space z in [-far, -near],
+    // which is the *reverse* of the ordinary orthographic's mapping. The Y row
+    // is negated because Vulkan's clip space is Y-down and glam's `vulkan`
+    // perspective already is — a shadow map built the other way up would put
+    // every shadow on the wrong side of its caster.
+    let depth = far - near;
+    Mat4::from_cols(
+        Vec4::new(1.0 / half_width, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, -1.0 / half_height, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 1.0 / depth, 0.0),
+        Vec4::new(0.0, 0.0, far / depth, 1.0),
+    )
+}
+
 /// A `float4x4` push-constant field, row-major — the layout `gg-shaders`
 /// reflects and asserts (§4.4). glam is column-major, so this transposes: a
 /// missing transpose here is the classic silently-wrong render.
@@ -92,6 +126,46 @@ mod tests {
         let mid = p * Vec4::new(0.0, 0.0, -10.0, 1.0);
         assert!(mid.z / mid.w < near.z / near.w);
         assert!(mid.z / mid.w > far.z / far.w);
+    }
+
+    #[test]
+    fn the_shadow_projection_agrees_with_the_camera_on_every_axis() {
+        let o = orthographic_reverse_z(10.0, 10.0, 1.0, 51.0);
+        // Reverse-Z, the same way round as the perspective: near is 1, far is 0.
+        let near = o * Vec4::new(0.0, 0.0, -1.0, 1.0);
+        let far = o * Vec4::new(0.0, 0.0, -51.0, 1.0);
+        assert!((near.z / near.w - 1.0).abs() < 1e-6, "near {near:?}");
+        assert!((far.z / far.w).abs() < 1e-6, "far {far:?}");
+        // Orthographic: w is 1 everywhere, which is what makes depth linear and
+        // is the reason a directional light gets this projection and not the
+        // other one.
+        assert_eq!(near.w, 1.0);
+        assert_eq!(far.w, 1.0);
+        // And nearer still compares greater, so one `GREATER_OR_EQUAL` serves
+        // both buffers.
+        let mid = o * Vec4::new(0.0, 0.0, -26.0, 1.0);
+        assert!(mid.z < near.z && mid.z > far.z);
+
+        // The Y flip is the bug that survives every scalar check and shows up
+        // as shadows on the wrong side of their casters, so it is compared
+        // against the projection that already has it right rather than asserted
+        // from memory.
+        let p = perspective_reverse_z(std::f32::consts::FRAC_PI_3, 1.0, 0.1);
+        let above = Vec4::new(0.0, 1.0, -4.0, 1.0);
+        let right = Vec4::new(1.0, 0.0, -4.0, 1.0);
+        assert_eq!(
+            (o * above).y.signum(),
+            (p * above).y.signum(),
+            "Y disagrees"
+        );
+        assert_eq!(
+            (o * right).x.signum(),
+            (p * right).x.signum(),
+            "X disagrees"
+        );
+        // Half-extents are half-extents: the edge of the slab lands on the edge
+        // of clip space.
+        assert!(((o * Vec4::new(10.0, 0.0, -2.0, 1.0)).x - 1.0).abs() < 1e-6);
     }
 
     #[test]

@@ -58,6 +58,10 @@ pub struct Stats<'a> {
     pub passes: &'a [PassTiming],
     /// Live device allocations.
     pub memory: MemoryUse,
+    /// The frame's luminance distribution, darkest bucket first, or `None` when
+    /// `r.histogram` is off (§6 M11). Buckets are log2 luminance over twelve
+    /// stops; the renderer decides the range and this only draws it.
+    pub luminance: Option<&'a [u32; gg_render::luminance::BINS]>,
 }
 
 /// Frames kept for the average — two seconds at 60 Hz, long enough that the
@@ -71,6 +75,11 @@ const DIM: u32 = 0xff8a_94a0;
 const ACCENT: u32 = 0xff7f_d0a0;
 /// Inset between a panel's edge and its text.
 const PAD: f32 = 4.0;
+/// The histogram's plot area, in unscaled cells. One cell per bucket, so the
+/// width is the bucket count and a bar is exactly one column — no resampling
+/// between the data and the picture.
+const CHART_WIDTH: f32 = gg_render::luminance::BINS as f32;
+const CHART_HEIGHT: f32 = 20.0;
 
 /// The overlay's own state across frames: the frame-time window it averages
 /// and the console's line and scrollback. Everything else is rebuilt per frame.
@@ -215,15 +224,16 @@ impl Overlay {
             rows.push((format!("rdoc  {:>7}  F11", capture::count()), DIM));
         }
 
+        let chart = stats.luminance.map_or(0.0, |_| CHART_HEIGHT + line);
         let width = rows
             .iter()
             .map(|(text, _)| DrawList::width(text))
-            .fold(0.0, f32::max);
+            .fold(CHART_WIDTH, f32::max);
         let panel = Rect::new(
             PAD,
             PAD,
             width + PAD * 2.0,
-            rows.len() as f32 * line + PAD * 2.0,
+            rows.len() as f32 * line + chart + PAD * 2.0,
         );
         self.list.rect(panel, PANEL);
         // Clipped to the panel it was measured against: a pass name longer than
@@ -233,7 +243,35 @@ impl Overlay {
             self.list
                 .text(PAD * 2.0, PAD * 2.0 + i as f32 * line, text, *color);
         }
+        if let Some(bins) = stats.luminance {
+            self.histogram(bins, PAD * 2.0, PAD * 2.0 + rows.len() as f32 * line);
+        }
         self.list.pop_clip();
+    }
+
+    /// The luminance histogram (§6 M11's exit row): one bar per bucket, darkest
+    /// on the left, normalized to the tallest.
+    ///
+    /// Normalized to the tallest rather than to the sample count, and that is
+    /// what makes it readable: a frame is usually dominated by one bucket, and a
+    /// chart scaled to the total would show that bucket and a flat line.
+    fn histogram(&mut self, bins: &[u32; gg_render::luminance::BINS], x: f32, y: f32) {
+        let line = DrawList::line_height();
+        let tallest = bins.iter().copied().max().unwrap_or(0).max(1) as f32;
+        self.list
+            .text(x, y, "luma  dark ....... 0EV ... bright", DIM);
+        let top = y + line;
+        for (i, &count) in bins.iter().enumerate() {
+            let height = (count as f32 / tallest * CHART_HEIGHT).max(f32::from(count > 0));
+            let bar = Rect::new(x + i as f32, top + CHART_HEIGHT - height, 1.0, height);
+            self.list.rect(bar, ACCENT);
+        }
+        // The bucket a luminance of 1.0 falls in — the reference an exposure
+        // decision is made against. A tick rather than a number, because the
+        // question the chart answers is "where is the mass", not "how much".
+        let zero_ev = gg_render::luminance::BINS * 2 / 3;
+        self.list
+            .rect(Rect::new(x + zero_ev as f32, top, 1.0, CHART_HEIGHT), DIM);
     }
 
     fn console_panel(&mut self, logical: (f32, f32)) {
@@ -328,6 +366,7 @@ mod tests {
             tick: 42,
             passes: &[],
             memory: MemoryUse::default(),
+            luminance: None,
         }
     }
 
@@ -404,6 +443,36 @@ mod tests {
         assert!(SHOW.bool());
         assert!(!overlay.build(&stats()).is_empty());
         SHOW.reset();
+    }
+
+    /// The histogram is drawn only when there is one, and the panel grows to
+    /// hold it. A chart clipped to a panel sized for text would be a chart
+    /// nobody can see, which is the failure this shape is chosen to avoid.
+    #[test]
+    fn the_histogram_appears_only_when_the_frame_measured_one() {
+        let mut overlay = Overlay::default();
+        let without = overlay.build(&stats()).len();
+
+        let mut bins = [0u32; gg_render::luminance::BINS];
+        bins[20] = 100;
+        bins[21] = 40;
+        let with = Stats {
+            luminance: Some(&bins),
+            ..stats()
+        };
+        let count = overlay.build(&with).len();
+        assert!(count > without, "{count} vertices vs {without}");
+
+        // Every bar stays inside the panel it was measured against, which the
+        // clip would otherwise hide rather than fix.
+        let extent = with.extent;
+        for vertex in overlay.build(&with) {
+            assert!(
+                vertex.pos[0] <= extent.0 as f32 && vertex.pos[1] <= extent.1 as f32,
+                "{:?} is off a {extent:?} target",
+                vertex.pos
+            );
+        }
     }
 
     /// Every quad the overlay emits stays on the target it was told about — a

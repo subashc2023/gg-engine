@@ -178,6 +178,7 @@ fn the_overlay_the_shell_builds_reaches_the_screen() {
             tick: 1234,
             passes: &[],
             memory: MemoryUse::default(),
+            luminance: None,
         })
         .to_vec();
     assert!(!vertices.is_empty(), "the default overlay draws");

@@ -94,6 +94,7 @@ pub fn system_id(name: &str) -> u64 {
 pub struct SideTableId(u64);
 
 impl SideTableId {
+    /// The id for a declared side-table name, under the side-table domain.
     #[must_use]
     pub fn of(declared: &str) -> Self {
         let mut h = blake3::Hasher::new();
@@ -104,6 +105,7 @@ impl SideTableId {
         Self(u64::from_le_bytes(out))
     }
 
+    /// The raw bits, for storage and diagnostics.
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
@@ -127,13 +129,14 @@ impl fmt::Debug for SideTableId {
 pub struct SchemaHash(u128);
 
 impl SchemaHash {
-    /// Fold one field into a schema hash under construction. Order matters:
-    /// this is a declaration-order encoding, not a set.
+    /// Wrap bits the derive computed at compile time. The only intended caller
+    /// is generated code — a hand-built value is a schema claim nothing checked.
     #[must_use]
     pub const fn from_raw(bits: u128) -> Self {
         Self(bits)
     }
 
+    /// The raw bits, for storage and diagnostics.
     #[must_use]
     pub const fn get(self) -> u128 {
         self.0
@@ -156,6 +159,9 @@ impl fmt::Debug for SchemaHash {
 pub struct CanonicalHash(u128);
 
 impl CanonicalHash {
+    /// The raw bits. Compare these across architectures; do not compare them
+    /// against a [`ChunkedHash`](crate::chunked::ChunkedHash), which is
+    /// version-local by construction (§4.2.1).
     #[must_use]
     pub const fn get(self) -> u128 {
         self.0
@@ -228,42 +234,54 @@ impl StateHasher {
         self.delimited(s.as_bytes());
     }
 
+    /// One byte. The integer family below is **little-endian regardless of
+    /// host**, which is what makes the encoding an architecture-independent
+    /// contract rather than a memory dump (§4.2.1).
     pub fn u8(&mut self, v: u8) {
         self.inner.update(&[v]);
     }
 
+    /// Two bytes, little-endian.
     pub fn u16(&mut self, v: u16) {
         self.inner.update(&v.to_le_bytes());
     }
 
+    /// Four bytes, little-endian.
     pub fn u32(&mut self, v: u32) {
         self.inner.update(&v.to_le_bytes());
     }
 
+    /// Eight bytes, little-endian.
     pub fn u64(&mut self, v: u64) {
         self.inner.update(&v.to_le_bytes());
     }
 
+    /// Sixteen bytes, little-endian.
     pub fn u128(&mut self, v: u128) {
         self.inner.update(&v.to_le_bytes());
     }
 
+    /// One byte, two's complement.
     pub fn i8(&mut self, v: i8) {
         self.inner.update(&v.to_le_bytes());
     }
 
+    /// Two bytes, little-endian two's complement.
     pub fn i16(&mut self, v: i16) {
         self.inner.update(&v.to_le_bytes());
     }
 
+    /// Four bytes, little-endian two's complement.
     pub fn i32(&mut self, v: i32) {
         self.inner.update(&v.to_le_bytes());
     }
 
+    /// Eight bytes, little-endian two's complement.
     pub fn i64(&mut self, v: i64) {
         self.inner.update(&v.to_le_bytes());
     }
 
+    /// Sixteen bytes, little-endian two's complement.
     pub fn i128(&mut self, v: i128) {
         self.inner.update(&v.to_le_bytes());
     }
@@ -276,6 +294,7 @@ impl StateHasher {
         self.u32(v.to_bits());
     }
 
+    /// As [`Self::f32`], by `to_bits()`.
     pub fn f64(&mut self, v: f64) {
         self.u64(v.to_bits());
     }

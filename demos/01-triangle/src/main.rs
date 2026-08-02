@@ -85,6 +85,7 @@ impl HotReload {
             color: gg_rhi::ColorTarget::Backbuffer,
             blend: gg_rhi::Blend::Off,
             depth: gg_rhi::DepthMode::Off,
+            depth_bias: false,
         };
         match rhi.create_pipeline(&desc) {
             Ok(handle) => {
@@ -220,6 +221,7 @@ fn main() -> anyhow::Result<()> {
                 count: scene::VERTEX_COUNT,
                 index_buffer: None,
                 indirect: None,
+                depth_bias: None,
             };
             match frame(r, &mut transients, std::slice::from_ref(&draw)) {
                 Ok(FrameOutcome::Presented { .. }) => {

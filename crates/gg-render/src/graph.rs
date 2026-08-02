@@ -267,26 +267,83 @@ impl<'p> Frame<'p> {
     /// A pooled color attachment at the frame's extent, registered in the
     /// bindless array so a later pass can sample it.
     ///
+    /// The format is the caller's: the scene attachment is `Rgba16F` since M11
+    /// (radiance leaves the forward pass above 1.0 and the tonemapper is what
+    /// brings it down), while a pass resolving to the screen writes 8-bit sRGB.
+    ///
     /// # Errors
     ///
     /// Allocation, or a full bindless array.
-    pub fn color(&mut self, name: &'static str) -> Result<ResourceId, RhiError> {
-        let entry = self
-            .pool
-            .acquire(self.ctx, name, self.extent, ImageFormat::Rgba8Srgb)?;
+    pub fn color(
+        &mut self,
+        name: &'static str,
+        format: ImageFormat,
+    ) -> Result<ResourceId, RhiError> {
+        let entry =
+            self.pool
+                .acquire(self.ctx, name, self.extent, format, ImageUse::ColorTarget)?;
         Ok(self.push(name, Target::Image(entry.image), entry.texture))
     }
 
-    /// A pooled depth attachment at the frame's extent.
+    /// A pooled depth attachment at the frame's extent, written and never read
+    /// as a texture — a prepass target.
     ///
     /// # Errors
     ///
     /// Allocation.
     pub fn depth(&mut self, name: &'static str) -> Result<ResourceId, RhiError> {
+        let entry = self.pool.acquire(
+            self.ctx,
+            name,
+            self.extent,
+            ImageFormat::Depth32,
+            ImageUse::Depth,
+        )?;
+        Ok(self.push(name, Target::Image(entry.image), None))
+    }
+
+    /// A pooled color attachment at **its own** extent, with a bindless slot —
+    /// the luminance resample's small target (§6 M11).
+    ///
+    /// # Errors
+    ///
+    /// Allocation, or a full bindless array.
+    pub fn color_at(
+        &mut self,
+        name: &'static str,
+        extent: (u32, u32),
+        format: ImageFormat,
+    ) -> Result<ResourceId, RhiError> {
         let entry = self
             .pool
-            .acquire(self.ctx, name, self.extent, ImageFormat::Depth32)?;
-        Ok(self.push(name, Target::Image(entry.image), None))
+            .acquire(self.ctx, name, extent, format, ImageUse::ColorTarget)?;
+        Ok(self.push(name, Target::Image(entry.image), entry.texture))
+    }
+
+    /// A pooled depth attachment at **its own** extent, with a bindless slot —
+    /// the shadow map (§6 M11).
+    ///
+    /// Its own extent because a shadow map's resolution is a quality knob and
+    /// not the window's, and its own [`ImageUse`] because `SAMPLED` costs some
+    /// drivers the compressed depth layout that the prepass target — which
+    /// nothing samples — should keep.
+    ///
+    /// # Errors
+    ///
+    /// Allocation, or a full bindless array.
+    pub fn shadow(
+        &mut self,
+        name: &'static str,
+        extent: (u32, u32),
+    ) -> Result<ResourceId, RhiError> {
+        let entry = self.pool.acquire(
+            self.ctx,
+            name,
+            extent,
+            ImageFormat::Depth32,
+            ImageUse::DepthSampled,
+        )?;
+        Ok(self.push(name, Target::Image(entry.image), entry.texture))
     }
 
     /// Import a host-readable buffer as a resource, so a readback pass can name
@@ -577,6 +634,7 @@ impl Transients {
         name: &str,
         extent: (u32, u32),
         format: ImageFormat,
+        usage: ImageUse,
     ) -> Result<Entry, RhiError> {
         let slot = ctx.frame_slot();
         let frame = self.frame;
@@ -592,20 +650,17 @@ impl Transients {
             name: &format!("gg.graph.{name}.{slot}"),
             extent,
             format,
-            usage: match format.is_depth() {
-                true => ImageUse::Depth,
-                false => ImageUse::ColorTarget,
-            },
+            usage,
             // A transient is written and sampled at full size; a chain would be
             // levels no pass declares and no upload fills.
             mip_levels: 1,
         })?;
-        // Colour attachments get their bindless slot once, here, rather than
+        // Sampled attachments get their bindless slot once, here, rather than
         // per frame: a descriptor write every frame would be a cost the graph
         // charges for nothing, since the pool hands back the same image.
-        let texture = match format.is_depth() {
-            true => None,
-            false => Some(ctx.register_texture(image)?),
+        let texture = match usage {
+            ImageUse::Depth => None,
+            _ => Some(ctx.register_texture(image)?),
         };
         let entry = Entry { image, texture };
         self.slots.push(Slot {

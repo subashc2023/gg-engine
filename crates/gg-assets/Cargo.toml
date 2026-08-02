@@ -40,3 +40,8 @@ bytemuck = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "load"
+# No framework, for the reason gg-ecs's query bench states (§4.11, §3 budget).
+harness = false

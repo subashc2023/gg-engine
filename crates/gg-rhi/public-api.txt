@@ -1,0 +1,282 @@
+pub mod gg_rhi
+pub enum gg_rhi::Access
+pub gg_rhi::Access::ColorWrite
+pub gg_rhi::Access::CopyDst
+pub gg_rhi::Access::CopySrc
+pub gg_rhi::Access::DepthRead
+pub gg_rhi::Access::DepthWrite
+pub gg_rhi::Access::HostRead
+pub gg_rhi::Access::None
+pub gg_rhi::Access::Present
+pub gg_rhi::Access::SampledRead
+pub gg_rhi::Access::StorageReadWrite
+pub enum gg_rhi::Blend
+pub gg_rhi::Blend::Alpha
+pub gg_rhi::Blend::Off
+pub enum gg_rhi::BufferKind
+pub gg_rhi::BufferKind::Dynamic
+pub gg_rhi::BufferKind::Index
+pub gg_rhi::BufferKind::Indirect
+pub gg_rhi::BufferKind::Readback
+pub gg_rhi::BufferKind::Storage
+pub enum gg_rhi::ColorTarget
+pub gg_rhi::ColorTarget::Backbuffer
+pub gg_rhi::ColorTarget::Format(gg_rhi::ImageFormat)
+pub gg_rhi::ColorTarget::None
+pub enum gg_rhi::DepthMode
+pub gg_rhi::DepthMode::Off
+pub gg_rhi::DepthMode::TestOnly
+pub gg_rhi::DepthMode::Write
+pub enum gg_rhi::FrameOutcome
+pub gg_rhi::FrameOutcome::Presented
+pub gg_rhi::FrameOutcome::Presented::suboptimal: bool
+pub gg_rhi::FrameOutcome::SkippedOutOfDate
+pub gg_rhi::FrameOutcome::SkippedSuspended
+pub enum gg_rhi::FrameStart
+pub gg_rhi::FrameStart::Ready(gg_rhi::FrameToken)
+pub gg_rhi::FrameStart::Skipped(gg_rhi::FrameOutcome)
+pub enum gg_rhi::ImageFormat
+pub gg_rhi::ImageFormat::Bc4Unorm
+pub gg_rhi::ImageFormat::Bc5Unorm
+pub gg_rhi::ImageFormat::Bc7Srgb
+pub gg_rhi::ImageFormat::Depth32
+pub gg_rhi::ImageFormat::Rgba16F
+pub gg_rhi::ImageFormat::Rgba8Srgb
+pub gg_rhi::ImageFormat::Rgba8Unorm
+impl gg_rhi::ImageFormat
+pub fn gg_rhi::ImageFormat::block_extent(self) -> u32
+pub fn gg_rhi::ImageFormat::is_depth(self) -> bool
+pub fn gg_rhi::ImageFormat::packed_size(self, (u32, u32)) -> u64
+pub enum gg_rhi::ImageUse
+pub gg_rhi::ImageUse::ColorTarget
+pub gg_rhi::ImageUse::Depth
+pub gg_rhi::ImageUse::DepthSampled
+pub gg_rhi::ImageUse::Sampled
+pub gg_rhi::ImageUse::Storage
+impl gg_rhi::ImageUse
+pub fn gg_rhi::ImageUse::is_depth(self) -> bool
+pub enum gg_rhi::PassKind<'a>
+pub gg_rhi::PassKind::Barriers
+pub gg_rhi::PassKind::Readback
+pub gg_rhi::PassKind::Readback::dest: gg_rhi::BufferHandle
+pub gg_rhi::PassKind::Readback::source: gg_rhi::Target
+pub gg_rhi::PassKind::Render
+pub gg_rhi::PassKind::Render::color: core::option::Option<gg_rhi::ColorAttachment>
+pub gg_rhi::PassKind::Render::depth: core::option::Option<gg_rhi::DepthAttachment>
+pub gg_rhi::PassKind::Render::draws: &'a [gg_rhi::DrawSpec<'a>]
+pub enum gg_rhi::RhiError
+pub gg_rhi::RhiError::Allocator(alloc::string::String)
+pub gg_rhi::RhiError::DeviceLost(alloc::string::String)
+pub gg_rhi::RhiError::Loader(alloc::string::String)
+pub gg_rhi::RhiError::MissingLayer(alloc::string::String)
+pub gg_rhi::RhiError::NoSuitableDevice(alloc::string::String)
+pub gg_rhi::RhiError::Vk(ash::vk::enums::Result)
+pub enum gg_rhi::Sampler
+pub gg_rhi::Sampler::LinearClamp
+pub gg_rhi::Sampler::LinearRepeat
+pub gg_rhi::Sampler::NearestClamp
+impl gg_rhi::Sampler
+pub const gg_rhi::Sampler::COUNT: u32
+pub fn gg_rhi::Sampler::index(self) -> u32
+pub enum gg_rhi::Target
+pub gg_rhi::Target::Backbuffer
+pub gg_rhi::Target::Buffer(gg_rhi::BufferHandle)
+pub gg_rhi::Target::Image(gg_rhi::ImageHandle)
+pub struct gg_rhi::BufferDesc<'a>
+pub gg_rhi::BufferDesc::kind: gg_rhi::BufferKind
+pub gg_rhi::BufferDesc::name: &'a str
+pub gg_rhi::BufferDesc::size: u64
+pub struct gg_rhi::BufferHandle(_)
+pub struct gg_rhi::Candidate
+pub gg_rhi::Candidate::device_type: &'static str
+pub gg_rhi::Candidate::missing: alloc::vec::Vec<&'static str>
+pub gg_rhi::Candidate::name: alloc::string::String
+pub gg_rhi::Candidate::score: u32
+pub struct gg_rhi::ColorAttachment
+pub gg_rhi::ColorAttachment::clear: core::option::Option<[f32; 4]>
+pub gg_rhi::ColorAttachment::target: gg_rhi::Target
+pub struct gg_rhi::DepthAttachment
+pub gg_rhi::DepthAttachment::clear: core::option::Option<f32>
+pub gg_rhi::DepthAttachment::read_only: bool
+pub gg_rhi::DepthAttachment::store: bool
+pub gg_rhi::DepthAttachment::target: gg_rhi::Target
+pub struct gg_rhi::DepthBias
+pub gg_rhi::DepthBias::constant: f32
+pub gg_rhi::DepthBias::slope: f32
+pub struct gg_rhi::DeviceReport
+pub gg_rhi::DeviceReport::api_version: (u32, u32, u32)
+pub gg_rhi::DeviceReport::candidates: alloc::vec::Vec<gg_rhi::Candidate>
+pub gg_rhi::DeviceReport::chosen: alloc::string::String
+pub gg_rhi::DeviceReport::transfer_dedicated: bool
+pub struct gg_rhi::DrawSpec<'a>
+pub gg_rhi::DrawSpec::count: u32
+pub gg_rhi::DrawSpec::depth_bias: core::option::Option<gg_rhi::DepthBias>
+pub gg_rhi::DrawSpec::index_buffer: core::option::Option<gg_rhi::BufferHandle>
+pub gg_rhi::DrawSpec::indirect: core::option::Option<gg_rhi::Indirect>
+pub gg_rhi::DrawSpec::pipeline: gg_rhi::PipelineHandle
+pub gg_rhi::DrawSpec::push_constants: &'a [u8]
+pub struct gg_rhi::FrameToken
+impl gg_rhi::FrameToken
+pub fn gg_rhi::FrameToken::extent(&self) -> (u32, u32)
+pub struct gg_rhi::GpuClock
+pub gg_rhi::GpuClock::period_ns: f32
+pub gg_rhi::GpuClock::ticks: i64
+pub struct gg_rhi::ImageDesc<'a>
+pub gg_rhi::ImageDesc::extent: (u32, u32)
+pub gg_rhi::ImageDesc::format: gg_rhi::ImageFormat
+pub gg_rhi::ImageDesc::mip_levels: u32
+pub gg_rhi::ImageDesc::name: &'a str
+pub gg_rhi::ImageDesc::usage: gg_rhi::ImageUse
+pub struct gg_rhi::ImageHandle(_)
+pub struct gg_rhi::Indirect
+pub gg_rhi::Indirect::buffer: gg_rhi::BufferHandle
+pub gg_rhi::Indirect::offset: u64
+#[repr(C)] pub struct gg_rhi::IndirectCommand
+pub gg_rhi::IndirectCommand::first_index: u32
+pub gg_rhi::IndirectCommand::first_instance: u32
+pub gg_rhi::IndirectCommand::index_count: u32
+pub gg_rhi::IndirectCommand::instance_count: u32
+pub gg_rhi::IndirectCommand::vertex_offset: i32
+impl bytemuck::pod::Pod for gg_rhi::IndirectCommand
+impl bytemuck::zeroable::Zeroable for gg_rhi::IndirectCommand
+pub struct gg_rhi::MemoryUse
+pub gg_rhi::MemoryUse::buffer_bytes: u64
+pub gg_rhi::MemoryUse::buffers: u32
+pub gg_rhi::MemoryUse::image_bytes: u64
+pub gg_rhi::MemoryUse::images: u32
+impl gg_rhi::MemoryUse
+pub fn gg_rhi::MemoryUse::total_bytes(&self) -> u64
+pub struct gg_rhi::OffscreenRhi
+impl gg_rhi::OffscreenRhi
+pub fn gg_rhi::OffscreenRhi::backbuffer(&self) -> gg_rhi::ImageHandle
+pub fn gg_rhi::OffscreenRhi::breadcrumbs(&self) -> alloc::string::String
+pub fn gg_rhi::OffscreenRhi::buffer_address(&self, gg_rhi::BufferHandle) -> core::result::Result<gg_rhi::DeviceAddress, gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::create_buffer(&mut self, &gg_rhi::BufferDesc<'_>) -> core::result::Result<gg_rhi::BufferHandle, gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::create_image(&mut self, &gg_rhi::ImageDesc<'_>) -> core::result::Result<gg_rhi::ImageHandle, gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::create_pipeline(&mut self, &gg_rhi::PipelineDesc<'_>) -> core::result::Result<gg_rhi::PipelineHandle, gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::destroy_buffer(&mut self, gg_rhi::BufferHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::destroy_image(&mut self, gg_rhi::ImageHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::destroy_pipeline(&mut self, gg_rhi::PipelineHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::device_report(&self) -> &gg_rhi::DeviceReport
+pub fn gg_rhi::OffscreenRhi::execute(&mut self, &[gg_rhi::Pass<'_>]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::extent(&self) -> (u32, u32)
+pub fn gg_rhi::OffscreenRhi::flush_uploads(&mut self) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::gpu_clock(&self) -> core::option::Option<gg_rhi::GpuClock>
+pub fn gg_rhi::OffscreenRhi::map_buffer(&self, gg_rhi::BufferHandle) -> core::result::Result<&[u8], gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::memory(&self) -> gg_rhi::MemoryUse
+pub fn gg_rhi::OffscreenRhi::new((u32, u32)) -> core::result::Result<Self, gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::pass_timings(&self) -> &[gg_rhi::PassTiming]
+pub fn gg_rhi::OffscreenRhi::register_storage_image(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::StorageImageIndex, gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::register_texture(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::TextureIndex, gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::shutdown(self) -> gg_rhi::ShutdownReport
+pub fn gg_rhi::OffscreenRhi::transfer_crosses_queue_families(&self) -> bool
+pub fn gg_rhi::OffscreenRhi::upload_buffer(&mut self, gg_rhi::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::upload_image(&mut self, gg_rhi::ImageHandle, u32, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::write_buffer(&mut self, gg_rhi::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+impl core::ops::drop::Drop for gg_rhi::OffscreenRhi
+pub fn gg_rhi::OffscreenRhi::drop(&mut self)
+impl gg_rhi::GraphContext for gg_rhi::OffscreenRhi
+pub fn gg_rhi::OffscreenRhi::create_image(&mut self, &gg_rhi::ImageDesc<'_>) -> core::result::Result<gg_rhi::ImageHandle, gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::destroy_image(&mut self, gg_rhi::ImageHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::frame_slot(&self) -> u64
+pub fn gg_rhi::OffscreenRhi::presents(&self) -> bool
+pub fn gg_rhi::OffscreenRhi::register_texture(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::TextureIndex, gg_rhi::RhiError>
+pub struct gg_rhi::Pass<'a>
+pub gg_rhi::Pass::kind: gg_rhi::PassKind<'a>
+pub gg_rhi::Pass::name: &'a str
+pub gg_rhi::Pass::transitions: &'a [gg_rhi::Transition]
+pub struct gg_rhi::PassTiming
+pub gg_rhi::PassTiming::begin: i64
+pub gg_rhi::PassTiming::end: i64
+pub gg_rhi::PassTiming::gpu_ms: f32
+pub gg_rhi::PassTiming::name: alloc::string::String
+pub struct gg_rhi::PipelineDesc<'a>
+pub gg_rhi::PipelineDesc::blend: gg_rhi::Blend
+pub gg_rhi::PipelineDesc::color: gg_rhi::ColorTarget
+pub gg_rhi::PipelineDesc::depth: gg_rhi::DepthMode
+pub gg_rhi::PipelineDesc::depth_bias: bool
+pub gg_rhi::PipelineDesc::fs_entry: &'a str
+pub gg_rhi::PipelineDesc::fs_spirv: &'a [u8]
+pub gg_rhi::PipelineDesc::name: &'a str
+pub gg_rhi::PipelineDesc::push_constant_size: u32
+pub gg_rhi::PipelineDesc::vs_entry: &'a str
+pub gg_rhi::PipelineDesc::vs_spirv: &'a [u8]
+pub struct gg_rhi::PipelineHandle(_)
+pub struct gg_rhi::Rhi
+impl gg_rhi::Rhi
+pub fn gg_rhi::Rhi::begin_frame(&mut self) -> core::result::Result<gg_rhi::FrameStart, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::breadcrumbs(&self) -> alloc::string::String
+pub fn gg_rhi::Rhi::buffer_address(&self, gg_rhi::BufferHandle) -> core::result::Result<gg_rhi::DeviceAddress, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::create_buffer(&mut self, &gg_rhi::BufferDesc<'_>) -> core::result::Result<gg_rhi::BufferHandle, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::create_image(&mut self, &gg_rhi::ImageDesc<'_>) -> core::result::Result<gg_rhi::ImageHandle, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::create_pipeline(&mut self, &gg_rhi::PipelineDesc<'_>) -> core::result::Result<gg_rhi::PipelineHandle, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::destroy_buffer(&mut self, gg_rhi::BufferHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::destroy_image(&mut self, gg_rhi::ImageHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::destroy_pipeline(&mut self, gg_rhi::PipelineHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::device_report(&self) -> &gg_rhi::DeviceReport
+pub fn gg_rhi::Rhi::execute(&mut self, gg_rhi::FrameToken, &[gg_rhi::Pass<'_>]) -> core::result::Result<gg_rhi::FrameOutcome, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::flush_uploads(&mut self) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::frames_submitted(&self) -> u64
+pub fn gg_rhi::Rhi::gpu_clock(&self) -> core::option::Option<gg_rhi::GpuClock>
+pub fn gg_rhi::Rhi::headless((u32, u32)) -> core::result::Result<Self, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::headless_supported() -> bool
+pub fn gg_rhi::Rhi::map_buffer(&self, gg_rhi::BufferHandle) -> core::result::Result<&[u8], gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::memory(&self) -> gg_rhi::MemoryUse
+pub fn gg_rhi::Rhi::new(&impl raw_window_handle::borrowed::HasWindowHandle + raw_window_handle::borrowed::HasDisplayHandle, (u32, u32)) -> core::result::Result<Self, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::pass_timings(&self) -> &[gg_rhi::PassTiming]
+pub fn gg_rhi::Rhi::register_texture(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::TextureIndex, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::resize(&mut self, u32, u32)
+pub fn gg_rhi::Rhi::shutdown(self) -> gg_rhi::ShutdownReport
+pub fn gg_rhi::Rhi::swapchain_extent(&self) -> (u32, u32)
+pub fn gg_rhi::Rhi::swapchain_generation(&self) -> u64
+pub fn gg_rhi::Rhi::transfer_crosses_queue_families(&self) -> bool
+pub fn gg_rhi::Rhi::upload_buffer(&mut self, gg_rhi::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::upload_image(&mut self, gg_rhi::ImageHandle, u32, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::validation_messages(&self) -> u64
+pub fn gg_rhi::Rhi::write_buffer(&mut self, gg_rhi::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+impl core::ops::drop::Drop for gg_rhi::Rhi
+pub fn gg_rhi::Rhi::drop(&mut self)
+impl gg_rhi::GraphContext for gg_rhi::Rhi
+pub fn gg_rhi::Rhi::create_image(&mut self, &gg_rhi::ImageDesc<'_>) -> core::result::Result<gg_rhi::ImageHandle, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::destroy_image(&mut self, gg_rhi::ImageHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::frame_slot(&self) -> u64
+pub fn gg_rhi::Rhi::presents(&self) -> bool
+pub fn gg_rhi::Rhi::register_texture(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::TextureIndex, gg_rhi::RhiError>
+pub struct gg_rhi::ShutdownReport
+pub gg_rhi::ShutdownReport::leaked_allocations: alloc::vec::Vec<alloc::string::String>
+pub gg_rhi::ShutdownReport::validation_messages: u64
+impl gg_rhi::ShutdownReport
+pub fn gg_rhi::ShutdownReport::clean(&self) -> bool
+pub struct gg_rhi::StorageImageIndex(_)
+impl gg_rhi::StorageImageIndex
+pub fn gg_rhi::StorageImageIndex::get(self) -> u32
+pub struct gg_rhi::TextureIndex(_)
+impl gg_rhi::TextureIndex
+pub fn gg_rhi::TextureIndex::get(self) -> u32
+pub struct gg_rhi::Transition
+pub gg_rhi::Transition::from: gg_rhi::Access
+pub gg_rhi::Transition::target: gg_rhi::Target
+pub gg_rhi::Transition::to: gg_rhi::Access
+pub const gg_rhi::DEPTH_CLEAR: f32
+pub const gg_rhi::FRAMES_IN_FLIGHT: u64
+pub trait gg_rhi::GraphContext
+pub fn gg_rhi::GraphContext::create_image(&mut self, &gg_rhi::ImageDesc<'_>) -> core::result::Result<gg_rhi::ImageHandle, gg_rhi::RhiError>
+pub fn gg_rhi::GraphContext::destroy_image(&mut self, gg_rhi::ImageHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::GraphContext::frame_slot(&self) -> u64
+pub fn gg_rhi::GraphContext::presents(&self) -> bool
+pub fn gg_rhi::GraphContext::register_texture(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::TextureIndex, gg_rhi::RhiError>
+impl gg_rhi::GraphContext for gg_rhi::OffscreenRhi
+pub fn gg_rhi::OffscreenRhi::create_image(&mut self, &gg_rhi::ImageDesc<'_>) -> core::result::Result<gg_rhi::ImageHandle, gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::destroy_image(&mut self, gg_rhi::ImageHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::frame_slot(&self) -> u64
+pub fn gg_rhi::OffscreenRhi::presents(&self) -> bool
+pub fn gg_rhi::OffscreenRhi::register_texture(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::TextureIndex, gg_rhi::RhiError>
+impl gg_rhi::GraphContext for gg_rhi::Rhi
+pub fn gg_rhi::Rhi::create_image(&mut self, &gg_rhi::ImageDesc<'_>) -> core::result::Result<gg_rhi::ImageHandle, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::destroy_image(&mut self, gg_rhi::ImageHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::frame_slot(&self) -> u64
+pub fn gg_rhi::Rhi::presents(&self) -> bool
+pub fn gg_rhi::Rhi::register_texture(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::TextureIndex, gg_rhi::RhiError>
+pub fn gg_rhi::full_mip_count((u32, u32)) -> u32
+pub fn gg_rhi::mip_extent((u32, u32), u32) -> (u32, u32)
+pub type gg_rhi::DeviceAddress = u64

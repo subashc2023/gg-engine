@@ -31,12 +31,20 @@ enum Encoding {
 /// condition.
 #[derive(Debug, thiserror::Error)]
 pub enum WorldError {
+    /// Component registration failed.
     #[error(transparent)]
     Registry(#[from] RegistryError),
+    /// Side-table installation failed.
     #[error(transparent)]
     SideTable(#[from] SideTableError),
+    /// An operation that must name a live entity was given a dead one. The
+    /// *accessors* report a dead entity as `None`/`false` instead — only the
+    /// mutating paths raise this.
     #[error("entity {entity:?} is not alive")]
-    DeadEntity { entity: Entity },
+    DeadEntity {
+        /// The entity that was not alive.
+        entity: Entity,
+    },
 }
 
 /// Sim state: an entity allocator, a component registry, and the archetypes.
@@ -71,6 +79,7 @@ pub struct World {
 }
 
 impl World {
+    /// An empty world holding only the empty archetype.
     #[must_use]
     pub fn new() -> Self {
         let mut world = Self::default();
@@ -80,16 +89,20 @@ impl World {
         world
     }
 
+    /// Live entities.
     #[must_use]
     pub fn len(&self) -> u32 {
         self.entities.len()
     }
 
+    /// Whether no entity is live.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entities.is_empty()
     }
 
+    /// The component registry, for reading what is registered and with which
+    /// schema. Registration itself goes through [`Self::register`].
     #[must_use]
     pub fn registry(&self) -> &Registry {
         &self.registry
@@ -102,6 +115,8 @@ impl World {
         &mut self.registry
     }
 
+    /// Whether `entity` is live — generation included, so a recycled index
+    /// does not resurrect an old handle.
     #[must_use]
     pub fn is_alive(&self, entity: Entity) -> bool {
         self.entities.is_alive(entity)
@@ -188,6 +203,8 @@ impl World {
         true
     }
 
+    /// Whether `entity` carries `T`. `false` for a dead entity — a despawn last
+    /// tick is ordinary control flow, not an error.
     #[must_use]
     pub fn contains<T: Component>(&self, entity: Entity) -> bool {
         self.location(entity).is_some_and(|loc| {
@@ -195,6 +212,7 @@ impl World {
         })
     }
 
+    /// Read one component. `None` if the entity is dead or does not carry `T`.
     #[must_use]
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
         let loc = self.location(entity)?;
@@ -205,6 +223,8 @@ impl World {
         ))
     }
 
+    /// As [`Self::get`], mutably. Writing through this changes the canonical
+    /// hash, which is the point: it is sim state.
     pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
         let loc = self.location(entity)?;
         let archetype = &mut self.archetypes[loc.archetype.index() as usize];
@@ -303,11 +323,13 @@ impl World {
         self.side_tables.insert(table).map(|_| ())
     }
 
+    /// The installed side table of type `T`, if one is installed.
     #[must_use]
     pub fn side_table<T: SideTable>(&self) -> Option<&T> {
         self.side_tables.get::<T>()
     }
 
+    /// As [`Self::side_table`], mutably.
     pub fn side_table_mut<T: SideTable>(&mut self) -> Option<&mut T> {
         self.side_tables.get_mut::<T>()
     }
@@ -318,6 +340,7 @@ impl World {
         self.side_tables.remove::<T>()
     }
 
+    /// How many side tables are installed.
     #[must_use]
     pub fn side_table_count(&self) -> usize {
         self.side_tables.len()

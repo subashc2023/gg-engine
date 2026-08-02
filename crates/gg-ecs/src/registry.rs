@@ -27,15 +27,22 @@ fn protocol_hash_of<T: Component>(bytes: &[u8], h: &mut StateHasher) {
 /// Compare `id` and `schema`, which is what callers actually mean.
 #[derive(Clone, Debug)]
 pub struct ComponentInfo {
+    /// Hash of [`declared_id`](Self::declared_id). Registry order is by this,
+    /// not by registration order.
     pub id: ComponentId,
+    /// Hash over every field's name, type token, offset and size. What
+    /// [`World::adopt`](crate::World::adopt) refuses a mismatch on.
     pub schema: SchemaHash,
     /// The declared id string — persisted identity, and what a migration report
     /// names.
     pub declared_id: &'static str,
     /// The Rust type name. Diagnostics only.
     pub type_name: &'static str,
+    /// `size_of::<T>()`, and therefore the column stride.
     pub size: usize,
+    /// `align_of::<T>()`, at most [`MAX_ALIGN`].
     pub align: usize,
+    /// The declared fields, in declaration order — the schema hash's input.
     pub fields: &'static [FieldDesc],
     /// The protocol encoding, kept so CI can prove the raw-bytes fast path
     /// agrees with it (§4.2.1). Not used by [`World::canonical_hash`] itself.
@@ -49,43 +56,62 @@ pub struct ComponentInfo {
 /// crashing, so it must not be recoverable.
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
+    /// Two distinct declared ids hash to one [`ComponentId`].
     #[error(
         "component id collision: `{first_type}` (id \"{first_declared}\") and `{second_type}` \
          (id \"{second_declared}\") both hash to {id:?}. Change one declared id — they are the \
          world's persisted identities and cannot be shared."
     )]
     IdCollision {
+        /// The id both types hashed to.
         id: ComponentId,
+        /// Rust type name of the entry already registered.
         first_type: &'static str,
+        /// Declared id of the entry already registered.
         first_declared: &'static str,
+        /// Rust type name of the entry being registered.
         second_type: &'static str,
+        /// Declared id of the entry being registered.
         second_declared: &'static str,
     },
+    /// Two types claim the same declared id — which is one save file's worth of
+    /// state with two owners.
     #[error(
         "component id \"{declared}\" is declared by two types, `{first_type}` and \
          `{second_type}`. A declared id is persisted identity: two types claiming one id would \
          load each other's saved state."
     )]
     DuplicateDeclaration {
+        /// The contested declared id.
         declared: &'static str,
+        /// Rust type name of the entry already registered.
         first_type: &'static str,
+        /// Rust type name of the entry being registered.
         second_type: &'static str,
     },
+    /// The component wants more alignment than a column provides.
     #[error(
         "component `{type_name}` needs {align}-byte alignment; columns provide {MAX_ALIGN}. \
          Over-aligned components are a render-side concern on the far side of the §1.4 membrane — \
          sim state has no reason to be SIMD-aligned."
     )]
     OverAligned {
+        /// Rust type name of the over-aligned component.
         type_name: &'static str,
+        /// The alignment it asked for, against [`MAX_ALIGN`].
         align: usize,
     },
+    /// A declared id is re-registered with a different schema. Changing a
+    /// schema under live data is snapshot → restore's job, not registration's.
     #[error(
         "component \"{declared}\" is already registered with a different schema. A registry \
          entry describes the columns that exist; changing one under live data is what \
          snapshot → restore is for (§4.2.2), not what registration does."
     )]
-    SchemaConflict { declared: &'static str },
+    SchemaConflict {
+        /// The declared id whose schema moved.
+        declared: &'static str,
+    },
 }
 
 /// The registry. Entries are kept **sorted by [`ComponentId`]**, which is what
@@ -97,16 +123,19 @@ pub struct Registry {
 }
 
 impl Registry {
+    /// An empty registry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Components registered so far.
     #[must_use]
     pub fn len(&self) -> usize {
         self.sorted.len()
     }
 
+    /// Whether nothing is registered yet.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.sorted.is_empty()
@@ -197,6 +226,7 @@ impl Registry {
         }
     }
 
+    /// The entry for `id`, or `None` if nothing registered it.
     #[must_use]
     pub fn get(&self, id: ComponentId) -> Option<&ComponentInfo> {
         self.sorted

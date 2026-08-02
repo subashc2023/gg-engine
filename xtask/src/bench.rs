@@ -30,11 +30,24 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
 const RECORD_FRAMES: &str = "300";
 const SMOKE_FRAMES: &str = "24";
 
+/// The CPU micros of §4.11, as `(package, bench target, archive key)`.
+///
+/// Harness-free, every one of them: each asserts *ratios* measured in its own
+/// process, which is what makes the numbers survive a noisy desk and keeps a
+/// benchmark framework out of crates with dependency budgets (§3, §4.11).
+const MICROS: &[(&str, &str, &str)] = &[
+    ("gg-ecs", "query", "ecs"),
+    ("gg-extract", "extract", "extract"),
+    ("gg-assets", "load", "assets"),
+];
+
 fn smoke() -> anyhow::Result<()> {
-    exec(
-        cargo().args(["bench", "-p", "gg-ecs"]),
-        "cargo bench -p gg-ecs",
-    )?;
+    for (package, bench, _) in MICROS {
+        exec(
+            cargo().args(["bench", "-p", package, "--bench", bench]),
+            &format!("cargo bench -p {package} --bench {bench}"),
+        )?;
+    }
     let mut macro_run = cargo();
     macro_run
         .args(["run", "-q", "-p", "gg-golden", "--", "bench", "--frames"])
@@ -70,16 +83,21 @@ fn record() -> anyhow::Result<()> {
     // half a baseline rather than nothing. `cargo bench` runs it under the
     // `bench` profile, which inherits `instrumented` (§3) — the tier §4.11 says
     // benchmarks are defined to run under.
-    println!("xtask bench: recording the gg-ecs micro baseline (bench profile = instrumented)");
-    // `--bench query` and not the whole package: a bare `cargo bench` also runs
-    // the lib's unit tests under libtest, which rejects `--json` as an option it
-    // does not have.
-    let micro = run_capture(
-        cargo().args(["bench", "-p", "gg-ecs", "--bench", "query", "--", "--json"]),
-        "cargo bench -p gg-ecs --bench query -- --json",
-    )?;
-    let ecs = json_line(&micro)
-        .ok_or_else(|| anyhow::anyhow!("the gg-ecs bench emitted no JSON record:\n{micro}"))?;
+    println!("xtask bench: recording the CPU micro baselines (bench profile = instrumented)");
+    // Named bench targets and not whole packages: a bare `cargo bench -p` also
+    // runs the lib's unit tests under libtest, which rejects `--json` as an
+    // option it does not have.
+    let mut micros = Vec::new();
+    for (package, bench, key) in MICROS {
+        let out = run_capture(
+            cargo().args(["bench", "-p", package, "--bench", bench, "--", "--json"]),
+            &format!("cargo bench -p {package} --bench {bench} -- --json"),
+        )?;
+        let record = json_line(&out)
+            .ok_or_else(|| anyhow::anyhow!("the {package} bench emitted no JSON record:\n{out}"))?
+            .to_owned();
+        micros.push(((*key).to_owned(), record));
+    }
 
     // No `VK_DRIVER_FILES`: a recording wants whatever this desk's best device
     // is (or `GG_ADAPTER`'s pick), which is the opposite of every other gate.
@@ -146,7 +164,7 @@ fn record() -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, archive(&machine, ecs, frame, field_frame)?)?;
+    std::fs::write(&path, archive(&machine, &micros, frame, field_frame)?)?;
 
     // The human half, straight from the run that was archived — a recording that
     // only writes a file leaves the operator with nothing to react to.
@@ -164,7 +182,12 @@ fn record() -> anyhow::Result<()> {
 /// commit and the toolchain that produced it is not a baseline — it is a
 /// rumour, and §5's recovery bar says baselines are re-recorded rather than
 /// compared when the box changes.
-fn archive(machine: &str, ecs: &str, frame: &str, field: &str) -> anyhow::Result<String> {
+fn archive(
+    machine: &str,
+    micros: &[(String, String)],
+    frame: &str,
+    field: &str,
+) -> anyhow::Result<String> {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -179,10 +202,16 @@ fn archive(machine: &str, ecs: &str, frame: &str, field: &str) -> anyhow::Result
             .args(["rev-parse", "--short", "HEAD"]),
         "git rev-parse HEAD",
     )?;
+    // Schema 2: the micros became a set rather than one entry, so a reader that
+    // knew schema 1 would look for a top-level `ecs` key and quietly find none.
+    let micro_json: String = micros
+        .iter()
+        .map(|(key, record)| format!("  \"{key}\": {record},\n"))
+        .collect();
     Ok(format!(
-        "{{\n  \"schema\": 1,\n  \"recorded\": \"{}\",\n  \"unix_time\": {secs},\n  \
+        "{{\n  \"schema\": 2,\n  \"recorded\": \"{}\",\n  \"unix_time\": {secs},\n  \
          \"machine\": \"{machine}\",\n  \"commit\": \"{}\",\n  \"rustc\": \"{}\",\n  \
-         \"profile\": \"instrumented\",\n  \"ecs\": {ecs},\n  \"frame\": {frame},\n  \
+         \"profile\": \"instrumented\",\n{micro_json}  \"frame\": {frame},\n  \
          \"field\": {field}\n}}\n",
         date(secs),
         commit.trim(),
@@ -212,7 +241,7 @@ fn date(secs: u64) -> String {
 /// This box, as the archive's key. Hostname plus architecture: §5 keys
 /// baselines to a machine, and the same hostname on two architectures is a
 /// machine the numbers do not transfer between.
-fn machine_id() -> String {
+pub(crate) fn machine_id() -> String {
     let host = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .ok()

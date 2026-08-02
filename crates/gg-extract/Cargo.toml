@@ -30,3 +30,9 @@ rayon.workspace = true
 
 [dev-dependencies]
 bytemuck.workspace = true
+
+[[bench]]
+name = "extract"
+# No framework, for the reason gg-ecs's query bench states: the numbers that
+# matter are ratios measured in one run (§4.11, §3 budget).
+harness = false

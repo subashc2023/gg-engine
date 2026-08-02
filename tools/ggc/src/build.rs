@@ -23,7 +23,8 @@ use crate::import;
 /// Bumped whenever the importer's output changes for unchanged input. Part of
 /// every source hash, which is what makes that statement true rather than
 /// aspirational.
-pub const IMPORT_VERSION: u32 = 1;
+/// 2 since M11: meshes carry a tangent, generated where the document has none.
+pub const IMPORT_VERSION: u32 = 2;
 
 /// What a build did, for the log and for the tests.
 #[derive(Debug, Default, PartialEq, Eq)]

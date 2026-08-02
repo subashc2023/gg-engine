@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use gg_assets::pack::{AssetId, AssetKind};
 use gg_assets::{Material, Node, PackWriter, Vertex, mesh, scene};
 use gg_ecs::World;
-use gg_ecs::boundary::Model;
+use gg_ecs::boundary::{Light, Model};
 use gg_extract::Extracted;
 use gg_math::sim;
 use gg_render::{OffscreenRenderer, View};
@@ -33,6 +33,7 @@ fn quad() -> Vec<u8> {
         position: [x, y, 0.0],
         normal: [0.0, 0.0, 1.0],
         uv: [u, v],
+        tangent: [1.0, 0.0, 0.0, 1.0],
     };
     let vertices = [
         corner(-1.0, -1.0, 0.0, 1.0),
@@ -54,6 +55,12 @@ fn pack_bytes(base_color: [f32; 4]) -> Vec<u8> {
             1,
             Material {
                 base_color,
+                // A plain dielectric, so the pixel this test reads is the base
+                // colour and not a metal's specular response to a light that is
+                // not there — glTF's default is fully metallic, which renders
+                // black without one (§6 M11).
+                metallic: 0.0,
+                roughness: 1.0,
                 ..Material::default()
             }
             .encode(),
@@ -91,13 +98,24 @@ fn temp(name: &str) -> PathBuf {
     path
 }
 
-/// A world holding one model that names the scene.
+/// A world holding one model that names the scene, and a sun to see it by.
 fn world() -> World {
     let mut world = World::new();
     world.register::<Model>().unwrap();
+    world.register::<Light>().unwrap();
     let entity = world.spawn();
     world
         .insert(entity, Model::at(SCENE, sim::DVec3::ZERO))
+        .unwrap();
+    // Straight down -Z, so it lands square on a quad facing +Z. Without it the
+    // quad is lit by the ambient term alone and this file would be asserting
+    // that a knob is not zero.
+    let sun = world.spawn();
+    world
+        .insert(
+            sun,
+            Light::sun(sim::Vec3::new(0.0, 0.0, -1.0), 0x00ff_ffff, 3.0),
+        )
         .unwrap();
     world
 }
@@ -119,6 +137,7 @@ fn settle(renderer: &mut OffscreenRenderer, world: &World) -> Vec<u8> {
         extracted
             .append_models::<Model>(world, renderer.scenes())
             .unwrap();
+        extracted.append_lights(world).unwrap();
         pixels = renderer
             .frame(&extracted, &View::default(), [0.0, 0.0, 0.0, 1.0], &[])
             .unwrap()
@@ -143,7 +162,14 @@ fn a_scene_named_by_a_game_reaches_the_target_as_pack_geometry() {
     let pixels = settle(&mut renderer, &world);
     let middle = at(&pixels, EXTENT.0 / 2, EXTENT.1 / 2);
     assert!(middle[0] > 0x40, "the quad is there and red: {middle:?}");
-    assert_eq!((middle[1], middle[2]), (0, 0), "and only red");
+    // Not "and only red": since M11 a dielectric carries a white specular
+    // highlight, so the other two channels are small rather than zero. What is
+    // still true — and what this file is actually about — is that the base
+    // colour in the pack is the colour that dominates on the screen.
+    assert!(
+        middle[0] > middle[1] * 3 && middle[0] > middle[2] * 3,
+        "red dominates: {middle:?}"
+    );
     // A one-metre quad four metres out at the default fov leaves the corners
     // clear, which is what makes the middle a claim about geometry and not
     // about a fullscreen fill.
@@ -185,7 +211,12 @@ fn a_rebuilt_pack_is_re_uploaded_without_the_game_noticing() {
     let after = settle(&mut renderer, &world);
     let middle = at(&after, 32, 32);
     assert!(middle[1] > 0x40, "green after the rebuild: {middle:?}");
-    assert_eq!(middle[0], 0, "and nothing of the old colour");
+    // The red left in the pixel is the white specular highlight, not the old
+    // base colour: green out-dominates it by the same margin it used to.
+    assert!(
+        middle[1] > middle[0] * 3 && middle[1] > middle[2] * 3,
+        "nothing of the old colour: {middle:?}"
+    );
 
     assert!(renderer.shutdown().clean(), "no leaks, no validation");
     let _ = std::fs::remove_file(&path);

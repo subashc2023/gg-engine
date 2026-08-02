@@ -25,6 +25,8 @@ members = [
     "demos/03-reload",
     "demos/04-scene",
     "demos/05-many",
+    "demos/06-lit",
+    "demos/99-template",
     "tools/gg-golden",
     "tools/gg-static-link",
     "tools/ggc",
@@ -47,8 +49,25 @@ profiling = "1"
 # Version-coupled to the Tracy profiler GUI by wire protocol, so the patch is
 # pinned rather than carets: 0.18.0..=0.18.4 span Tracy v0.11.1..=v0.13.1 and a
 # mismatch is a hard connect failure, not a degradation. Requires Tracy v0.13.1.
-tracy-client = "=0.18.4"
-tracing-tracy = "0.11"
+#
+# `only-localhost` is the third firewall-prompt cause, and the only one left that
+# is ours. Measured: a tracy-linked binary opens a TCP listener on *all*
+# interfaces from a static constructor, before `main`, with no profiler attached;
+# the same shell built without tracy opens no socket at all. Windows raises its
+# dialog per executable that binds a non-loopback *listener*, and nextest names
+# test binaries with a build hash, so every rebuild was a fresh prompt. The
+# feature moves the listener to 127.0.0.1, which the firewall never asks about;
+# the profiler still attaches, because it runs on this machine. On both
+# declarations because cargo unions features — one of them alone is a coin toss
+# over which crate the resolver reaches first.
+#
+# Tracy's UDP broadcast socket stays, and is not worth chasing: `profiling`
+# declares `tracy-client` without `default-features = false`, so `broadcast`
+# re-enters through `profile-with-tracy` and features cannot be subtracted. It
+# does not prompt — its port is ephemeral and different every run (61230, 61231,
+# 52476…), which is a sender, not a listener.
+tracy-client = { version = "=0.18.4", features = ["only-localhost"] }
+tracing-tracy = { version = "0.11", features = ["only-localhost"] }
 thiserror = "2"
 anyhow = "1"
 shader-slang = "0.1"
@@ -73,7 +92,7 @@ blake3 = { version = "=1.8.5", default-features = false, features = ["pure"] }
 # gg-ecs-derive's build-time trio. Never in a runtime dependency graph.
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full", "extra-traits"] }
+syn = { version = "3", features = ["full", "extra-traits"] }
 # Compile-fail harness for the M3 derive rejections. Dev-dependency only.
 trybuild = "1"
 # Render-side only, and deny.toml keeps it that way; judged by gg-golden, never

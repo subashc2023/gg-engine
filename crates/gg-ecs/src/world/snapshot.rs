@@ -39,28 +39,56 @@ const IMAGE_FORMAT: u32 = 1;
 /// Why a snapshot could not be restored.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
+    /// The image does not start with the snapshot magic.
     #[error("not a snapshot image: magic is {found:02x?}, expected {IMAGE_MAGIC:02x?}")]
-    Magic { found: [u8; 4] },
+    Magic {
+        /// The four bytes actually found.
+        found: [u8; 4],
+    },
+    /// A format word this build does not write. Snapshots are same-build only
+    /// (§4.2.2), so this rejects a stale file rather than starting a migration.
     #[error("snapshot image format {found}, this build writes {IMAGE_FORMAT}")]
-    Format { found: u32 },
+    Format {
+        /// The format word found in the image.
+        found: u32,
+    },
+    /// The image ends inside a record.
     #[error("snapshot image ends early: {need} more bytes needed, {left} left")]
-    Truncated { need: usize, left: usize },
+    Truncated {
+        /// Bytes the record still needed.
+        need: usize,
+        /// Bytes actually remaining.
+        left: usize,
+    },
+    /// A declared id or type name in the image is not UTF-8.
     #[error("snapshot image holds a name that is not UTF-8")]
     NotUtf8,
+    /// The world's installed side tables differ from the captured set. Side
+    /// tables are host-owned, so a difference means the *host* changed.
     #[error(
         "snapshot was captured with side tables [{captured}] but this world has [{present}]. \
          Side tables are host-owned and cannot cross the reload boundary, so a difference means \
          the host changed — which is not something a snapshot carries."
     )]
-    SideTableMismatch { captured: String, present: String },
+    SideTableMismatch {
+        /// Declared ids present when the snapshot was captured.
+        captured: String,
+        /// Declared ids installed in the world being restored into.
+        present: String,
+    },
+    /// One declared id kept its schema hash while its size moved — which the
+    /// hash covers, so one of the two artifacts is lying about itself.
     #[error(
         "component \"{declared}\" kept its schema hash but changed size ({captured} bytes when \
          captured, {present} now). Size is hashed into the schema, so one of the two artifacts \
          is not what it claims to be."
     )]
     SchemaContradiction {
+        /// The declared id in contradiction.
         declared: String,
+        /// Component size recorded in the image.
         captured: usize,
+        /// Component size this build reports.
         present: usize,
     },
 }

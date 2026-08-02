@@ -420,6 +420,13 @@ impl Residency {
     /// # Errors
     /// A handle the RHI does not recognise, which cannot happen for one issued
     /// here.
+    // No caller yet — asset hot reload is the one that arrives, and its own test
+    // below is what keeps the path from rotting until then. Named rather than
+    // deleted because eviction is `want_*`'s counterpart, not a feature.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "asset hot reload is its caller (§4.6)")
+    )]
     pub fn drop_asset(
         &mut self,
         rhi: &mut impl GpuHost,
@@ -491,6 +498,7 @@ mod tests {
             position: [x, 0.0, 0.0],
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         }
     }
 

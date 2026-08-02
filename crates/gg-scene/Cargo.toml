@@ -20,6 +20,3 @@ workspace = true
 gg-ecs = { path = "../gg-ecs" }
 gg-math = { path = "../gg-math" }
 thiserror.workspace = true
-
-[dev-dependencies]
-bytemuck.workspace = true

@@ -1,0 +1,206 @@
+pub mod gg_render
+pub mod gg_render::content
+pub enum gg_render::content::ContentError
+pub gg_render::content::ContentError::Asset(gg_assets::load::AssetError)
+pub gg_render::content::ContentError::Residency(gg_render::residency::ResidencyError)
+pub struct gg_render::content::Content
+impl gg_render::content::Content
+pub fn gg_render::content::Content::destroy(&mut self, &mut impl gg_render::GpuHost) -> core::result::Result<(), gg_render::residency::ResidencyError>
+pub fn gg_render::content::Content::material(&self, gg_assets::pack::AssetId) -> gg_render::content::DrawMaterial
+pub fn gg_render::content::Content::mesh(&self, gg_assets::pack::AssetId) -> core::option::Option<&gg_render::residency::ResidentMesh>
+pub fn gg_render::content::Content::open(&std::path::Path) -> core::result::Result<Self, gg_render::content::ContentError>
+pub fn gg_render::content::Content::path(&self) -> &std::path::Path
+pub fn gg_render::content::Content::pending(&self) -> usize
+pub fn gg_render::content::Content::poll_reload(&mut self, &mut impl gg_render::GpuHost) -> core::result::Result<bool, gg_render::content::ContentError>
+pub fn gg_render::content::Content::pump(&mut self, &mut impl gg_render::GpuHost, usize) -> core::result::Result<gg_render::residency::Progress, gg_rhi::RhiError>
+pub fn gg_render::content::Content::ready_at(&self) -> core::option::Option<core::time::Duration>
+pub fn gg_render::content::Content::request(&mut self, gg_assets::pack::AssetId)
+pub fn gg_render::content::Content::scene_ids(&self) -> alloc::vec::Vec<u64>
+pub fn gg_render::content::Content::texture(&self, gg_assets::pack::AssetId) -> core::option::Option<&gg_render::residency::ResidentTexture>
+impl core::fmt::Debug for gg_render::content::Content
+pub fn gg_render::content::Content::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl gg_extract::Scenes for gg_render::content::Content
+pub fn gg_render::content::Content::expand(&self, u64, &mut dyn core::ops::function::FnMut(gg_extract::Placement))
+pub fn gg_render::content::Content::radius(&self, u64) -> core::option::Option<f32>
+pub struct gg_render::content::DrawMaterial
+pub gg_render::content::DrawMaterial::base_color: [f32; 4]
+pub gg_render::content::DrawMaterial::base_color_texture: gg_assets::pack::AssetId
+pub gg_render::content::DrawMaterial::metallic: f32
+pub gg_render::content::DrawMaterial::metallic_roughness_texture: gg_assets::pack::AssetId
+pub gg_render::content::DrawMaterial::normal_texture: gg_assets::pack::AssetId
+pub gg_render::content::DrawMaterial::occlusion_texture: gg_assets::pack::AssetId
+pub gg_render::content::DrawMaterial::roughness: f32
+impl core::default::Default for gg_render::content::DrawMaterial
+pub fn gg_render::content::DrawMaterial::default() -> Self
+pub mod gg_render::cvars
+pub static gg_render::cvars::AMBIENT: gg_core::cvar::CVar
+pub static gg_render::cvars::EXPOSURE: gg_core::cvar::CVar
+pub static gg_render::cvars::FOV: gg_core::cvar::CVar
+pub static gg_render::cvars::HISTOGRAM: gg_core::cvar::CVar
+pub static gg_render::cvars::NEAR: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_BIAS: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_NORMAL_BIAS: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_RADIUS: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_SIZE: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_SLOPE_BIAS: gg_core::cvar::CVar
+pub static gg_render::cvars::UPLOAD_BUDGET: gg_core::cvar::CVar
+pub fn gg_render::cvars::register() -> core::result::Result<(), gg_core::cvar::CVarError>
+pub mod gg_render::graph
+pub enum gg_render::graph::Body<'a>
+pub gg_render::graph::Body::Draw
+pub gg_render::graph::Body::Draw::color: core::option::Option<(gg_render::graph::ResourceId, gg_render::graph::Load)>
+pub gg_render::graph::Body::Draw::depth: core::option::Option<(gg_render::graph::ResourceId, gg_render::graph::DepthUse)>
+pub gg_render::graph::Body::Draw::draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::graph::Body::Draw::samples: &'a [gg_render::graph::ResourceId]
+pub gg_render::graph::Body::Readback
+pub gg_render::graph::Body::Readback::dest: gg_render::graph::ResourceId
+pub gg_render::graph::Body::Readback::source: gg_render::graph::ResourceId
+pub enum gg_render::graph::DepthUse
+pub gg_render::graph::DepthUse::Test
+pub gg_render::graph::DepthUse::Write
+pub gg_render::graph::DepthUse::WriteStore
+pub enum gg_render::graph::Load
+pub gg_render::graph::Load::Clear([f32; 4])
+pub gg_render::graph::Load::Keep
+pub struct gg_render::graph::Compiled<'a>
+impl<'a> gg_render::graph::Compiled<'a>
+pub fn gg_render::graph::Compiled<'a>::dot(&self) -> alloc::string::String
+pub fn gg_render::graph::Compiled<'a>::dump(&self) -> alloc::string::String
+pub fn gg_render::graph::Compiled<'a>::order(&self) -> impl core::iter::traits::iterator::Iterator<Item = &str>
+pub fn gg_render::graph::Compiled<'a>::passes(&self) -> alloc::vec::Vec<gg_rhi::graph::Pass<'_>>
+pub struct gg_render::graph::Declared<'a>
+pub gg_render::graph::Declared::body: gg_render::graph::Body<'a>
+pub gg_render::graph::Declared::name: &'static str
+pub struct gg_render::graph::Frame<'p>
+impl<'p> gg_render::graph::Frame<'p>
+pub fn gg_render::graph::Frame<'p>::backbuffer(&mut self) -> gg_render::graph::ResourceId
+pub fn gg_render::graph::Frame<'p>::color(&mut self, &'static str, gg_rhi::resource::ImageFormat) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
+pub fn gg_render::graph::Frame<'p>::color_at(&mut self, &'static str, (u32, u32), gg_rhi::resource::ImageFormat) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
+pub fn gg_render::graph::Frame<'p>::compile<'a>(self, &'a [gg_render::graph::Declared<'a>]) -> core::result::Result<gg_render::graph::Compiled<'a>, gg_rhi::RhiError>
+pub fn gg_render::graph::Frame<'p>::depth(&mut self, &'static str) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
+pub fn gg_render::graph::Frame<'p>::readback_buffer(&mut self, &'static str, gg_rhi::resource::BufferHandle) -> gg_render::graph::ResourceId
+pub fn gg_render::graph::Frame<'p>::shadow(&mut self, &'static str, (u32, u32)) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
+pub fn gg_render::graph::Frame<'p>::texture(&self, gg_render::graph::ResourceId) -> core::option::Option<gg_rhi::bindless::TextureIndex>
+pub struct gg_render::graph::ResourceId(_)
+pub struct gg_render::graph::Transients
+impl gg_render::graph::Transients
+pub fn gg_render::graph::Transients::destroy(&mut self, &mut dyn gg_rhi::GraphContext) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::graph::Transients::frame<'p>(&'p mut self, &'p mut dyn gg_rhi::GraphContext, (u32, u32)) -> core::result::Result<gg_render::graph::Frame<'p>, gg_rhi::RhiError>
+pub fn gg_render::graph::readback_pass<'a>(gg_render::graph::ResourceId, gg_render::graph::ResourceId) -> gg_render::graph::Declared<'a>
+pub fn gg_render::graph::single_pass<'a>(&'static str, gg_render::graph::ResourceId, gg_render::graph::Load, &'a [gg_rhi::DrawSpec<'a>]) -> [gg_render::graph::Declared<'a>; 1]
+pub mod gg_render::luminance
+pub const gg_render::luminance::BINS: usize
+pub mod gg_render::ui
+pub struct gg_render::ui::Coverage<'a>
+pub gg_render::ui::Coverage::extent: (u32, u32)
+pub gg_render::ui::Coverage::texels: &'a [u8]
+#[repr(C)] pub struct gg_render::ui::UiVertex
+pub gg_render::ui::UiVertex::color: u32
+pub gg_render::ui::UiVertex::pos: [f32; 2]
+pub gg_render::ui::UiVertex::uv: [f32; 2]
+impl bytemuck::pod::Pod for gg_render::ui::UiVertex
+impl bytemuck::zeroable::Zeroable for gg_render::ui::UiVertex
+pub const gg_render::ui::MAX_VERTICES: usize
+pub struct gg_render::OffscreenFrame
+pub gg_render::OffscreenFrame::dump: alloc::string::String
+pub gg_render::OffscreenFrame::order: alloc::vec::Vec<alloc::string::String>
+pub gg_render::OffscreenFrame::pixels: alloc::vec::Vec<u8>
+pub struct gg_render::OffscreenRenderer
+impl gg_render::OffscreenRenderer
+pub fn gg_render::OffscreenRenderer::device(&self) -> &gg_rhi::device::DeviceReport
+pub fn gg_render::OffscreenRenderer::draw_counts(&self) -> (usize, usize)
+pub fn gg_render::OffscreenRenderer::frame(&mut self, &gg_extract::Extracted, &gg_render::View, [f32; 4], &[gg_render::ui::UiVertex]) -> core::result::Result<gg_render::OffscreenFrame, gg_rhi::RhiError>
+pub fn gg_render::OffscreenRenderer::luminance(&self) -> core::option::Option<&[u32; 64]>
+pub fn gg_render::OffscreenRenderer::memory(&self) -> gg_rhi::resource::MemoryUse
+pub fn gg_render::OffscreenRenderer::new((u32, u32)) -> core::result::Result<Self, gg_rhi::RhiError>
+pub fn gg_render::OffscreenRenderer::open_pack(&mut self, &std::path::Path) -> core::result::Result<(), gg_render::content::ContentError>
+pub fn gg_render::OffscreenRenderer::pack(&self) -> core::option::Option<&gg_render::content::Content>
+pub fn gg_render::OffscreenRenderer::pass_timings(&self) -> &[gg_rhi::timing::PassTiming]
+pub fn gg_render::OffscreenRenderer::reload_pack(&mut self) -> core::result::Result<bool, gg_render::content::ContentError>
+pub fn gg_render::OffscreenRenderer::scenes(&self) -> &dyn gg_extract::Scenes
+pub fn gg_render::OffscreenRenderer::set_ui_atlas(&mut self, &gg_render::ui::Coverage<'_>) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::OffscreenRenderer::shutdown(self) -> gg_rhi::ShutdownReport
+pub struct gg_render::Renderer
+impl gg_render::Renderer
+pub fn gg_render::Renderer::device(&self) -> &gg_rhi::device::DeviceReport
+pub fn gg_render::Renderer::draw_counts(&self) -> (usize, usize)
+pub fn gg_render::Renderer::dump_graph(&mut self) -> core::result::Result<alloc::string::String, gg_rhi::RhiError>
+pub fn gg_render::Renderer::extent(&self) -> (u32, u32)
+pub fn gg_render::Renderer::frame(&mut self, &gg_extract::Extracted, &gg_render::View, [f32; 4], &[gg_render::ui::UiVertex]) -> core::result::Result<gg_rhi::FrameOutcome, gg_rhi::RhiError>
+pub fn gg_render::Renderer::gpu_clock(&self) -> core::option::Option<gg_rhi::timing::GpuClock>
+pub fn gg_render::Renderer::luminance(&self) -> core::option::Option<&[u32; 64]>
+pub fn gg_render::Renderer::memory(&self) -> gg_rhi::resource::MemoryUse
+pub fn gg_render::Renderer::new(&impl raw_window_handle::borrowed::HasWindowHandle + raw_window_handle::borrowed::HasDisplayHandle, (u32, u32)) -> core::result::Result<Self, gg_rhi::RhiError>
+pub fn gg_render::Renderer::open_pack(&mut self, &std::path::Path) -> core::result::Result<(), gg_render::content::ContentError>
+pub fn gg_render::Renderer::pack(&self) -> core::option::Option<&gg_render::content::Content>
+pub fn gg_render::Renderer::pass_timings(&self) -> &[gg_rhi::timing::PassTiming]
+pub fn gg_render::Renderer::reload_pack(&mut self) -> core::result::Result<bool, gg_render::content::ContentError>
+pub fn gg_render::Renderer::resize(&mut self, u32, u32)
+pub fn gg_render::Renderer::scenes(&self) -> &dyn gg_extract::Scenes
+pub fn gg_render::Renderer::set_ui_atlas(&mut self, &gg_render::ui::Coverage<'_>) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::Renderer::shutdown(self) -> gg_rhi::ShutdownReport
+pub struct gg_render::SceneFrame<'a>
+pub gg_render::SceneFrame::backbuffer: gg_render::graph::ResourceId
+pub gg_render::SceneFrame::clear: [f32; 4]
+pub gg_render::SceneFrame::depth: gg_render::graph::ResourceId
+pub gg_render::SceneFrame::forward_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::forward_samples: &'a [gg_render::graph::ResourceId]
+pub gg_render::SceneFrame::post_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::prepass_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::samples: &'a [gg_render::graph::ResourceId]
+pub gg_render::SceneFrame::scene: gg_render::graph::ResourceId
+pub gg_render::SceneFrame::shadow: core::option::Option<gg_render::graph::ResourceId>
+pub gg_render::SceneFrame::shadow_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub struct gg_render::View
+pub gg_render::View::fov_y: f32
+pub gg_render::View::near: f32
+pub gg_render::View::pitch: f32
+pub gg_render::View::yaw: f32
+impl gg_render::View
+pub fn gg_render::View::frustum(&self, (u32, u32)) -> gg_extract::frustum::Frustum
+impl core::default::Default for gg_render::View
+pub fn gg_render::View::default() -> Self
+pub trait gg_render::GpuHost
+pub fn gg_render::GpuHost::buffer_address(&self, gg_rhi::resource::BufferHandle) -> core::result::Result<gg_rhi::resource::DeviceAddress, gg_rhi::RhiError>
+pub fn gg_render::GpuHost::create_buffer(&mut self, &gg_rhi::resource::BufferDesc<'_>) -> core::result::Result<gg_rhi::resource::BufferHandle, gg_rhi::RhiError>
+pub fn gg_render::GpuHost::create_image(&mut self, &gg_rhi::resource::ImageDesc<'_>) -> core::result::Result<gg_rhi::resource::ImageHandle, gg_rhi::RhiError>
+pub fn gg_render::GpuHost::create_pipeline(&mut self, &gg_rhi::pipeline::PipelineDesc<'_>) -> core::result::Result<gg_rhi::pipeline::PipelineHandle, gg_rhi::RhiError>
+pub fn gg_render::GpuHost::destroy_buffer(&mut self, gg_rhi::resource::BufferHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::GpuHost::destroy_image(&mut self, gg_rhi::resource::ImageHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::GpuHost::destroy_pipeline(&mut self, gg_rhi::pipeline::PipelineHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::GpuHost::flush_uploads(&mut self) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::GpuHost::map_buffer(&self, gg_rhi::resource::BufferHandle) -> core::result::Result<&[u8], gg_rhi::RhiError>
+pub fn gg_render::GpuHost::register_texture(&mut self, gg_rhi::resource::ImageHandle) -> core::result::Result<gg_rhi::bindless::TextureIndex, gg_rhi::RhiError>
+pub fn gg_render::GpuHost::upload_buffer(&mut self, gg_rhi::resource::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::GpuHost::upload_image(&mut self, gg_rhi::resource::ImageHandle, u32, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::GpuHost::write_buffer(&mut self, gg_rhi::resource::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+impl gg_render::GpuHost for gg_rhi::Rhi
+pub fn gg_rhi::Rhi::buffer_address(&self, gg_rhi::resource::BufferHandle) -> core::result::Result<gg_rhi::resource::DeviceAddress, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::create_buffer(&mut self, &gg_rhi::resource::BufferDesc<'_>) -> core::result::Result<gg_rhi::resource::BufferHandle, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::create_image(&mut self, &gg_rhi::resource::ImageDesc<'_>) -> core::result::Result<gg_rhi::resource::ImageHandle, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::create_pipeline(&mut self, &gg_rhi::pipeline::PipelineDesc<'_>) -> core::result::Result<gg_rhi::pipeline::PipelineHandle, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::destroy_buffer(&mut self, gg_rhi::resource::BufferHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::destroy_image(&mut self, gg_rhi::resource::ImageHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::destroy_pipeline(&mut self, gg_rhi::pipeline::PipelineHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::flush_uploads(&mut self) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::map_buffer(&self, gg_rhi::resource::BufferHandle) -> core::result::Result<&[u8], gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::register_texture(&mut self, gg_rhi::resource::ImageHandle) -> core::result::Result<gg_rhi::bindless::TextureIndex, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::upload_buffer(&mut self, gg_rhi::resource::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::upload_image(&mut self, gg_rhi::resource::ImageHandle, u32, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::write_buffer(&mut self, gg_rhi::resource::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+impl gg_render::GpuHost for gg_rhi::offscreen::OffscreenRhi
+pub fn gg_rhi::offscreen::OffscreenRhi::buffer_address(&self, gg_rhi::resource::BufferHandle) -> core::result::Result<gg_rhi::resource::DeviceAddress, gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::create_buffer(&mut self, &gg_rhi::resource::BufferDesc<'_>) -> core::result::Result<gg_rhi::resource::BufferHandle, gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::create_image(&mut self, &gg_rhi::resource::ImageDesc<'_>) -> core::result::Result<gg_rhi::resource::ImageHandle, gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::create_pipeline(&mut self, &gg_rhi::pipeline::PipelineDesc<'_>) -> core::result::Result<gg_rhi::pipeline::PipelineHandle, gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::destroy_buffer(&mut self, gg_rhi::resource::BufferHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::destroy_image(&mut self, gg_rhi::resource::ImageHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::destroy_pipeline(&mut self, gg_rhi::pipeline::PipelineHandle) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::flush_uploads(&mut self) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::map_buffer(&self, gg_rhi::resource::BufferHandle) -> core::result::Result<&[u8], gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::register_texture(&mut self, gg_rhi::resource::ImageHandle) -> core::result::Result<gg_rhi::bindless::TextureIndex, gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::upload_buffer(&mut self, gg_rhi::resource::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::upload_image(&mut self, gg_rhi::resource::ImageHandle, u32, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::offscreen::OffscreenRhi::write_buffer(&mut self, gg_rhi::resource::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::scene_graph<'a>(&gg_render::SceneFrame<'a>) -> alloc::vec::Vec<gg_render::graph::Declared<'a>>
+pub fn gg_render::ui_pass<'a>(gg_render::graph::ResourceId, &'a [gg_rhi::DrawSpec<'a>]) -> gg_render::graph::Declared<'a>

@@ -403,6 +403,26 @@ fn resolve_draws<'a>(gpu: &Gpu, draws: &[DrawSpec<'a>]) -> Result<Vec<ResolvedDr
                     entry.push_constant_size
                 )));
             }
+            // Both directions, because both are silent failures: an unset
+            // dynamic state biases by whatever was left in the command buffer,
+            // and a bias handed to a pipeline that did not enable it is a knob
+            // the operator turns while nothing moves.
+            if d.depth_bias.is_some() != entry.depth_bias {
+                return Err(RhiError::Loader(format!(
+                    "draw {} a depth bias and its pipeline {} one — dynamic state is required \
+                     exactly where it is declared",
+                    if d.depth_bias.is_some() {
+                        "passes"
+                    } else {
+                        "passes no"
+                    },
+                    if entry.depth_bias {
+                        "declares"
+                    } else {
+                        "declares no"
+                    },
+                )));
+            }
             let index_buffer = d
                 .index_buffer
                 .map(|h| gpu.resources.buffer(h).map(|b| b.raw))
@@ -417,6 +437,7 @@ fn resolve_draws<'a>(gpu: &Gpu, draws: &[DrawSpec<'a>]) -> Result<Vec<ResolvedDr
                 count: d.count,
                 index_buffer,
                 indirect,
+                depth_bias: d.depth_bias,
             })
         })
         .collect()

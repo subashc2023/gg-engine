@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "machine": "tower-windows-x86_64",
+  "commit": "7411809",
+  "tasks": [
+    {"name": "add-a-component", "task": "add a component", "steps": 2, "lines": 9, "latency_us": 372670},
+    {"name": "write-a-system", "task": "write a gameplay system", "steps": 2, "lines": 7, "latency_us": 428175},
+    {"name": "add-a-shader-parameter", "task": "add a shader parameter", "steps": 2, "lines": 2, "latency_us": 109058},
+    {"name": "add-an-asset", "task": "add an asset", "steps": 2, "lines": 0, "latency_us": 280040},
+    {"name": "add-a-render-pass", "task": "add a render pass", "steps": 2, "lines": 6, "latency_us": 1783723},
+    {"name": "create-a-demo", "task": "create a demo", "steps": 3, "lines": 41, "latency_us": 459928},
+    {"name": "inspect-an-entity", "task": "inspect an entity's state", "steps": 3, "lines": 0, "latency_us": 0},
+    {"name": "reproduce-a-bug", "task": "reproduce a reported bug", "steps": 3, "lines": 0, "latency_us": 1024}
+  ]
+}

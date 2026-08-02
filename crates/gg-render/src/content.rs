@@ -44,15 +44,38 @@ pub struct DrawMaterial {
     pub base_color: [f32; 4],
     /// The base-colour map, or [`AssetId::NONE`] for a flat material.
     pub base_color_texture: AssetId,
+    /// Tangent-space normals, BC5 — or [`AssetId::NONE`], which samples flat.
+    pub normal_texture: AssetId,
+    /// Roughness in red, metalness in green (§4.6's repack), or
+    /// [`AssetId::NONE`], which samples 1 and leaves the factors alone.
+    pub metallic_roughness_texture: AssetId,
+    /// Ambient occlusion in red, or [`AssetId::NONE`], which samples 1.
+    pub occlusion_texture: AssetId,
+    /// Metalness factor, multiplied with the map.
+    pub metallic: f32,
+    /// Roughness factor, multiplied with the map.
+    pub roughness: f32,
 }
 
 impl Default for DrawMaterial {
-    /// What a mesh naming no material draws as: white, untextured. Visible and
-    /// obviously plain, rather than invisible.
+    /// What a mesh naming *no* material draws as: white, untextured, rough and
+    /// **not metallic**. Visible and obviously plain rather than invisible.
+    ///
+    /// glTF's own default material is `metallicFactor = 1.0`, and this
+    /// deliberately is not: a metal has no diffuse lobe, so a fully metallic
+    /// surface in a scene with no lights renders pure black — indistinguishable
+    /// from a mesh that failed to load. A material that *declares* full
+    /// metalness still gets it; this is the fallback for a mesh that declared
+    /// nothing, and it follows the same rule the rest of the protocol does.
     fn default() -> Self {
         DrawMaterial {
             base_color: [1.0; 4],
             base_color_texture: AssetId::NONE,
+            normal_texture: AssetId::NONE,
+            metallic_roughness_texture: AssetId::NONE,
+            occlusion_texture: AssetId::NONE,
+            metallic: 0.0,
+            roughness: 1.0,
         }
     }
 }
@@ -192,12 +215,19 @@ impl Content {
         self.residency.want_mesh(&handle);
         let material = self.resolve_material(material_id);
         self.materials.insert(id, material);
-        self.request_texture(material.base_color_texture);
+        for texture in [
+            material.base_color_texture,
+            material.normal_texture,
+            material.metallic_roughness_texture,
+            material.occlusion_texture,
+        ] {
+            self.request_texture(texture);
+        }
     }
 
     /// A material's draw facts, or the default for one that is absent or
-    /// unreadable. The three maps it also names are deliberately unread: they
-    /// are lighting inputs and M11 owns the pass that reads them.
+    /// unreadable. All four maps since M11 — the three that were unread at M9
+    /// are lighting inputs, and this is the milestone that reads them.
     fn resolve_material(&mut self, id: AssetId) -> DrawMaterial {
         let handle = match self.assets.load_id::<asset::Material>(id) {
             Ok(Some(handle)) => handle,
@@ -213,6 +243,15 @@ impl Content {
             Ok(material) => DrawMaterial {
                 base_color: material.base_color,
                 base_color_texture: material.base_color_texture,
+                normal_texture: material.normal_texture,
+                metallic_roughness_texture: material.metallic_roughness_texture,
+                occlusion_texture: material.occlusion_texture,
+                metallic: material.metallic,
+                roughness: material.roughness,
+                // `flags` and `alpha_cutoff` stay unread. Alpha masking needs
+                // the *same* discard in the prepass and the shadow pass or the
+                // depth it writes disagrees with the colour it draws, and that
+                // is a transparency milestone rather than a lighting one (§4.6).
             },
             Err(error) => {
                 warn(id, &error);

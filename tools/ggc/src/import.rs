@@ -272,6 +272,12 @@ fn primitive_geometry(
     let uvs: Option<Vec<[f32; 2]>> = reader
         .read_tex_coords(0)
         .map(|uv| uv.into_f32().collect::<Vec<_>>());
+    // glTF's TANGENT is already `xyz` plus a handedness `w`, which is the
+    // engine's format too — so a document that supplies one is copied, not
+    // reinterpreted. Only a document that omits it gets a generated frame, and
+    // an authored one always wins: the artist's normal map was baked against
+    // *their* tangents, and regenerating would light every seam differently.
+    let tangents: Option<Vec<[f32; 4]>> = reader.read_tangents().map(Iterator::collect);
 
     let mut indices: Vec<u32> = match reader.read_indices() {
         Some(indices) => indices.into_u32().collect(),
@@ -313,10 +319,18 @@ fn primitive_geometry(
                 .and_then(|u| u.get(i))
                 .copied()
                 .unwrap_or([0.0; 2]),
+            tangent: tangents
+                .as_ref()
+                .and_then(|t| t.get(i))
+                .copied()
+                .unwrap_or([0.0; 4]),
         })
         .collect();
     if normals.is_none() {
         flat_normals(&mut vertices, &indices);
+    }
+    if tangents.is_none() {
+        generate_tangents(&mut vertices, &indices);
     }
     let vertices = optimize(vertices, &mut indices);
     Ok((vertices, indices))
@@ -360,6 +374,96 @@ fn flat_normals(vertices: &mut [Vertex], indices: &[u32]) {
         for &index in triangle {
             vertices[index as usize].normal = normal;
         }
+    }
+}
+
+/// Build a tangent frame for a primitive whose glTF document supplied none.
+///
+/// Lengyel's method (*Mathematics for 3D Game Programming*, §7.8, and the same
+/// derivation in the glTF sample viewer): for each triangle, solve the 2x2
+/// system that maps the uv edges onto the position edges, which gives the
+/// object-space directions in which u and v increase. Accumulate both per
+/// vertex, then orthonormalize the tangent against the interpolated normal by
+/// Gram-Schmidt and store the bitangent's sign.
+///
+/// This is *not* MikkTSpace, and the difference is worth naming: MikkTSpace
+/// splits vertices where the frame is discontinuous, and this averages across
+/// the seam instead. For an asset whose normal map was baked against MikkTSpace
+/// that is visible at the seam — which is exactly why an authored `TANGENT`
+/// wins, and why a pipeline that bakes its own maps should supply one.
+///
+/// `f64` throughout and narrowed once, like [`flat_normals`]: §4.6's
+/// byte-reproducibility means two hosts must produce the same pack, and the
+/// accumulation order is the file's triangle order on both.
+fn generate_tangents(vertices: &mut [Vertex], indices: &[u32]) {
+    let mut tangents = vec![DVec3::ZERO; vertices.len()];
+    let mut bitangents = vec![DVec3::ZERO; vertices.len()];
+    for triangle in indices.chunks_exact(3) {
+        let at = |i: usize| &vertices[triangle[i] as usize];
+        let position = |i: usize| DVec3::from(at(i).position.map(f64::from));
+        let uv = |i: usize| (f64::from(at(i).uv[0]), f64::from(at(i).uv[1]));
+
+        let (edge1, edge2) = (position(1) - position(0), position(2) - position(0));
+        let ((u0, v0), (u1, v1), (u2, v2)) = (uv(0), uv(1), uv(2));
+        let (du1, dv1) = (u1 - u0, v1 - v0);
+        let (du2, dv2) = (u2 - u0, v2 - v0);
+        let determinant = du1 * dv2 - du2 * dv1;
+        // A degenerate uv triangle — a face with no texture area, which is
+        // ordinary on untextured geometry — contributes nothing rather than an
+        // infinity that would poison every vertex it touches.
+        if determinant == 0.0 {
+            continue;
+        }
+        let scale = 1.0 / determinant;
+        let tangent = (edge1 * dv2 - edge2 * dv1) * scale;
+        let bitangent = (edge2 * du1 - edge1 * du2) * scale;
+        for &index in triangle {
+            tangents[index as usize] += tangent;
+            bitangents[index as usize] += bitangent;
+        }
+    }
+
+    for (vertex, (tangent, bitangent)) in vertices
+        .iter_mut()
+        .zip(tangents.into_iter().zip(bitangents))
+    {
+        let normal = DVec3::from(vertex.normal.map(f64::from)).normalize_or_zero();
+        // Gram-Schmidt: the accumulated tangent is only approximately in the
+        // surface plane once several triangles have averaged into it.
+        let orthogonal = (tangent - normal * normal.dot(tangent)).normalize_or_zero();
+        let orthogonal = match orthogonal == DVec3::ZERO {
+            // No usable tangent: an untextured face, or one whose uvs collapsed.
+            // Any vector in the surface plane will do, and picking it from the
+            // world axis *least* aligned with the normal is what stops the cross
+            // product from being near-zero.
+            true => normal.cross(least_aligned_axis(normal)).normalize_or_zero(),
+            false => orthogonal,
+        };
+        // glTF stores the bitangent as a sign, so this is the one bit that says
+        // whether the uv layout was mirrored on this face.
+        let handedness = match normal.cross(orthogonal).dot(bitangent) < 0.0 {
+            true => -1.0,
+            false => 1.0,
+        };
+        vertex.tangent = [
+            orthogonal.x as f32,
+            orthogonal.y as f32,
+            orthogonal.z as f32,
+            handedness,
+        ];
+    }
+}
+
+/// The world axis `normal` is least aligned with — the one whose cross product
+/// with it is furthest from zero.
+fn least_aligned_axis(normal: DVec3) -> DVec3 {
+    let (x, y, z) = (normal.x.abs(), normal.y.abs(), normal.z.abs());
+    if x <= y && x <= z {
+        DVec3::X
+    } else if y <= z {
+        DVec3::Y
+    } else {
+        DVec3::Z
     }
 }
 
@@ -484,6 +588,7 @@ mod tests {
                 position: [(i % stride) as f32, (i / stride) as f32, 0.0],
                 normal: [0.0, 0.0, 1.0],
                 uv: [0.0; 2],
+                tangent: [1.0, 0.0, 0.0, 1.0],
             })
             .collect();
         let mut indices = Vec::new();
@@ -550,5 +655,92 @@ mod tests {
         // it at all rather than reach it with a null.
         let mut indices = Vec::new();
         assert!(optimize(Vec::new(), &mut indices).is_empty());
+    }
+
+    /// One quad in the XY plane facing +Z, with uv increasing along +X and +Y —
+    /// the case whose right answer is written down rather than derived.
+    fn quad(uv: [[f32; 2]; 4]) -> (Vec<Vertex>, Vec<u32>) {
+        let corners = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let vertices = corners
+            .iter()
+            .zip(uv)
+            .map(|(&position, uv)| Vertex {
+                position,
+                normal: [0.0, 0.0, 1.0],
+                uv,
+                tangent: [0.0; 4],
+            })
+            .collect();
+        (vertices, vec![0, 1, 2, 0, 2, 3])
+    }
+
+    #[test]
+    fn a_generated_tangent_points_the_way_u_increases() {
+        // u along +X, v along +Y: the tangent is +X and the frame is
+        // right-handed, so the handedness bit is +1.
+        let (mut vertices, indices) = quad([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        generate_tangents(&mut vertices, &indices);
+        for vertex in &vertices {
+            assert!(
+                (vertex.tangent[0] - 1.0).abs() < 1e-5,
+                "{:?}",
+                vertex.tangent
+            );
+            assert!(vertex.tangent[1].abs() < 1e-5);
+            assert!(vertex.tangent[2].abs() < 1e-5);
+            assert_eq!(vertex.tangent[3], 1.0);
+        }
+    }
+
+    #[test]
+    fn a_mirrored_uv_layout_flips_the_handedness_bit_and_nothing_else() {
+        // v runs the other way. The tangent still points along +X; what changes
+        // is the sign that tells the shader which way the bitangent goes — which
+        // is the whole reason the bitangent is a bit rather than a vector.
+        let (mut vertices, indices) = quad([[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);
+        generate_tangents(&mut vertices, &indices);
+        for vertex in &vertices {
+            assert!(
+                (vertex.tangent[0] - 1.0).abs() < 1e-5,
+                "{:?}",
+                vertex.tangent
+            );
+            assert_eq!(vertex.tangent[3], -1.0, "mirrored");
+        }
+    }
+
+    #[test]
+    fn a_face_with_no_texture_area_still_gets_a_usable_frame() {
+        // Every uv identical: the 2x2 system is singular. A zero tangent would
+        // make the TBN singular too and normal mapping would come out black, so
+        // the fallback has to be a real vector in the surface plane.
+        let (mut vertices, indices) = quad([[0.5, 0.5]; 4]);
+        generate_tangents(&mut vertices, &indices);
+        for vertex in &vertices {
+            let t = DVec3::new(
+                f64::from(vertex.tangent[0]),
+                f64::from(vertex.tangent[1]),
+                f64::from(vertex.tangent[2]),
+            );
+            assert!((t.length() - 1.0).abs() < 1e-5, "{:?}", vertex.tangent);
+            // And it lies in the surface: perpendicular to the normal.
+            assert!(t.z.abs() < 1e-5, "{:?}", vertex.tangent);
+        }
+    }
+
+    #[test]
+    fn generating_tangents_twice_gives_the_same_bytes() {
+        // §4.6's byte-reproducibility reaches through this too: the accumulation
+        // is `f64` over the file's own triangle order, so two hosts agree.
+        let (mut first, indices) = quad([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        let mut second = first.clone();
+        generate_tangents(&mut first, &indices);
+        generate_tangents(&mut second, &indices);
+        assert_eq!(first, second);
     }
 }

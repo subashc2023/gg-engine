@@ -57,6 +57,7 @@ pub struct Entities {
 }
 
 impl Entities {
+    /// An empty allocator.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -68,6 +69,8 @@ impl Entities {
         self.live
     }
 
+    /// Whether nothing is live. Slots may still be allocated — this counts
+    /// entities, not capacity.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.live == 0

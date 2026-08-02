@@ -25,7 +25,7 @@
 //! [`TINTS`], save, and the hall changes colour without the session restarting.
 
 use gg_ecs::boundary::{
-    ActionId, AxisId, BoundaryError, Eye, GameWorld, Model, Renderable, log_level,
+    ActionId, AxisId, BoundaryError, Eye, GameWorld, Light, Model, Renderable, log_level,
 };
 use gg_ecs::{Component, Entity};
 use gg_math::sim;
@@ -52,6 +52,18 @@ pub const TINTS: [u32; 4] = [0x00ff_ffff, 0x00ff_c080, 0x0080_c0ff, 0x0080_ff90]
 
 /// Half-extent of the marker cube, metres.
 pub const MARKER_SIZE: f32 = 0.25;
+
+/// The demo's one light: a sun, warm, angled so a face pointing up and a face
+/// pointing at the camera are lit differently (§6 M11).
+///
+/// Exported rather than buried in `bootstrap` because `gg-golden` builds this
+/// demo's world from its constants: a sun the harness restated would be a sun
+/// that could drift from the one a player sees.
+pub const SUN_DIRECTION: sim::Vec3 = sim::Vec3::new(-0.42, -0.82, -0.39);
+/// The sun's colour, `0x00RRGGBB`.
+pub const SUN_COLOR: u32 = 0x00ff_f2dc;
+/// The sun's radiance multiplier.
+pub const SUN_INTENSITY: f32 = 3.5;
 
 /// Cycle [`Model::tint`].
 pub const TINT: ActionId = ActionId::new(0);
@@ -135,6 +147,14 @@ pub fn bootstrap(world: &mut GameWorld) {
     // doing it here would put a transform hierarchy in a demo.
     let hall = world.spawn();
     let outcome = world.insert(hall, Model::at(HALL, sim::DVec3::ZERO));
+    report(world, outcome);
+
+    // The sun. One directional light, so the scene is lit and the shadow pass
+    // has something to cast (§6 M11). Spawned in `bootstrap` like everything
+    // else here — a light is a component the game declares, not a renderer
+    // setting somebody edits in the engine.
+    let sun = world.spawn();
+    let outcome = world.insert(sun, Light::sun(SUN_DIRECTION, SUN_COLOR, SUN_INTENSITY));
     report(world, outcome);
 
     // One box in a frame full of pack meshes, so both pipelines are exercised
@@ -231,7 +251,7 @@ pub fn present(world: &mut GameWorld) {
 // Order in both verb lists is the id space (§4.7); order in `systems` is the
 // execution order (§4.1). Neither is alphabetical and neither may drift.
 gg_ecs::gg_game! {
-    components: [Visitor, Model, Renderable, Eye],
+    components: [Visitor, Model, Renderable, Light, Eye],
     actions: ["tint"],
     axes: ["move_right", "move_up", "move_forward", "aim_x", "aim_y"],
     systems: [bootstrap, aim, walk, tint, present],

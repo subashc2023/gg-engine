@@ -28,6 +28,9 @@ pub use gg_ecs::boundary::VerbsTable
 pub use gg_ecs::boundary::WorldHandle
 pub use gg_ecs::boundary::asset_id
 pub use gg_ecs::boundary::log_level
+pub mod gg_ecs::boundary::light
+pub const gg_ecs::boundary::light::DIRECTIONAL: u32
+pub const gg_ecs::boundary::light::POINT: u32
 pub struct gg_ecs::boundary::Access
 impl gg_ecs::boundary::Access
 pub const fn gg_ecs::boundary::Access::new() -> Self
@@ -48,6 +51,7 @@ pub gg_ecs::boundary::Eye::position: gg_math::sim::DVec3
 pub gg_ecs::boundary::Eye::yaw: f32
 impl gg_ecs::boundary::Eye
 pub const gg_ecs::boundary::Eye::ORIGIN: gg_ecs::boundary::Eye
+pub fn gg_ecs::boundary::Eye::at(gg_math::sim::DVec3, f32, f32) -> Self
 pub fn gg_ecs::boundary::Eye::of(&gg_ecs::world::World) -> core::result::Result<gg_ecs::boundary::Eye, gg_ecs::view::AliasError>
 impl bytemuck::pod::Pod for gg_ecs::boundary::Eye
 impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Eye
@@ -73,12 +77,33 @@ pub fn gg_ecs::GameWorld<'a>::log(&self, u32, &str)
 pub unsafe fn gg_ecs::GameWorld<'a>::new(*mut gg_abi::host::WorldHandle, &'a gg_abi::system::TickCtx) -> Self
 pub const fn gg_ecs::GameWorld<'a>::pressed(&self, gg_abi::input::ActionId) -> bool
 pub const fn gg_ecs::GameWorld<'a>::previous(&self) -> &gg_abi::input::InputFrame
+pub fn gg_ecs::GameWorld<'a>::put<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity, T)
 pub fn gg_ecs::GameWorld<'a>::remove<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::GameWorld<'a>::spawn(&mut self) -> gg_abi::entity::Entity
+pub fn gg_ecs::GameWorld<'a>::spawn_with<T: gg_ecs::component::Component>(&mut self, T) -> gg_abi::entity::Entity
 pub const fn gg_ecs::GameWorld<'a>::tick(&self) -> u64
 pub const fn gg_ecs::GameWorld<'a>::tick_hz(&self) -> u32
 impl core::fmt::Debug for gg_ecs::GameWorld<'_>
 pub fn gg_ecs::GameWorld<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[repr(C)] pub struct gg_ecs::boundary::Light
+pub gg_ecs::boundary::Light::color: u32
+pub gg_ecs::boundary::Light::direction: gg_math::sim::Vec3
+pub gg_ecs::boundary::Light::intensity: f32
+pub gg_ecs::boundary::Light::kind: u32
+pub gg_ecs::boundary::Light::position: gg_math::sim::DVec3
+pub gg_ecs::boundary::Light::range: f32
+pub gg_ecs::boundary::Light::reserved: u32
+impl gg_ecs::boundary::Light
+pub fn gg_ecs::boundary::Light::point(gg_math::sim::DVec3, u32, f32, f32) -> Self
+pub fn gg_ecs::boundary::Light::sun(gg_math::sim::Vec3, u32, f32) -> Self
+impl bytemuck::pod::Pod for gg_ecs::boundary::Light
+impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Light
+impl gg_ecs::component::Component for gg_ecs::boundary::Light
+pub const gg_ecs::boundary::Light::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Light::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Light::TYPE_NAME: &'static str
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Light
+pub fn gg_ecs::boundary::Light::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 #[repr(C)] pub struct gg_ecs::boundary::Model
 pub gg_ecs::boundary::Model::asset: u64
 pub gg_ecs::boundary::Model::position: gg_math::sim::DVec3
@@ -243,6 +268,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Eye
 pub const gg_ecs::boundary::Eye::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Eye::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Eye::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Light
+pub const gg_ecs::boundary::Light::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Light::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Light::TYPE_NAME: &'static str
 impl gg_ecs::component::Component for gg_ecs::boundary::Model
 pub const gg_ecs::boundary::Model::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Model::FIELDS: &'static [gg_ecs::component::FieldDesc]
@@ -478,6 +507,8 @@ impl gg_ecs::state_hash::StateHash for gg_abi::entity::Entity
 pub fn gg_abi::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Eye
 pub fn gg_ecs::boundary::Eye::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Light
+pub fn gg_ecs::boundary::Light::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Model
 pub fn gg_ecs::boundary::Model::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
@@ -776,8 +807,10 @@ pub fn gg_ecs::GameWorld<'a>::log(&self, u32, &str)
 pub unsafe fn gg_ecs::GameWorld<'a>::new(*mut gg_abi::host::WorldHandle, &'a gg_abi::system::TickCtx) -> Self
 pub const fn gg_ecs::GameWorld<'a>::pressed(&self, gg_abi::input::ActionId) -> bool
 pub const fn gg_ecs::GameWorld<'a>::previous(&self) -> &gg_abi::input::InputFrame
+pub fn gg_ecs::GameWorld<'a>::put<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity, T)
 pub fn gg_ecs::GameWorld<'a>::remove<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::GameWorld<'a>::spawn(&mut self) -> gg_abi::entity::Entity
+pub fn gg_ecs::GameWorld<'a>::spawn_with<T: gg_ecs::component::Component>(&mut self, T) -> gg_abi::entity::Entity
 pub const fn gg_ecs::GameWorld<'a>::tick(&self) -> u64
 pub const fn gg_ecs::GameWorld<'a>::tick_hz(&self) -> u32
 impl core::fmt::Debug for gg_ecs::GameWorld<'_>
@@ -890,6 +923,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Eye
 pub const gg_ecs::boundary::Eye::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Eye::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Eye::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Light
+pub const gg_ecs::boundary::Light::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Light::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Light::TYPE_NAME: &'static str
 impl gg_ecs::component::Component for gg_ecs::boundary::Model
 pub const gg_ecs::boundary::Model::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Model::FIELDS: &'static [gg_ecs::component::FieldDesc]
@@ -995,6 +1032,8 @@ impl gg_ecs::state_hash::StateHash for gg_abi::entity::Entity
 pub fn gg_abi::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Eye
 pub fn gg_ecs::boundary::Eye::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Light
+pub fn gg_ecs::boundary::Light::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Model
 pub fn gg_ecs::boundary::Model::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node

@@ -498,6 +498,9 @@ impl Stages for App {
         // empty archetype (§4.6).
         self.extracted
             .append_models::<Model>(&self.world, renderer.scenes())?;
+        // The lights the game declared (§6 M11). A game with none renders unlit
+        // — dim and obviously so, which is the same rule a missing `Eye` follows.
+        self.extracted.append_lights(&self.world)?;
         Ok(())
     }
 
@@ -514,6 +517,7 @@ impl Stages for App {
             tick: self.next_tick,
             passes: renderer.pass_timings(),
             memory: renderer.memory(),
+            luminance: renderer.luminance(),
         });
         #[cfg(not(feature = "overlay"))]
         let ui = &[];

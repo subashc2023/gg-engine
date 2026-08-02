@@ -60,6 +60,8 @@
 //! pointers, references, and randomly-ordered containers all fail before they
 //! can reach a hash (§4.2.1).
 
+#![deny(missing_docs)]
+
 // `#[derive(Component)]` emits `::gg_ecs::` paths, which is what lets a game
 // crate name one crate (§3). The alias is how the derive also works *inside*
 // this crate, so the boundary's own components are derived rather than

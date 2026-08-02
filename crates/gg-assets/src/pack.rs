@@ -48,7 +48,9 @@ pub const MAGIC: [u8; 8] = *b"GG-PACK\0";
 
 /// The layout version this build reads and writes. Bumped by any change to
 /// [`Header`], [`Entry`] or a blob's own layout; a mismatch is refused at load.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// 2 since M11: [`crate::Vertex`] grew a tangent and went from 32 bytes to 48.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Section and blob alignment (§4.6). Also the granularity every offset in the
 /// file is a multiple of.

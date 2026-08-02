@@ -24,7 +24,9 @@
 //! That is the affordance the finding asked for, spelled as a verb the player
 //! already has.
 
-use gg_ecs::boundary::{ActionId, AxisId, BoundaryError, Eye, GameWorld, Renderable, log_level};
+use gg_ecs::boundary::{
+    ActionId, AxisId, BoundaryError, Eye, GameWorld, Light, Renderable, log_level,
+};
 use gg_ecs::{Component, Entity};
 use gg_math::sim;
 
@@ -81,6 +83,18 @@ pub const CROSSHAIR_DISTANCE: f64 = 1.0;
 
 /// Half-extent of the crosshair, metres — about seven pixels at 720p.
 pub const CROSSHAIR_SIZE: f32 = 0.004;
+
+/// The demo's one light: a sun, warm, angled so a face pointing up and a face
+/// pointing at the camera are lit differently (§6 M11).
+///
+/// Exported rather than buried in `bootstrap` because `gg-golden` builds this
+/// demo's world from its constants: a sun the harness restated would be a sun
+/// that could drift from the one a player sees.
+pub const SUN_DIRECTION: sim::Vec3 = sim::Vec3::new(-0.35, -0.86, -0.37);
+/// The sun's colour, `0x00RRGGBB`.
+pub const SUN_COLOR: u32 = 0x00ff_f4e0;
+/// The sun's radiance multiplier.
+pub const SUN_INTENSITY: f32 = 3.2;
 
 /// Fire at whatever is under the crosshair.
 pub const FIRE: ActionId = ActionId::new(0);
@@ -221,6 +235,14 @@ pub fn bootstrap(world: &mut GameWorld) {
         world.log(log_level::ERROR, &refused.to_string());
         return;
     }
+
+    // The sun. One directional light, so the scene is lit and the shadow pass
+    // has something to cast (§6 M11). Spawned in `bootstrap` like everything
+    // else here — a light is a component the game declares, not a renderer
+    // setting somebody edits in the engine.
+    let sun = world.spawn();
+    let outcome = world.insert(sun, Light::sun(SUN_DIRECTION, SUN_COLOR, SUN_INTENSITY));
+    report(world, outcome);
 
     let floor = world.spawn();
     if let Err(refused) = world.insert(
@@ -505,7 +527,7 @@ fn cube_extremes(world: &mut GameWorld) -> (usize, u64) {
 // Order in both lists is the id space (§4.7) and order in `systems` is the
 // schedule (§4.1) — which is why both are game code, and both are reloadable.
 gg_ecs::gg_game! {
-    components: [Player, Cube, Shot, Renderable, Eye],
+    components: [Player, Cube, Shot, Renderable, Light, Eye],
     actions: ["fire", "spawn", "restart"],
     axes: ["move_right", "move_up", "move_forward", "aim_x", "aim_y"],
     systems: [restart, bootstrap, aim, walk, shoot, spawn, fade, present],

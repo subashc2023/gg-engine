@@ -26,27 +26,64 @@ pub struct Instance {
     debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
 
+/// Where this instance's surface will come from. Chosen at instance creation
+/// because it decides the extension set, and an extension not asked for then
+/// cannot be used later.
+pub(crate) enum Presentation {
+    /// A real window, via the WSI extensions its display handle names.
+    Window(raw_window_handle::RawDisplayHandle),
+    /// `VK_EXT_headless_surface` — a real `VkSwapchainKHR` whose present
+    /// discards, with no OS window anywhere. The only shape in which a
+    /// swapchain gate and §1.5 can both hold (§6 M12). Not universally
+    /// available: ask [`Instance::headless_supported`] first.
+    Headless,
+    /// No surface at all — [`OffscreenRhi`](crate::OffscreenRhi)'s instance.
+    None,
+}
+
 impl Instance {
-    /// Create the instance with the surface extensions the display needs —
-    /// or, with `None`, a display-less instance for offscreen rendering
-    /// (§4.10: gg-golden renders with no swapchain and no windowing).
-    /// With `validation`: the Khronos layer, synchronization validation, and
-    /// the debug messenger — all lab equipment that unbolts in dist (§1.13).
-    pub fn new(display: Option<raw_window_handle::RawDisplayHandle>) -> Result<Self, RhiError> {
+    /// Whether this machine's loader offers `VK_EXT_headless_surface`.
+    ///
+    /// A capability question asked of the *instance* layer, so it is answerable
+    /// before anything is created — which is what lets a gate skip cleanly on a
+    /// driver that lacks it instead of failing.
+    pub fn headless_supported() -> bool {
+        // SAFETY: loading the system Vulkan loader; sound to call anytime.
+        let Ok(entry) = (unsafe { ash::Entry::load() }) else {
+            return false;
+        };
+        // SAFETY: entry is live; `None` asks for the implementation's own list.
+        let Ok(available) = (unsafe { entry.enumerate_instance_extension_properties(None) }) else {
+            return false;
+        };
+        available.iter().any(|e| {
+            e.extension_name_as_c_str()
+                .is_ok_and(|n| n == ash::ext::headless_surface::NAME)
+        })
+    }
+
+    /// Create the instance with the extensions `presentation` implies. With
+    /// `validation`: the Khronos layer, synchronization validation, and the
+    /// debug messenger — all lab equipment that unbolts in dist (§1.13).
+    pub fn new(presentation: Presentation) -> Result<Self, RhiError> {
         // SAFETY: loading the system Vulkan loader; sound to call anytime.
         let entry = unsafe { ash::Entry::load() }
             .map_err(|e| RhiError::Loader(format!("Vulkan loader not found: {e}")))?;
 
         // `mut` feeds the validation-only debug_utils push below.
         #[cfg_attr(not(feature = "validation"), allow(unused_mut))]
-        let mut extensions = match display {
-            Some(display) => ash_window::enumerate_required_extensions(display)
+        let mut extensions = match presentation {
+            Presentation::Window(display) => ash_window::enumerate_required_extensions(display)
                 .map_err(RhiError::Vk)?
                 .to_vec(),
+            Presentation::Headless => vec![
+                ash::khr::surface::NAME.as_ptr(),
+                ash::ext::headless_surface::NAME.as_ptr(),
+            ],
             // Offscreen still enables VK_KHR_surface alone: it is what device
             // creation's unconditional VK_KHR_swapchain extension requires,
             // and enabling it costs nothing without a surface object.
-            None => vec![ash::khr::surface::NAME.as_ptr()],
+            Presentation::None => vec![ash::khr::surface::NAME.as_ptr()],
         };
 
         let app_info = vk::ApplicationInfo::default()

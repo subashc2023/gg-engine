@@ -41,6 +41,10 @@ demo-04-scene = { path = "../../demos/04-scene" }
 # Demo 05 supplies the field's layout as pure functions; the scene below builds
 # the world from them rather than restating a hundred hub positions.
 demo-05-many = { path = "../../demos/05-many", default-features = false }
+# Demo 06's constants — where its lights are, how bright, and where the visitor
+# stands. Same reason as demo 04's: the lit reference moves with the demo rather
+# than beside it.
+demo-06-lit = { path = "../../demos/06-lit", default-features = false }
 gg-scene = { path = "../../crates/gg-scene" }
 gg-input = { path = "../../crates/gg-input" }
 # The capture trigger (§4.8). `gg-debug` is winit-free by its own dependency

@@ -60,6 +60,7 @@ fn pipeline(
             color: gg_rhi::ColorTarget::Backbuffer,
             blend: gg_rhi::Blend::Off,
             depth,
+            depth_bias: false,
         })
         .unwrap();
     (handle, push_size)
@@ -138,6 +139,7 @@ float4 fs_main() : SV_Target
             count: 3,
             index_buffer: None,
             indirect: None,
+            depth_bias: None,
         }],
     )
     .unwrap();
@@ -205,6 +207,7 @@ float4 fs_main() : SV_Target
                 count: 3,
                 index_buffer: None,
                 indirect: None,
+                depth_bias: None,
             }],
         )
         .unwrap()
@@ -278,6 +281,7 @@ float4 fs_main(VOut i) : SV_Target { return i.color; }
             count: 12,
             index_buffer: None,
             indirect: None,
+            depth_bias: None,
         }],
     )
     .unwrap();
@@ -349,6 +353,7 @@ float4 fs_main() : SV_Target
             count: 3,
             index_buffer: None,
             indirect: None,
+            depth_bias: None,
         }],
     )
     .unwrap();
@@ -462,6 +467,7 @@ float4 fs_main() : SV_Target
                 count: 3,
                 index_buffer: None,
                 indirect: None,
+                depth_bias: None,
             }],
         )
         .unwrap();
@@ -719,6 +725,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             count: 3,
             index_buffer: Some(indices),
             indirect: None,
+            depth_bias: None,
         }],
     )
     .unwrap();
@@ -749,6 +756,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
                 buffer: commands,
                 offset: 0,
             }),
+            depth_bias: None,
         }],
     )
     .unwrap();
@@ -781,6 +789,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
                 buffer: commands,
                 offset: 0,
             }),
+            depth_bias: None,
         }],
     )
     .unwrap();

@@ -33,16 +33,19 @@ fn mesh_blob() -> Vec<u8> {
             position: [0.0, 0.0, 0.0],
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [1.0, 0.0, 0.0],
             normal: [0.0, 1.0, 0.0],
             uv: [1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
         Vertex {
             position: [0.0, 0.0, 1.0],
             normal: [0.0, 1.0, 0.0],
             uv: [0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
         },
     ];
     mesh::encode(&vertices, &[0, 1, 2], AssetId::of("mat/a"))

@@ -61,7 +61,7 @@ struct Scene {
     render: fn() -> Render,
 }
 
-/// The roster. Eight scenes across four sources — three demos, the engine's own
+/// The roster. Eleven scenes across five sources — four demos, the engine's own
 /// v1 pass list, and two replay-driven captures — each with its own policy,
 /// because "how strictly" is a property of what the frame contains and not of
 /// the harness (§4.10 per-test config).
@@ -217,6 +217,42 @@ const SCENES: &[Scene] = &[
         },
         render: render_field,
     },
+    Scene {
+        name: "atrium",
+        // §6 M11's lit scene: metal-rough shading over all four maps, a sun that
+        // casts a shadow map, four point lights, and the tonemapper on the way
+        // out. Judged like `hall` on the per-channel side — the same BC7
+        // filtering is under it — but the **perceptual** gate is what carries
+        // the weight here, exactly as the exit row says: this frame is smooth
+        // gradients over curved surfaces, where a driver's rounding moves many
+        // more pixels by a little than a hard-edged frame does, and a wrong
+        // light direction or a lost shadow moves *structure* instead.
+        policy: Policy {
+            tolerance: 4,
+            max_diff_pixels: 512,
+            benign_delta: 8,
+            max_dssim: 0.03,
+            max_bias: 0.2,
+        },
+        render: render_atrium,
+    },
+    Scene {
+        name: "atrium-noon",
+        // The same room with the sun a quarter of its sweep on, which puts the
+        // pillars' shadows across the floor at a different angle and the
+        // spheres' highlights on their other sides. Two lit references rather
+        // than one because a single sun angle can hide a shadow projection that
+        // is wrong in only one axis — the classic symptom of a light-space basis
+        // built from a fixed world up.
+        policy: Policy {
+            tolerance: 4,
+            max_diff_pixels: 512,
+            benign_delta: 8,
+            max_dssim: 0.03,
+            max_bias: 0.2,
+        },
+        render: render_atrium_noon,
+    },
 ];
 
 /// Render demo 02's scene — the same buffers, the same upload path through
@@ -328,6 +364,7 @@ fn render_mesh_of(sim: demo_02_mesh::sim::Sim) -> Render {
             count: scene.index_count,
             index_buffer: Some(scene.indices),
             indirect: None,
+            depth_bias: None,
         })
         .collect();
 
@@ -375,6 +412,7 @@ const BOXES_EXTENT: (u32, u32) = (320, 180);
 /// checked in — so a missing one is a missing *step*, and says so.
 const HALL_PACK: &str = "target/assets/04-scene.ggpack";
 const FIELD_PACK: &str = "target/assets/05-many.ggpack";
+const ATRIUM_PACK: &str = "target/assets/06-lit.ggpack";
 
 /// §6 M9's exit row: a pack must be on the device within this. Measured from
 /// `open` to the frame where nothing is pending, which is the span a player
@@ -498,7 +536,7 @@ fn hall_pack() -> anyhow::Result<std::path::PathBuf> {
 /// its visitor moves this reference rather than quietly diverging from it.
 fn render_hall() -> Render {
     use gg_ecs::World;
-    use gg_ecs::boundary::{Model, Renderable};
+    use gg_ecs::boundary::{Light, Model, Renderable};
     use gg_math::sim;
 
     let extent = BOXES_EXTENT;
@@ -506,6 +544,16 @@ fn render_hall() -> Render {
     let mut world = World::new();
     world.register::<Model>()?;
     world.register::<Renderable>()?;
+    world.register::<Light>()?;
+    let sun = world.spawn();
+    world.insert(
+        sun,
+        Light::sun(
+            demo_04_scene::SUN_DIRECTION,
+            demo_04_scene::SUN_COLOR,
+            demo_04_scene::SUN_INTENSITY,
+        ),
+    )?;
     let hall = world.spawn();
     world.insert(
         hall,
@@ -539,6 +587,7 @@ fn render_hall() -> Render {
         extracted.clear(demo_04_scene::START_POSITION, view.frustum(extent));
         extracted.append::<Renderable>(&world)?;
         extracted.append_models::<Model>(&world, renderer.scenes())?;
+        extracted.append_lights(&world)?;
         let _capture = gg_debug::capture::frame();
         frame = Some(renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?);
     }
@@ -566,6 +615,125 @@ fn render_hall() -> Render {
     })
 }
 
+fn atrium_pack() -> anyhow::Result<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(ATRIUM_PACK);
+    anyhow::ensure!(
+        path.is_file(),
+        "{ATRIUM_PACK} is not there — `cargo xtask assets` compiles it (§4.6). Packs are build \
+         output and are never checked in, so this is a missing step and not a missing file."
+    );
+    Ok(path)
+}
+
+/// Demo 06's atrium, lit (§6 M11).
+///
+/// The one scene in the roster that judges *shading*: a normal map bending the
+/// light across a mortar line, an occlusion map darkening the same groove,
+/// roughness spreading a highlight across ten spheres, a sun casting a shadow
+/// map, four point lights falling off, and the tonemapper bringing all of it
+/// into eight bits. Every constant is the demo's own, so a change to where its
+/// lights are moves this reference rather than quietly diverging from it.
+///
+/// `phase` picks a point in the demo's sun sweep. It is the demo's own
+/// `sun_direction`, not an angle restated here, which is what makes the
+/// reference move when the sweep does.
+fn render_atrium_at(phase: u64) -> Render {
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Light, Model};
+    use gg_math::sim;
+
+    let extent = BOXES_EXTENT;
+    let pack = atrium_pack()?;
+    let mut world = World::new();
+    world.register::<Model>()?;
+    world.register::<Light>()?;
+    let atrium = world.spawn();
+    world.insert(atrium, Model::at(demo_06_lit::ATRIUM, sim::DVec3::ZERO))?;
+    // The sun first, which is what makes it the light the single cascade casts
+    // — the same ordering the demo's `bootstrap` relies on (§6 M11).
+    let sun = world.spawn();
+    world.insert(
+        sun,
+        Light::sun(
+            demo_06_lit::sun_direction(phase),
+            demo_06_lit::SUN_COLOR,
+            demo_06_lit::SUN_INTENSITY,
+        ),
+    )?;
+    for (x, z) in demo_06_lit::LAMP_AT {
+        let lamp = world.spawn();
+        world.insert(
+            lamp,
+            Light::point(
+                sim::DVec3::new(x, demo_06_lit::LAMP_HEIGHT, z),
+                demo_06_lit::LAMP_COLOR,
+                demo_06_lit::LAMP_INTENSITY,
+                demo_06_lit::LAMP_RANGE,
+            ),
+        )?;
+    }
+
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    renderer.open_pack(&pack)?;
+    let view = gg_render::View {
+        // Slightly down, so the floor's shadows and the two rows of spheres are
+        // both in frame.
+        pitch: -0.18,
+        ..gg_render::View::default()
+    };
+    let mut extracted = gg_extract::Extracted::default();
+    let mut frame = None;
+    for _ in 0..HALL_FRAMES {
+        extracted.clear(demo_06_lit::START_POSITION, view.frustum(extent));
+        extracted.append_models::<Model>(&world, renderer.scenes())?;
+        extracted.append_lights(&world)?;
+        let _capture = gg_debug::capture::frame();
+        frame = Some(renderer.frame(&extracted, &view, [0.01, 0.012, 0.02, 1.0], &[])?);
+    }
+    let pending = renderer
+        .pack()
+        .map_or(0, gg_render::content::Content::pending);
+    anyhow::ensure!(
+        pending == 0,
+        "the atrium was still streaming after {HALL_FRAMES} frames ({pending} asset(s) pending) — \
+         judging a half-resident frame would make the reference a race"
+    );
+    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
+    // The claim the whole scene rests on, as a machine rather than as a look:
+    // a frame with a casting sun runs the shadow pass, and one without does not
+    // (§6 M11). A reference blessed from a frame that skipped it would be a
+    // reference of an unlit room that happened to look plausible.
+    anyhow::ensure!(
+        frame.order.iter().any(|name| name == "shadow"),
+        "the atrium's sun casts, so the graph must have run a shadow pass: {:?}",
+        frame.order
+    );
+    let report = renderer.shutdown();
+    anyhow::ensure!(
+        report.clean(),
+        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
+        report.validation_messages,
+        report.leaked_allocations.len(),
+        report.leaked_allocations,
+    );
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
+
+/// The atrium at the start of the sun's sweep.
+fn render_atrium() -> Render {
+    render_atrium_at(0)
+}
+
+/// The same room a quarter of the sweep on.
+fn render_atrium_noon() -> Render {
+    render_atrium_at(demo_06_lit::SUN_PERIOD / 4)
+}
+
 /// Demo 05's field: ten thousand parented objects over four meshes (§6 M10).
 ///
 /// The world is built from the demo's own layout functions and composed by the
@@ -575,7 +743,7 @@ fn render_hall() -> Render {
 /// is an exit claim and a claim a harness cannot count is one nobody checks.
 fn render_field() -> Render {
     use gg_ecs::World;
-    use gg_ecs::boundary::{Model, Node};
+    use gg_ecs::boundary::{Light, Model, Node};
     use gg_math::sim;
 
     let extent = BOXES_EXTENT;
@@ -583,6 +751,16 @@ fn render_field() -> Render {
     let mut world = World::new();
     world.register::<Model>()?;
     world.register::<Node>()?;
+    world.register::<Light>()?;
+    let sun = world.spawn();
+    world.insert(
+        sun,
+        Light::sun(
+            demo_05_many::SUN_DIRECTION,
+            demo_05_many::SUN_COLOR,
+            demo_05_many::SUN_INTENSITY,
+        ),
+    )?;
     for index in 0..demo_05_many::HUBS {
         let hub = world.spawn();
         world.insert(
@@ -623,6 +801,7 @@ fn render_field() -> Render {
     for _ in 0..HALL_FRAMES {
         extracted.clear(demo_05_many::START_POSITION, view.frustum(extent));
         extracted.append_models::<Model>(&world, renderer.scenes())?;
+        extracted.append_lights(&world)?;
         let _capture = gg_debug::capture::frame();
         frame = Some(renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?);
     }
@@ -683,11 +862,22 @@ fn field_pack() -> anyhow::Result<std::path::PathBuf> {
 
 fn boxes_world(frustum: gg_extract::Frustum) -> anyhow::Result<gg_extract::Extracted> {
     use gg_ecs::World;
-    use gg_ecs::boundary::Renderable;
+    use gg_ecs::boundary::{Light, Renderable};
     use gg_math::sim;
 
     let mut world = World::new();
     world.register::<Renderable>()?;
+    world.register::<Light>()?;
+    // These boxes belong to no demo, so the sun is declared here — and it has to
+    // be declared somewhere, because since M11 a world with no light renders by
+    // the ambient term alone. An unlit reference would still catch a lost draw
+    // and would stop catching a wrong normal, which is half of what this scene
+    // is for.
+    let sun = world.spawn();
+    world.insert(
+        sun,
+        Light::sun(sim::Vec3::new(-0.35, -0.86, -0.37), 0x00ff_f4e0, 3.2),
+    )?;
     // Depths chosen so the near box overlaps the far ones from the angled eye
     // and clears them from the straight-on one: one scene shows the colours,
     // the other shows the depth test deciding between them.
@@ -704,6 +894,7 @@ fn boxes_world(frustum: gg_extract::Frustum) -> anyhow::Result<gg_extract::Extra
     }
     let mut extracted = gg_extract::Extracted::default();
     extracted.transforms::<Renderable>(&world, gg_math::sim::DVec3::ZERO, frustum)?;
+    extracted.append_lights(&world)?;
     Ok(extracted)
 }
 
@@ -777,6 +968,7 @@ fn render_triangle_scaled(scale: f32) -> Render {
         count: demo_01_triangle::VERTEX_COUNT,
         index_buffer: None,
         indirect: None,
+        depth_bias: None,
     }];
 
     let dest = readback_buffer(&mut rhi, extent)?;

@@ -285,4 +285,28 @@ fn report_instruments(
         "  {} VK_AMD_buffer_marker (stage-ordered breadcrumbs; else cmd_fill_buffer)",
         mark(has("VK_AMD_buffer_marker"))
     );
+    // An *instance* extension, unlike everything above it — reported here anyway
+    // because its absence is what makes `gg-rhi`'s swapchain gate skip, and a
+    // skip nobody can see is the vacuous pass §5.8 exists to refuse (§6 M12).
+    println!(
+        "  {} VK_EXT_headless_surface (windowless swapchain recreation gate, §1.5)",
+        mark(has_headless_surface())
+    );
+}
+
+/// Whether the loader offers `VK_EXT_headless_surface`. Loads its own entry: it
+/// is an instance-level question, and the probe's instance is already built.
+fn has_headless_surface() -> bool {
+    // SAFETY: loading the system Vulkan loader; sound to call anytime.
+    let Ok(entry) = (unsafe { ash::Entry::load() }) else {
+        return false;
+    };
+    // SAFETY: entry is live; `None` asks for the implementation's own list.
+    let Ok(available) = (unsafe { entry.enumerate_instance_extension_properties(None) }) else {
+        return false;
+    };
+    available.iter().any(|e| {
+        e.extension_name_as_c_str()
+            .is_ok_and(|c| c.to_string_lossy() == "VK_EXT_headless_surface")
+    })
 }

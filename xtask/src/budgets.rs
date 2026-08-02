@@ -30,6 +30,13 @@ const SHELL_BUDGET: usize = 600;
 /// one; a budget invented here would be a rule this file made up.
 const DEPENDENCY_BUDGETS: &[(&str, usize)] = &[("gg-ecs", 6), ("gg-core", 8)];
 
+/// §6 M12's exit row: the template reaches a spinning lit mesh in under 50
+/// lines. A budget rather than a claim, because the number is the whole point —
+/// it is what caps the ceremony a game pays, and the first time it was measured
+/// it came out at 74 and sent two helpers down into `GameWorld` where every
+/// game crate had been hand-writing them.
+const TEMPLATE_BUDGET: usize = 50;
+
 /// What a game crate may reach engine-side (§3's deny pin, §4.2.2's blast
 /// radius). `gg-ecs-derive` is the forced proc-macro leaf `gg-ecs` re-exports,
 /// so a game crate reaches it whether or not it names it.
@@ -41,11 +48,157 @@ const GAME_CRATE_PIN: &[&str] = &["gg-abi", "gg-ecs", "gg-ecs-derive", "gg-math"
 /// a PR, not discovered when a clone crawls.
 const REFERENCE_BUDGET: u64 = 50 * 1024 * 1024;
 
+/// `(crate, dependency, why)` for edges a textual scan cannot see — a dependency
+/// reached only through a macro expansion, or linked for its symbols alone.
+///
+/// **Empty, and deliberately so**, on the same reasoning as the validation
+/// suppressions file: the escape hatch exists before it is needed, so the first
+/// real case gets a row with a reason instead of the gate getting switched off.
+const USED_INVISIBLY: &[(&str, &str, &str)] = &[];
+
 pub fn check() -> anyhow::Result<()> {
     shell_lines()?;
+    template_lines()?;
     dependencies()?;
+    unused_dependencies()?;
     game_crate_pin()?;
     reference_images()
+}
+
+/// The template's ceremony, counted (§6 M12).
+///
+/// Code lines, on the same definition [`shell_lines`] uses and for the same
+/// reason: the house comment style is dense and inline, and counting comments
+/// would make the two rules fight — resolved by deleting the explanations that
+/// are half of what a template is *for*.
+fn template_lines() -> anyhow::Result<()> {
+    let path = workspace_root().join("demos/99-template/src/lib.rs");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("no template at {}: {e}", path.display()))?;
+    let (code, total) = count_code(&text);
+    anyhow::ensure!(
+        code <= TEMPLATE_BUDGET,
+        "demos/99-template is {code} code lines against a {TEMPLATE_BUDGET}-line budget (§6 M12) \
+         — the fix is to move the ceremony into the boundary where every game crate gets it, \
+         not to raise the number"
+    );
+    println!("xtask: template budget {code}/{TEMPLATE_BUDGET} code lines ({total} total)");
+    Ok(())
+}
+
+/// `(code, total)` lines: code is non-blank and not a `//` comment.
+fn count_code(text: &str) -> (usize, usize) {
+    let (mut code, mut total) = (0usize, 0usize);
+    for line in text.lines() {
+        total += 1;
+        let line = line.trim_start();
+        if !line.is_empty() && !line.starts_with("//") {
+            code += 1;
+        }
+    }
+    (code, total)
+}
+
+/// Every declared dependency must appear in the crate that declares it.
+///
+/// The §3 budgets count dependencies for two crates; nothing counted whether a
+/// declared one is *reached*, and an unused edge costs a build, a `cargo-deny`
+/// surface and an audit line while buying nothing. Textual rather than
+/// `cargo-udeps`: this must run in the push tier on pinned stable, and udeps
+/// needs a nightly and a full build. The cost of that choice is false positives,
+/// paid down by [`USED_INVISIBLY`] rather than by weakening the check.
+fn unused_dependencies() -> anyhow::Result<()> {
+    let root = workspace_root();
+    let mut checked = 0usize;
+    let mut offenders = Vec::new();
+    for crate_dir in workspace_members(&root)? {
+        let manifest: toml::Value =
+            toml::from_str(&std::fs::read_to_string(crate_dir.join("Cargo.toml"))?)?;
+        let package = crate_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let mut sources = Vec::new();
+        walk_rs(&crate_dir, &mut sources);
+        let text: String = sources
+            .iter()
+            .filter_map(|f| std::fs::read_to_string(f).ok())
+            .collect();
+        for name in declared_dependencies(&manifest) {
+            if USED_INVISIBLY
+                .iter()
+                .any(|(krate, dep, _)| *dep == name && crate_dir.ends_with(krate))
+            {
+                continue;
+            }
+            checked += 1;
+            if !mentions(&text, &name.replace('-', "_")) {
+                offenders.push(format!("{package} declares `{name}` and never reaches it"));
+            }
+        }
+    }
+    anyhow::ensure!(
+        offenders.is_empty(),
+        "unused dependencies (§3):\n  {}\n\nDelete the line, or — if the use is real and \
+         invisible to a textual scan — add it to USED_INVISIBLY with the reason",
+        offenders.join("\n  ")
+    );
+    println!("xtask: {checked} declared dependencies, all reached (§3)");
+    Ok(())
+}
+
+/// Whole-identifier match: `gg_math` must not be satisfied by `gg_math_sim`, and
+/// a substring test would make the gate pass on names that merely overlap.
+fn mentions(text: &str, ident: &str) -> bool {
+    let boundary = |c: char| !(c.is_alphanumeric() || c == '_');
+    text.match_indices(ident).any(|(at, _)| {
+        let before = text[..at].chars().next_back().is_none_or(boundary);
+        let after = text[at + ident.len()..].chars().next().is_none_or(boundary);
+        before && after
+    })
+}
+
+/// Dependency names from every table a manifest can declare one in, including
+/// the `[target.'cfg(...)'.…]` ones — a platform-gated edge is still an edge.
+fn declared_dependencies(manifest: &toml::Value) -> Vec<String> {
+    const TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+    let mut names = Vec::new();
+    let mut take = |table: Option<&toml::Value>| {
+        if let Some(table) = table.and_then(toml::Value::as_table) {
+            names.extend(table.keys().cloned());
+        }
+    };
+    for table in TABLES {
+        take(manifest.get(table));
+    }
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for spec in targets.values() {
+            for table in TABLES {
+                take(spec.get(table));
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Workspace member directories. Read off the manifest rather than globbed, so a
+/// member added without a `members` entry is invisible to this gate for the same
+/// reason it is invisible to `cargo`.
+fn workspace_members(root: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(root.join("Cargo.toml"))?)?;
+    let members = manifest
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("the workspace manifest declares no members"))?;
+    Ok(members
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .map(|m| root.join(m))
+        .filter(|p| p.join("Cargo.toml").is_file())
+        .collect())
 }
 
 /// The golden reference sets, weighed (§4.10).
@@ -96,13 +249,9 @@ fn shell_lines() -> anyhow::Result<()> {
     walk_rs(&workspace_root().join("crates/gg-runtime/src"), &mut files);
     let (mut code, mut total) = (0usize, 0usize);
     for text in files.iter().filter_map(|f| std::fs::read_to_string(f).ok()) {
-        for line in text.lines() {
-            total += 1;
-            let line = line.trim_start();
-            if !line.is_empty() && !line.starts_with("//") {
-                code += 1;
-            }
-        }
+        let (c, t) = count_code(&text);
+        code += c;
+        total += t;
     }
     anyhow::ensure!(
         code <= SHELL_BUDGET,

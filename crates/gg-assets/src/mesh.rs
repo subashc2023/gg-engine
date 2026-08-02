@@ -18,13 +18,13 @@ use thiserror::Error;
 
 use crate::pack::{AssetId, SECTION_ALIGN};
 
-/// The engine's one vertex format: 32 bytes, position, normal, uv.
+/// The engine's one vertex format: 48 bytes, position, normal, uv, tangent.
 ///
-/// No tangent in v1. Normal mapping arrives with lighting at M11 and would
-/// bring a tangent generator with it for the glTF meshes that ship without one;
-/// carrying a field nothing writes would be pre-building that answer. It is a
-/// [`crate::FORMAT_VERSION`] bump when it lands, which is a rebuild of every
-/// pack and no runtime ambiguity at all.
+/// The tangent arrived at M11 with normal mapping, which is what the v1 note
+/// said would bring it — and it arrived as a [`crate::FORMAT_VERSION`] bump, so
+/// a pack built before it is refused by number rather than read with its fields
+/// transposed. `uv` kept its offset so the change is additive on the shader
+/// side; the tangent went on the end.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct Vertex {
@@ -34,9 +34,19 @@ pub struct Vertex {
     pub normal: [f32; 3],
     /// Texture coordinates, glTF convention (origin top-left).
     pub uv: [f32; 2],
+    /// Object-space tangent in `xyz` and **bitangent handedness** in `w`, ±1 —
+    /// glTF's own `TANGENT` convention, so a document that supplies one is
+    /// copied rather than reinterpreted.
+    ///
+    /// `w` rather than a stored bitangent: the bitangent is
+    /// `cross(normal, tangent) * w`, which is four bytes instead of twelve and
+    /// cannot disagree with the normal it is derived from after interpolation.
+    pub tangent: [f32; 4],
 }
 
-const _: () = assert!(size_of::<Vertex>() == 32);
+const _: () = assert!(size_of::<Vertex>() == 48);
+const _: () = assert!(core::mem::offset_of!(Vertex, uv) == 24);
+const _: () = assert!(core::mem::offset_of!(Vertex, tangent) == 32);
 
 /// A mesh blob's header. 64 bytes, so the vertices behind it start 16-aligned
 /// even when a caller lays the blob out by hand.

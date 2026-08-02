@@ -59,7 +59,7 @@ pub fn run(extracted: &Extracted, frames: usize, json: bool) -> anyhow::Result<(
 /// camera would let a cache that should not exist look free.
 pub fn field(frames: usize, json: bool) -> anyhow::Result<()> {
     use gg_ecs::World;
-    use gg_ecs::boundary::{Model, Node};
+    use gg_ecs::boundary::{Light, Model, Node};
     use gg_math::sim;
 
     let pack = std::path::PathBuf::from("target/assets/05-many.ggpack");
@@ -72,6 +72,20 @@ pub fn field(frames: usize, json: bool) -> anyhow::Result<()> {
     let mut world = World::new();
     world.register::<Model>()?;
     world.register::<Node>()?;
+    world.register::<Light>()?;
+    // The demo's own sun (§6 M11). A measurement of an *unlit* frame would be a
+    // measurement of a frame nobody renders: the shading loop, the shadow pass
+    // and ten thousand casters are all part of what a lit frame costs, and the
+    // exit budget is about the frame a player sees.
+    let sun = world.spawn();
+    world.insert(
+        sun,
+        Light::sun(
+            demo_05_many::SUN_DIRECTION,
+            demo_05_many::SUN_COLOR,
+            demo_05_many::SUN_INTENSITY,
+        ),
+    )?;
     let mut hubs = Vec::with_capacity(demo_05_many::HUBS);
     for index in 0..demo_05_many::HUBS {
         let hub = world.spawn();
@@ -109,6 +123,7 @@ pub fn field(frames: usize, json: bool) -> anyhow::Result<()> {
         hierarchy.propagate(&mut world)?;
         extracted.clear(demo_05_many::START_POSITION, settle.frustum(EXTENT));
         extracted.append_models::<Model>(&world, renderer.scenes())?;
+        extracted.append_lights(&world)?;
         renderer.frame(&extracted, &settle, CLEAR, &[])?;
     }
     let pending = renderer
@@ -147,6 +162,7 @@ pub fn field(frames: usize, json: bool) -> anyhow::Result<()> {
 
         extracted.clear(eye, view.frustum(EXTENT));
         extracted.append_models::<Model>(&world, renderer.scenes())?;
+        extracted.append_lights(&world)?;
         renderer.frame(&extracted, &view, CLEAR, &[])?;
         Ok(())
     })

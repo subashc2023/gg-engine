@@ -126,7 +126,16 @@ fn process_module(module: &Path, check: bool) -> anyhow::Result<bool> {
     // papering over. The weekly fresh-clone gate found this the hard way on its
     // first run: without `.gitattributes`, a Windows clone got CRLF and every
     // generated artifact read as stale in a tree nobody had touched.
-    let source = std::fs::read(module)?;
+    let mut source = std::fs::read(module)?;
+    // Anything under `shaders/include/` is `#include`d rather than compiled on
+    // its own (`find_slang` skips it — the parent directory is not `shaders`),
+    // so it has to enter the hash here or editing the shared BRDF would leave
+    // every module's artifacts stale with a header that still matched. Absent
+    // include directory appends nothing, which is why every pre-M11 shader keeps
+    // the hash it had.
+    for included in includes(&shaders_dir.join("include"))? {
+        source.extend_from_slice(&std::fs::read(&included)?);
+    }
     let hash = sha256_hex(&source);
     let header = gg_shaders::codegen::header_line(&hash);
 
@@ -202,6 +211,21 @@ fn process_module(module: &Path, check: bool) -> anyhow::Result<bool> {
         }
     );
     Ok(true)
+}
+
+/// Every `.slang` under an `include/` directory, sorted. Sorted because the
+/// concatenation is hashed and a directory listing's order is the filesystem's.
+fn includes(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(Vec::new());
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "slang"))
+        .collect();
+    found.sort();
+    Ok(found)
 }
 
 /// All `<crate>/shaders/*.slang` modules. `fixtures/` trees are compiler test

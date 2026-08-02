@@ -56,20 +56,33 @@ pub const MAX_WRITES: usize = 64;
 /// Why a set of accesses cannot be granted.
 #[derive(Debug, thiserror::Error)]
 pub enum AliasError {
+    /// One component borrowed mutably twice.
     #[error(
         "component {id:?} is borrowed mutably more than once by this query. Two mutable borrows \
          of one component would alias; split the work or borrow it once."
     )]
-    WriteWrite { id: ComponentId },
+    WriteWrite {
+        /// The doubly-borrowed component.
+        id: ComponentId,
+    },
+    /// One component borrowed both shared and mutably.
     #[error(
         "component {id:?} is borrowed both mutably and immutably by this query. Drop the shared \
          borrow, or read it through the mutable one."
     )]
-    ReadWrite { id: ComponentId },
+    ReadWrite {
+        /// The component on both sides of the borrow.
+        id: ComponentId,
+    },
+    /// More mutable borrows than [`MAX_WRITES`] — the fixed-size write set is
+    /// what keeps the borrow check allocation-free.
     #[error(
         "a query may borrow at most {MAX_WRITES} components mutably; this one asks for {count}"
     )]
-    TooManyWrites { count: usize },
+    TooManyWrites {
+        /// How many were asked for.
+        count: usize,
+    },
 }
 
 impl QueryAccess {
@@ -110,11 +123,13 @@ impl QueryAccess {
         self.write.binary_search(&id).ok()
     }
 
+    /// Components this query borrows shared, sorted by id.
     #[must_use]
     pub fn reads(&self) -> &[ComponentId] {
         &self.read
     }
 
+    /// Components this query borrows mutably, sorted by id.
     #[must_use]
     pub fn writes(&self) -> &[ComponentId] {
         &self.write
@@ -160,11 +175,14 @@ impl<'w, 'q> ArchetypeView<'w, 'q> {
         unsafe { core::slice::from_raw_parts(self.entities, self.entities_len) }
     }
 
+    /// Rows in this archetype — the length every column view shares.
     #[must_use]
     pub fn len(&self) -> usize {
         self.entities_len
     }
 
+    /// Whether the archetype holds no rows. A matched-but-empty archetype is
+    /// ordinary, not a bug.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entities_len == 0
@@ -176,6 +194,8 @@ impl<'w, 'q> ArchetypeView<'w, 'q> {
         &self.read
     }
 
+    /// As [`Self::raw_reads`], for the mutable half. Handing one out does not
+    /// consume it — [`Self::write`] is what tracks that.
     #[must_use]
     pub fn raw_writes(&self) -> &[ColumnView] {
         &self.write

@@ -1,0 +1,39 @@
+# demo 06-lit: the atrium, lit (§6 M11). Game code, like demos 03, 04 and 05 —
+# a dylib the host loads, three engine dependencies and no fourth.
+#
+# The lights are `gg_ecs::boundary::Light` components this crate spawns and
+# moves. Nothing about the shading model is reachable from here, which is the
+# point: a game says *there is a sun and it points this way*, and the renderer
+# decides what that means.
+
+[package]
+name = "demo-06-lit"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "demo_06_lit"
+path = "src/lib.rs"
+# cdylib is what the host loads; rlib is what the tests link. Both from one
+# build, so the artifact under test is the artifact that ships.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `gg_game!` exports fixed `extern "C"` symbol names, so two game rlibs cannot
+# link into one binary — and `gg-golden` already links demo 04's. The harness
+# takes this crate's layout functions with `default-features = false`; the
+# cdylib and this crate's own tests are unaffected. Demo 05 needs the same
+# escape hatch for the same reason (§6 M10).
+default = ["game"]
+game = []
+
+[dependencies]
+bytemuck.workspace = true
+gg-ecs = { path = "../../crates/gg-ecs" }
+gg-math = { path = "../../crates/gg-math" }

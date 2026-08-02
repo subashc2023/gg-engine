@@ -26,7 +26,9 @@
 //! (§6 M10). What reaches the device is four draws — the count is a property of
 //! the *content*, not of the entity count, which is the whole point of batching.
 
-use gg_ecs::boundary::{ActionId, AxisId, BoundaryError, Eye, GameWorld, Model, Node, log_level};
+use gg_ecs::boundary::{
+    ActionId, AxisId, BoundaryError, Eye, GameWorld, Light, Model, Node, log_level,
+};
 use gg_ecs::{Component, Entity};
 use gg_math::sim;
 
@@ -79,6 +81,18 @@ pub const PITCH_LIMIT: f32 = 1.55;
 /// Where a session opens: outside the field, looking into it, so a good share
 /// of the objects start behind the camera and the culler has something to do.
 pub const START_POSITION: sim::DVec3 = sim::DVec3::new(-14.0, 9.0, 78.0);
+
+/// The demo's one light: a sun, warm, angled so a face pointing up and a face
+/// pointing at the camera are lit differently (§6 M11).
+///
+/// Exported rather than buried in `bootstrap` because `gg-golden` builds this
+/// demo's world from its constants: a sun the harness restated would be a sun
+/// that could drift from the one a player sees.
+pub const SUN_DIRECTION: sim::Vec3 = sim::Vec3::new(-0.38, -0.84, -0.39);
+/// The sun's colour, `0x00RRGGBB`.
+pub const SUN_COLOR: u32 = 0x00ff_f0d4;
+/// The sun's radiance multiplier.
+pub const SUN_INTENSITY: f32 = 3.5;
 
 /// Stop and start the spin.
 pub const FREEZE: ActionId = ActionId::new(0);
@@ -200,6 +214,13 @@ pub fn bootstrap(world: &mut GameWorld) {
         return;
     }
 
+    // The sun. One directional light, so ten thousand objects are lit rather
+    // than merely present (§6 M11) — and so the shadow pass has ten thousand
+    // casters, which is the scale question a lit frame actually asks.
+    let sun = world.spawn();
+    let outcome = world.insert(sun, Light::sun(SUN_DIRECTION, SUN_COLOR, SUN_INTENSITY));
+    report(world, outcome);
+
     for index in 0..HUBS {
         let hub = world.spawn();
         // The hub's own `Model` is its transform: it has no parent, so nothing
@@ -319,7 +340,7 @@ pub fn present(world: &mut GameWorld) {
 // boundary symbols — see the manifest for why that is not optional.
 #[cfg(feature = "game")]
 gg_ecs::gg_game! {
-    components: [Observer, Hub, Model, Node, Eye],
+    components: [Observer, Hub, Model, Node, Light, Eye],
     actions: ["freeze"],
     axes: ["move_right", "move_up", "move_forward", "aim_x", "aim_y"],
     systems: [bootstrap, aim, walk, freeze, spin, present],

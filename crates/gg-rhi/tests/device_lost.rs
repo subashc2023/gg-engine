@@ -136,6 +136,7 @@ fn a_hung_pass_is_named_by_the_device_lost_report() {
         count: 3,
         index_buffer: None,
         indirect: None,
+        depth_bias: None,
     }];
     let passes = [Pass {
         name: "hang.draw",
@@ -221,6 +222,7 @@ fn arm(
             color: ColorTarget::Backbuffer,
             blend: gg_rhi::Blend::Off,
             depth: DepthMode::Off,
+            depth_bias: false,
         })
         .unwrap();
     (pipeline, buffer, push)
@@ -252,6 +254,7 @@ fn the_hang_shader_loops_on_a_trip_count_it_reads_from_memory() {
             count: 3,
             index_buffer: None,
             indirect: None,
+            depth_bias: None,
         }],
     )
     .unwrap();

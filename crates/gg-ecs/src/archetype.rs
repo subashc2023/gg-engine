@@ -27,6 +27,8 @@ impl ArchetypeId {
     /// `spawn()` lands there.
     pub(crate) const EMPTY: Self = Self(0);
 
+    /// Dense index into the world's archetype table. Stable for a world's
+    /// lifetime; not stable across a reload.
     #[must_use]
     pub const fn index(self) -> u32 {
         self.0

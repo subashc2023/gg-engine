@@ -11,6 +11,7 @@ fn tetra() -> (Vec<Vertex>, Vec<u32>) {
         position: [x, y, z],
         normal: [0.0, 1.0, 0.0],
         uv: [x, z],
+        tangent: [1.0, 0.0, 0.0, 1.0],
     };
     (
         vec![

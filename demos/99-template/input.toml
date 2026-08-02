@@ -1,0 +1,18 @@
+# The template's bindings (§4.7). Empty, because the template has no verbs —
+# both lists in its `gg_game!` block are `[]` and a binding naming a verb that
+# does not exist is refused at load rather than silently dead.
+#
+# The file exists anyway so the shape is here to copy: verbs are bound by
+# *physical* key position, so a binding file means the same thing on AZERTY as
+# on QWERTY, and the two tables below resolve against `actions:` and `axes:`.
+#
+#   [game.actions]
+#   fire = ["Mouse1", "Space"]
+#
+#   [game.axes]
+#   move_forward = ["+W", "-S"]
+#   aim_x = ["MouseX"]
+
+[game.actions]
+
+[game.axes]

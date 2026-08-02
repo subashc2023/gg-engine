@@ -46,33 +46,46 @@ pub trait SideTable: StateHash + Send + Sync + 'static {
 /// Registration failures — startup errors, never silent remaps (§4.2).
 #[derive(Debug, thiserror::Error)]
 pub enum SideTableError {
+    /// Two distinct declared ids hash to one [`SideTableId`].
     #[error(
         "side-table id collision: `{first_type}` (id \"{first_declared}\") and `{second_type}` \
          (id \"{second_declared}\") both hash to {id:?}. Change one declared id — they are \
          persisted identities and cannot be shared."
     )]
     IdCollision {
+        /// The id both types hashed to.
         id: SideTableId,
+        /// Rust type name of the table already installed.
         first_type: &'static str,
+        /// Declared id of the table already installed.
         first_declared: &'static str,
+        /// Rust type name of the table being installed.
         second_type: &'static str,
+        /// Declared id of the table being installed.
         second_declared: &'static str,
     },
+    /// Two types claim the same declared id.
     #[error(
         "side-table id \"{declared}\" is declared by two types, `{first_type}` and \
          `{second_type}`. Two types claiming one id would load each other's saved state."
     )]
     DuplicateDeclaration {
+        /// The contested declared id.
         declared: &'static str,
+        /// Rust type name of the table already installed.
         first_type: &'static str,
+        /// Rust type name of the table being installed.
         second_type: &'static str,
     },
+    /// A table with this id is already installed. Installing is not an update.
     #[error(
         "side table `{type_name}` (id \"{declared}\") is already installed. Take it out with \
          `remove_side_table` first, or mutate it in place."
     )]
     AlreadyInstalled {
+        /// The declared id already taken.
         declared: &'static str,
+        /// Rust type name of the installed table.
         type_name: &'static str,
     },
 }

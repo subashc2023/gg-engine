@@ -89,11 +89,15 @@ pub const CHUNK_ROWS: usize = 256;
 pub struct ChunkedHash<const VERSION: u64>(u128);
 
 impl<const VERSION: u64> ChunkedHash<VERSION> {
+    /// Wrap a value at `VERSION`. The version parameter is the point: it is
+    /// what makes a cross-version comparison fail to compile.
     #[must_use]
     pub const fn new(value: u128) -> Self {
         Self(value)
     }
 
+    /// The raw bits. Meaningful only against another value at the same
+    /// `VERSION`.
     #[must_use]
     pub const fn get(self) -> u128 {
         self.0

@@ -145,6 +145,8 @@ impl<D: QueryData> Query<D> {
         })
     }
 
+    /// The read and write sets this query declared, for the borrow check the
+    /// world performs before handing out columns.
     #[must_use]
     pub fn access(&self) -> &QueryAccess {
         &self.access

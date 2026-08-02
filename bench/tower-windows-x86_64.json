@@ -1,12 +1,14 @@
 {
-  "schema": 1,
+  "schema": 2,
   "recorded": "2026-08-02",
-  "unix_time": 1785695552,
+  "unix_time": 1785705780,
   "machine": "tower-windows-x86_64",
-  "commit": "6894f90",
+  "commit": "7411809",
   "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
   "profile": "instrumented",
-  "ecs": {"entities":100000,"reps":25,"ns_per_entity":{"native":0.6050,"column_views":0.5720,"typed_each":0.6960,"boundary_each":0.6000,"canonical_hash":110.8370},"ratios":{"column_views":0.9455,"typed_each":1.1504,"boundary_each":0.9917,"seam":0.8621,"canonical_hash":183.2017}},
-  "frame": {"scene":"boxes","extent":[1280,720],"device":"NVIDIA GeForce RTX 4090","frames":300,"warmup":30,"cpu_frame_ms":{"p50":1.0410,"p95":1.3817,"p99":2.9384,"min":0.8977},"passes":[{"name":"depth-prepass","mean_ms":0.0041,"max_ms":0.0063},{"name":"forward-opaque","mean_ms":0.0034,"max_ms":0.0041},{"name":"post","mean_ms":0.0047,"max_ms":0.0051},{"name":"readback","mean_ms":0.1401,"max_ms":0.1450},{"name":"frame-end","mean_ms":0.0022,"max_ms":0.0052}]},
-  "field": {"scene":"field","extent":[1280,720],"device":"NVIDIA GeForce RTX 4090","frames":300,"warmup":30,"cpu_frame_ms":{"p50":2.4871,"p95":2.9809,"p99":3.3533,"min":2.1163},"passes":[{"name":"depth-prepass","mean_ms":0.0217,"max_ms":0.0240},{"name":"forward-opaque","mean_ms":0.0210,"max_ms":0.0399},{"name":"post","mean_ms":0.0046,"max_ms":0.0092},{"name":"readback","mean_ms":0.1401,"max_ms":0.1508},{"name":"frame-end","mean_ms":0.0023,"max_ms":0.0077}]}
+  "ecs": {"entities":100000,"reps":25,"ns_per_entity":{"native":0.6270,"column_views":0.5980,"typed_each":0.6990,"boundary_each":0.5930,"canonical_hash":110.9290},"ratios":{"column_views":0.9537,"typed_each":1.1148,"boundary_each":0.9458,"seam":0.8484,"canonical_hash":176.9203}},
+  "extract": {"entities":10000,"reps":25,"lights":40,"kept_unbounded":10000,"kept_narrow":354,"culled":9646,"ns_per_entity":{"unbounded":6.730,"culled":2.010},"ratios":{"cull":0.2987,"double_the_world":1.5672}},
+  "assets": {"meshes":256,"vertices_each":512,"reps":25,"pack_bytes":6846432,"tracked":256,"us":{"container_copy":1018.100,"copy_and_read":1251.800,"reload_warm":7.000},"ns_per_vertex":1.7830,"ratios":{"read_vs_copy":0.22955,"reload_vs_read":0.00559}},
+  "frame": {"scene":"boxes","extent":[1280,720],"device":"NVIDIA GeForce RTX 4090","frames":300,"warmup":30,"cpu_frame_ms":{"p50":1.0083,"p95":1.2344,"p99":2.9926,"min":0.9376},"passes":[{"name":"shadow","mean_ms":0.0038,"max_ms":0.0045},{"name":"depth-prepass","mean_ms":0.0032,"max_ms":0.0041},{"name":"forward-opaque","mean_ms":0.0051,"max_ms":0.0061},{"name":"post","mean_ms":0.0043,"max_ms":0.0051},{"name":"readback","mean_ms":0.1384,"max_ms":0.1422},{"name":"frame-end","mean_ms":0.0022,"max_ms":0.0024}]},
+  "field": {"scene":"field","extent":[1280,720],"device":"NVIDIA GeForce RTX 4090","frames":300,"warmup":30,"cpu_frame_ms":{"p50":2.8782,"p95":3.4597,"p99":3.7285,"min":2.6348},"passes":[{"name":"shadow","mean_ms":0.0224,"max_ms":0.0247},{"name":"depth-prepass","mean_ms":0.0209,"max_ms":0.0236},{"name":"forward-opaque","mean_ms":0.0254,"max_ms":0.0276},{"name":"post","mean_ms":0.0043,"max_ms":0.0051},{"name":"readback","mean_ms":0.1392,"max_ms":0.1446},{"name":"frame-end","mean_ms":0.0021,"max_ms":0.0025}]}
 }

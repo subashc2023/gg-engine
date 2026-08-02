@@ -42,6 +42,25 @@ impl Surface {
         })
     }
 
+    /// Create a headless surface — a presentable surface with no window behind
+    /// it. Its capabilities report `current_extent` as "you decide", so a
+    /// recreation gate drives the extent itself rather than being told it by a
+    /// window manager (§6 M12).
+    ///
+    /// The instance must have been created with
+    /// [`Presentation::Headless`](crate::instance::Presentation::Headless).
+    pub fn headless(instance: &Instance) -> Result<Self, RhiError> {
+        let fns = ash::ext::headless_surface::Instance::new(instance.entry(), instance.raw());
+        let info = vk::HeadlessSurfaceCreateInfoEXT::default();
+        // SAFETY: instance is live and enabled VK_EXT_headless_surface; the
+        // create-info holds no pointers.
+        let raw = unsafe { fns.create_headless_surface(&info, None) }.map_err(RhiError::Vk)?;
+        Ok(Self {
+            fns: ash::khr::surface::Instance::new(instance.entry(), instance.raw()),
+            raw,
+        })
+    }
+
     pub(crate) fn raw(&self) -> vk::SurfaceKHR {
         self.raw
     }

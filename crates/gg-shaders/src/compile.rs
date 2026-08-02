@@ -166,6 +166,11 @@ pub fn slang_build_tag() -> Result<String, ShaderError> {
 pub fn compile_module(search_dir: &str, module_name: &str) -> Result<CompiledModule, ShaderError> {
     let global_session = slang::GlobalSession::new().ok_or(ShaderError::NoGlobalSession)?;
 
+    // `search_path` must outlive `session_desc`: `SessionDesc::search_paths` takes
+    // raw pointers and ties no lifetime to them (upstream slang-rs #31, open —
+    // and unsound by signature, not by our use). Binding the `CString` to a
+    // named local is the whole guard; folding it into the array expression makes
+    // it a temporary, and the dangle compiles.
     let search_path =
         std::ffi::CString::new(search_dir).map_err(|e| ShaderError::BadPath(e.to_string()))?;
     let search_paths = [search_path.as_ptr()];

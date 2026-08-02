@@ -181,6 +181,7 @@ impl UiPass {
             count: self.pending.0,
             index_buffer: None,
             indirect: None,
+            depth_bias: None,
         })
     }
 
@@ -206,5 +207,6 @@ fn pipeline_desc() -> PipelineDesc<'static> {
         color: ColorTarget::Backbuffer,
         blend: Blend::Alpha,
         depth: DepthMode::Off,
+        depth_bias: false,
     }
 }

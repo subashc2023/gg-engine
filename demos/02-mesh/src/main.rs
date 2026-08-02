@@ -229,6 +229,7 @@ fn main() -> anyhow::Result<()> {
                     count: s.index_count,
                     index_buffer: Some(s.indices),
                     indirect: None,
+                    depth_bias: None,
                 })
                 .collect();
             match frame(r, &mut transients, &draws) {

@@ -57,8 +57,8 @@ impl Game {
             (gg_game_systems(), declared)
         };
         assert_eq!(
-            declared, 5,
-            "player, cube, shot, and the two render protocol types"
+            declared, 6,
+            "player, cube, shot, and the three render protocol types"
         );
         Game {
             world,
