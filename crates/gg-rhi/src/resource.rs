@@ -58,6 +58,11 @@ pub enum ImageFormat {
     Rgba8Unorm,
     /// BC7 block-compressed, sRGB-encoded (§2, Texture pipeline row).
     Bc7Srgb,
+    /// BC5, two linear channels — normal maps, and glTF's metallic-roughness
+    /// pair after `ggc` repacks it (§4.6).
+    Bc5Unorm,
+    /// BC4, one linear channel — masks. Half the block size of the other two.
+    Bc4Unorm,
     /// 32-bit float depth. The only depth format we ask for: reverse-Z's
     /// precision argument *is* a float-depth argument (§2, Math row).
     Depth32,
@@ -69,6 +74,8 @@ impl ImageFormat {
             ImageFormat::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
             ImageFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
             ImageFormat::Bc7Srgb => vk::Format::BC7_SRGB_BLOCK,
+            ImageFormat::Bc5Unorm => vk::Format::BC5_UNORM_BLOCK,
+            ImageFormat::Bc4Unorm => vk::Format::BC4_UNORM_BLOCK,
             ImageFormat::Depth32 => vk::Format::D32_SFLOAT,
         }
     }
@@ -86,16 +93,44 @@ impl ImageFormat {
         matches!(self, ImageFormat::Depth32)
     }
 
+    /// The texel block's edge: 4 for the BC formats, 1 for the rest. A copy's
+    /// height must be a multiple of this unless it reaches the mip's edge,
+    /// which is what makes a banded upload legal (§4.3).
+    pub fn block_extent(self) -> u32 {
+        match self {
+            ImageFormat::Bc7Srgb | ImageFormat::Bc5Unorm | ImageFormat::Bc4Unorm => 4,
+            ImageFormat::Rgba8Srgb | ImageFormat::Rgba8Unorm | ImageFormat::Depth32 => 1,
+        }
+    }
+
     /// Bytes a tightly packed `extent` image occupies. Block formats round the
     /// extent up to whole 4x4 blocks — a 5x5 BC7 image is 2x2 blocks, and
     /// getting this wrong is a buffer overrun the copy would not catch.
     pub fn packed_size(self, extent: (u32, u32)) -> u64 {
         let (w, h) = (u64::from(extent.0), u64::from(extent.1));
         match self {
-            ImageFormat::Bc7Srgb => w.div_ceil(4) * h.div_ceil(4) * 16,
+            ImageFormat::Bc7Srgb | ImageFormat::Bc5Unorm => w.div_ceil(4) * h.div_ceil(4) * 16,
+            ImageFormat::Bc4Unorm => w.div_ceil(4) * h.div_ceil(4) * 8,
             ImageFormat::Rgba8Srgb | ImageFormat::Rgba8Unorm | ImageFormat::Depth32 => w * h * 4,
         }
     }
+}
+
+/// `extent` at mip `level`, halved per level and clamped at 1 — the Vulkan
+/// rule, and the one `ggc` encodes a chain against.
+///
+/// Mirrored in `gg_assets::texture` rather than shared: this crate is below the
+/// asset format and must be able to *check* a caller's arithmetic without
+/// linking the crate that produced it.
+#[must_use]
+pub fn mip_extent(extent: (u32, u32), level: u32) -> (u32, u32) {
+    ((extent.0 >> level).max(1), (extent.1 >> level).max(1))
+}
+
+/// How many mips `extent` reduces to before both axes reach 1.
+#[must_use]
+pub fn full_mip_count(extent: (u32, u32)) -> u32 {
+    32 - extent.0.max(extent.1).max(1).leading_zeros()
 }
 
 /// What an image is for. Drives usage flags and the layout it settles in.
@@ -184,8 +219,7 @@ pub struct BufferDesc<'a> {
     pub kind: BufferKind,
 }
 
-/// How to create an image. One mip level at M4A: mip chains are generated
-/// offline by the asset pipeline (§4.6, M9) and the field arrives with it.
+/// How to create an image.
 pub struct ImageDesc<'a> {
     /// Debug name (§1.6).
     pub name: &'a str,
@@ -195,6 +229,10 @@ pub struct ImageDesc<'a> {
     pub format: ImageFormat,
     /// What the image is for.
     pub usage: ImageUse,
+    /// Mip levels, 1 for no chain. Never *generated* here: a chain is built
+    /// offline by `ggc` and uploaded level by level (§4.6), so this allocates
+    /// the levels and the caller fills every one of them.
+    pub mip_levels: u32,
 }
 
 /// An opaque handle to a buffer. Plain data, like [`PipelineHandle`]: a handle
@@ -238,16 +276,17 @@ pub(crate) struct Buffer {
     pub address: DeviceAddress,
 }
 
-/// An image, its view, and the layout it is currently in. Layout is tracked
-/// here because at M4A the RHI records its own barriers; from M6 the render
-/// graph derives them from declarations (§4.5) and this becomes its input.
+/// An image and its view. No layout field: every transition a frame makes is
+/// derived from the graph's declarations (§4.5) and an upload's pair is
+/// recorded per mip level, so a single current-layout here could only ever be
+/// a copy of one of those — and one that a half-uploaded chain makes wrong.
 pub(crate) struct Image {
     pub raw: vk::Image,
     pub view: vk::ImageView,
     pub alloc: Option<gpu_allocator::vulkan::Allocation>,
     pub extent: (u32, u32),
     pub format: ImageFormat,
-    pub layout: vk::ImageLayout,
+    pub mip_levels: u32,
     /// Bindless slots this image occupies, so retiring it returns them rather
     /// than leaking the array one entry at a time.
     pub texture_slot: Option<crate::TextureIndex>,
@@ -356,6 +395,15 @@ impl Resources {
                 desc.name, desc.format, desc.usage
             )));
         }
+        // A chain longer than the extent supports would allocate levels no
+        // upload can name, and every one of them would sample as undefined.
+        let full = full_mip_count(desc.extent);
+        if desc.mip_levels == 0 || desc.mip_levels > full {
+            return Err(RhiError::Loader(format!(
+                "image `{}`: {} mip levels, and {:?} has {full}",
+                desc.name, desc.mip_levels, desc.extent
+            )));
+        }
         let usage = match desc.usage {
             ImageUse::Sampled => vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             ImageUse::Depth => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
@@ -374,7 +422,7 @@ impl Resources {
                 height: desc.extent.1,
                 depth: 1,
             })
-            .mip_levels(1)
+            .mip_levels(desc.mip_levels)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
@@ -419,7 +467,7 @@ impl Resources {
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(desc.format.aspect())
-                    .level_count(1)
+                    .level_count(desc.mip_levels)
                     .layer_count(1),
             );
         // SAFETY: image is live and bound.
@@ -444,7 +492,7 @@ impl Resources {
                 alloc: Some(alloc),
                 extent: desc.extent,
                 format: desc.format,
-                layout: vk::ImageLayout::UNDEFINED,
+                mip_levels: desc.mip_levels,
                 texture_slot: None,
                 storage_slot: None,
             },

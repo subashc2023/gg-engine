@@ -39,7 +39,7 @@ pub use offscreen::OffscreenRhi;
 pub use pipeline::{Blend, ColorTarget, DepthMode, PipelineDesc, PipelineHandle};
 pub use resource::{
     BufferDesc, BufferHandle, BufferKind, DeviceAddress, ImageDesc, ImageFormat, ImageHandle,
-    ImageUse, MemoryUse, Sampler,
+    ImageUse, MemoryUse, Sampler, full_mip_count, mip_extent,
 };
 pub use suppressions::{parse as parse_suppressions, validated as validated_suppressions};
 pub use timing::{GpuClock, PassTiming};
@@ -302,10 +302,16 @@ impl Rhi {
         self.gpu.upload_buffer(handle, offset, bytes)
     }
 
-    /// Record an image upload into the staging batch. `bytes` is the whole
-    /// image, tightly packed for its format.
-    pub fn upload_image(&mut self, handle: ImageHandle, bytes: &[u8]) -> Result<(), RhiError> {
-        self.gpu.upload_image(handle, bytes)
+    /// Record one mip level's upload into the staging batch. `bytes` is that
+    /// level, tightly packed for its format; an image with no chain takes one
+    /// call at level 0.
+    pub fn upload_image(
+        &mut self,
+        handle: ImageHandle,
+        level: u32,
+        bytes: &[u8],
+    ) -> Result<(), RhiError> {
+        self.gpu.upload_image(handle, level, bytes)
     }
 
     /// Write into a [`BufferKind::Dynamic`] buffer's mapping — the per-frame

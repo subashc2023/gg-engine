@@ -55,6 +55,17 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
     if bindings.is_file() {
         shell.arg("--input").arg(&bindings);
     }
+    // Same argument for the pack (§4.6): a demo that declares an `assets/` tree
+    // gets it compiled and passed. Built here rather than assumed present,
+    // because a pack is build output and a stale one is worse than none — and
+    // `ggc watch` in another terminal is the asset half of the reload loop, the
+    // way `cargo build -p <game>` is the code half.
+    if crate_dir.join("assets").is_dir() {
+        crate::assets::run(&[])?;
+        shell
+            .arg("--pack")
+            .arg(root.join(format!("target/assets/{demo}.ggpack")));
+    }
     shell.args(args.iter().filter(|a| a != &demo));
     util::run(&mut shell, "gg-runtime")
 }

@@ -27,10 +27,14 @@ gg-rhi = { path = "../gg-rhi", default-features = false }
 gg-core = { path = "../gg-core" }
 # What a frame draws, already narrowed through the §1.4 membrane.
 gg-extract = { path = "../gg-extract" }
+# Pack assets and their load states. A downhill edge: `gg-assets` knows nothing
+# about a GPU, and `residency` is the one place the two meet (§4.6).
+gg-assets = { path = "../gg-assets" }
 # The render half only: this crate is downstream of the membrane and has no
 # business with sim types.
 gg-math = { path = "../gg-math" }
 bytemuck.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 # The window is the shell's; this crate only needs the handles a surface is
 # built from, which is what keeps `gg-platform` out of its graph.
@@ -41,6 +45,10 @@ validation = ["gg-rhi/validation"]
 # Forwarded, not local: the query pool is the RHI's and the tier meta-features
 # in `gg-runtime` are the only place that decides it exists (§4.8).
 gpu-timings = ["gg-rhi/gpu-timings"]
+# Notice a rebuilt pack and re-upload it (§4.6). No dependency either way — it
+# is a `stat` and a re-open — so this gates the *call*, which is what makes the
+# watch absent from dist rather than switched off there.
+hot-reload = []
 
 [dev-dependencies]
 # The offscreen render test builds its world out of the render protocol's own

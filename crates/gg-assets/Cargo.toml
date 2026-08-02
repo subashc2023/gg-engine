@@ -1,0 +1,42 @@
+# gg-assets (§4.6, §3) — the gg-pack format, its reader and its writer.
+#
+# The format's specification is the commented Rust in `src/pack.rs` (§6 M9
+# exit), which is why the writer lives here beside the reader rather than in
+# `ggc`: two definitions of one layout is how a format acquires a dialect.
+# Importers, codecs and glTF stay in the tool; nothing in this crate parses a
+# source asset.
+
+[package]
+name = "gg-assets"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gg_assets"
+
+[dependencies]
+# An asset id is a hash of its name, and a game crate names assets while being
+# pinned away from this crate (§3) — so the hash lives at the leaf both sides
+# link and this crate calls it rather than restating it. A downhill edge; no
+# other part of `gg-abi` is reachable from here.
+gg-abi = { path = "../gg-abi" }
+# Sections are cast in place out of a mapping, never deserialized (§4.6).
+bytemuck = { workspace = true }
+memmap2 = { workspace = true }
+# KTX2 levels are zstd frames (§4.6), so the container's reader and its writer
+# both need the codec — and it is the reason a texture is the one blob that is
+# decompressed rather than cast in place.
+zstd = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# The rejection tests corrupt a good pack field by field, which means reading
+# and rewriting the very structs the reader casts.
+bytemuck = { workspace = true }
+
+[lints]
+workspace = true

@@ -25,6 +25,20 @@ const BANNED_DIST_CRATES: &[&str] = &[
     "tracing-tracy",
     "notify",
     "ggc",
+    // §2's "the runtime never parses JSON", as a machine rather than a habit.
+    // `gltf` and `serde_json` are `ggc`'s and reach no runtime graph; banning
+    // them by name means a dependency added three crates away that happens to
+    // pull one in fails the gate instead of quietly shipping a JSON parser.
+    "gltf",
+    "serde_json",
+    // The codecs, same argument (§4.6). A ship decodes no PNG, compresses no
+    // block and reorders no index buffer — every one of those already happened,
+    // offline, and the pack is the evidence. `zstd` is deliberately *not* here:
+    // a KTX2 level is a zstd frame, so the runtime decompresses one on the way
+    // to the staging ring.
+    "image",
+    "intel_tex_2",
+    "meshopt",
     "gg-golden",
     // The instruments (§3: instrumentation never in the dist graph, §4.8).
     // Banning the crate and not only Tracy is what keeps the console and the

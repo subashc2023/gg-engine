@@ -38,6 +38,7 @@ pub fn render_with_depth(
         extent: rhi.extent(),
         format: ImageFormat::Depth32,
         usage: ImageUse::Depth,
+        mip_levels: 1,
     })?;
     let pixels = render_inner(rhi, clear, draws, None, Some(depth));
     rhi.destroy_image(depth)?;

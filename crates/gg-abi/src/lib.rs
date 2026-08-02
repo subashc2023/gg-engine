@@ -36,12 +36,15 @@
 //!
 //! # No allocation, no behaviour
 //!
-//! `#![no_std]`. The only executable code here is [`host`] — a pointer stash
-//! whose per-dylib copy is a linkage fact, documented at its definition.
+//! `#![no_std]`. Two exceptions, both of them the *same* argument the layouts
+//! above make: [`host`] is a pointer stash whose per-dylib copy is a linkage
+//! fact, and [`asset`] is a `const fn` hash both sides of the seam must agree
+//! on to the bit. Neither allocates, and neither could grow a subsystem.
 
 #![no_std]
 #![warn(missing_docs)]
 
+pub mod asset;
 pub mod entity;
 pub mod host;
 pub mod input;
@@ -50,6 +53,7 @@ pub mod query;
 pub mod system;
 pub mod verb;
 
+pub use asset::asset_id;
 pub use entity::Entity;
 pub use host::{AbiStatus, HostApiV1, WorldHandle};
 pub use input::{AXIS_SCALE, ActionId, AxisId, InputFrame, MAX_ACTIONS, MAX_AXES};

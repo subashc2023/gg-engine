@@ -1,4 +1,6 @@
 pub mod gg_abi
+pub mod gg_abi::asset
+pub const fn gg_abi::asset::asset_id(&str) -> u64
 pub mod gg_abi::entity
 #[repr(C)] pub struct gg_abi::entity::Entity
 impl gg_abi::entity::Entity
@@ -269,6 +271,7 @@ pub const gg_abi::SYM_GAME_COMPONENTS: &[u8]
 pub const gg_abi::SYM_GAME_INIT: &[u8]
 pub const gg_abi::SYM_GAME_SYSTEMS: &[u8]
 pub const gg_abi::SYM_GAME_VERBS: &[u8]
+pub const fn gg_abi::asset_id(&str) -> u64
 pub type gg_abi::GameAbiFn = fn() -> gg_abi::AbiInfo
 pub type gg_abi::GameComponentsFn = fn() -> gg_abi::layout::ComponentsTable
 pub type gg_abi::GameInitFn = fn(*const gg_abi::host::HostApiV1)

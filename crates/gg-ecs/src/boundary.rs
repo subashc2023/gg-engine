@@ -40,7 +40,7 @@ pub use declare::{Table, entry, init, layout_of, run, verbs};
 pub use game::{Access, BoundaryData, BoundaryError, Columns, GameWorld};
 pub use host::{SystemZone, host_api, set_logger, set_system_zone};
 pub use load::{SystemPanic, Verbs, read_verbs};
-pub use present::{Eye, Renderable};
+pub use present::{Eye, Model, Renderable};
 
 pub use crate::hash::system_id;
 
@@ -51,7 +51,7 @@ pub use gg_abi::host::log_level;
 pub use gg_abi::{
     AXIS_SCALE, AbiInfo, AbiStatus, ActionId, AxisId, ComponentLayout, ComponentsTable, HostApiV1,
     InputFrame, MAX_AXES, SystemEntry, SystemStatus, SystemsTable, TickCtx, VerbName, VerbsTable,
-    WorldHandle,
+    WorldHandle, asset_id,
 };
 
 /// What this build of the boundary says about itself — the value

@@ -24,7 +24,7 @@ use gg_core::reload::rejuvenate::Rejuvenator;
 use gg_core::{GameLib, Stages};
 #[cfg(feature = "hot-reload")]
 use gg_ecs::ComponentOutcome;
-use gg_ecs::boundary::{Eye, Renderable, TickCtx, host_api};
+use gg_ecs::boundary::{Eye, Model, Renderable, TickCtx, host_api};
 use gg_ecs::{Snapshot, World};
 use gg_extract::Extracted;
 use gg_input::{ActionMap, Drive, Input, InputFrame, Recorder, Replay, ReplayMeta};
@@ -70,6 +70,10 @@ pub struct App {
     /// The window's GPU state, absent in a headless run — and that absence is
     /// the extract and render stages' off switch.
     gpu: Option<Renderer>,
+    /// The pack, opened against the renderer once there is one (§4.6). Held as
+    /// a path rather than opened here because a headless run has no renderer to
+    /// stream into and mapping a file for nobody would be work with no reader.
+    pack: Option<std::path::PathBuf>,
     /// Tracy's GPU zones, fed the same readings the overlay shows, so the two
     /// views of one frame cannot disagree (§4.8).
     #[cfg(feature = "debug-tools")]
@@ -86,15 +90,13 @@ impl App {
     /// `target/debug/game.dll` in place would make the next `cargo build` fail
     /// rather than the reload (§4.2.2).
     pub fn new(
-        game: &Path,
+        args: &crate::Args,
         staging: &Path,
         hz: u32,
         bindings: String,
         replay: Option<Box<Replay>>,
-        record: bool,
-        leak_budget: Option<u64>,
     ) -> anyhow::Result<Self> {
-        let _ = staging;
+        let (game, _) = (args.game.as_path(), staging);
         #[cfg(feature = "hot-reload")]
         let (watch, lib) = {
             let mut watch = gg_core::reload::watch::Watch::new(game, staging)?;
@@ -123,7 +125,11 @@ impl App {
         let declared = unsafe { world.adopt(lib.components()) }?;
         let mut drive = match replay {
             Some(replay) => Drive::Replay(replay),
-            None => Drive::Live(record.then(|| Box::new(Recorder::new(meta(&lib, hz))))),
+            None => Drive::Live(
+                args.record
+                    .is_some()
+                    .then(|| Box::new(Recorder::new(meta(&lib, hz)))),
+            ),
         };
         // Segment zero names the build that produced tick zero (§4.7).
         drive.open_segment(0, lib.code_hash());
@@ -139,7 +145,7 @@ impl App {
         Ok(Self {
             world,
             lib,
-            rejuvenate: Rejuvenator::new(leak_budget),
+            rejuvenate: Rejuvenator::new(args.leak_budget),
             hz,
             halted: false,
             #[cfg(feature = "hot-reload")]
@@ -153,6 +159,7 @@ impl App {
             extracted: Extracted::default(),
             view: View::default(),
             gpu: None,
+            pack: args.pack.clone(),
             #[cfg(feature = "debug-tools")]
             zones: None,
             #[cfg(feature = "overlay")]
@@ -183,12 +190,14 @@ impl App {
     /// `Event::WindowReady` — the surface may not outlive the window it came
     /// from, which is what [`App::detach`] is for at the other end.
     pub fn attach(&mut self, window: &Window) -> anyhow::Result<()> {
-        #[cfg_attr(not(feature = "overlay"), expect(unused_mut, reason = "atlas upload"))]
         let mut renderer = Renderer::new(window, window.inner_size())?;
         // The renderer never learns what a glyph is; it takes coverage texels
         // and a rectangle (§4.9).
         #[cfg(feature = "overlay")]
         renderer.set_ui_atlas(&gg_debug::atlas())?;
+        if let Some(pack) = &self.pack {
+            renderer.open_pack(pack)?;
+        }
         let device = renderer.device();
         info!(device = %device.chosen, api = ?device.api_version, "gpu online");
         // Opened here and not at construction: the context is anchored to the
@@ -452,9 +461,9 @@ impl Stages for App {
     /// per entity. The loop hands it over anyway so the day a second buffer
     /// exists, the signature does not move.
     fn extract(&mut self, _alpha: f32) -> anyhow::Result<()> {
-        if self.gpu.is_none() {
+        let Some(renderer) = &self.gpu else {
             return Ok(());
-        }
+        };
         let eye = Eye::of(&self.world)?;
         // Rebuilt, not mutated: `View::default()` is where the render CVars are
         // read, so a console edit lands on the next frame (§4.8).
@@ -465,6 +474,11 @@ impl Stages for App {
         };
         self.extracted
             .transforms::<Renderable>(&self.world, eye.position)?;
+        // Pack content, expanded through whatever the renderer has mapped. A
+        // run with no `--pack` expands nothing and this is a query over an
+        // empty archetype (§4.6).
+        self.extracted
+            .append_models::<Model>(&self.world, renderer.scenes())?;
         Ok(())
     }
 

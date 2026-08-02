@@ -1,0 +1,16 @@
+# Demo 04's bindings (§4.7). By *physical* key position, so this file means the
+# same thing on AZERTY as on QWERTY.
+#
+# Verb names resolve against the two lists in `gg_game!`, and their order there
+# is the id space a replay records — so renaming a verb here without renaming it
+# there is refused at load, not a silently dead binding.
+
+[game.actions]
+tint = ["T", "Mouse1"]
+
+[game.axes]
+move_right = ["+D", "-A"]
+move_up = ["+E", "-Q"]
+move_forward = ["+W", "-S"]
+aim_x = ["MouseX"]
+aim_y = ["MouseY"]

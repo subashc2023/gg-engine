@@ -61,7 +61,7 @@ nan-scan = []
 # Forwarded rather than local: the machinery is `gg-core`'s and the tier
 # meta-features below are the only place that decides it is present.
 fp-assert = ["gg-core/fp-assert"]
-hot-reload = ["gg-core/hot-reload"]
+hot-reload = ["gg-core/hot-reload", "gg-render/hot-reload"]
 cvar-console = ["debug-tools"]
 overlay = ["debug-tools"]
 

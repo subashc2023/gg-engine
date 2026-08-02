@@ -104,6 +104,7 @@ impl OffscreenRhi {
             extent,
             format: TARGET_FORMAT,
             usage: ImageUse::ColorTarget,
+            mip_levels: 1,
         })?;
 
         let device = &mut gpu.device;
@@ -203,9 +204,14 @@ impl OffscreenRhi {
         self.gpu.upload_buffer(handle, offset, bytes)
     }
 
-    /// Record an image upload into the staging batch.
-    pub fn upload_image(&mut self, handle: ImageHandle, bytes: &[u8]) -> Result<(), RhiError> {
-        self.gpu.upload_image(handle, bytes)
+    /// Record one mip level's upload into the staging batch.
+    pub fn upload_image(
+        &mut self,
+        handle: ImageHandle,
+        level: u32,
+        bytes: &[u8],
+    ) -> Result<(), RhiError> {
+        self.gpu.upload_image(handle, level, bytes)
     }
 
     /// Write into a dynamic buffer's mapping — see [`crate::Rhi::write_buffer`].

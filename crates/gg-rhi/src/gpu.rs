@@ -256,17 +256,24 @@ impl Gpu {
         self.resources.memory()
     }
 
-    /// Record an image upload into the staging batch. `bytes` is the tightly
-    /// packed content of the whole image.
-    pub fn upload_image(&mut self, handle: ImageHandle, bytes: &[u8]) -> Result<(), RhiError> {
+    /// Record one mip level's upload into the staging batch. `bytes` is the
+    /// tightly packed content of that level.
+    pub fn upload_image(
+        &mut self,
+        handle: ImageHandle,
+        level: u32,
+        bytes: &[u8],
+    ) -> Result<(), RhiError> {
         let image = self.resources.image(handle)?;
-        let (raw, format, extent) = (image.raw, image.format, image.extent);
+        let (raw, format, extent, levels) =
+            (image.raw, image.format, image.extent, image.mip_levels);
+        if level >= levels {
+            return Err(RhiError::Loader(format!(
+                "image upload: level {level} of an image allocated with {levels}"
+            )));
+        }
         self.uploader
-            .upload_image(&self.device, raw, format, extent, bytes)?;
-        // The upload's barrier leaves it here; the acquire, when there is one,
-        // does not change the layout it lands in.
-        self.resources.image_mut(handle)?.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
-        Ok(())
+            .upload_image(&self.device, raw, format, extent, level, bytes)
     }
 
     /// Submit the staging batch and wait for it — the §4.3 "upload now" path.

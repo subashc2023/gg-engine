@@ -1,8 +1,9 @@
 //! `cargo xtask` — local-first CI and repo automation. `cargo xtask ci` *is* CI:
 //! the definition, not a mirror (§5). Subcommands per §3: ci, shaders, assets,
-//! bench, capture, probe, dist — the ones whose first consumer hasn't arrived
-//! yet are stubs that say which milestone brings it.
+//! bench, capture, probe, dist. `assets` was the last stub and landed at M9;
+//! every subcommand now runs something.
 
+mod assets;
 mod bench;
 mod budgets;
 mod ci;
@@ -34,7 +35,7 @@ fn main() {
         Some("reload") => shell::gates(&rest),
         Some("run") => run::run(&rest),
         Some("timers") => timers::run(&rest),
-        Some("assets") => stub("assets", "M9 (asset pipeline; `ggc` does not exist yet)"),
+        Some("assets") => assets::run(&rest),
         Some("bench") => bench::run(&rest),
         _ => usage(),
     };
@@ -45,11 +46,6 @@ fn main() {
         // to the agent (§6 M0A); plain failures exit 1.
         std::process::exit(if hook { 2 } else { 1 });
     }
-}
-
-fn stub(name: &str, lands: &str) -> anyhow::Result<()> {
-    println!("xtask {name}: stub — the machine lands at {lands}; see PLAN.md §6.");
-    Ok(())
 }
 
 fn usage() -> anyhow::Result<()> {
@@ -64,6 +60,6 @@ fn usage() -> anyhow::Result<()> {
          dist                                             dist gate: build+run tier-dist, symbol absence, crash symbolization (§5.8)\n\
          reload [--cross-tier|--segments|--chaos|--latency]  the M5 shell gates over demo 03; no flag runs the set\n\
          bench [--record]                                 smoke on lavapipe; --record archives real numbers per machine (§4.11)\n\
-         assets                                           a stub until M9 (RenderDoc capture is `gg-golden capture`)"
+         assets [--check]                                 compile every demo's asset tree; --check proves two clean runs agree byte for byte (§4.6)"
     )
 }

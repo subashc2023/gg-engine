@@ -184,9 +184,10 @@ float4 fs_main() : SV_Target
                 extent: (4, 4),
                 format: ImageFormat::Rgba8Unorm,
                 usage: ImageUse::Sampled,
+                mip_levels: 1,
             })
             .unwrap();
-        rhi.upload_image(image, &solid(color)).unwrap();
+        rhi.upload_image(image, 0, &solid(color)).unwrap();
         rhi.flush_uploads().unwrap();
         (image, rhi.register_texture(image).unwrap())
     };
@@ -355,26 +356,127 @@ float4 fs_main() : SV_Target
     assert!(report.clean(), "unclean: {report:?}");
 }
 
+/// A buffer larger than the whole ring is split and reassembled at the
+/// destination (§4.6 streaming). 20 MiB is two and a half rings, so the copy
+/// spans chunks, a wrap, and the early submit a batch that outgrew the ring
+/// forces — and the readback proves every byte landed at its own offset, not
+/// merely that the calls returned.
+#[test]
+fn an_upload_larger_than_the_staging_ring_arrives_whole() {
+    init_tracing();
+    let mut rhi = OffscreenRhi::new((8, 8)).unwrap();
+
+    const SIZE: usize = 20 << 20;
+    let readback = rhi
+        .create_buffer(&BufferDesc {
+            name: "test.oversize",
+            size: SIZE as u64,
+            kind: BufferKind::Readback,
+        })
+        .unwrap();
+
+    // A pattern with a long period, so a chunk landing at the wrong offset
+    // cannot coincide with the bytes that belong there.
+    let source: Vec<u8> = (0..SIZE).map(|i| (i % 251) as u8).collect();
+    rhi.upload_buffer(readback, 0, &source).unwrap();
+    rhi.flush_uploads().unwrap();
+
+    let landed = rhi.map_buffer(readback).unwrap();
+    let first = (0..SIZE).find(|&i| landed[i] != source[i]);
+    assert_eq!(first, None, "first byte that disagrees");
+
+    rhi.destroy_buffer(readback).unwrap();
+    let report = rhi.shutdown();
+    assert!(report.clean(), "unclean: {report:?}");
+}
+
+/// A mip chain arrives level by level and every level is sampled from the same
+/// image (§4.6). The chain is uploaded smallest-first — the order a KTX2 file
+/// stores it in — to prove no level depends on another having gone before it.
+#[test]
+fn a_mip_chain_uploads_level_by_level_and_samples_from_every_one() {
+    init_tracing();
+    let mut rhi = OffscreenRhi::new((8, 8)).unwrap();
+
+    // 4 levels: 8x8, 4x4, 2x2, 1x1. Each is a flat colour, so which level a
+    // sample came from is readable off the pixel. Only 0 and 255 per channel:
+    // the offscreen target is sRGB and would re-encode anything between them,
+    // which is a colour-space bug wearing a wrong-level costume.
+    const EXTENT: (u32, u32) = (8, 8);
+    const LEVELS: u32 = 4;
+    const COLORS: [[u8; 4]; LEVELS as usize] = [
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 0, 255],
+    ];
+    let image = rhi
+        .create_image(&ImageDesc {
+            name: "test.chain",
+            extent: EXTENT,
+            format: ImageFormat::Rgba8Unorm,
+            usage: ImageUse::Sampled,
+            mip_levels: LEVELS,
+        })
+        .unwrap();
+    for level in (0..LEVELS).rev() {
+        let (w, h) = gg_rhi::mip_extent(EXTENT, level);
+        let bytes: Vec<u8> = COLORS[level as usize].repeat((w * h) as usize);
+        rhi.upload_image(image, level, &bytes).unwrap();
+    }
+    rhi.flush_uploads().unwrap();
+    let index = rhi.register_texture(image).unwrap();
+
+    // Sample each level explicitly. `SampleLevel` rather than a derivative, so
+    // the level under test is named rather than inferred from the quad.
+    let source = format!(
+        r#"
+struct P {{ uint texture; uint level; uint _pad0; uint _pad1; }}
+[[vk::push_constant]] ConstantBuffer<P> push;
+[[vk::binding(0, 0)]] Texture2D<float4> textures[];
+[[vk::binding(2, 0)]] SamplerState samplers[];
+{FULLSCREEN_VS}
+[shader("fragment")]
+float4 fs_main() : SV_Target
+{{
+    return textures[push.texture].SampleLevel(samplers[1], float2(0.5, 0.5), push.level);
+}}
+"#
+    );
+    let (handle, _) = pipeline(&mut rhi, "chain", &source, gg_rhi::DepthMode::Off);
+
+    for level in 0..LEVELS {
+        let mut push = [0u8; 16];
+        push[..4].copy_from_slice(&index.get().to_le_bytes());
+        push[4..8].copy_from_slice(&level.to_le_bytes());
+        let pixels = common::render(
+            &mut rhi,
+            [0.0, 0.0, 0.0, 1.0],
+            &[DrawSpec {
+                pipeline: handle,
+                push_constants: &push,
+                count: 3,
+                index_buffer: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            top_left(&pixels),
+            COLORS[level as usize],
+            "level {level} sampled as the wrong one"
+        );
+    }
+
+    rhi.destroy_image(image).unwrap();
+    let report = rhi.shutdown();
+    assert!(report.clean(), "unclean: {report:?}");
+}
+
 /// Uploads that cannot work say so precisely, before anything is recorded.
 #[test]
 fn impossible_uploads_are_refused_by_name() {
     init_tracing();
     let mut rhi = OffscreenRhi::new((8, 8)).unwrap();
-
-    // Larger than the whole staging ring: chunked streaming arrives with the
-    // asset pipeline, and until then this is an error rather than a hang.
-    let huge = rhi
-        .create_buffer(&BufferDesc {
-            name: "test.huge",
-            size: 16 << 20,
-            kind: BufferKind::Storage,
-        })
-        .unwrap();
-    let err = rhi
-        .upload_buffer(huge, 0, &vec![0u8; 9 << 20])
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("staging ring"), "got: {err}");
 
     // Past the end of the destination.
     let small = rhi
@@ -398,14 +500,36 @@ fn impossible_uploads_are_refused_by_name() {
             extent: (8, 8),
             format: ImageFormat::Bc7Srgb,
             usage: ImageUse::Sampled,
+            mip_levels: 1,
         })
         .unwrap();
     assert_eq!(ImageFormat::Bc7Srgb.packed_size((8, 8)), 64);
     let err = rhi
-        .upload_image(texture, &[0u8; 63])
+        .upload_image(texture, 0, &[0u8; 63])
         .unwrap_err()
         .to_string();
     assert!(err.contains("packs to 64 bytes"), "got: {err}");
+
+    // A level the image was never allocated. Refused by name rather than
+    // recorded against a subresource that does not exist.
+    let err = rhi
+        .upload_image(texture, 1, &[0u8; 16])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("allocated with 1"), "got: {err}");
+
+    // More levels than the extent reduces to: 8x8 is four, never five.
+    let err = rhi
+        .create_image(&ImageDesc {
+            name: "test.overlong",
+            extent: (8, 8),
+            format: ImageFormat::Rgba8Unorm,
+            usage: ImageUse::Sampled,
+            mip_levels: 5,
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("5 mip levels, and (8, 8) has 4"), "got: {err}");
 
     // A depth image is an attachment, not a material.
     let depth = rhi
@@ -414,6 +538,7 @@ fn impossible_uploads_are_refused_by_name() {
             extent: (8, 8),
             format: ImageFormat::Depth32,
             usage: ImageUse::Depth,
+            mip_levels: 1,
         })
         .unwrap();
     let err = rhi.register_texture(depth).unwrap_err().to_string();
@@ -426,12 +551,12 @@ fn impossible_uploads_are_refused_by_name() {
             extent: (8, 8),
             format: ImageFormat::Depth32,
             usage: ImageUse::Sampled,
+            mip_levels: 1,
         })
         .unwrap_err()
         .to_string();
     assert!(err.contains("disagree"), "got: {err}");
 
-    rhi.destroy_buffer(huge).unwrap();
     rhi.destroy_buffer(small).unwrap();
     rhi.destroy_image(texture).unwrap();
     rhi.destroy_image(depth).unwrap();
@@ -478,10 +603,11 @@ fn uploads_are_clean_on_whichever_queue_topology_this_device_has() {
             extent: (16, 16),
             format: ImageFormat::Rgba8Srgb,
             usage: ImageUse::Sampled,
+            mip_levels: 1,
         })
         .unwrap();
     rhi.upload_buffer(buffer, 0, &[7u8; 256]).unwrap();
-    rhi.upload_image(image, &[9u8; 16 * 16 * 4]).unwrap();
+    rhi.upload_image(image, 0, &[9u8; 16 * 16 * 4]).unwrap();
     rhi.flush_uploads().unwrap();
     // The acquires are recorded by the next render; running one is what proves
     // the barrier pair validates.
@@ -506,6 +632,7 @@ fn a_storage_image_takes_a_slot_in_the_storage_array() {
             extent: (8, 8),
             format: ImageFormat::Rgba8Unorm,
             usage: ImageUse::Storage,
+            mip_levels: 1,
         })
         .unwrap();
     let index = rhi.register_storage_image(image).unwrap();

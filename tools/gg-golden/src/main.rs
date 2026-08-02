@@ -13,6 +13,7 @@
 //!   gg-golden chaos [seed]     render chaos streams' terminal frames (§5.11)
 //!   gg-golden capture [scene]  render under RenderDoc, write a `.rdc` (§4.8)
 //!   gg-golden bench [--json] [--frames N]   §4.11's frame macro
+//!   gg-golden load  [pack]     time a pack from mapped to resident (§6 M9)
 
 mod bench;
 mod compare;
@@ -60,7 +61,7 @@ struct Scene {
     render: fn() -> Render,
 }
 
-/// The roster. Seven scenes across three sources — two demos, the engine's own
+/// The roster. Eight scenes across four sources — three demos, the engine's own
 /// v1 pass list, and two replay-driven captures — each with its own policy,
 /// because "how strictly" is a property of what the frame contains and not of
 /// the harness (§4.10 per-test config).
@@ -180,6 +181,24 @@ const SCENES: &[Scene] = &[
             max_bias: 0.25,
         },
         render: render_chaos_witness,
+    },
+    Scene {
+        name: "hall",
+        // Demo 04's pack (§4.6): geometry, a tiled BC7 base-colour map and a
+        // material factor, none of which is written in any Rust source — the
+        // frame comes out of `ggc`. Judged like `mesh` and for the same reason:
+        // BC7 filtering is not bit-specified, and per-channel 3 still catches a
+        // lost mip level, a wrong sampler, or a scene node placed by the CPU
+        // instead of by the file. It is also the only scene in the roster whose
+        // reference moves when an *asset* changes rather than when code does.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.25,
+        },
+        render: render_hall,
     },
 ];
 
@@ -334,6 +353,197 @@ const BOXES_EXTENT: (u32, u32) = (320, 180);
 
 /// Three boxes, declared the way a game declares them: ordinary components in a
 /// `World`, read back through the same typed query the shell's extract uses.
+/// Demo 04's pack, as `cargo xtask assets` compiles it. Build output, never
+/// checked in — so a missing one is a missing *step*, and says so.
+const HALL_PACK: &str = "target/assets/04-scene.ggpack";
+
+/// §6 M9's exit row: a pack must be on the device within this. Measured from
+/// `open` to the frame where nothing is pending, which is the span a player
+/// spends looking at an empty room.
+const LOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Frames the loader is given before the clock is called stopped. Generous
+/// rather than tight: what is being measured is wall time, and a frame count
+/// only bounds how long this is willing to wait for it.
+const LOAD_FRAMES: usize = 4096;
+
+/// `gg-golden load [pack]` — time a pack from mapped to fully resident (§4.6).
+///
+/// Windowless by linkage like everything else here, which is the only reason
+/// this measurement is available to an automated tier at all: the shell is the
+/// other thing that streams a pack, and the shell needs a window (§1.5).
+///
+/// It streams every asset the pack contains rather than only what a frame
+/// shows, because the number the exit row asks about is a *level's* load and a
+/// camera pointed at a wall would otherwise measure one mesh.
+fn load(pack: Option<&str>) -> anyhow::Result<()> {
+    let path = match pack {
+        Some(path) => std::path::PathBuf::from(path),
+        None => hall_pack()?,
+    };
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let mut renderer = gg_render::OffscreenRenderer::new((64, 64))?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    renderer.open_pack(&path)?;
+
+    // Every scene in the file, named by id — the closest thing a pack has to
+    // "load the level", and what a game's own `Model`s would add up to.
+    let mut extracted = gg_extract::Extracted::default();
+    let scenes: Vec<u64> = renderer
+        .pack()
+        .map(gg_render::content::Content::scene_ids)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        !scenes.is_empty(),
+        "{} holds no scene — there is nothing here to time (§5.8: a check that finds nothing to \
+         check passes vacuously)",
+        path.display()
+    );
+    for (index, asset) in scenes.iter().enumerate() {
+        extracted.models.push(gg_extract::Instance {
+            entity: gg_ecs::Entity::from_bits(index as u64 + 1),
+            offset: gg_math::render::Vec3::ZERO,
+            rotation: gg_math::render::Quat::IDENTITY,
+            half_extent: gg_math::render::Vec3::splat(1.0),
+            color: 0x00ff_ffff,
+            asset: *asset,
+        });
+    }
+
+    let mut frames = 0;
+    let mut elapsed = None;
+    while frames < LOAD_FRAMES && elapsed.is_none() {
+        frames += 1;
+        renderer.frame(
+            &extracted,
+            &gg_render::View::default(),
+            [0.0, 0.0, 0.0, 1.0],
+            &[],
+        )?;
+        elapsed = renderer
+            .pack()
+            .and_then(gg_render::content::Content::ready_at);
+    }
+    let report = renderer.shutdown();
+    anyhow::ensure!(report.clean(), "unclean shutdown: {report:?} (§4.3)");
+
+    let elapsed = elapsed.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} was still streaming after {frames} frames",
+            path.display()
+        )
+    })?;
+    println!(
+        "gg-golden load: {} — {} KiB resident in {} ms over {frames} frame(s), budget {} ms (§6 M9)",
+        path.display(),
+        bytes / 1024,
+        elapsed.as_millis(),
+        LOAD_BUDGET.as_millis()
+    );
+    anyhow::ensure!(
+        elapsed <= LOAD_BUDGET,
+        "load to first frame is {} ms against a {} ms budget (§6 M9's exit row) — the knob is \
+         `r.upload_budget`, and raising it trades a hitching frame for a shorter wait",
+        elapsed.as_millis(),
+        LOAD_BUDGET.as_millis()
+    );
+    Ok(())
+}
+
+/// How many frames the hall is streamed for before it is judged.
+///
+/// Streaming is frames deep by design (§4.6): frame one is what *requests* the
+/// scene, so extract cannot expand it until frame two. A fixed count rather
+/// than "until idle" for exactly that reason — the first idle frame is the one
+/// before the meshes are known about.
+const HALL_FRAMES: usize = 4;
+
+fn hall_pack() -> anyhow::Result<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(HALL_PACK);
+    anyhow::ensure!(
+        path.is_file(),
+        "{HALL_PACK} is not there — `cargo xtask assets` compiles it (§4.6). Packs are build \
+         output and are never checked in, so this is a missing step and not a missing file."
+    );
+    Ok(path)
+}
+
+/// Render demo 04's hall out of its pack (§4.6, §4.10).
+///
+/// The world is built here rather than by running the demo's systems, because
+/// systems run through the boundary and that is the shell's job — but every
+/// number in it is the demo's own constant, so a change to where the demo puts
+/// its visitor moves this reference rather than quietly diverging from it.
+fn render_hall() -> Render {
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Model, Renderable};
+    use gg_math::sim;
+
+    let extent = BOXES_EXTENT;
+    let pack = hall_pack()?;
+    let mut world = World::new();
+    world.register::<Model>()?;
+    world.register::<Renderable>()?;
+    let hall = world.spawn();
+    world.insert(
+        hall,
+        Model {
+            tint: demo_04_scene::TINTS[0],
+            ..Model::at(demo_04_scene::HALL, sim::DVec3::ZERO)
+        },
+    )?;
+    let marker = world.spawn();
+    world.insert(
+        marker,
+        Renderable::boxed(
+            sim::DVec3::new(0.0, f64::from(demo_04_scene::MARKER_SIZE), 0.0),
+            sim::Vec3::splat(demo_04_scene::MARKER_SIZE),
+            0x00ff_e070,
+        ),
+    )?;
+
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    renderer.open_pack(&pack)?;
+    let view = gg_render::View {
+        // Looking slightly down the hall from the visitor's opening pose, so
+        // the floor's tiling, two pillars and the back wall are all in frame.
+        pitch: -0.15,
+        ..gg_render::View::default()
+    };
+    let mut extracted = gg_extract::Extracted::default();
+    let mut frame = None;
+    for _ in 0..HALL_FRAMES {
+        extracted.clear(demo_04_scene::START_POSITION);
+        extracted.append::<Renderable>(&world)?;
+        extracted.append_models::<Model>(&world, renderer.scenes())?;
+        let _capture = gg_debug::capture::frame();
+        frame = Some(renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?);
+    }
+    let pending = renderer
+        .pack()
+        .map_or(0, gg_render::content::Content::pending);
+    anyhow::ensure!(
+        pending == 0,
+        "the hall was still streaming after {HALL_FRAMES} frames ({pending} asset(s) pending) — \
+         judging a half-resident frame would make the reference a race"
+    );
+    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
+    let report = renderer.shutdown();
+    anyhow::ensure!(
+        report.clean(),
+        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
+        report.validation_messages,
+        report.leaked_allocations.len(),
+        report.leaked_allocations,
+    );
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
+
 fn boxes_world() -> anyhow::Result<gg_extract::Extracted> {
     use gg_ecs::World;
     use gg_ecs::boundary::Renderable;
@@ -911,8 +1121,10 @@ fn main() -> anyhow::Result<()> {
             flag(&args, "--frames").unwrap_or(BENCH_FRAMES),
             args.iter().any(|a| a == "--json"),
         ),
+        Some("load") => load(filter),
         _ => anyhow::bail!(
-            "usage: gg-golden <run|bless|graph|verify-gates|chaos|capture|bench> [scene|seed]"
+            "usage: gg-golden <run|bless|graph|verify-gates|chaos|capture|bench|load> \
+             [scene|seed|pack]"
         ),
     }
 }

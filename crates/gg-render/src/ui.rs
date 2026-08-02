@@ -70,7 +70,7 @@ const SLOT_BYTES: u64 = (MAX_VERTICES * core::mem::size_of::<UiVertex>()) as u64
 impl UiPass {
     /// Build the pipeline and the vertex stream. No atlas yet: a pass with
     /// nothing to draw needs none, and the shell may never open an overlay.
-    pub(crate) fn new(rhi: &mut impl super::PassHost) -> Result<Self, RhiError> {
+    pub(crate) fn new(rhi: &mut impl super::GpuHost) -> Result<Self, RhiError> {
         let vertices = rhi.create_buffer(&BufferDesc {
             name: "render.ui.vertices",
             // One region per frame in flight: [`BufferKind::Dynamic`] does not
@@ -92,7 +92,7 @@ impl UiPass {
     /// previous one, whose image is released.
     pub(crate) fn set_atlas(
         &mut self,
-        rhi: &mut impl super::PassHost,
+        rhi: &mut impl super::GpuHost,
         coverage: &Coverage<'_>,
     ) -> Result<(), RhiError> {
         let texels = (coverage.extent.0 as usize) * (coverage.extent.1 as usize);
@@ -116,8 +116,9 @@ impl UiPass {
             extent: coverage.extent,
             format: ImageFormat::Rgba8Unorm,
             usage: ImageUse::Sampled,
+            mip_levels: 1,
         })?;
-        rhi.upload_image(image, &rgba)?;
+        rhi.upload_image(image, 0, &rgba)?;
         rhi.flush_uploads()?;
         let index = rhi.register_texture(image)?;
         if let Some((old, _)) = self.atlas.replace((image, index)) {
@@ -138,7 +139,7 @@ impl UiPass {
     /// mid-graph are both worse answers than a short overlay.
     pub(crate) fn write(
         &mut self,
-        rhi: &mut impl super::PassHost,
+        rhi: &mut impl super::GpuHost,
         slot: u64,
         vertices: &[UiVertex],
     ) -> Result<(), RhiError> {
@@ -182,7 +183,7 @@ impl UiPass {
         })
     }
 
-    pub(crate) fn destroy(self, rhi: &mut impl super::PassHost) -> Result<(), RhiError> {
+    pub(crate) fn destroy(self, rhi: &mut impl super::GpuHost) -> Result<(), RhiError> {
         if let Some((image, _)) = self.atlas {
             rhi.destroy_image(image)?;
         }

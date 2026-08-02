@@ -596,6 +596,9 @@ impl Transients {
                 true => ImageUse::Depth,
                 false => ImageUse::ColorTarget,
             },
+            // A transient is written and sampled at full size; a chain would be
+            // levels no pass declares and no upload fills.
+            mip_levels: 1,
         })?;
         // Colour attachments get their bindless slot once, here, rather than
         // per frame: a descriptor write every frame would be a cost the graph

@@ -17,11 +17,11 @@ help: the trait `StateHash` is not implemented for `Stance`
              ComponentId
              Entity
              Eye
+             Model
              Option<T>
              Renderable
              String
              Unit
-             Vec<T>
            and $N others
 note: required by a bound in `field_type_must_have_a_defined_encoding`
   --> tests/reject/bare_enum_field.rs:16:10
@@ -49,10 +49,10 @@ help: the trait `StateHash` is not implemented for `Stance`
              ComponentId
              Entity
              Eye
+             Model
              Option<T>
              Renderable
              String
              Unit
-             Vec<T>
            and $N others
    = note: this error originates in the derive macro `StateHash` (in Nightly builds, run with -Z macro-backtrace for more info)

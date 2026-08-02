@@ -1,0 +1,62 @@
+# ggc (§4.6) — the asset compiler. glTF and images in, gg-pack out.
+#
+# Everything that parses a source format lives here and nowhere else, which is
+# what makes §2's "the runtime never parses JSON" a property of the dependency
+# graph rather than a rule someone has to remember. `xtask dist` already bans
+# this crate from the shipping graph by name.
+
+[package]
+name = "ggc"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ggc"
+
+[[bin]]
+name = "ggc"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# The format, its writer, and the blob layouts — one definition, shared with
+# the runtime that reads them back.
+gg-assets = { path = "../../crates/gg-assets" }
+# Node transforms compose in f64 and are decomposed there: a scene's absolute
+# translations are sim-side (§1.4), so the importer must not narrow on the way
+# through. `gg-math` is also the only crate allowed to reach glam (deny.toml).
+gg-math = { path = "../../crates/gg-math" }
+gltf.workspace = true
+twox-hash.workspace = true
+# The codec half (§4.6). Both are source-format machinery and both stop here:
+# `xtask dist` bans this crate from the shipping graph, so a BC encoder and two
+# image decoders are things the game never links.
+intel_tex_2.workspace = true
+image.workspace = true
+# Vertex cache, overdraw and fetch reordering (§2, Mesh pipeline row). A
+# permutation, never a change of geometry — and a deterministic one, which is
+# what lets it sit upstream of a byte-reproducible pack.
+meshopt = { version = "0.6", default-features = false }
+# meshoptimizer wants the vertex array as bytes plus a stride, which is exactly
+# what `Vertex` being `Pod` already promises.
+bytemuck.workspace = true
+# `ggc watch` (§4.6): the dev-loop half of the compiler. Same crate the dylib
+# watcher uses, and — after M9 — the same wall-clock settle rule.
+notify.workspace = true
+
+[dev-dependencies]
+# The gates read back what the compiler wrote, through the same reader the
+# runtime uses — a test that parsed the pack itself would be testing a third
+# implementation of the format.
+gg-assets = { path = "../../crates/gg-assets" }
+# The texture gate writes its own PNG rather than checking one in: a binary
+# fixture is a second thing to keep in step with the importer.
+image.workspace = true

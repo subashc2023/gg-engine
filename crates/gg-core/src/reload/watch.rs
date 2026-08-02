@@ -14,11 +14,11 @@
 //!
 //! # Why a rebuilt file is not loaded the moment it appears
 //!
-//! The watcher fires while the linker is still writing. Rather than sleeping a
-//! guessed interval, [`Watch::poll`] waits for the artifact's size and
-//! modification time to be identical on two consecutive polls: at frame rate
-//! that is a couple of milliseconds of patience, it scales with how slow the
-//! machine actually is, and it costs nothing when the file was already still.
+//! The watcher fires while the linker is still writing. [`Watch::poll`] waits
+//! for the artifact's size and modification time to hold still for
+//! [`SETTLE_QUIET`] before staging it — a wall-clock quiet period rather than a
+//! number of polls, because `poll` is called wherever the loop calls it and a
+//! bounded headless run calls it hundreds of thousands of times a second.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -29,10 +29,22 @@ use notify::Watcher as _;
 
 use super::{GameLib, ReloadError};
 
-/// Polls a stubbornly-locked artifact is given before the wait is reported as a
-/// failure. At frame rate this is a couple of seconds — long enough for any
-/// linker, short enough that a genuinely stuck file is not silence.
-const MAX_STAGING_ATTEMPTS: u32 = 120;
+/// How long the artifact must hold the same size and mtime before it counts as
+/// fully written.
+///
+/// **Time, not a poll count.** `poll` runs wherever the loop calls it, and that
+/// is 60 Hz under a player but hundreds of thousands per second in a bounded
+/// headless run — so "two consecutive polls agreed" can mean "two microseconds
+/// apart, in the middle of someone's 2 MB write". That is not a settle rule, it
+/// is a race the fast lane loses, and losing it stages a truncated dylib and
+/// reports `file too short` for an artifact that was perfectly good a
+/// millisecond later.
+const SETTLE_QUIET: Duration = Duration::from_millis(40);
+
+/// How long a stubbornly-unreadable artifact is given before the wait is
+/// reported as a failure — long enough for any linker, short enough that a
+/// genuinely stuck file is not silence. Also in time, for the same reason.
+const STAGING_PATIENCE: Duration = Duration::from_secs(2);
 
 /// A dylib that arrived, was staged, and passed every check.
 pub struct Reloaded {
@@ -58,10 +70,15 @@ impl std::fmt::Debug for Reloaded {
 /// A rebuild seen but not yet acted on.
 struct Pending {
     saved_at: Instant,
-    /// Size and mtime at the last poll — the artifact is settled once two polls
-    /// agree.
-    settled_at: Option<(u64, SystemTime)>,
-    attempts: u32,
+    /// The size and mtime last observed, and when they were first observed —
+    /// the artifact is settled once that pair has held for [`Self::quiet`].
+    settled_at: Option<((u64, SystemTime), Instant)>,
+    /// How long that pair must hold. [`SETTLE_QUIET`] when a file event started
+    /// this, and zero when [`Watch::request`] did: the quiet period exists to
+    /// outlast a *writer*, and at startup there is none — charging every launch
+    /// 40 ms to wait for a build that finished yesterday would be paying M9's
+    /// load-to-first-frame budget for nothing.
+    quiet: Duration,
 }
 
 /// Watches for a rebuilt game dylib and stages it for loading.
@@ -153,7 +170,7 @@ impl Watch {
         self.pending.get_or_insert(Pending {
             saved_at: Instant::now(),
             settled_at: None,
-            attempts: 0,
+            quiet: Duration::ZERO,
         });
     }
 
@@ -178,30 +195,39 @@ impl Watch {
             match &mut self.pending {
                 Some(pending) => {
                     pending.saved_at = pending.saved_at.min(seen);
-                    // A write during the settling wait restarts it.
+                    // A write during the settling wait restarts it — and proves
+                    // there is a writer, if this began as a startup request.
                     pending.settled_at = None;
+                    pending.quiet = SETTLE_QUIET;
                 }
                 None => {
                     self.pending = Some(Pending {
                         saved_at: seen,
                         settled_at: None,
-                        attempts: 0,
+                        quiet: SETTLE_QUIET,
                     });
                 }
             }
         }
 
         let pending = self.pending.as_mut()?;
-        pending.attempts += 1;
-        let stuck = pending.attempts > MAX_STAGING_ATTEMPTS;
+        let stuck = pending.saved_at.elapsed() > STAGING_PATIENCE;
 
         let stat = std::fs::metadata(&self.source)
             .and_then(|m| Ok((m.len(), m.modified()?)))
             .ok();
         match stat {
-            Some(stat) if pending.settled_at == Some(stat) => {}
+            // Held long enough to be believed: fall through and stage it.
+            Some(stat)
+                if pending.settled_at.is_some_and(|(seen, since)| {
+                    seen == stat && since.elapsed() >= pending.quiet
+                }) => {}
             Some(stat) if !stuck => {
-                pending.settled_at = Some(stat);
+                // A different size or mtime restarts the clock; the same one
+                // keeps the instant it was first seen, or the wait never ends.
+                if pending.settled_at.is_none_or(|(seen, _)| seen != stat) {
+                    pending.settled_at = Some((stat, Instant::now()));
+                }
                 return None;
             }
             _ if !stuck => return None,
@@ -230,8 +256,8 @@ impl Watch {
         let staged = self.staged_path(self.generation);
         if let Err(source) = std::fs::copy(&self.source, &staged) {
             // Almost always the linker still holding the file. Clearing the
-            // settle marker costs one more poll and retries; `attempts` is what
-            // stops this being forever.
+            // settle marker restarts the quiet period and retries;
+            // `STAGING_PATIENCE` is what stops this being forever.
             if !stuck {
                 if let Some(pending) = self.pending.as_mut() {
                     pending.settled_at = None;

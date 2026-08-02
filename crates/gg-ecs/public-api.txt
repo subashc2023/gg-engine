@@ -26,6 +26,7 @@ pub use gg_ecs::boundary::TickCtx
 pub use gg_ecs::boundary::VerbName
 pub use gg_ecs::boundary::VerbsTable
 pub use gg_ecs::boundary::WorldHandle
+pub use gg_ecs::boundary::asset_id
 pub use gg_ecs::boundary::log_level
 pub struct gg_ecs::boundary::Access
 impl gg_ecs::boundary::Access
@@ -78,6 +79,22 @@ pub const fn gg_ecs::GameWorld<'a>::tick(&self) -> u64
 pub const fn gg_ecs::GameWorld<'a>::tick_hz(&self) -> u32
 impl core::fmt::Debug for gg_ecs::GameWorld<'_>
 pub fn gg_ecs::GameWorld<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[repr(C)] pub struct gg_ecs::boundary::Model
+pub gg_ecs::boundary::Model::asset: u64
+pub gg_ecs::boundary::Model::position: gg_math::sim::DVec3
+pub gg_ecs::boundary::Model::rotation: gg_math::sim::DQuat
+pub gg_ecs::boundary::Model::scale: gg_math::sim::Vec3
+pub gg_ecs::boundary::Model::tint: u32
+impl gg_ecs::boundary::Model
+pub fn gg_ecs::boundary::Model::at(&str, gg_math::sim::DVec3) -> Self
+impl bytemuck::pod::Pod for gg_ecs::boundary::Model
+impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Model
+impl gg_ecs::component::Component for gg_ecs::boundary::Model
+pub const gg_ecs::boundary::Model::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Model::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Model::TYPE_NAME: &'static str
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Model
+pub fn gg_ecs::boundary::Model::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 #[repr(C)] pub struct gg_ecs::boundary::Renderable
 pub gg_ecs::boundary::Renderable::color: u32
 pub gg_ecs::boundary::Renderable::half_extent: gg_math::sim::Vec3
@@ -212,6 +229,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Eye
 pub const gg_ecs::boundary::Eye::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Eye::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Eye::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Model
+pub const gg_ecs::boundary::Model::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Model::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Model::TYPE_NAME: &'static str
 impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
 pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
@@ -439,6 +460,8 @@ impl gg_ecs::state_hash::StateHash for gg_abi::entity::Entity
 pub fn gg_abi::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Eye
 pub fn gg_ecs::boundary::Eye::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Model
+pub fn gg_ecs::boundary::Model::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
@@ -845,6 +868,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Eye
 pub const gg_ecs::boundary::Eye::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Eye::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Eye::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Model
+pub const gg_ecs::boundary::Model::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Model::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Model::TYPE_NAME: &'static str
 impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
 pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
@@ -942,6 +969,8 @@ impl gg_ecs::state_hash::StateHash for gg_abi::entity::Entity
 pub fn gg_abi::entity::Entity::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Eye
 pub fn gg_ecs::boundary::Eye::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Model
+pub fn gg_ecs::boundary::Model::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId

@@ -291,4 +291,52 @@ mod watching {
         assert!(outcome.is_err(), "still not a dylib");
         assert!(staging.join("game-1.dll").exists());
     }
+
+    #[test]
+    fn a_half_written_artifact_is_never_the_one_that_gets_staged() {
+        // The settle rule's whole job, against a poller running as fast as the
+        // machine allows — which is what a `--frames` headless run is, and how
+        // this was found: a rule that asked for "the same stat twice" was
+        // satisfied microseconds apart, mid-write, and staged a truncated dylib
+        // that could only be reported as `file too short`.
+        use std::io::Write as _;
+
+        let dir = scratch("partial");
+        let staging = dir.join("staging");
+        let source = dir.join("game.dll");
+        std::fs::write(&source, b"the previous build").unwrap();
+        let mut watch = Watch::new(&source, &staging).unwrap();
+
+        let whole = vec![b'x'; 512 * 1024];
+        let writer = {
+            let (source, whole) = (source.clone(), whole.clone());
+            std::thread::spawn(move || {
+                let mut file = std::fs::File::create(&source).unwrap();
+                for chunk in whole.chunks(64 * 1024) {
+                    file.write_all(chunk).unwrap();
+                    file.flush().unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(4));
+                }
+            })
+        };
+
+        // No sleep in this loop: a tick boundary in a bounded run is not paced.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut outcome = None;
+        while std::time::Instant::now() < deadline && outcome.is_none() {
+            // SAFETY: as in `spin` — the artifact is this test's own file.
+            outcome = unsafe { watch.poll(&HOST_API) };
+        }
+        writer.join().unwrap();
+        assert!(outcome.is_some(), "the watcher never resolved");
+
+        let staged = std::fs::read(staging.join("game-1.dll")).expect("nothing was staged");
+        assert_eq!(
+            staged.len(),
+            whole.len(),
+            "staged {} bytes of a {}-byte artifact — a partial write was believed",
+            staged.len(),
+            whole.len()
+        );
+    }
 }

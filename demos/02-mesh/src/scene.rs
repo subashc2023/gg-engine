@@ -282,7 +282,12 @@ pub trait SceneHost {
         bytes: &[u8],
     ) -> Result<(), RhiError>;
     /// See [`gg_rhi::Rhi::upload_image`].
-    fn upload_image(&mut self, handle: ImageHandle, bytes: &[u8]) -> Result<(), RhiError>;
+    fn upload_image(
+        &mut self,
+        handle: ImageHandle,
+        level: u32,
+        bytes: &[u8],
+    ) -> Result<(), RhiError>;
     /// See [`gg_rhi::Rhi::flush_uploads`].
     fn flush_uploads(&mut self) -> Result<(), RhiError>;
     /// See [`gg_rhi::Rhi::register_texture`].
@@ -311,8 +316,13 @@ macro_rules! impl_scene_host {
             ) -> Result<(), RhiError> {
                 <$ty>::upload_buffer(self, handle, offset, bytes)
             }
-            fn upload_image(&mut self, handle: ImageHandle, bytes: &[u8]) -> Result<(), RhiError> {
-                <$ty>::upload_image(self, handle, bytes)
+            fn upload_image(
+                &mut self,
+                handle: ImageHandle,
+                level: u32,
+                bytes: &[u8],
+            ) -> Result<(), RhiError> {
+                <$ty>::upload_image(self, handle, level, bytes)
             }
             fn flush_uploads(&mut self) -> Result<(), RhiError> {
                 <$ty>::flush_uploads(self)
@@ -355,11 +365,12 @@ pub fn upload(host: &mut impl SceneHost) -> Result<SceneResources, RhiError> {
         extent: TEXTURE_EXTENT,
         format: ImageFormat::Bc7Srgb,
         usage: ImageUse::Sampled,
+        mip_levels: 1,
     })?;
 
     host.upload_buffer(vertex_buffer, 0, vertex_bytes)?;
     host.upload_buffer(index_buffer, 0, index_bytes)?;
-    host.upload_image(texture, &texture_bc7())?;
+    host.upload_image(texture, 0, &texture_bc7())?;
     host.flush_uploads()?;
 
     let texture_index = host.register_texture(texture)?;

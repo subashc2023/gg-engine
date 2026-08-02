@@ -1,0 +1,29 @@
+# demo 04-scene: pack content on the screen (§6 M9). Game code, like demo 03 —
+# a dylib the host loads, three engine dependencies and no fourth.
+#
+# It names assets and links nothing that knows what a pack is: §3's deny pin
+# keeps `gg-assets` out of a game's link set, and `gg_ecs::boundary::asset_id`
+# is how a name becomes an id on this side of it.
+
+[package]
+name = "demo-04-scene"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "demo_04_scene"
+path = "src/lib.rs"
+# cdylib is what the host loads; rlib is what the tests link. Both from one
+# build, so the artifact under test is the artifact that ships.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bytemuck.workspace = true
+gg-ecs = { path = "../../crates/gg-ecs" }
+gg-math = { path = "../../crates/gg-math" }

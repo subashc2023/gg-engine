@@ -14,22 +14,37 @@
 //! barrier on the transfer buffer does the whole job:
 //! [`Uploader::take_acquires`] comes back empty and the graphics side records
 //! nothing.
+//!
+//! # Nothing here is bounded by the ring
+//!
+//! An upload larger than [`RING_BYTES`] is split — buffers by byte range,
+//! images by bands of whole texel-block rows — and a *batch* that would outgrow
+//! the ring submits itself rather than failing, because its own bytes are the
+//! ones it would otherwise be waiting on. A caller streaming a pack in
+//! therefore never has to know this file's constants (§4.6).
 
 use crate::RhiError;
 use crate::device::Device;
-use crate::resource::{Buffer, ImageFormat, create_raw_buffer_in};
+use crate::resource::{Buffer, ImageFormat, create_raw_buffer_in, mip_extent};
 use ash::vk;
 use std::collections::VecDeque;
 
-/// Staging ring capacity. One item larger than this is an error naming the
-/// constant rather than a silent chunked upload — streaming arrives with the
-/// asset pipeline (§4.6, M9) and brings its own chunking.
+/// Staging ring capacity. Nothing is refused for exceeding it: an upload
+/// larger than the ring is split, and a *batch* that outgrows it is submitted
+/// early (see [`Uploader::stage`]). A pack holds more texels than any ring
+/// worth allocating, so the size is a throughput knob rather than a limit
+/// (§4.6 streaming).
 pub(crate) const RING_BYTES: u64 = 8 << 20;
 
 /// Offset alignment for a staged block. 64 covers both hard requirements at
 /// once — 4 bytes for buffer copies, the 16-byte texel block for BC7 — with
 /// room for the copy alignment drivers prefer.
 const STAGE_ALIGN: u64 = 64;
+
+/// Command buffers in rotation. One would mean waiting out each batch before
+/// recording the next, which is exactly the stall streaming exists to avoid;
+/// four lets the CPU stay three batches ahead of the transfer queue.
+const BATCH_SLOTS: usize = 4;
 
 /// A barrier the *graphics* queue must record before it first reads something
 /// the transfer queue wrote. Produced only when the families differ.
@@ -38,6 +53,8 @@ pub(crate) enum Acquire {
     Image {
         image: vk::Image,
         aspect: vk::ImageAspectFlags,
+        /// One mip level per acquire, because one upload writes one level.
+        level: u32,
     },
     Buffer {
         buffer: vk::Buffer,
@@ -52,19 +69,25 @@ struct Batch {
     head_after: u64,
 }
 
-/// The staging arena and the transfer-queue command buffer it feeds.
+/// The staging arena and the transfer-queue command buffers it feeds.
 pub(crate) struct Uploader {
     ring: Buffer,
     /// Monotonic byte cursors into the ring. `head - tail <= RING_BYTES` is the
     /// invariant; the ring offset is the cursor modulo capacity.
     head: u64,
     tail: u64,
-    /// Where the *unflushed* batch began — a batch larger than the ring cannot
-    /// be satisfied by waiting, so it is refused rather than deadlocked on.
+    /// Where the *unflushed* batch began. A batch cannot outgrow the ring —
+    /// nothing in flight owns its bytes, so waiting could never reclaim them —
+    /// which is why reaching that point submits rather than fails.
     batch_start: u64,
     in_flight: VecDeque<Batch>,
     pool: vk::CommandPool,
-    cmd: vk::CommandBuffer,
+    cmds: [vk::CommandBuffer; BATCH_SLOTS],
+    /// Which slot the current (or next) batch records into, and the timeline
+    /// value each slot's last submission signaled — the only proof a buffer is
+    /// free to reset. Zero means never submitted.
+    slot: usize,
+    slot_retire: [u64; BATCH_SLOTS],
     recording: bool,
     timeline_value: u64,
     acquires: Vec<Acquire>,
@@ -79,8 +102,13 @@ impl Uploader {
             vk::BufferUsageFlags::TRANSFER_SRC,
             gpu_allocator::MemoryLocation::CpuToGpu,
         )?;
+        // RESET_COMMAND_BUFFER, not a pool reset: the slots retire independently
+        // and resetting the pool would recycle buffers still in flight.
         let pool_info = vk::CommandPoolCreateInfo::default()
-            .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+            .flags(
+                vk::CommandPoolCreateFlags::TRANSIENT
+                    | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            )
             .queue_family_index(device.transfer.family);
         // SAFETY: device is live; the family index came from device creation.
         let pool = match unsafe { device.raw().create_command_pool(&pool_info, None) } {
@@ -94,10 +122,10 @@ impl Uploader {
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(pool)
             .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
+            .command_buffer_count(BATCH_SLOTS as u32);
         // SAFETY: pool is live.
-        let cmd = match unsafe { device.raw().allocate_command_buffers(&alloc_info) } {
-            Ok(bufs) => bufs.into_iter().next(),
+        let allocated = match unsafe { device.raw().allocate_command_buffers(&alloc_info) } {
+            Ok(bufs) => bufs,
             Err(e) => {
                 // SAFETY: the pool was created above and owns no buffers yet.
                 unsafe { device.raw().destroy_command_pool(pool, None) };
@@ -105,13 +133,15 @@ impl Uploader {
                 return Err(RhiError::Vk(e));
             }
         };
-        let Some(cmd) = cmd else {
-            // SAFETY: as above.
+        let Ok(cmds) = <[vk::CommandBuffer; BATCH_SLOTS]>::try_from(allocated.as_slice()) else {
+            // SAFETY: as above; the buffers are freed with the pool.
             unsafe { device.raw().destroy_command_pool(pool, None) };
             destroy_ring(device, ring);
-            return Err(RhiError::Loader("no upload command buffer".into()));
+            return Err(RhiError::Loader("no upload command buffers".into()));
         };
-        device.set_name(cmd, "gg.upload.cmd");
+        for (index, cmd) in cmds.iter().enumerate() {
+            device.set_name(*cmd, &format!("gg.upload.cmd.{index}"));
+        }
 
         Ok(Self {
             ring,
@@ -120,7 +150,9 @@ impl Uploader {
             batch_start: 0,
             in_flight: VecDeque::new(),
             pool,
-            cmd,
+            cmds,
+            slot: 0,
+            slot_retire: [0; BATCH_SLOTS],
             recording: false,
             timeline_value: 0,
             acquires: Vec::new(),
@@ -163,52 +195,64 @@ impl Uploader {
                 bytes.len()
             )));
         }
-        let src_offset = self.stage(device, bytes)?;
-        self.begin(device)?;
-
-        let regions = [vk::BufferCopy2::default()
-            .src_offset(src_offset)
-            .dst_offset(dst_offset)
-            .size(bytes.len() as u64)];
-        let copy = vk::CopyBufferInfo2::default()
-            .src_buffer(self.ring.raw)
-            .dst_buffer(dst)
-            .regions(&regions);
-        // SAFETY: cmd is recording (begin above); both buffers are live and the
-        // range was bounds-checked against dst_size.
-        unsafe { device.raw().cmd_copy_buffer2(self.cmd, &copy) };
+        // Split at the ring's capacity rather than refusing: a mesh larger than
+        // the ring is ordinary at Sponza's size, and the chunk boundary is
+        // invisible to the destination — one buffer, one release barrier.
+        for (index, chunk) in bytes.chunks(RING_BYTES as usize).enumerate() {
+            let src_offset = self.stage(device, chunk)?;
+            self.begin(device)?;
+            let at = dst_offset + (index as u64) * RING_BYTES;
+            let regions = [vk::BufferCopy2::default()
+                .src_offset(src_offset)
+                .dst_offset(at)
+                .size(chunk.len() as u64)];
+            let copy = vk::CopyBufferInfo2::default()
+                .src_buffer(self.ring.raw)
+                .dst_buffer(dst)
+                .regions(&regions);
+            // SAFETY: cmd is recording (begin above); both buffers are live and
+            // the range was bounds-checked against dst_size.
+            unsafe { device.raw().cmd_copy_buffer2(self.cmd(), &copy) };
+        }
 
         self.release_buffer(device, dst, dst_size);
         Ok(())
     }
 
-    /// Copy `bytes` into `image`, transitioning it into shader-read layout.
-    /// `bytes` must be the tightly packed content of the whole image; the
-    /// caller's format decides how many that is ([`ImageFormat::packed_size`]).
+    /// Copy `bytes` into one mip `level` of `image`, transitioning that level
+    /// into shader-read layout. `extent` is the image's level-0 size; `bytes`
+    /// must be the tightly packed content of the *level*, whose size follows
+    /// from the two ([`ImageFormat::packed_size`] of [`mip_extent`]).
+    ///
+    /// One level per call, and each level's barrier pair names only itself, so
+    /// a chain uploaded over several frames leaves the levels it has not
+    /// reached yet untouched rather than repeatedly discarded.
     pub fn upload_image(
         &mut self,
         device: &Device,
         image: vk::Image,
         format: ImageFormat,
         extent: (u32, u32),
+        level: u32,
         bytes: &[u8],
     ) -> Result<(), RhiError> {
-        let expected = format.packed_size(extent);
+        let level_extent = mip_extent(extent, level);
+        let expected = format.packed_size(level_extent);
         if bytes.len() as u64 != expected {
             return Err(RhiError::Loader(format!(
-                "image upload: {:?} at {extent:?} packs to {expected} bytes, got {}",
-                format,
+                "image upload: {format:?} level {level} of {extent:?} is {level_extent:?} and \
+                 packs to {expected} bytes, got {}",
                 bytes.len()
             )));
         }
-        let src_offset = self.stage(device, bytes)?;
-        self.begin(device)?;
         let aspect = format.aspect();
         let subresource = vk::ImageSubresourceRange::default()
             .aspect_mask(aspect)
+            .base_mip_level(level)
             .level_count(1)
             .layer_count(1);
 
+        self.begin(device)?;
         let to_dst = [vk::ImageMemoryBarrier2::default()
             .image(image)
             .subresource_range(subresource)
@@ -218,37 +262,66 @@ impl Uploader {
             .src_access_mask(vk::AccessFlags2::NONE)
             .dst_stage_mask(vk::PipelineStageFlags2::COPY)
             .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)];
-        // SAFETY: cmd is recording; the image is live and this is its first
-        // use, so discarding its contents via UNDEFINED is correct.
+        // SAFETY: cmd is recording; the image is live and this level has not
+        // been written, so discarding its contents via UNDEFINED is correct.
         unsafe {
             device.raw().cmd_pipeline_barrier2(
-                self.cmd,
+                self.cmd(),
                 &vk::DependencyInfo::default().image_memory_barriers(&to_dst),
             )
         };
 
-        let regions = [vk::BufferImageCopy2::default()
-            .buffer_offset(src_offset)
-            .image_subresource(
-                vk::ImageSubresourceLayers::default()
-                    .aspect_mask(aspect)
-                    .layer_count(1),
-            )
-            .image_extent(vk::Extent3D {
-                width: extent.0,
-                height: extent.1,
-                depth: 1,
-            })];
-        let copy = vk::CopyBufferToImageInfo2::default()
-            .src_buffer(self.ring.raw)
-            .dst_image(image)
-            .dst_image_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .regions(&regions);
-        // SAFETY: cmd is recording; the barrier above put the image in the
-        // named layout and the staged range holds exactly `expected` bytes.
-        unsafe { device.raw().cmd_copy_buffer_to_image2(self.cmd, &copy) };
+        // Bands of whole texel-block rows. A copy's height must be a multiple
+        // of the block edge *unless* it reaches the mip's bottom, which is what
+        // makes the last band legal at a non-block-aligned height.
+        let block = format.block_extent();
+        // Exactly `rows * band_bytes == bytes.len()`: both round the extent up
+        // to whole blocks the same way, which is what lets the last band be a
+        // slice rather than a special case.
+        let band_bytes = format.packed_size((level_extent.0, block));
+        let rows = u64::from(level_extent.1.div_ceil(block));
+        let per_band = (RING_BYTES / band_bytes.max(1)).max(1);
+        let mut first_row = 0;
+        while first_row < rows {
+            let band_rows = per_band.min(rows - first_row);
+            // Both fit u32: the band lies inside a level whose height does.
+            let y = (first_row * u64::from(block)) as u32;
+            let height = ((band_rows * u64::from(block)) as u32).min(level_extent.1 - y);
+            let from = (first_row * band_bytes) as usize;
+            let to = from + (band_rows * band_bytes) as usize;
+            let src_offset = self.stage(device, &bytes[from..to])?;
+            self.begin(device)?;
+            first_row += band_rows;
 
-        self.release_image(device, image, aspect);
+            let regions = [vk::BufferImageCopy2::default()
+                .buffer_offset(src_offset)
+                .image_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(aspect)
+                        .mip_level(level)
+                        .layer_count(1),
+                )
+                .image_offset(vk::Offset3D {
+                    x: 0,
+                    y: y as i32,
+                    z: 0,
+                })
+                .image_extent(vk::Extent3D {
+                    width: level_extent.0,
+                    height,
+                    depth: 1,
+                })];
+            let copy = vk::CopyBufferToImageInfo2::default()
+                .src_buffer(self.ring.raw)
+                .dst_image(image)
+                .dst_image_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .regions(&regions);
+            // SAFETY: cmd is recording; the barrier above put this level in the
+            // named layout and the band is inside the staged range.
+            unsafe { device.raw().cmd_copy_buffer_to_image2(self.cmd(), &copy) };
+        }
+
+        self.release_image(device, image, aspect, level);
         Ok(())
     }
 
@@ -256,10 +329,14 @@ impl Uploader {
     /// timeline. Returns the signaled value (0 when there was nothing to do).
     pub fn flush(&mut self, device: &Device) -> Result<u64, RhiError> {
         if !self.recording {
+            // Nothing recorded, but `stage` may still have advanced the head;
+            // leaving `batch_start` behind it would make the next batch look
+            // bigger than it is and submit early forever.
+            self.batch_start = self.head;
             return Ok(self.timeline_value);
         }
         // SAFETY: cmd has been recording since `begin`.
-        unsafe { device.raw().end_command_buffer(self.cmd) }.map_err(RhiError::Vk)?;
+        unsafe { device.raw().end_command_buffer(self.cmd()) }.map_err(RhiError::Vk)?;
         self.recording = false;
 
         let signal_value = self.timeline_value + 1;
@@ -267,7 +344,7 @@ impl Uploader {
             .semaphore(device.transfer.timeline)
             .value(signal_value)
             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-        let cmd_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(self.cmd)];
+        let cmd_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(self.cmd())];
         let submit = vk::SubmitInfo2::default()
             .command_buffer_infos(&cmd_infos)
             .signal_semaphore_infos(&signal);
@@ -285,6 +362,8 @@ impl Uploader {
             head_after: self.head,
         });
         self.batch_start = self.head;
+        self.slot_retire[self.slot] = signal_value;
+        self.slot = (self.slot + 1) % BATCH_SLOTS;
         Ok(signal_value)
     }
 
@@ -315,12 +394,17 @@ impl Uploader {
         let mut buffer_barriers = Vec::new();
         for acquire in acquires {
             match *acquire {
-                Acquire::Image { image, aspect } => image_barriers.push(
+                Acquire::Image {
+                    image,
+                    aspect,
+                    level,
+                } => image_barriers.push(
                     vk::ImageMemoryBarrier2::default()
                         .image(image)
                         .subresource_range(
                             vk::ImageSubresourceRange::default()
                                 .aspect_mask(aspect)
+                                .base_mip_level(level)
                                 .level_count(1)
                                 .layer_count(1),
                         )
@@ -375,22 +459,34 @@ impl Uploader {
 
     // ---- internals -------------------------------------------------------
 
+    fn cmd(&self) -> vk::CommandBuffer {
+        self.cmds[self.slot]
+    }
+
     fn begin(&mut self, device: &Device) -> Result<(), RhiError> {
         if self.recording {
             return Ok(());
         }
-        // SAFETY: the ring's reclaim wait proves the previous batch retired
-        // before its command buffer is reset.
+        // Resetting a buffer whose submission is still executing is undefined,
+        // and the ring's reclaim wait does not prove it retired — a small batch
+        // never touches the ring's far side. The timeline does prove it, and
+        // with BATCH_SLOTS in rotation this only waits once the CPU is that far
+        // ahead of the transfer queue.
+        let retire = self.slot_retire[self.slot];
+        if retire > 0 {
+            device.wait_transfer_timeline(retire)?;
+        }
+        // SAFETY: the wait above proves this buffer is no longer in flight.
         unsafe {
             device
                 .raw()
-                .reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
+                .reset_command_buffer(self.cmd(), vk::CommandBufferResetFlags::empty())
                 .map_err(RhiError::Vk)?;
             let begin = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             device
                 .raw()
-                .begin_command_buffer(self.cmd, &begin)
+                .begin_command_buffer(self.cmd(), &begin)
                 .map_err(RhiError::Vk)?;
         }
         self.recording = true;
@@ -404,9 +500,16 @@ impl Uploader {
         let size = bytes.len() as u64;
         if size > RING_BYTES {
             return Err(RhiError::Loader(format!(
-                "staging {size} bytes exceeds the {RING_BYTES}-byte staging ring; chunked \
-                 streaming arrives with the asset pipeline (§4.6)"
+                "staging {size} bytes exceeds the {RING_BYTES}-byte staging ring; the caller \
+                 splits an upload this large before it reaches here"
             )));
+        }
+        // A batch cannot outgrow the ring: its own bytes are the ones the loop
+        // below would have to wait on, and nothing in flight owns them. So the
+        // batch is submitted here instead — which is what lets a caller push a
+        // whole pack through without knowing the ring's size (§4.6).
+        if self.head.next_multiple_of(STAGE_ALIGN) + size - self.batch_start > RING_BYTES {
+            self.flush(device)?;
         }
         let start = loop {
             let mut start = self.head.next_multiple_of(STAGE_ALIGN);
@@ -419,22 +522,17 @@ impl Uploader {
                 break start;
             }
             let Some(batch) = self.in_flight.pop_front() else {
+                // Unreachable: the submit above left the batch empty, so the
+                // only bytes this can be waiting on are in flight. Named rather
+                // than unwrapped, because a deadlock is the alternative.
                 return Err(RhiError::Loader(format!(
-                    "one unflushed batch would need more than the {RING_BYTES}-byte staging \
-                     ring; flush between uploads"
+                    "{size} bytes cannot be staged in the {RING_BYTES}-byte ring with nothing in \
+                     flight to reclaim"
                 )));
             };
             device.wait_transfer_timeline(batch.timeline_value)?;
             self.tail = batch.head_after;
         };
-        // A batch that has lapped its own start can never be satisfied by
-        // waiting — nothing in flight owns those bytes.
-        if self.head - self.batch_start > RING_BYTES {
-            return Err(RhiError::Loader(format!(
-                "one unflushed batch would need more than the {RING_BYTES}-byte staging ring; \
-                 flush between uploads"
-            )));
-        }
 
         let offset = start % RING_BYTES;
         let mapped = self
@@ -450,9 +548,16 @@ impl Uploader {
 
     /// The transfer-queue half of an image's ownership transfer — or, when one
     /// family owns everything, the whole barrier.
-    fn release_image(&mut self, device: &Device, image: vk::Image, aspect: vk::ImageAspectFlags) {
+    fn release_image(
+        &mut self,
+        device: &Device,
+        image: vk::Image,
+        aspect: vk::ImageAspectFlags,
+        level: u32,
+    ) {
         let subresource = vk::ImageSubresourceRange::default()
             .aspect_mask(aspect)
+            .base_mip_level(level)
             .level_count(1)
             .layer_count(1);
         let barrier = vk::ImageMemoryBarrier2::default()
@@ -463,7 +568,11 @@ impl Uploader {
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
         let barrier = if device.transfer_crosses_families() {
-            self.acquires.push(Acquire::Image { image, aspect });
+            self.acquires.push(Acquire::Image {
+                image,
+                aspect,
+                level,
+            });
             // A release's destination scopes must be empty, and its stage mask
             // must be one the transfer family supports — which is why the
             // shader-read stage lives on the acquire and not here.
@@ -482,7 +591,7 @@ impl Uploader {
         // the copy this follows.
         unsafe {
             device.raw().cmd_pipeline_barrier2(
-                self.cmd,
+                self.cmd(),
                 &vk::DependencyInfo::default().image_memory_barriers(&barriers),
             )
         };
@@ -511,7 +620,7 @@ impl Uploader {
         // SAFETY: cmd is recording; the buffer is live and was just written.
         unsafe {
             device.raw().cmd_pipeline_barrier2(
-                self.cmd,
+                self.cmd(),
                 &vk::DependencyInfo::default().buffer_memory_barriers(&barriers),
             )
         };

@@ -83,6 +83,11 @@ fn push() -> anyhow::Result<()> {
     // Gate 3 (§5): entry points compile + reflection codegen diff-clean. Check
     // mode: CI verifies the checked-in artifacts, it never rewrites the tree.
     crate::shaders::build_all(true)?;
+    // §4.6's byte-reproducibility, which §6 M9's exit row asks to be CI-tested:
+    // every demo's asset tree compiled twice *cleanly* and compared. Here and
+    // not in the nightly tier, because the incremental cache rests on it — a
+    // pack that differs run to run makes every warm build's reuse a guess.
+    crate::assets::run(&["--check"])?;
     rejuvenation()?;
     static_link()?;
     for (pkg, feats) in [
@@ -336,6 +341,17 @@ fn golden_suite() -> anyhow::Result<()> {
         &mut cmd,
         "golden gates reject a one-pixel change and forgive rounding noise (§4.10)",
     )?;
+
+    // §6 M9's "load to first frame < 500 ms". Here rather than in the shell's
+    // gates because the shell needs a window to hold a renderer (§1.5) and this
+    // harness is windowless by the linkage proven above. Demo 04's pack is two
+    // kilobytes, so what this leg gates is that the *clock exists and stops* —
+    // the number that means anything is a level-sized one, and it is measured
+    // by hand and recorded, the way `xtask bench --record` is (§4.11).
+    let mut cmd = cargo();
+    cmd.args(["run", "-p", "gg-golden", "--", "load"]);
+    lavapipe_env(&mut cmd)?;
+    exec(&mut cmd, "pack load-to-first-frame under budget (§6 M9)")?;
     render_graph_dump()
 }
 

@@ -4,14 +4,15 @@
 //! §3's deny pin means a type both sides name can live in exactly three crates —
 //! `gg-abi` (below [`Component`](crate::Component), so it cannot carry persisted
 //! identity), `gg-math` (types, no identity either), and this one. So the render
-//! protocol is *two ordinary components* defined here, declared by the game like
-//! any other, and read by the host through a typed query.
+//! protocol is *three ordinary components* defined here, declared by the game
+//! like any other, and read by the host through a typed query.
 //!
 //! The consequence worth naming: **nothing about how the game looks lives in the
 //! host.** A system fills these in from whatever the game's own components say,
 //! which puts colour, size and pose inside the dylib — reloadable, and editable
-//! while someone is playing. The host's renderer knows one shape and one colour
-//! channel, and that is the whole of its opinion.
+//! while someone is playing. The host's renderer knows one shape, one colour
+//! channel, and how to resolve a name in the pack it was handed; that is the
+//! whole of its opinion.
 //!
 //! Layout agreement is not asserted here because it is already checked where it
 //! matters: the schema hash covers every field's name, type token, offset and
@@ -20,6 +21,7 @@
 //! (§4.2.2). Two compilations that laid these out differently would be refused
 //! by name at load rather than drawing garbage.
 
+use gg_abi::asset_id;
 use gg_math::sim;
 
 use crate::Component;
@@ -57,6 +59,51 @@ impl Renderable {
             rotation: sim::DQuat::IDENTITY,
             half_extent,
             color,
+        }
+    }
+}
+
+/// One piece of pack content to draw, in world space (§4.6).
+///
+/// [`Renderable`] is the shape the host knows; this is the shape the *content*
+/// knows. `asset` names a mesh or a scene in the pack the host was given, and
+/// the host draws whatever that name resolves to — so the game still says what
+/// it looks like, at the only granularity a file format leaves it.
+///
+/// An `asset` the pack does not contain draws nothing. Not an error: a pack is
+/// rebuilt while the game runs (§4.6 watch mode), and a frame that failed
+/// because a mesh was mid-rebuild would make an artist's save look like a crash.
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "gg.model")]
+#[repr(C)]
+pub struct Model {
+    /// World-space origin, `f64` and un-narrowed — as [`Renderable::position`].
+    pub position: sim::DVec3,
+    /// Orientation.
+    pub rotation: sim::DQuat,
+    /// The pack asset this draws: `gg_assets::AssetId`'s value, or 0 for none.
+    /// A `u64` rather than that type because a game crate may not link the
+    /// crate that defines it (§3), which is also why [`asset_id`] is where it
+    /// is — see that function for the whole argument.
+    pub asset: u64,
+    /// Scale per axis, applied before rotation. `1.0` is the size the asset was
+    /// authored at, which is what makes an unscaled placement the common case.
+    pub scale: sim::Vec3,
+    /// `0x00RRGGBB`, sRGB, multiplied into the material's base colour. White
+    /// leaves the asset looking as it was authored.
+    pub tint: u32,
+}
+
+impl Model {
+    /// White, unrotated, unscaled — an asset placed as authored.
+    #[must_use]
+    pub fn at(name: &str, position: sim::DVec3) -> Self {
+        Model {
+            position,
+            rotation: sim::DQuat::IDENTITY,
+            asset: asset_id(name),
+            scale: sim::Vec3::splat(1.0),
+            tint: 0x00ff_ffff,
         }
     }
 }
@@ -120,6 +167,16 @@ mod tests {
         assert_eq!(align_of::<Renderable>(), 8);
         assert_eq!(size_of::<Eye>(), 32);
         assert_eq!(align_of::<Eye>(), 8);
+        assert_eq!(size_of::<Model>(), 80);
+        assert_eq!(align_of::<Model>(), 8);
+    }
+
+    #[test]
+    fn a_model_names_its_asset_by_the_hash_the_pack_stores() {
+        let model = Model::at("hall/scene", sim::DVec3::ZERO);
+        assert_eq!(model.asset, asset_id("hall/scene"));
+        assert_eq!(model.scale, sim::Vec3::splat(1.0));
+        assert_eq!(model.tint, 0x00ff_ffff, "authored colours, untinted");
     }
 
     #[test]

@@ -5,6 +5,7 @@
 resolver = "3"
 members = [
     "crates/gg-abi",
+    "crates/gg-assets",
     "crates/gg-core",
     "crates/gg-debug",
     "crates/gg-ecs",
@@ -21,8 +22,10 @@ members = [
     "demos/01-triangle",
     "demos/02-mesh",
     "demos/03-reload",
+    "demos/04-scene",
     "tools/gg-golden",
     "tools/gg-static-link",
+    "tools/ggc",
     "xtask",
 ]
 
@@ -91,6 +94,29 @@ winit = { version = "0.30", default-features = false, features = [
     "wayland-csd-adwaita-notitle",
 ] }
 raw-window-handle = "0.6"
+# M9 (§4.6), the pack's *runtime* side and therefore the only two of this group
+# that may reach a shipping graph: `memmap2` maps a pack so its sections are
+# cast in place rather than deserialized, and `zstd` is the codec a KTX2 level
+# is a frame of — the one blob that is decompressed instead of pointed at.
+memmap2 = "0.9"
+zstd = "0.13"
+# `ggc`'s side of §4.6 — the importer and the codecs. None of these may appear
+# in a dist graph and the dist gate proves it by name, which is why the tool is
+# a separate crate rather than a feature of the runtime one. xxhash3 gates the
+# incremental cache; it never crosses the determinism membrane (§4.1), so it is
+# deliberately not blake3.
+# `default-features = false`: the default `random` feature pulls `rand` in to
+# seed a hasher, and a *content* hash that took a random seed would defeat the
+# incremental cache it exists to key.
+twox-hash = { version = "2", default-features = false, features = [
+    "std",
+    "xxhash3_64",
+] }
+gltf = "1.4"
+# Only the two codecs glTF actually carries. The rest of `image`'s format list
+# is build time spent on formats a source tree cannot contain.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+intel_tex_2 = "0.5"
 ash-window = "0.13"
 # 0.28 gained no_std support, which moved `std` into `default` — so with
 # default-features = false the `std` feature must be named explicitly or the

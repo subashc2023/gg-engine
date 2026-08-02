@@ -19,9 +19,10 @@ use tracing::{info, info_span, warn};
 mod app;
 mod play;
 
-/// What the shell was told to run. Hand-parsed: five values, and a parser
-/// dependency would be the shell's first gram of fat.
-struct Args {
+/// What the shell was told to run. Hand-parsed: a handful of values, and a
+/// parser dependency would be the shell's first gram of fat. Passed to [`App`]
+/// whole rather than field by field — one struct is what a session *is*.
+pub struct Args {
     game: PathBuf,
     /// Bounded run. Headless it is `Pace::Locked` — wall time ignored, so a
     /// run's tick count is a property of the run and not of the machine (§5.6).
@@ -38,6 +39,9 @@ struct Args {
     /// the forced case — zero, restart on the first reload — is exercisable on
     /// demand instead of after a thousand edits.
     leak_budget: Option<u64>,
+    /// The pack a game draws out of (§4.6). Which file, and nothing else: what
+    /// to draw from it is the game's to say, through `Model`.
+    pack: Option<PathBuf>,
 }
 
 /// One spelling of the handoff flag: [`Args`] parses it and
@@ -99,15 +103,7 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .map(|path| -> anyhow::Result<_> { Ok(Box::new(Replay::decode(&std::fs::read(path)?)?)) })
         .transpose()?;
-    let mut app = app::App::new(
-        &args.game,
-        &staging,
-        DEFAULT_TICK_HZ,
-        bindings,
-        replay,
-        args.record.is_some(),
-        args.leak_budget,
-    )?;
+    let mut app = app::App::new(&args, &staging, DEFAULT_TICK_HZ, bindings, replay)?;
     // Before the first frame: the loop's clock resumes at the tick this carries.
     if let Some(path) = &args.restore {
         app.restore(&gg_core::Handoff::take(path)?)?;
@@ -155,6 +151,7 @@ fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
         replay: None,
         restore: None,
         leak_budget: None,
+        pack: None,
     };
     let mut argv = argv.iter().cloned();
     while let Some(flag) = argv.next() {
@@ -170,6 +167,7 @@ fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
             "--replay" => args.replay = Some(PathBuf::from(value()?)),
             RESTORE_FLAG => args.restore = Some(PathBuf::from(value()?)),
             "--leak-budget" => args.leak_budget = Some(value()?.parse()?),
+            "--pack" => args.pack = Some(PathBuf::from(value()?)),
             other => anyhow::bail!("unknown argument `{other}`"),
         }
     }
