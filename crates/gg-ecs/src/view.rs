@@ -304,6 +304,56 @@ impl<'w, 'q> ArchetypeView<'w, 'q> {
         }
     }
 
+    /// The `i`-th read column as raw bytes — `len * stride` of them, rows back
+    /// to back — where `i` indexes [`QueryAccess::reads`].
+    ///
+    /// The untyped sibling of [`read`](Self::read), for a caller holding a
+    /// [`ComponentInfo`](crate::registry::ComponentInfo) rather than a type: a
+    /// component id chosen at runtime has no `T` to name. Nothing new is
+    /// *reachable* through it — [`raw_reads`](Self::raw_reads) already hands the
+    /// same pointer, length and stride out — it is the safe way to spend them.
+    ///
+    /// # Panics
+    ///
+    /// If `i` is out of range.
+    #[must_use]
+    pub fn read_bytes(&self, i: usize) -> &'w [u8] {
+        let view = self.read[i];
+        if view.stride == 0 {
+            return &[]; // a zero-sized component has no bytes and no pointer
+        }
+        // SAFETY: as `read`, minus the type. Every `Component` is `Pod`, so a
+        // column holds no bit pattern a `&[u8]` could misread, and the stride
+        // check `read` needs has nothing to check here.
+        unsafe { core::slice::from_raw_parts(view.ptr, view.len * view.stride) }
+    }
+
+    /// The `i`-th write column as raw bytes, where `i` indexes
+    /// [`QueryAccess::writes`]. Taken **once**, exactly as
+    /// [`write`](Self::write) is and for the same reason.
+    ///
+    /// # Panics
+    ///
+    /// If `i` is out of range, or if this column was already taken.
+    pub fn write_bytes(&mut self, i: usize) -> &'w mut [u8] {
+        let view = self.write[i];
+        let bit = 1u64 << i;
+        assert_eq!(
+            self.taken & bit,
+            0,
+            "gg-ecs: write column {i} was already taken from this view; a second mutable borrow \
+             of one column would alias"
+        );
+        self.taken |= bit;
+        if view.stride == 0 {
+            return &mut [];
+        }
+        // SAFETY: as `write`, minus the type — and `Pod` is what makes the
+        // untyped form no weaker: every byte pattern a caller can write is a
+        // value the component could already have held.
+        unsafe { core::slice::from_raw_parts_mut(view.ptr, view.len * view.stride) }
+    }
+
     fn assert_shape<T: Component>(view: ColumnView, kind: &str) {
         assert_eq!(
             view.stride,
@@ -323,6 +373,13 @@ impl<'w, 'q> ArchetypeView<'w, 'q> {
 /// The whole function takes raw pointers out of a unique borrow and hands them
 /// to a lifetime-tagged view; disjointness is [`QueryAccess`]'s job, already
 /// done before this is called.
+///
+/// P1: the two `Vec`s below are a heap allocation per matching archetype per
+/// call, so every `each` over a live world allocates once a tick per archetype
+/// — measured at M13 by `gg-ui/tests/no_alloc_widgets.rs`, which had to bound
+/// what it asserts because of it. A query's term count is one to a handful, so
+/// the fix is inline storage with a cap and a loud refusal past it; it is not
+/// M13's to make, because it touches the ECS hot path and its own benches.
 pub(crate) fn build<'w, 'q>(
     archetype: &'w mut Archetype,
     access: &'q QueryAccess,

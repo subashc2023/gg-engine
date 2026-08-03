@@ -10,6 +10,7 @@ use crate::registry::{Registry, RegistryError};
 use crate::side_table::{SideTable, SideTableError, SideTables};
 use crate::view::{ArchetypeView, QueryAccess};
 
+pub mod save;
 pub mod snapshot;
 
 /// Which encoding a canonical walk uses. Both must agree; see

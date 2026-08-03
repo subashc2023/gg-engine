@@ -1,0 +1,37 @@
+# demo 08-save: a play session worth keeping (§6 M14). Game code, like demos 03
+# through 07 — a dylib the host loads, three engine dependencies and no fourth.
+#
+# What it is *for* is the file: an avatar walks a field of chests, opens them,
+# banks what it carries, and the world at the end of that is something a player
+# would be annoyed to lose. Everything M14 gates — cross-tier load, migration
+# across a schema change, play/stop equality — is about this world and not about
+# this code.
+
+[package]
+name = "demo-08-save"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "demo_08_save"
+path = "src/lib.rs"
+# cdylib is what the host loads; rlib is what the tests and `xtask` link. Both
+# from one build, so the artifact under test is the artifact that ships.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `gg_game!` exports `extern "C"` symbols with fixed names (§4.2.2), so two game
+# rlibs cannot be linked into one binary. Default-on; the tests need the table.
+default = ["game"]
+game = []
+
+[dependencies]
+bytemuck.workspace = true
+gg-ecs = { path = "../../crates/gg-ecs" }
+gg-math = { path = "../../crates/gg-math" }

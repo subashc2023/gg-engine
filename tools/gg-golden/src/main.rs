@@ -61,10 +61,10 @@ struct Scene {
     render: fn() -> Render,
 }
 
-/// The roster. Eleven scenes across five sources — four demos, the engine's own
-/// v1 pass list, and two replay-driven captures — each with its own policy,
-/// because "how strictly" is a property of what the frame contains and not of
-/// the harness (§4.10 per-test config).
+/// The roster. Thirteen scenes across six sources — four demos, the engine's own
+/// v1 pass list, two replay-driven captures, and the UI layer — each with its
+/// own policy, because "how strictly" is a property of what the frame contains
+/// and not of the harness (§4.10 per-test config).
 const SCENES: &[Scene] = &[
     Scene {
         name: "triangle",
@@ -252,6 +252,60 @@ const SCENES: &[Scene] = &[
             max_bias: 0.2,
         },
         render: render_atrium_noon,
+    },
+    Scene {
+        name: "ui-overlay",
+        // §6 M13's acceptance test as a picture: the real debug overlay, frozen.
+        // Flat fills over a translucent panel and a bitmap font under a nearest
+        // sampler — there is nothing in this frame a driver is entitled to round
+        // differently, so it is judged as strictly as the roster allows. What it
+        // catches is a clip that stopped cutting, a panel that stopped fitting
+        // its rows, and a histogram that stopped being normalized.
+        policy: Policy {
+            tolerance: 1,
+            max_diff_pixels: 16,
+            benign_delta: 2,
+            max_dssim: 0.02,
+            max_bias: 0.25,
+        },
+        render: render_ui_overlay,
+    },
+    Scene {
+        name: "editor",
+        // §6 M15's third exit row: the editor is a golden-image subject like any
+        // other scene. Flat fills and a nearest-sampled bitmap font at an exact
+        // ×2 fit, so nothing here is a driver's to round — judged as strictly as
+        // `ui-overlay` and catching the same class of thing one panel wider: a
+        // clip that stopped cutting, a row that stopped fitting, a selection
+        // highlight that stopped following the selection.
+        policy: Policy {
+            tolerance: 1,
+            max_diff_pixels: 16,
+            benign_delta: 2,
+            max_dssim: 0.02,
+            max_bias: 0.25,
+        },
+        render: render_editor,
+    },
+    Scene {
+        name: "ui-text",
+        // The text-heavy scene the M13 exit row names. Every glyph edge is
+        // eight-bit coverage the CPU produced, so unlike every other scene here
+        // the *rasterizer* is under test and not only the driver. It turns out
+        // to be portable — the Windows and Linux lavapipe references are byte
+        // for byte the same file — which is worth knowing precisely because
+        // nothing enforces it: zeno's outline rasterizer is ordinary `f32` work
+        // and sits nowhere near §1.4's membrane. Judged like the mesh scenes all
+        // the same: per-channel 3 forgives a rounded edge and still catches a
+        // wrong slot, a stale atlas, or an advance that drifted.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.25,
+        },
+        render: render_ui_text,
     },
 ];
 
@@ -942,6 +996,324 @@ fn render_boxes_from(view: gg_render::View) -> Render {
         graph: frame.dump,
     })
 }
+
+/// The UI scenes' extent. Small on purpose: what they gate is glyph coverage
+/// and clipped edges, and a larger frame is a larger reference carrying the
+/// same information (§3's image budget).
+const UI_EXTENT: (u32, u32) = (480, 270);
+/// Behind the UI, so a panel's alpha is visible as a blend rather than as a
+/// colour. Flat: these two scenes gate the layer, not the renderer.
+const UI_CLEAR: [f32; 4] = [0.10, 0.13, 0.17, 1.0];
+
+/// The editor's extent, and it is not [`UI_EXTENT`]: `gg_ecs::boundary::CANVAS`
+/// is 640×360 and the bitmap font is sampled nearest, so a non-integer fit turns
+/// every stem into porridge and the reference would gate the resampler instead
+/// of the panels. 1280×720 is exactly ×2.
+const EDITOR_EXTENT: (u32, u32) = (1280, 720);
+
+/// Render a UI-only frame: no world, one atlas, one draw.
+fn render_ui(atlas: &gg_render::ui::Coverage<'_>, vertices: &[gg_render::ui::UiVertex]) -> Render {
+    render_ui_at(UI_EXTENT, atlas, vertices)
+}
+
+/// As [`render_ui`], at an extent the caller chooses.
+fn render_ui_at(
+    extent: (u32, u32),
+    atlas: &gg_render::ui::Coverage<'_>,
+    vertices: &[gg_render::ui::UiVertex],
+) -> Render {
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    renderer.set_ui_atlas(atlas)?;
+    let frame = {
+        let _capture = gg_debug::capture::frame();
+        renderer.frame(
+            &gg_extract::Extracted::default(),
+            &gg_render::View::default(),
+            UI_CLEAR,
+            vertices,
+        )?
+    };
+    let report = renderer.shutdown();
+    anyhow::ensure!(
+        report.clean(),
+        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
+        report.validation_messages,
+        report.leaked_allocations.len(),
+        report.leaked_allocations,
+    );
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
+
+/// The editor, frozen mid-session (§6 M15's third exit row).
+///
+/// Not a lookalike panel authored here: this is `gg_editor::Editor` driven by
+/// `gg_editor::session`'s own aiming helpers over a world shaped like a demo's,
+/// so the reference moves when the editor does — the same argument
+/// [`render_ui_overlay`] makes, and the reason both are worth having.
+///
+/// The dock is switched to the **perf** tab on purpose. The cvars tab reads a
+/// process-global registry whose contents depend on which crates have
+/// registered by the time this scene runs, and a reference image whose value
+/// depends on scene *order* is a reference that fails for the wrong reason.
+fn render_editor() -> Render {
+    use gg_editor::session::{Act, aim, frames};
+    use gg_input::{ActionId, AxisId};
+
+    let mut world = gg_ecs::World::new();
+    world.register::<Spinner>()?;
+    world.register::<gg_ecs::boundary::Model>()?;
+    // Three archetypes, so the tree has variety and the mask column has
+    // something to say. Which one lands on which row is archetype order and
+    // therefore the ECS's business, not this scene's (`gg_editor::scan`).
+    for (spinners, models) in [(3u32, false), (24, true), (2, false)] {
+        for i in 0..spinners {
+            let entity = world.spawn();
+            world.insert(
+                entity,
+                Spinner {
+                    angle: f32::from(i as u16) * 0.25,
+                    rate: 0.125,
+                    ticks: u64::from(i) * 7,
+                    awake: u32::from(i % 3 != 0),
+                    _pad: 0,
+                },
+            )?;
+            if models {
+                world.insert(
+                    entity,
+                    gg_ecs::boundary::Model::at(
+                        "meshes/cube",
+                        gg_math::sim::DVec3::new(f64::from(i), 1.5, -4.0),
+                    ),
+                )?;
+            }
+        }
+    }
+
+    // Select an entity, pick a field lane, switch the dock, and leave the
+    // pointer hovering `+` — one frame that has every panel in a live state.
+    let acts = [
+        Act::To(aim::tree_row(1)),
+        Act::Settle(3),
+        Act::Click,
+        Act::To(aim::lane(1, 0)),
+        Act::Settle(3),
+        Act::Click,
+        Act::To(aim::tab(2)),
+        Act::Settle(3),
+        Act::Click,
+        Act::To(aim::plus()),
+        Act::Settle(4),
+    ];
+    let (click, x, y) = (ActionId::new(0), AxisId::new(0), AxisId::new(1));
+    let passes: Vec<gg_rhi::PassTiming> =
+        [("shadow", 0.884), ("forward-opaque", 2.113), ("ui", 0.058)]
+            .iter()
+            .enumerate()
+            .map(|(i, (name, gpu_ms))| gg_rhi::PassTiming {
+                name: (*name).to_owned(),
+                gpu_ms: *gpu_ms,
+                begin: i as i64,
+                end: i as i64 + 1,
+            })
+            .collect();
+
+    let mut editor = gg_editor::Editor::new(None);
+    for (tick, frame) in frames(&acts, click, x, y).iter().enumerate() {
+        editor.tick(
+            &mut world,
+            &gg_ui::router::Tick {
+                motion: (frame.axes[x.index()], frame.axes[y.index()]),
+                primary: frame.pressed(click),
+                advance_focus: false,
+            },
+            &gg_editor::Frame {
+                extent: EDITOR_EXTENT,
+                tick: 41_337 + tick as u64,
+                playing: false,
+                passes: &passes,
+                memory: gg_rhi::MemoryUse {
+                    buffers: 41,
+                    buffer_bytes: 88 << 20,
+                    images: 9,
+                    image_bytes: 132 << 20,
+                },
+                save_path: "target/editor/demo-05.ggsv",
+            },
+        );
+    }
+    render_ui_at(EDITOR_EXTENT, &gg_ui::atlas::fallback(), editor.vertices())
+}
+
+/// A component no engine crate declares, so the inspector has to reach it
+/// through the registry rather than through a type it was compiled against —
+/// which is the whole of what §6 M15's inspector row claims. One field per lane
+/// shape the value model knows: float, integer, and a boolean.
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, gg_ecs::Component)]
+#[component(id = "golden.spinner")]
+#[repr(C)]
+struct Spinner {
+    angle: f32,
+    rate: f32,
+    ticks: u64,
+    awake: u32,
+    _pad: u32,
+}
+
+/// The real debug overlay, frozen — §6 M13's acceptance test as a picture.
+///
+/// Not a lookalike panel authored here: this is `gg_debug::Overlay` fed fixed
+/// [`gg_debug::overlay::Stats`], so the reference moves when the overlay does
+/// (§4.10). A *fresh* overlay is what makes it deterministic — with no frame on
+/// record the timing rows format from a zeroed window rather than from a clock,
+/// which is the only thing in the panel that would otherwise be a wall time.
+fn render_ui_overlay() -> Render {
+    use gg_debug::overlay::{Overlay, Stats};
+    // The console's replies come out of the registry, so its knobs have to be
+    // in it. Once per process: the roster may render a scene more than once.
+    static REGISTERED: std::sync::Once = std::sync::Once::new();
+    REGISTERED.call_once(|| {
+        let _ = gg_debug::register();
+    });
+
+    let passes: Vec<gg_rhi::PassTiming> = [
+        ("depth-prepass", 0.211),
+        ("forward-opaque", 1.874),
+        ("post", 0.402),
+        ("ui", 0.061),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, (name, gpu_ms))| gg_rhi::PassTiming {
+        name: (*name).to_owned(),
+        gpu_ms: *gpu_ms,
+        begin: i as i64,
+        end: i as i64 + 1,
+    })
+    .collect();
+    // A distribution with a clear mode, so the chart is a shape and not a
+    // rectangle: a wrong normalization is visible rather than plausible.
+    let mut luminance = [0u32; gg_render::luminance::BINS];
+    for (i, bin) in luminance.iter_mut().enumerate() {
+        let from_mode = i as i32 - gg_render::luminance::BINS as i32 / 2;
+        *bin = (900 - from_mode * from_mode * 6).max(0) as u32;
+    }
+
+    let mut overlay = Overlay::default();
+    overlay.key(gg_input::Key::Backquote, true);
+    for c in "d.scale".chars() {
+        overlay.text(c);
+    }
+    overlay.key(gg_input::Key::Enter, true);
+    for c in "r.expo".chars() {
+        overlay.text(c);
+    }
+    let vertices = overlay.build(&Stats {
+        extent: UI_EXTENT,
+        tick: 214_748,
+        passes: &passes,
+        memory: gg_rhi::MemoryUse {
+            buffers: 37,
+            buffer_bytes: 92 << 20,
+            images: 12,
+            image_bytes: 148 << 20,
+        },
+        luminance: Some(&luminance),
+    });
+    render_ui(&gg_ui::atlas::fallback(), vertices)
+}
+
+/// The text-heavy scene §6 M13 asks for, on the vendored face: shaping,
+/// rasterization, packing and sampling, at four sizes in one draw.
+///
+/// The per-backend reference sets carry something here they carry nowhere else:
+/// outline rasterization is CPU float work, so this frame could differ between
+/// hosts with no driver involved. Measured, it does not — the two lavapipe sets
+/// are the same bytes on both operating systems — but that is an observation
+/// about `zeno`, not a guarantee anything in this repo makes.
+fn render_ui_text() -> Render {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .map(|root| root.join("tests/fonts/FiraMono-Regular.ttf"));
+    let path = path.ok_or_else(|| anyhow::anyhow!("tools/gg-golden is two below the root"))?;
+    let mut fonts = gg_ui::Fonts::default();
+    let face = fonts.load(std::fs::read(&path)?, 0)?;
+    let mut list = gg_ui::DrawList::default();
+
+    let panel = gg_ui::Rect::new(
+        8.0,
+        8.0,
+        UI_EXTENT.0 as f32 - 16.0,
+        UI_EXTENT.1 as f32 - 16.0,
+    );
+    list.rect(panel, 0xc00c_1016);
+    list.push_clip(panel);
+    let mut stack = gg_ui::Stack::vertical((panel.x + 10.0, panel.y + 8.0), 4.0);
+    for (text, px, color) in UI_TEXT {
+        let line = fonts.metrics(face, *px).line_height;
+        let cell = stack.push(fonts.layout(face, *px, text), line);
+        list.glyphs(cell.x, cell.y, fonts.glyphs(), *color);
+    }
+    // A paragraph at a size where a lost pixel of coverage is a lost stem.
+    let line = fonts.metrics(face, BODY_PX).line_height;
+    stack.push(0.0, line * 0.5);
+    for text in UI_BODY {
+        let cell = stack.push(fonts.layout(face, BODY_PX, text), line);
+        list.glyphs(cell.x, cell.y, fonts.glyphs(), 0xffb0_bcc8);
+    }
+
+    // The same face again through a clip that lands *inside* a glyph. A
+    // geometric clip moves the uvs with the cut (§4.9), so these rows end in a
+    // partial letter rather than a squeezed one — the failure a scissor cannot
+    // have, and one no other scene in the roster would show.
+    let cut = gg_ui::Rect::new(panel.x + 2.0, stack.content().bottom() + 8.0, 137.0, 44.0);
+    list.push_clip(cut);
+    let line = fonts.metrics(face, CUT_PX).line_height;
+    let mut cutter = gg_ui::Stack::vertical((cut.x + 8.0, cut.y + 3.0), 2.0);
+    for text in ["clipped mid-glyph", "and the uv with it"] {
+        let cell = cutter.push(fonts.layout(face, CUT_PX, text), line);
+        list.glyphs(cell.x, cell.y, fonts.glyphs(), 0xffff_c86e);
+    }
+    list.pop_clip();
+    // And the bitmap fallback beside it, out of the same atlas in the same draw
+    // — the claim §4.9 makes about one bitmap, standing next to its evidence.
+    let mut fallback = gg_ui::Stack::vertical((cut.right() + 14.0, cut.y + 4.0), 3.0);
+    for text in ["fallback 5x7, same atlas", "same draw, no second pass"] {
+        let cell = fallback.push(gg_ui::DrawList::width(text), 8.0);
+        list.text(cell.x, cell.y, text, 0xff8a_94a0);
+    }
+    list.pop_clip();
+
+    render_ui(&fonts.coverage(), list.vertices())
+}
+
+/// Heading rows: sizes that share no ppem, and characters chosen for what they
+/// stress — stems and counters at small sizes, the punctuation a hinted
+/// rasterizer rounds differently, and the pairs a shaper advances.
+const UI_TEXT: &[(&str, u16, u32)] = &[
+    ("gg-ui text", 30, 0xffff_ffff),
+    ("shaped by swash, packed by our own atlas,", 15, 0xffd8_e0e8),
+    ("sampled from one bitmap in one draw call.", 15, 0xffd8_e0e8),
+    ("0123456789 ,.;:!? ijlI1 WMmw ()[]{} /|\\", 12, 0xff7f_d0a0),
+];
+/// Body copy, at the size the overlay's successor would actually use. Enough of
+/// it that the packer has had to open more than one shelf by the time the frame
+/// is done, which is the state the atlas spends its life in.
+const UI_BODY: &[&str] = &[
+    "We own the draw batching, the glyph atlas, the",
+    "input routing, the layout and the styling. We",
+    "rent shaping and rasterization: bidi, ligatures,",
+    "hinting and fallback chains are not our fight.",
+];
+const BODY_PX: u16 = 11;
+/// The clipped rows' size, small enough that a lost pixel of coverage shows.
+const CUT_PX: u16 = 14;
 
 /// Render demo 01's scene — the same SPIR-V and push constants the demo draws
 /// with (§4.10: the golden guards the demo, not a lookalike).

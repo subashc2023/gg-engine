@@ -22,15 +22,15 @@ use std::path::Path;
 
 use gg_core::reload::rejuvenate::Rejuvenator;
 use gg_core::{GameLib, Stages};
-#[cfg(feature = "hot-reload")]
-use gg_ecs::ComponentOutcome;
-use gg_ecs::boundary::{Eye, Light, Model, Renderable, TickCtx, host_api};
-use gg_ecs::{Snapshot, World};
+use gg_ecs::boundary::{Eye, Light, Model, Renderable, TickCtx, Widget, host_api};
+use gg_ecs::{ComponentOutcome, Save, Snapshot, World};
 use gg_extract::Extracted;
 use gg_input::{ActionMap, Drive, Input, InputFrame, Recorder, Replay, ReplayMeta};
 use gg_platform::Window;
-use gg_render::{Renderer, View};
+use gg_render::{Renderer, View, ui::UiVertex};
 use gg_scene::Hierarchy;
+use gg_ui::boundary::binding;
+use gg_ui::router::{Binding, Tick as UiTick};
 use tracing::{error, info, warn};
 
 /// Background clear (linear values; the sRGB target encodes).
@@ -71,6 +71,29 @@ pub struct App {
     hierarchy: Hierarchy,
     extracted: Extracted,
     view: View,
+    /// The game's declared UI (§4.9). Driven on the *tick* and not the frame:
+    /// hit state lands in `Widget::state`, which the canonical hash covers, so
+    /// "a replayed click lands on the same widget" is §5.6c's existing gate
+    /// rather than a new kind of proof — and a headless run must therefore
+    /// route clicks exactly as a windowed one does.
+    ui: gg_ui::Ui,
+    /// Which verbs feed it, resolved against *this build's* verb list and
+    /// re-resolved at every swap for the reason [`bind`] gives. `None` is a
+    /// game that declared none: its UI draws and cannot be clicked.
+    ui_binding: Option<Binding>,
+    /// The frame's UI geometry, game first and instruments over the top. One
+    /// buffer because [`Renderer::frame`] takes one slice; cleared and refilled,
+    /// so it allocates once (§6 M13).
+    ui_geometry: Vec<UiVertex>,
+    /// The editor's play/stop, when `--play` asked for it (§6 M14). In every
+    /// tier for the reason `--save` is: the capture and the restore either side
+    /// of it are the shipping code path, and a play mode that existed only where
+    /// the instruments do would make dist the untested one (§1.10).
+    play: Option<PlayMode>,
+    /// The editor, when `--editor` asked for it (§6 M15). One field rather than
+    /// four: pause, single-step and the save target only exist because it does.
+    #[cfg(feature = "editor")]
+    editor: Option<Editing>,
     /// The window's GPU state, absent in a headless run — and that absence is
     /// the extract and render stages' off switch.
     gpu: Option<Renderer>,
@@ -123,20 +146,29 @@ impl App {
             None => Drive::Live(
                 args.record
                     .is_some()
-                    .then(|| Box::new(Recorder::new(meta(&lib, hz)))),
+                    .then(|| Box::new(Recorder::new(meta(&lib, args.editor, hz)))),
             ),
         };
         // Segment zero names the build that produced tick zero (§4.7).
         drive.open_segment(0, lib.code_hash());
-        let input = bind(&bindings, &drive, &lib)?;
+        // SAFETY: `lib` is verified and never unloaded.
+        let (verbs, extra) = unsafe { verbs_for(&lib, args.editor) };
+        let input = bind(&format!("{bindings}{extra}"), &drive, verbs)?;
+        let ui_binding = binding(&verbs);
         info!(
             path = %lib.path().display(),
             components = declared,
             systems = lib.systems().len,
             contexts = input.map().context_count(),
+            ui = ui_binding.is_some(),
             replaying = drive.ticks(),
             "game loaded"
         );
+        // Before the struct literal takes `lib`: the save target defaults to the
+        // dylib's own name, so a session with no `--save` still has somewhere
+        // for the button to write.
+        #[cfg(feature = "editor")]
+        let editing = args.editor.then(|| Editing::new(args, &lib));
         Ok(Self {
             world,
             lib,
@@ -154,6 +186,12 @@ impl App {
             hierarchy: Hierarchy::new(),
             extracted: Extracted::default(),
             view: View::default(),
+            ui: gg_ui::Ui::new()?,
+            ui_binding,
+            ui_geometry: Vec::new(),
+            play: args.play.as_deref().map(PlayMode::parse).transpose()?,
+            #[cfg(feature = "editor")]
+            editor: editing,
             gpu: None,
             pack: args.pack.clone(),
             #[cfg(feature = "debug-tools")]
@@ -188,9 +226,9 @@ impl App {
     pub fn attach(&mut self, window: &Window) -> anyhow::Result<()> {
         let mut renderer = Renderer::new(window, window.inner_size())?;
         // The renderer never learns what a glyph is; it takes coverage texels
-        // and a rectangle (§4.9).
-        #[cfg(feature = "overlay")]
-        renderer.set_ui_atlas(&gg_debug::atlas())?;
+        // and a rectangle (§4.9). Unconditional since M13: the game's own UI
+        // draws from this atlas in every tier, the overlay is a second caller.
+        renderer.set_ui_atlas(&gg_ui::atlas::fallback())?;
         if let Some(pack) = &self.pack {
             renderer.open_pack(pack)?;
         }
@@ -269,6 +307,52 @@ impl App {
         self.next_tick
     }
 
+    /// Load a save written by *any* build (§6 M14). Call before the loop starts,
+    /// for the same reason [`App::restore`] is: the world it installs is the one
+    /// tick zero of this run acts on.
+    ///
+    /// Unlike a handoff, this may cross a schema change and may not cross a
+    /// loss — `gg_ecs::world::save` holds that policy, and a refusal here is a
+    /// named component rather than a failed run.
+    pub fn load_save(&mut self, path: &Path) -> anyhow::Result<()> {
+        let save = Save::decode(&std::fs::read(path)?)?;
+        let report = self.world.load(&save)?;
+        self.next_tick = save.tick();
+        for (declared, outcome) in &report.components {
+            if !matches!(outcome, ComponentOutcome::Reused) {
+                info!(component = %declared, ?outcome, "migrated");
+            }
+        }
+        info!(
+            entities = report.entities,
+            tick = save.tick(),
+            provenance = format!("{:032x}", save.provenance()),
+            migrated = !report.is_clean(),
+            "save loaded"
+        );
+        Ok(())
+    }
+
+    /// Write the played world where `--save` said. After the loop, so what lands
+    /// is the session someone actually had.
+    ///
+    /// The provenance is the game dylib's content hash — the same number a
+    /// replay segment names (§4.7) — so a save and a recording of the run that
+    /// produced it agree about which build made them.
+    pub fn write_save(&self, path: &Path) -> anyhow::Result<()> {
+        let save = Save::new(self.world.snapshot(), self.next_tick, self.lib.code_hash());
+        let bytes = save.encode();
+        std::fs::write(path, &bytes)?;
+        info!(
+            path = %path.display(),
+            tick = save.tick(),
+            entities = save.snapshot().entity_count(),
+            bytes = bytes.len(),
+            "save written"
+        );
+        Ok(())
+    }
+
     /// The world staged for a successor, once the loop is over and the window is
     /// gone. `Some` means this process exists only to start the next one.
     pub fn handoff(&mut self) -> Option<gg_core::Handoff> {
@@ -278,6 +362,54 @@ impl App {
     /// The recording, once the loop is over.
     pub fn finish(self) -> Option<Box<Recorder>> {
         self.drive.recorder()
+    }
+
+    /// One editor tick, returning where a save was asked for (§6 M15).
+    ///
+    /// Split out of [`Stages::sim_tick`] because the borrows are: the panels
+    /// take the world mutably while the profiler view reads the renderer, and
+    /// `write_save` needs both released before it runs.
+    #[cfg(feature = "editor")]
+    fn editor_tick(
+        &mut self,
+        tick: u64,
+        ui: &UiTick,
+        extent: (u32, u32),
+    ) -> Option<std::path::PathBuf> {
+        let editing = self.editor.as_mut()?;
+        let path = editing.save.display().to_string();
+        let commands = editing.ui.tick(
+            &mut self.world,
+            ui,
+            &gg_editor::Frame {
+                extent,
+                tick,
+                playing: !editing.paused,
+                passes: self.gpu.as_ref().map_or(&[][..], Renderer::pass_timings),
+                memory: self.gpu.as_ref().map(Renderer::memory).unwrap_or_default(),
+                save_path: &path,
+            },
+        );
+        if let Some(playing) = commands.playing {
+            editing.paused = !playing;
+            info!(
+                tick,
+                playing,
+                entities = self.world.len(),
+                "editor: play state"
+            );
+        }
+        editing.step = commands.step;
+        commands.save.then(|| editing.save.clone())
+    }
+
+    /// Whether the editor is open, asked from a path that exists without it.
+    #[cfg(feature = "hot-reload")]
+    fn editing(&self) -> bool {
+        #[cfg(feature = "editor")]
+        return self.editor.is_some();
+        #[cfg(not(feature = "editor"))]
+        false
     }
 
     /// Adopt a rebuilt dylib: snapshot, register the new schemas into a *fresh*
@@ -308,8 +440,14 @@ impl App {
         // the id space, and a map bound against the old one would fire the wrong
         // verb (§4.7). Key state resets with it, which is why this is the one
         // reload effect a player can feel.
-        self.input =
-            bind(&self.bindings, &self.drive, &reloaded.lib).map_err(|e| reloaded.lib.refuse(e))?;
+        // SAFETY: `reloaded.lib` is verified and never unloaded.
+        let (verbs, extra) = unsafe { verbs_for(&reloaded.lib, self.editing()) };
+        self.input = bind(&format!("{}{extra}", self.bindings), &self.drive, verbs)
+            .map_err(|e| reloaded.lib.refuse(e))?;
+        // Same move, same reason: an edit that appends a verb moves the id
+        // space the UI's four names resolved to (§4.7). An edit that *deletes*
+        // one leaves the UI unclickable rather than clicking the wrong thing.
+        self.ui_binding = binding(&verbs);
         self.rejuvenate.retire(self.lib.bytes());
         self.lib = reloaded.lib;
         // The old segment closes and a new one opens at the first tick the new
@@ -341,20 +479,126 @@ impl App {
     }
 }
 
+/// The editor and the three shell states only it creates (§6 M15).
+///
+/// One struct rather than three fields, so the whole of what `--editor` costs
+/// the shell is `Option<Editing>` and the tier that lacks the crate lacks the
+/// concept — pause, single-step and a save *button* are meaningless without it.
+#[cfg(feature = "editor")]
+struct Editing {
+    ui: gg_editor::Editor,
+    /// The sim is not advancing. Starts **false**: an editor that opened paused
+    /// would show a world whose bootstrap system had never run.
+    paused: bool,
+    /// Advance one tick, then pause again. Consumed by [`Editing::advance`].
+    step: bool,
+    /// Where the save button writes — `--save` if given, so a gate can name it.
+    save: std::path::PathBuf,
+}
+
+#[cfg(feature = "editor")]
+impl Editing {
+    fn new(args: &crate::Args, lib: &GameLib) -> Editing {
+        let save = args.save.clone().unwrap_or_else(|| {
+            let stem = lib.path().file_stem().unwrap_or_default().to_string_lossy();
+            std::path::Path::new("target/editor").join(format!("{stem}.ggsv"))
+        });
+        Editing {
+            ui: gg_editor::Editor::new(args.pack.as_deref()),
+            paused: false,
+            step: false,
+            save,
+        }
+    }
+
+    /// Whether the sim advances this tick, spending a single step if one is due.
+    fn advance(&mut self) -> bool {
+        !self.paused || core::mem::take(&mut self.step)
+    }
+}
+
+/// The editor's play/stop on a script, so a tier can run it (§6 M14).
+///
+/// M15 drives these two edges from a button; a `<enter>:<stop>` spec drives them
+/// from a tick number, and both reach the same two calls. It reports rather than
+/// asserts: a gate that lived inside the program under test would be graded by
+/// the thing it grades, so the shell states what happened and `xtask` decides.
+struct PlayMode {
+    enter: u64,
+    stop: u64,
+    /// The captured world, kept *encoded*. Comparing bytes at stop then proves
+    /// the round trip and the equality at once — a `Snapshot` held by value
+    /// would prove neither, because nothing would have serialized it.
+    stash: Option<Vec<u8>>,
+}
+
+impl PlayMode {
+    fn parse(spec: &str) -> anyhow::Result<PlayMode> {
+        let (enter, stop) = spec.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("--play wants `<enter tick>:<stop tick>`, got `{spec}`")
+        })?;
+        let (enter, stop) = (enter.parse()?, stop.parse()?);
+        anyhow::ensure!(
+            enter < stop,
+            "--play {spec}: nothing happens between {enter} and {stop}"
+        );
+        Ok(PlayMode {
+            enter,
+            stop,
+            stash: None,
+        })
+    }
+
+    /// Called at the top of every tick, so the world compared at `stop` is the
+    /// world captured at `enter` — the same point in the frame, with nothing
+    /// half-advanced between the two readings.
+    fn edge(&mut self, tick: u64, world: &mut World) -> anyhow::Result<()> {
+        if tick == self.enter {
+            let stash = world.snapshot().encode();
+            info!(
+                tick,
+                entities = world.len(),
+                bytes = stash.len(),
+                "play mode entered"
+            );
+            self.stash = Some(stash);
+        } else if tick == self.stop
+            && let Some(stash) = self.stash.take()
+        {
+            // Read before the restore as well as after. `identical` over a
+            // session that changed nothing is a gate that cannot fail, so the
+            // *other* half of the claim is reported beside it and the caller
+            // requires both.
+            let changed = world.snapshot().encode() != stash;
+            world.restore(&Snapshot::decode(&stash)?)?;
+            let identical = world.snapshot().encode() == stash;
+            info!(
+                tick,
+                entities = world.len(),
+                changed,
+                identical,
+                "play mode stopped"
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Register the host's own §4.5 protocol types, then everything the dylib
 /// declares. Returns the dylib's count.
 ///
-/// The order *is* the check. The host reads these four through typed queries at
-/// extract, so putting its compiled-in schemas in first is what gives
-/// `World::adopt`'s comparison something to disagree with — into a fresh world
-/// every declaration would take the insert branch, and a dylib that laid one out
-/// differently would be accepted and then panic mid-extract, outside every shim
-/// (§4.2.2).
+/// The order *is* the check. The host reads these five through typed queries at
+/// extract and at the UI tick, so putting its compiled-in schemas in first is
+/// what gives `World::adopt`'s comparison something to disagree with — into a
+/// fresh world every declaration would take the insert branch, and a dylib that
+/// laid one out differently would be accepted and then panic mid-extract,
+/// outside every shim (§4.2.2).
 fn adopt(world: &mut World, lib: &GameLib) -> anyhow::Result<usize> {
     world.register::<Renderable>()?;
     world.register::<Eye>()?;
     world.register::<Model>()?;
     world.register::<Light>()?;
+    world.register::<Widget>()?;
     // SAFETY: `lib` is verified — `GameLib::load` returned it — and is never
     // unloaded, which is what makes its descriptors `&'static`.
     let declared = unsafe { world.adopt(lib.components()) }?;
@@ -379,11 +623,33 @@ unsafe fn verbs_of(lib: &GameLib) -> gg_ecs::boundary::Verbs {
     unsafe { gg_ecs::boundary::read_verbs(lib.verbs()) }
 }
 
+/// This build's verbs as the shell actually binds them, and the bindings text
+/// for whatever had to be appended (§4.7, §6 M15).
+///
+/// Without the editor this is the dylib's own lists and an empty string, which
+/// is why every caller goes through it rather than through [`verbs_of`]: the
+/// three places that need verbs — the map, the replay header, and the UI
+/// binding — must agree, and one of them disagreeing would route a replayed
+/// click to a different verb.
+///
+/// # Safety
+///
+/// As [`verbs_of`].
+unsafe fn verbs_for(lib: &GameLib, _editor: bool) -> (gg_ecs::boundary::Verbs, String) {
+    // SAFETY: forwarded to the caller.
+    let verbs = unsafe { verbs_of(lib) };
+    #[cfg(feature = "editor")]
+    if _editor {
+        return gg_editor::host::open(&verbs);
+    }
+    (verbs, String::new())
+}
+
 /// The replay header this build would record (§4.7): the reproduction
 /// environment, and the verb lists whose *order* is the id space it writes.
-fn meta(lib: &GameLib, hz: u32) -> ReplayMeta {
+fn meta(lib: &GameLib, editor: bool, hz: u32) -> ReplayMeta {
     // SAFETY: `lib` is verified and never unloaded.
-    let verbs = unsafe { verbs_of(lib) };
+    let (verbs, _) = unsafe { verbs_for(lib, editor) };
     let contract = gg_math::DETERMINISM_CONTRACT;
     ReplayMeta::new(
         contract,
@@ -401,9 +667,7 @@ fn meta(lib: &GameLib, hz: u32) -> ReplayMeta {
 /// A replay is checked here too, and again at every swap: an edit that appends
 /// or reorders a verb moves the id space the file was recorded against, and
 /// carrying on would replay the wrong verbs rather than fail (§4.7).
-fn bind(bindings: &str, drive: &Drive, lib: &GameLib) -> anyhow::Result<Input> {
-    // SAFETY: `lib` is verified and never unloaded.
-    let verbs = unsafe { verbs_of(lib) };
+fn bind(bindings: &str, drive: &Drive, verbs: gg_ecs::boundary::Verbs) -> anyhow::Result<Input> {
     if let Some(replay) = drive.replay() {
         replay.check_verbs(verbs.actions, verbs.axes)?;
     }
@@ -462,6 +726,12 @@ impl Stages for App {
         #[cfg(all(feature = "fp-assert", debug_assertions))]
         gg_math::fpenv::assert_fp_env();
         self.next_tick = tick + 1;
+        // Before the halt check: play mode is the *editor's* clock, not the
+        // sim's, and stopping a session that a panicking system halted is
+        // exactly when someone wants their world back.
+        if let Some(play) = &mut self.play {
+            play.edge(tick, &mut self.world)?;
+        }
         if self.halted {
             return Ok(());
         }
@@ -470,6 +740,17 @@ impl Stages for App {
         // frame that owes three of them must not report the same edge to all
         // three. Platform events accumulate in `self.input` as they arrive.
         let input = self.drive.frame(&mut self.input, tick);
+        // The editor and the game share one physical mouse (§6 M15). While the
+        // pointer is over a panel the game gets a dead frame, or a click on
+        // `pause` would also fire whatever the game bound to that button — and
+        // the reading is the *previous* tick's pointer, which is the same frame
+        // of lag every hit test already has. Recorded before this, never after:
+        // what a replay holds is what the operator did, not what the game saw.
+        #[cfg(feature = "editor")]
+        let input = match self.editor.as_ref().is_some_and(|e| e.ui.over_panels()) {
+            true => InputFrame::default(),
+            false => input,
+        };
         let ctx = TickCtx {
             tick,
             tick_hz: self.hz,
@@ -478,8 +759,17 @@ impl Stages for App {
             previous: self.previous,
         };
         self.previous = input;
+        // Pause is the editor's, and it stops exactly the sim: the tick still
+        // happens, input is still recorded, and the panels still route clicks —
+        // which is what makes a paused editor usable at all.
+        #[cfg(feature = "editor")]
+        let running = self.editor.as_mut().is_none_or(Editing::advance);
+        #[cfg(not(feature = "editor"))]
+        let running = true;
         // SAFETY: `self.lib` is verified and loaded, and `ctx` outlives the call.
-        if let Err(panicked) = unsafe { self.world.run_systems(self.lib.systems(), &ctx) } {
+        if running
+            && let Err(panicked) = unsafe { self.world.run_systems(self.lib.systems(), &ctx) }
+        {
             // Halt, do not exit: the sim stops cleanly, the process survives,
             // and a fixed reload resumes it (§4.2.2).
             error!(
@@ -494,11 +784,39 @@ impl Stages for App {
         // hashed state, so the three-way gate covers the compose and not merely
         // the locals feeding it. A refused hierarchy halts like a panicking
         // system — same reason, and a reload is what clears it.
-        if !self.halted
+        if running
+            && !self.halted
             && let Err(refused) = self.hierarchy.propagate(&mut self.world)
         {
             error!(error = %refused, tick, "hierarchy refused — sim halted until the next reload");
             self.halted = true;
+        }
+        // The UI tick (§4.9). *Before* the hash and after the systems that
+        // declared it, so a click lands in `Widget::state` inside the tick that
+        // took it and the game reads it on the next one. A halt stops it with
+        // everything else — the early return above is the sim's clock, and a UI
+        // that kept ticking would route clicks against a world nothing is
+        // advancing.
+        //
+        // The extent moves the picture and never the hit test: the pointer is
+        // integrated in canvas units precisely so a headless tick and a 4K one
+        // resolve the same widget (`gg_ui::boundary`'s docs), which is what
+        // lets the determinism gate cover clicks at all.
+        let ui_tick = self
+            .ui_binding
+            .map(|binding| UiTick::from_input(&self.input, &binding))
+            .unwrap_or_default();
+        let extent = self
+            .gpu
+            .as_ref()
+            .map_or(gg_ecs::boundary::CANVAS, Renderer::extent);
+        self.ui.frame(&mut self.world, &ui_tick, extent);
+        // The editor tick (§6 M15), after the game's UI and before the hash for
+        // the same reason: an inspector edit is ordinary world state and belongs
+        // in the tick that took the click.
+        #[cfg(feature = "editor")]
+        if let Some(path) = self.editor_tick(tick, &ui_tick, extent) {
+            self.write_save(&path)?;
         }
         // §1.13 hazard 6's per-tick call site. The canonical hash absorbs raw
         // bits and NaN payloads differ by architecture, so a NaN in hashed state
@@ -558,24 +876,36 @@ impl Stages for App {
         let Some(renderer) = &mut self.gpu else {
             return Ok(());
         };
+        // Game UI first, instruments over the top — the overlay is a lab
+        // instrument and must never be the thing a click lands under. Copied
+        // into one buffer because the renderer takes one slice; cleared and
+        // refilled, so this allocates once and then never (§6 M13).
+        self.ui_geometry.clear();
+        self.ui_geometry.extend_from_slice(self.ui.vertices());
+        // Over the game and under the instruments: the editor is what the
+        // operator clicks, the overlay is a readout and must never be the thing
+        // a click lands beneath.
+        #[cfg(feature = "editor")]
+        if let Some(editing) = &self.editor {
+            self.ui_geometry.extend_from_slice(editing.ui.vertices());
+        }
         // The overlay reads the readings the frame already took rather than
         // asking the device again, so its rows and Tracy's zones cannot
         // disagree about one frame (§4.8).
         #[cfg(feature = "overlay")]
-        let ui = self.overlay.build(&gg_debug::overlay::Stats {
-            extent: renderer.extent(),
-            tick: self.next_tick,
-            passes: renderer.pass_timings(),
-            memory: renderer.memory(),
-            luminance: renderer.luminance(),
-        });
-        #[cfg(not(feature = "overlay"))]
-        let ui = &[];
+        self.ui_geometry
+            .extend_from_slice(self.overlay.build(&gg_debug::overlay::Stats {
+                extent: renderer.extent(),
+                tick: self.next_tick,
+                passes: renderer.pass_timings(),
+                memory: renderer.memory(),
+                luminance: renderer.luminance(),
+            }));
         // Dropped at the end of this method, which is before the device is and
         // after the only submit — what RenderDoc records is exactly one frame.
         #[cfg(feature = "debug-tools")]
         let _capture = gg_debug::capture::frame();
-        renderer.frame(&self.extracted, &self.view, CLEAR, ui)?;
+        renderer.frame(&self.extracted, &self.view, CLEAR, &self.ui_geometry)?;
         // A frame or two behind, which is what not stalling costs; a zone is
         // placed by its GPU timestamps, not by when it was sent (§4.8).
         #[cfg(feature = "debug-tools")]

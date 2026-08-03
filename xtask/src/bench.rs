@@ -39,6 +39,14 @@ const MICROS: &[(&str, &str, &str)] = &[
     ("gg-ecs", "query", "ecs"),
     ("gg-extract", "extract", "extract"),
     ("gg-assets", "load", "assets"),
+    // §6 M13's "no frame-time regression": the overlay's row shape against the
+    // one it replaced, both timed in the same run.
+    ("gg-debug", "overlay", "overlay"),
+    // §6 M14's last exit row, and the one micro whose assertion is an absolute
+    // budget rather than a ratio: ten thousand entities save and load inside one
+    // frame. A frame is three orders of magnitude above timer noise, which is
+    // what makes the exception safe.
+    ("demo-05-many", "save", "save"),
 ];
 
 fn smoke() -> anyhow::Result<()> {

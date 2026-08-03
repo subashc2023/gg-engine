@@ -52,3 +52,10 @@ gg-input = { path = "../../crates/gg-input" }
 # claim — which is the point: RenderDoc's own hotkey needs a Present, and
 # nothing here presents.
 gg-debug = { path = "../../crates/gg-debug" }
+# The UI layer (§4.9) for the two scenes that gate it. Winit-free by its own
+# dependency list — it sits below `gg-platform` for exactly that reason — so it
+# reaches this binary without touching gate 7's linkage claim.
+gg-ui = { path = "../../crates/gg-ui" }
+# The `editor` scene renders the real editor rather than a lookalike, so a panel
+# that moves moves the reference (§4.10, §6 M15).
+gg-editor = { path = "../../crates/gg-editor" }

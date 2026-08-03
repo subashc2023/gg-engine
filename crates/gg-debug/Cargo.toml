@@ -26,6 +26,10 @@ gg-core = { path = "../gg-core" }
 # this crate reads the types, and whether they carry readings is the shell's
 # choice of tier.
 gg-rhi = { path = "../gg-rhi", default-features = false }
+# The draw layer and the input router (§4.9) — this crate's `draw` module until
+# M13 moved it to the crate it was always the kernel of. The overlay is now a
+# `gg-ui` client like any other, which is the acceptance test §4.8 named.
+gg-ui = { path = "../gg-ui" }
 # The UI pass and its vertex format (§4.9). The arrow §4.8 predicted: "the
 # overlay simultaneously needed the renderer" is why the CVar registry is
 # `gg-core`'s and not this crate's.
@@ -52,6 +56,12 @@ gg-rhi = { path = "../gg-rhi", features = ["gpu-timings"] }
 # The overlay's pixel test renders through the same offscreen entry point the
 # golden harness uses, so what it proves is the pass the screen runs (§1.5).
 gg-extract = { path = "../gg-extract" }
+
+[[bench]]
+name = "overlay"
+# No framework, for `gg-ecs`'s reason: the number asserted is a ratio between
+# two shapes timed in the same run, which needs no harness (§4.11).
+harness = false
 
 [features]
 default = []

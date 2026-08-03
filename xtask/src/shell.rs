@@ -188,7 +188,159 @@ pub fn bless(commit: &str) -> anyhow::Result<()> {
         replay.ticks(),
         replay.change_count()
     );
+    let mut ui = ui_replay();
+    ui.set_engine_commit(commit);
+    std::fs::write(ui_path(), ui.encode())?;
+    println!(
+        "xtask replay: blessed {UI_CURATED} ({} ticks, {} change records) at {commit}",
+        ui.ticks(),
+        ui.change_count()
+    );
+    let mut save = save_replay();
+    save.set_engine_commit(commit);
+    std::fs::write(save_replay_path(), save.encode())?;
+    println!(
+        "xtask replay: blessed {SAVE_CURATED} ({} ticks, {} change records) at {commit}",
+        save.ticks(),
+        save.change_count()
+    );
+    let mut editor = editor_replay()?;
+    editor.set_engine_commit(commit);
+    std::fs::write(editor_replay_path(), editor.encode())?;
+    println!(
+        "xtask replay: blessed {EDITOR_CURATED} ({} ticks, {} change records) at {commit}",
+        editor.ticks(),
+        editor.change_count()
+    );
     Ok(())
+}
+
+/// Demo 07's name in `tests/replays/`, and its verbs in declared order (§4.7).
+/// `gg_ui::boundary::binding` finds the four by *name* in the loaded dylib's
+/// list; this order is what the recorded frames index.
+pub const UI_CURATED: &str = "demo07-ui";
+const UI_ACTIONS: &[&str] = &["ui_click", "ui_focus"];
+const UI_AXES: &[&str] = &["ui_x", "ui_y"];
+
+/// The scripted UI session as a replay file.
+///
+/// The frames are `demo_07_ui::session()`'s — authored in the demo so this file
+/// and the demo's own in-process test are the same script, and so moving a
+/// button in `LAYOUT` moves the click rather than silently missing it.
+pub fn ui_replay() -> Replay {
+    let mut meta = ReplayMeta::new(
+        gg_math::DETERMINISM_CONTRACT,
+        "curated",
+        gg_core::DEFAULT_TICK_HZ,
+        UI_ACTIONS,
+        UI_AXES,
+    );
+    meta.engine_commit = "generated".to_owned();
+    let mut recorder = Recorder::new(meta);
+    for (tick, frame) in demo_07_ui::session().into_iter().enumerate() {
+        recorder.record(tick as u64, frame);
+    }
+    recorder.finish()
+}
+
+pub fn ui_path() -> PathBuf {
+    workspace_root()
+        .join("tests/replays")
+        .join(format!("{UI_CURATED}.ggrp"))
+}
+
+/// Demo 08's name in `tests/replays/`, and its verbs in declared order (§4.7).
+pub const SAVE_CURATED: &str = "demo08-save";
+const SAVE_ACTIONS: &[&str] = &["bank"];
+const SAVE_AXES: &[&str] = &["move_x", "move_z"];
+
+/// The scripted walk as a replay file — `demo_08_save::session()`'s frames, so
+/// this file and the demo's own tests are the same script and moving a chest
+/// moves the walk.
+pub fn save_replay() -> Replay {
+    let mut meta = ReplayMeta::new(
+        gg_math::DETERMINISM_CONTRACT,
+        "curated",
+        gg_core::DEFAULT_TICK_HZ,
+        SAVE_ACTIONS,
+        SAVE_AXES,
+    );
+    meta.engine_commit = "generated".to_owned();
+    let mut recorder = Recorder::new(meta);
+    for (tick, frame) in demo_08_save::session().into_iter().enumerate() {
+        recorder.record(tick as u64, frame);
+    }
+    recorder.finish()
+}
+
+/// The editor session's name in `tests/replays/`, and the *game's* verbs — demo
+/// 05's own, which the editor appends to rather than replaces (§6 M15).
+///
+/// Written out rather than read off the dylib because a replay is authored
+/// offline. A drift is not silent: the shell checks a replay's verb lists
+/// against the loaded build at load and refuses a mismatch by name (§4.7), so
+/// renaming one of demo 05's verbs fails this gate rather than replaying the
+/// wrong ones.
+pub const EDITOR_CURATED: &str = "demo05-editor";
+const EDITOR_ACTIONS: &[&str] = &["freeze"];
+const EDITOR_AXES: &[&str] = &["move_right", "move_up", "move_forward", "aim_x", "aim_y"];
+
+/// The verbs a shell binds with the editor open over demo 05, through the
+/// host's own append rule rather than a copy of it: a change to which verbs the
+/// editor adds moves this file with it.
+fn editor_verbs() -> gg_ecs::boundary::Verbs {
+    let (verbs, _) = gg_editor::host::open(&gg_ecs::boundary::Verbs {
+        actions: EDITOR_ACTIONS,
+        axes: EDITOR_AXES,
+    });
+    verbs
+}
+
+/// The scripted editor session as a replay.
+///
+/// The frames are `gg_editor::session`'s — authored beside the panels they
+/// click, so a panel that moves moves the script rather than missing it (§6
+/// M15) — and the ids come out of the augmented verb list, because `ui_click`
+/// is action 1 over demo 05 and action 0 over a game that declared it first.
+pub fn editor_replay() -> anyhow::Result<Replay> {
+    let verbs = editor_verbs();
+    let find = |names: &[&str], want: &str| {
+        names
+            .iter()
+            .position(|n| *n == want)
+            .ok_or_else(|| anyhow::anyhow!("the editor did not append `{want}`"))
+    };
+    let frames = gg_editor::session::frames(
+        &gg_editor::session::script(),
+        gg_input::ActionId::new(find(verbs.actions, "ui_click")?),
+        gg_input::AxisId::new(find(verbs.axes, "ui_x")?),
+        gg_input::AxisId::new(find(verbs.axes, "ui_y")?),
+    );
+    let mut meta = ReplayMeta::new(
+        gg_math::DETERMINISM_CONTRACT,
+        "curated",
+        gg_core::DEFAULT_TICK_HZ,
+        verbs.actions,
+        verbs.axes,
+    );
+    meta.engine_commit = "generated".to_owned();
+    let mut recorder = Recorder::new(meta);
+    for (tick, frame) in frames.into_iter().enumerate() {
+        recorder.record(tick as u64, frame);
+    }
+    Ok(recorder.finish())
+}
+
+pub fn editor_replay_path() -> PathBuf {
+    workspace_root()
+        .join("tests/replays")
+        .join(format!("{EDITOR_CURATED}.ggrp"))
+}
+
+pub fn save_replay_path() -> PathBuf {
+    workspace_root()
+        .join("tests/replays")
+        .join(format!("{SAVE_CURATED}.ggrp"))
 }
 
 /// Read it back and say what it claims — the check half.
@@ -217,14 +369,14 @@ fn exe(dir: &str, name: &str) -> PathBuf {
         })
 }
 
-fn dylib(dir: &str) -> PathBuf {
+fn dylib(dir: &str, stem: &str) -> PathBuf {
     workspace_root()
         .join("target")
         .join(dir)
         .join(if cfg!(windows) {
-            "demo_03_reload.dll"
+            format!("{stem}.dll")
         } else {
-            "libdemo_03_reload.so"
+            format!("lib{stem}.so")
         })
 }
 
@@ -236,6 +388,11 @@ fn dylib(dir: &str) -> PathBuf {
 /// second would overwrite the first, and a gate that silently compared a tier
 /// against itself would be green for the wrong reason.
 fn stage(tier: &Tier) -> anyhow::Result<(PathBuf, PathBuf)> {
+    stage_game(tier, "demo-03-reload", "demo_03_reload")
+}
+
+/// [`stage`], over some other game crate.
+fn stage_game(tier: &Tier, package: &str, stem: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
     exec(
         cargo().args([
             "build",
@@ -250,16 +407,16 @@ fn stage(tier: &Tier) -> anyhow::Result<(PathBuf, PathBuf)> {
         &format!("build gg-runtime [{}]", tier.name),
     )?;
     exec(
-        cargo().args(["build", "-p", "demo-03-reload", "--profile", tier.profile]),
-        &format!("build demo 03 [{} profile]", tier.profile),
+        cargo().args(["build", "-p", package, "--profile", tier.profile]),
+        &format!("build {package} [{} profile]", tier.profile),
     )?;
 
     let dir = workspace_root().join("target/tiers").join(tier.name);
     std::fs::create_dir_all(&dir)?;
     let host = dir.join(exe(tier.out, "gg-runtime").file_name().unwrap_or_default());
-    let game = dir.join(dylib(tier.out).file_name().unwrap_or_default());
+    let game = dir.join(dylib(tier.out, stem).file_name().unwrap_or_default());
     std::fs::copy(exe(tier.out, "gg-runtime"), &host)?;
-    std::fs::copy(dylib(tier.out), &game)?;
+    std::fs::copy(dylib(tier.out, stem), &game)?;
     Ok((host, game))
 }
 
@@ -480,6 +637,15 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     }
     if only("--latency") {
         latency()?;
+    }
+    if only("--ui") {
+        ui()?;
+    }
+    if only("--save") {
+        save()?;
+    }
+    if only("--editor") {
+        editor()?;
     }
     println!("xtask reload: green");
     Ok(())
@@ -1007,6 +1173,501 @@ pub fn cross_tier() -> anyhow::Result<()> {
         first.len()
     );
     Ok(())
+}
+
+/// §6 M13's end-to-end criterion: **a replayed click lands on the same widget
+/// every run**, proven through the shell rather than in a unit test.
+///
+/// The demo's own `tests/game.rs` drives `gg_ui::Ui` over a world in one
+/// process and covers the window-size half. What only this can cover is the
+/// wiring: the four verb names resolving out of a *loaded dylib*, the shell
+/// running the UI on the tick, and `Widget::state` reaching the canonical hash.
+/// So the gate has two halves and both are load-bearing —
+///
+/// - **the clicks landed**: the session's log lines appear, in order. A pointer
+///   that hit a neighbouring button writes different lines, and a UI that never
+///   routed at all writes none.
+/// - **and they landed identically under three codegens**: dev, instrumented
+///   and dist-verify agree tick for tick, which is §5.6c's machinery applied to
+///   a stream whose hash is *made of* hit state.
+fn ui() -> anyhow::Result<()> {
+    let replay = ui_path();
+    anyhow::ensure!(
+        replay.is_file(),
+        "no UI stream at {} — `cargo xtask replay --bless` authors it",
+        replay.display()
+    );
+    let replay = replay.display().to_string();
+
+    let mut runs: Vec<(&str, Vec<(u64, String)>)> = Vec::new();
+    for tier in HASHED_TIERS {
+        let (host, game) = stage_game(tier, "demo-07-ui", "demo_07_ui")?;
+        let log = play(&host, &game, &["--replay", &replay], true)?;
+        // The shell found the verbs at all. Without this a game that declared
+        // none would route nothing, the world would still hash consistently,
+        // and three tiers would agree about a UI nobody touched.
+        anyhow::ensure!(
+            log.contains("ui=true"),
+            "the shell did not bind demo 07's UI verbs [{}]:\n{log}",
+            tier.name
+        );
+        let mut at = 0;
+        for line in log.lines() {
+            if at < demo_07_ui::SESSION_LOG.len() && line.contains(demo_07_ui::SESSION_LOG[at]) {
+                at += 1;
+            }
+        }
+        anyhow::ensure!(
+            at == demo_07_ui::SESSION_LOG.len(),
+            "[{}] the replayed session reached {at} of {} settings changes — expected {:?} in \
+             order; a click that landed on a different widget is what this looks like:\n{log}",
+            tier.name,
+            demo_07_ui::SESSION_LOG.len(),
+            demo_07_ui::SESSION_LOG,
+        );
+        runs.push((tier.name, sequence(&log)?));
+    }
+
+    for pair in runs.windows(2) {
+        if let Some(found) = divergence(&pair[0], &pair[1]) {
+            anyhow::bail!("§6 M13: {found}");
+        }
+    }
+    println!(
+        "xtask reload: demo 07's replayed session landed the same {} clicks under dev, \
+         instrumented and dist-verify, tick for tick over {} ticks (§6 M13)",
+        demo_07_ui::SESSION_LOG.len(),
+        runs[0].1.len(),
+    );
+    Ok(())
+}
+
+/// The tier `HASHED_TIERS` cannot contain and this gate cannot do without: the
+/// shipping one. It computes no canonical hash, so it is compared by the file it
+/// writes instead — which is a *stricter* equality than the hash, and the only
+/// one available in the configuration that ships.
+const DIST_TIER: Tier = Tier {
+    name: "dist",
+    features: "tier-dist",
+    profile: "dist",
+    out: "dist",
+};
+
+/// Where the gate's files land. Under `target/`, because a save is build output.
+fn save_dir() -> anyhow::Result<PathBuf> {
+    let dir = workspace_root().join("target/save");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// §6 M14's cross-tier criterion: **a save written under dev loads under dist
+/// and dist-verify and hashes identically in all three**.
+///
+/// Demo 08's own tests take a save mid-walk and resume it in one process, which
+/// covers the format. What only this can cover is the tier axis — that fat LTO,
+/// one codegen unit and a stripped binary read a file dev wrote, migrate nothing
+/// they should not, and continue the same session. Three claims, and each fails
+/// differently:
+///
+/// - **dev writes a real session**: the walk's log lines appear, in order. A
+///   save of a world where nothing happened would pass everything below.
+/// - **every tier resumes it identically**: the remaining ticks of the replay
+///   run on top of the loaded world and the *world image* inside the re-saved
+///   file is byte-identical across all four tiers. Bytes rather than a hash on
+///   purpose: dist computes no hash, and an image comparison covers the entity
+///   allocator and archetype order that the canonical hash deliberately
+///   abstracts over. The *files* differ and must — the container names the
+///   dylib that wrote it, and four tiers are four dylibs.
+/// - **and the hashed tiers agree tick for tick**: §5.6c's machinery over a
+///   stream that started from a file rather than from tick zero.
+fn save() -> anyhow::Result<()> {
+    let replay = save_replay_path();
+    anyhow::ensure!(
+        replay.is_file(),
+        "no save stream at {} — `cargo xtask replay --bless` authors it",
+        replay.display()
+    );
+    // Every tick count comes off the *file*, never off `session()`. A gate that
+    // re-derived its budget from the demo's own constants would follow an edit
+    // that moved the chests and stay green over a walk that now misses them —
+    // the frozen stream is the whole reason this is a gate (§5.6).
+    let total = Replay::decode(&std::fs::read(&replay)?)?.ticks();
+    let replay = replay.display().to_string();
+    // Stopped mid-walk, so the file holds a session in progress rather than a
+    // finished one: chests already open, an avatar somewhere between two.
+    let written = (total / 2).to_string();
+    let dir = save_dir()?;
+    let file = dir.join("demo08.ggsv");
+    let path = file.display().to_string();
+
+    let (host, game) = stage_game(&HASHED_TIERS[0], "demo-08-save", "demo_08_save")?;
+    let prefix = play(
+        &host,
+        &game,
+        &["--replay", &replay, "--frames", &written, "--save", &path],
+        false,
+    )?;
+    anyhow::ensure!(
+        prefix.contains("save written"),
+        "dev wrote no save:\n{prefix}"
+    );
+    anyhow::ensure!(file.is_file(), "the shell said it wrote {path} and did not");
+
+    let remaining = (total - total / 2).to_string();
+    let mut runs: Vec<(&str, Vec<(u64, String)>)> = Vec::new();
+    let mut files: Vec<(&str, u64, Vec<u8>)> = Vec::new();
+    for tier in HASHED_TIERS.iter().chain(std::iter::once(&DIST_TIER)) {
+        let hashed = tier.name != DIST_TIER.name;
+        let (host, game) = stage_game(tier, "demo-08-save", "demo_08_save")?;
+        let out = dir.join(format!("resumed-{}.ggsv", tier.name));
+        let log = play(
+            &host,
+            &game,
+            &[
+                "--load",
+                &path,
+                "--replay",
+                &replay,
+                "--frames",
+                &remaining,
+                "--save",
+                &out.display().to_string(),
+            ],
+            hashed,
+        )?;
+        anyhow::ensure!(
+            log.contains("save loaded"),
+            "[{}] the shell did not load {path}:\n{log}",
+            tier.name
+        );
+        // A migration here is a bug in the gate, not a feature of it: the same
+        // build wrote and read this file, so every component must be `Reused`.
+        anyhow::ensure!(
+            log.contains("migrated=false"),
+            "[{}] one build wrote this save and another read it — the tier legs are not \
+             building the same demo:\n{log}",
+            tier.name
+        );
+        // The whole walk, across the two runs: the chests dev opened before the
+        // save, then the ones this tier opened after loading it. In order, and
+        // all of them — a run that resumed a *world* but not the *session*
+        // reaches the split and stops.
+        let mut at = 0;
+        for line in prefix.lines().chain(log.lines()) {
+            if at < demo_08_save::SESSION_LOG.len() && line.contains(demo_08_save::SESSION_LOG[at])
+            {
+                at += 1;
+            }
+        }
+        anyhow::ensure!(
+            at == demo_08_save::SESSION_LOG.len(),
+            "[{}] the replayed walk reached {at} of {} logged events — expected {:?} in order, \
+             across the run that saved and the run that loaded:\n{log}",
+            tier.name,
+            demo_08_save::SESSION_LOG.len(),
+            demo_08_save::SESSION_LOG,
+        );
+        let resaved = gg_ecs::Save::decode(&std::fs::read(&out)?)?;
+        files.push((tier.name, resaved.tick(), resaved.snapshot().encode()));
+        if hashed {
+            runs.push((tier.name, sequence(&log)?));
+        }
+    }
+
+    for pair in files.windows(2) {
+        anyhow::ensure!(
+            (pair[0].1, &pair[0].2) == (pair[1].1, &pair[1].2),
+            "§6 M14: the world {} resumed to is not the world {} resumed to — tick {} / {} bytes \
+             against tick {} / {} bytes. One file, four codegens, one world was the claim",
+            pair[0].0,
+            pair[1].0,
+            pair[0].1,
+            pair[0].2.len(),
+            pair[1].1,
+            pair[1].2.len()
+        );
+    }
+    for pair in runs.windows(2) {
+        if let Some(found) = divergence(&pair[0], &pair[1]) {
+            anyhow::bail!("§6 M14: {found}");
+        }
+    }
+    println!(
+        "xtask reload: demo 08's save crossed dev → dev, instrumented, dist-verify and dist — \
+         one {}-byte world at tick {}, and the three hashed tiers agreed tick for tick over {} \
+         resumed ticks (§6 M14)",
+        files[0].2.len(),
+        files[0].1,
+        runs[0].1.len(),
+    );
+    play_mode()
+}
+
+/// §6 M14's other equality: **play → mutate → stop restores a bit-identical
+/// world**, through the shell, in every tier that ships one.
+///
+/// The demo's own test proves it over a world in one process. What this adds is
+/// the configuration: dist's codegen taking the snapshot, and the answer coming
+/// back out of a binary with no hash to check itself with.
+fn play_mode() -> anyhow::Result<()> {
+    let total = Replay::decode(&std::fs::read(save_replay_path())?)?.ticks();
+    let replay = save_replay_path().display().to_string();
+    // Enter early enough that the walk is still opening chests afterwards —
+    // stopping a session in which nothing happened would prove nothing.
+    let script = format!("{}:{total}", total / 4);
+    for tier in HASHED_TIERS.iter().chain(std::iter::once(&DIST_TIER)) {
+        let (host, game) = stage_game(tier, "demo-08-save", "demo_08_save")?;
+        let log = play(
+            &host,
+            &game,
+            &[
+                "--replay",
+                &replay,
+                "--frames",
+                &(total + 1).to_string(),
+                "--play",
+                &script,
+            ],
+            false,
+        )?;
+        anyhow::ensure!(
+            log.contains("play mode entered"),
+            "[{}] play mode never started:\n{log}",
+            tier.name
+        );
+        // Both halves, or the gate passes on a session in which nothing
+        // happened: `changed` is what makes `identical` an achievement.
+        anyhow::ensure!(
+            log.contains("changed=true"),
+            "[{}] the world at the stop tick is the world that entered play — there was nothing \
+             to undo, so this run proves nothing:\n{log}",
+            tier.name
+        );
+        anyhow::ensure!(
+            log.contains("identical=true"),
+            "[{}] stopping play did not give back the world that entered it:\n{log}",
+            tier.name
+        );
+    }
+    println!(
+        "xtask reload: demo 08 entered play at tick {}, played to {total}, and stopped back onto \
+         the same bytes under dev, instrumented, dist-verify and dist (§6 M14)",
+        total / 4
+    );
+    Ok(())
+}
+
+/// The log lines §6 M15's session must produce, in order. Each names a distinct
+/// claim, and a click that landed on a neighbouring button writes a different
+/// set — which is what makes this the half of the gate a hash comparison cannot
+/// be: two runs that both clicked on nothing agree perfectly.
+const EDITOR_LOG: &[&str] = &[
+    "editor: play state",       // the toolbar paused a running game
+    "component=\"demo05.hub\"", // the inspector reached a *game's* own component
+    "field=\"angle\"",          // by name, out of a schema this host never compiled
+    "editor: play state",       // and played it again
+    "editor: play state",       // and stopped it again
+    "save written",             // the save button, not the shell's exit path
+];
+
+/// Nudges the script performs. Pinned, because "at least one edit" would pass
+/// over a session whose step button had stopped working.
+const EDITOR_NUDGES: usize = 6;
+
+/// §6 M15's fourth exit row: **an editor session is recordable and replayable to
+/// the same final state hash** — and, on the way, the first and the fifth.
+///
+/// The session is `gg_editor::session`'s, frozen into `tests/replays/` and
+/// replayed through the real shell over demo 05. Four claims, each failing
+/// differently:
+///
+/// - **the editor's input is in the recorded stream and nowhere else.** The
+///   file's verb list is demo 05's *plus* the four `gg-ui` names the host
+///   appended, so the same file is **refused** by a shell without `--editor` —
+///   asserted below, because it is the whole argument that there is no second
+///   input path (§4.7, §4.9).
+/// - **the clicks landed on the panels they aimed at**: [`EDITOR_LOG`] in order,
+///   and exactly [`EDITOR_NUDGES`] field edits naming a component demo 05
+///   declared. An inspector that could only reach the host's own protocol types
+///   would name one of those instead.
+/// - **an inspector edit is hashed state**: while the sim is paused nothing else
+///   in demo 05 moves, so every canonical-hash change inside the paused window
+///   is an editor edit — and there must be at least as many as there were
+///   nudges. That is §6 M15's "edits go through `World` like every other write",
+///   and it is checkable only because pause exists.
+/// - **and it replays**: two codegens and a repeat of the first agree tick for
+///   tick, and the world each one saved is byte-identical.
+fn editor() -> anyhow::Result<()> {
+    let path = editor_replay_path();
+    anyhow::ensure!(
+        path.is_file(),
+        "no editor stream at {} — `cargo xtask replay --bless` authors it",
+        path.display()
+    );
+    // Off the file, never off `script()`: a gate that re-derived its length from
+    // the editor's own constants would follow a panel that moved and stay green
+    // over a session that now clicks the chrome (§6 M14 learned this the hard
+    // way).
+    let total = Replay::decode(&std::fs::read(&path)?)?.ticks();
+    let replay = path.display().to_string();
+
+    let mut runs: Vec<(&str, Vec<(u64, String)>)> = Vec::new();
+    let mut worlds: Vec<(&str, u64, Vec<u8>)> = Vec::new();
+    // dev, instrumented, then dev again: a session that is a function of its
+    // input stream has to reproduce against itself as well as across a codegen.
+    for (label, tier) in [
+        ("dev", &HASHED_TIERS[0]),
+        ("instrumented", &HASHED_TIERS[1]),
+        ("dev-again", &HASHED_TIERS[0]),
+    ] {
+        let (host, game) = stage_game(tier, "demo-05-many", "demo_05_many")?;
+        let out = save_dir()?.join(format!("editor-{label}.ggsv"));
+        let _ = std::fs::remove_file(&out);
+        let log = play(
+            &host,
+            &game,
+            &[
+                "--replay",
+                &replay,
+                "--editor",
+                "--save",
+                &out.display().to_string(),
+            ],
+            true,
+        )?;
+        anyhow::ensure!(
+            log.contains("ui=true"),
+            "[{label}] the shell bound no UI verbs — the editor has no pointer, so every click \
+             below landed on nothing:\n{log}"
+        );
+
+        let mut at = 0;
+        for line in log.lines() {
+            if at < EDITOR_LOG.len() && line.contains(EDITOR_LOG[at]) {
+                at += 1;
+            }
+        }
+        anyhow::ensure!(
+            at == EDITOR_LOG.len(),
+            "[{label}] the replayed editor session reached {at} of {} logged events — expected \
+             {EDITOR_LOG:?} in order; a click that landed on a different panel is what this \
+             looks like:\n{log}",
+            EDITOR_LOG.len()
+        );
+        let nudges = log
+            .lines()
+            .filter(|l| l.contains("editor: field nudged"))
+            .count();
+        anyhow::ensure!(
+            nudges == EDITOR_NUDGES,
+            "[{label}] the inspector applied {nudges} edits, not {EDITOR_NUDGES}:\n{log}"
+        );
+
+        let seq = sequence(&log)?;
+        let moved = hash_changes_while_paused(&log, &seq)?;
+        anyhow::ensure!(
+            moved >= EDITOR_NUDGES,
+            "[{label}] the canonical hash moved {moved} times while the sim was paused and the \
+             inspector claims {EDITOR_NUDGES} edits — an edit that did not reach the hash is an \
+             edit outside the state this engine is built on (§6 M15):\n{log}"
+        );
+
+        let bytes = std::fs::read(&out).map_err(|e| {
+            anyhow::anyhow!(
+                "[{label}] the save button wrote nothing to {}: {e}",
+                out.display()
+            )
+        })?;
+        let save = gg_ecs::Save::decode(&bytes)?;
+        worlds.push((label, save.tick(), save.snapshot().encode()));
+        runs.push((label, seq));
+    }
+
+    // The negative, and it is the load-bearing one: without `--editor` the same
+    // file names verbs the build does not declare, so the shell refuses it at
+    // load. An editor whose clicks arrived by a side channel would replay here
+    // happily and nothing above would notice.
+    let (host, game) = stage_game(&HASHED_TIERS[0], "demo-05-many", "demo_05_many")?;
+    let refused = Command::new(&host)
+        .arg("--game")
+        .arg(&game)
+        .args(["--replay", &replay])
+        .env("GG_HEADLESS", "1")
+        .output()?;
+    anyhow::ensure!(
+        !refused.status.success(),
+        "§6 M15: a shell with no editor replayed the editor's own session — its clicks are then \
+         not in the recorded verb space, which is the whole claim that there is no second input \
+         path (§4.7)"
+    );
+
+    for pair in worlds.windows(2) {
+        anyhow::ensure!(
+            (pair[0].1, &pair[0].2) == (pair[1].1, &pair[1].2),
+            "§6 M15: the world {} saved is not the world {} saved — tick {} / {} bytes against \
+             tick {} / {} bytes",
+            pair[0].0,
+            pair[1].0,
+            pair[0].1,
+            pair[0].2.len(),
+            pair[1].1,
+            pair[1].2.len()
+        );
+    }
+    for pair in runs.windows(2) {
+        if let Some(found) = divergence(&pair[0], &pair[1]) {
+            anyhow::bail!("§6 M15: {found}");
+        }
+    }
+    println!(
+        "xtask reload: the recorded editor session replayed over demo 05 under dev and \
+         instrumented and again under dev — {EDITOR_NUDGES} inspector edits inside the paused \
+         window, identical hashes over {} of {total} ticks, and one {}-byte world out of the \
+         save button (§6 M15)",
+        runs[0].1.len(),
+        worlds[0].2.len(),
+    );
+    Ok(())
+}
+
+/// How many ticks the canonical hash moved on while the editor had the sim
+/// paused.
+///
+/// The window is read out of the shell's own `editor: play state` lines, so this
+/// counts what the *session* did rather than what the script meant to do.
+/// Nothing in demo 05 advances while paused — no systems, no hierarchy, no
+/// widgets — so every change inside the window is an inspector write.
+fn hash_changes_while_paused(log: &str, seq: &[(u64, String)]) -> anyhow::Result<usize> {
+    let mut windows: Vec<(u64, u64)> = Vec::new();
+    let mut paused_at: Option<u64> = None;
+    for line in log.lines().filter(|l| l.contains("editor: play state")) {
+        let tick = crate::util::field_u64(line, "tick")?;
+        match crate::util::field(line, "playing")? {
+            "false" => paused_at = Some(tick),
+            _ => {
+                if let Some(from) = paused_at.take() {
+                    windows.push((from, tick));
+                }
+            }
+        }
+    }
+    // A window still open at the end runs to the last tick recorded.
+    if let (Some(from), Some(last)) = (paused_at, seq.last()) {
+        windows.push((from, last.0));
+    }
+    anyhow::ensure!(
+        !windows.is_empty(),
+        "the session never paused, so nothing here proves an edit reached the hash:\n{log}"
+    );
+    Ok(seq
+        .windows(2)
+        .filter(|pair| {
+            pair[0].1 != pair[1].1
+                && windows
+                    .iter()
+                    .any(|(from, to)| pair[1].0 > *from && pair[1].0 <= *to)
+        })
+        .count())
 }
 
 /// The other half of §5.6c's "recorded under dist", and §5.8's recorder-presence

@@ -507,6 +507,15 @@ fn demo_runs() -> anyhow::Result<()> {
 /// process inherits this pipe, which is what makes "did it come back" observable
 /// at all: `wait_with_output` returns only once the *last* process in the chain
 /// has closed it.
+///
+/// P1: this is the one flaky gate in the push tier, observed on the WSL lane at
+/// M14 — the child ran its 300k frames in 1.55 s, the rewrite landed at 400 ms,
+/// and no reload fired; the identical rerun passed at tick 88218. The frame
+/// count is a *proxy* for "long enough", which is the bug: the trigger should be
+/// the shell reporting it is running and the bound should be wall time, not a
+/// number of frames whose duration nobody controls. Left as it is because the
+/// fix belongs with whoever next touches the watcher's debounce, and a rerun is
+/// currently cheaper than a wrong redesign.
 fn rejuvenation() -> anyhow::Result<()> {
     use std::process::Stdio;
 
@@ -632,7 +641,40 @@ fn shell_run() -> anyhow::Result<()> {
         .arg(root.join("demos/03-reload/input.toml"))
         .args(["--frames", "100"]);
     lavapipe_env(&mut cmd)?;
-    exec(&mut cmd, "demo 03 under the shell, 100 windowed frames")
+    exec(&mut cmd, "demo 03 under the shell, 100 windowed frames")?;
+    ui_shell_run()
+}
+
+/// The UI's WSI leg (§6 M13): demo 07 replaying its own session into a real
+/// swapchain.
+///
+/// `xtask reload --ui` proves the clicks land, but it runs headless — where the
+/// shell builds no geometry at all. Nothing automated can watch a menu reach a
+/// window, so this is where it happens, and it is the run to watch by eye when
+/// the UI changes.
+fn ui_shell_run() -> anyhow::Result<()> {
+    let root = crate::util::workspace_root();
+    exec(
+        cargo().args(["build", "-p", "demo-07-ui", "-p", "gg-runtime"]),
+        "build demo 07 + the shell",
+    )?;
+    let mut cmd = std::process::Command::new(root.join("target/debug").join(if cfg!(windows) {
+        "gg-runtime.exe"
+    } else {
+        "gg-runtime"
+    }));
+    cmd.arg("--game")
+        .arg(root.join("target/debug").join(if cfg!(windows) {
+            "demo_07_ui.dll"
+        } else {
+            "libdemo_07_ui.so"
+        }))
+        .arg("--input")
+        .arg(root.join("demos/07-ui/input.toml"))
+        .arg("--replay")
+        .arg(crate::shell::ui_path());
+    lavapipe_env(&mut cmd)?;
+    exec(&mut cmd, "demo 07's UI session, windowed, from the replay")
 }
 
 /// The third architecture of the §5 matrix (§6 M0B): gg-math — the FP baseline

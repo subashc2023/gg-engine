@@ -50,4 +50,15 @@ deny = [
     # via determinism-allowlist.toml; this wrappers list must mirror that file
     # plus the render/tools crates rayon is chartered for — xtask ci cross-checks.
     { crate = "rayon", wrappers = ["gg-extract"] },
+    # UI containment (§4.9, §6 M13's exit row, §6 M15's second): `egui` is
+    # permitted in tools and in no engine crate — it draws outside our
+    # render graph and therefore outside `gg-golden`, which is a permanent hole
+    # in the best quality gate we have, in the subsystem where regressions are
+    # subtlest. The wrappers list is **empty and armed**: nothing depends on it
+    # today, so the first crate that does gets a review rather than a green run
+    # (the validation-suppressions rule, applied to a dependency). M15 built the
+    # editor and the list is still empty, which is what "every panel is `gg-ui`"
+    # means as a machine: the dogfooding is not a policy, it is that there is no
+    # other option in the tree.
+    { crate = "egui", wrappers = [] },
 ]

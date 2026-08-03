@@ -14,11 +14,11 @@
 // unwrap is permitted in tests (§2, Error handling row).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use gg_debug::draw::{DrawList, Rect};
-use gg_debug::{Overlay, atlas, overlay};
+use gg_debug::{Overlay, overlay};
 use gg_extract::Extracted;
 use gg_render::{OffscreenRenderer, View};
 use gg_rhi::MemoryUse;
+use gg_ui::{DrawList, Rect, atlas::fallback};
 
 const EXTENT: (u32, u32) = (256, 128);
 /// The clear the scene lands on, in the sRGB bytes it reads back as.
@@ -45,7 +45,7 @@ impl Target {
 /// Render a UI layer over an empty scene and read the target back.
 fn render(vertices: &[gg_render::ui::UiVertex]) -> Target {
     let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
-    renderer.set_ui_atlas(&atlas()).unwrap();
+    renderer.set_ui_atlas(&fallback()).unwrap();
     let frame = renderer
         .frame(
             &Extracted::default(),
@@ -68,7 +68,7 @@ fn render(vertices: &[gg_render::ui::UiVertex]) -> Target {
 #[test]
 fn an_empty_layer_declares_no_pass_and_a_full_one_does() {
     let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
-    renderer.set_ui_atlas(&atlas()).unwrap();
+    renderer.set_ui_atlas(&fallback()).unwrap();
     let empty = renderer
         .frame(&Extracted::default(), &View::default(), [0.0; 4], &[])
         .unwrap();

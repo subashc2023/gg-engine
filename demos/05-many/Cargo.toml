@@ -44,3 +44,10 @@ gg-math = { path = "../../crates/gg-math" }
 # dev-dependency is not in it — the shipped dylib links the pinned four.
 [dev-dependencies]
 gg-scene = { path = "../../crates/gg-scene" }
+
+[[bench]]
+name = "save"
+# No framework, and the number is an absolute budget rather than a ratio: §6
+# M14 asks whether ten thousand entities save and load inside one frame, which
+# is a question about this world and not about two implementations of it.
+harness = false

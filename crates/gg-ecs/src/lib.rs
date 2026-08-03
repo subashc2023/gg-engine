@@ -94,6 +94,7 @@ pub use registry::{ComponentInfo, Registry, RegistryError};
 pub use side_table::{SideTable, SideTableError};
 pub use state_hash::StateHash;
 pub use view::{AliasError, ArchetypeView, ColumnView, QueryAccess};
+pub use world::save::{Save, SaveError};
 pub use world::snapshot::{ComponentOutcome, MigrationReport, Snapshot, SnapshotError};
 pub use world::{World, WorldError};
 

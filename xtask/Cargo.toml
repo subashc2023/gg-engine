@@ -32,10 +32,28 @@ demo-02-mesh = { path = "../demos/02-mesh", default-features = false, features =
     "gate",
 ] }
 gg-input = { path = "../crates/gg-input" }
+# M14 (§6): `xtask reload --save` compares the *world* four tiers resumed to,
+# which means opening their save files rather than diffing bytes — the container
+# carries the writing dylib's content hash, so four tiers legitimately produce
+# four different files holding one identical world.
+gg-ecs = { path = "../crates/gg-ecs" }
+# M13 (§6): demo 07's scripted UI session — the pointer path, the clicks and the
+# settings changes they should produce — lives in the demo so the checked-in
+# replay and the demo's own in-process test cannot drift. `default-features =
+# false` drops the `game` feature: `gg_game!` exports fixed `extern "C"` names
+# and this binary already links demo 02's.
+demo-07-ui = { path = "../demos/07-ui", default-features = false }
+# M14 (§6), same arrangement and the same reason: demo 08's scripted walk is the
+# source of both the checked-in replay and the demo's own tests.
+demo-08-save = { path = "../demos/08-save", default-features = false }
 # M5 (§5.6c): the curated demo-03 stream is authored here and driven through the
 # real shell, so xtask needs the two constants the shell's replay header is
 # built from — the tick rate and the Determinism Contract version. Nothing else
 # from either crate is used; a mismatch would otherwise be a header nobody could
 # check.
+# The editor's own session script and its verb-append rule (§6 M15). The gate
+# authors demo 05's editor replay by *calling* both rather than restating them,
+# so a panel that moved or a verb that changed moves the file with it.
+gg-editor = { path = "../crates/gg-editor" }
 gg-core = { path = "../crates/gg-core" }
 gg-math = { path = "../crates/gg-math" }

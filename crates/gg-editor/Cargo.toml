@@ -1,0 +1,65 @@
+# gg-editor (§3, §6 M15) — the v1 artifact, and lab equipment like every other
+# instrument: `deny.toml` bans it from the dist graph and §5.8 proves the
+# absence, because §7's "shipping the lab" covers an editor first of all.
+#
+# Complexity budget (§3): <= 10 dependencies. The composition is the argument —
+# it consumes engine crates and adds nothing of its own. `gg-ui` because §6 M15
+# says every panel is one; `gg-ecs` because the entity tree and the inspector
+# read the registry and write the world; `gg-core` for the CVar registry the
+# panel edits; `gg-assets` to list the M9 pack; `gg-rhi` for the two reading
+# types the profiler view formats; `gg-input` for the frames a recorded session
+# is made of. No `egui`, ever — that is the whole point of the milestone (§4.9,
+# §7).
+
+[package]
+name = "gg-editor"
+version = "0.1.0"
+description = "The editor: gg-ui panels over the host the demos run on (PLAN.md §6 M15)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gg_editor"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Every panel. The editor declares widgets against `Router` and `DrawList`
+# directly rather than through `gg_ecs::boundary::Widget` — a game declares its
+# UI as components because it may not link this crate (§3's deny pin); the
+# editor is host code and has no such wall to talk through. The consequence
+# worth stating: the editor's panels are *not* in the world and therefore not in
+# the state hash, while every edit it makes is.
+gg-ui = { path = "../gg-ui" }
+# The world it edits, and the registry it reads to know what a component is.
+gg-ecs = { path = "../gg-ecs" }
+# The CVar registry (§4.8). The panel is a second face on `gg_debug`'s console,
+# over the same global registry, so the two cannot disagree about a value.
+gg-core = { path = "../gg-core" }
+# The pack the asset browser lists (§4.6). Opened read-only and directly rather
+# than through the renderer's copy: the browser wants the directory, not the
+# residency, and a headless run has no renderer at all.
+gg-assets = { path = "../gg-assets" }
+# The UI pass's vertex format, which is what `DrawList` produces and the shell
+# submits. Same arrow `gg-ui` draws: the pass is a renderer's, what fills it is
+# ours (§4.9).
+gg-render = { path = "../gg-render" }
+# `PassTiming` and `MemoryUse`, the two readings the profiler view formats.
+# Taken as the renderer's own types for `gg-debug`'s reason: a shell-side
+# conversion would be a second place for one frame's numbers to drift.
+gg-rhi = { path = "../gg-rhi", default-features = false }
+# The recorded session (§4.7) — `InputFrame` is what a scripted editor run is
+# made of, and it is authored here because the clicks are against *this*
+# crate's layout constants.
+gg-input = { path = "../gg-input" }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# The scan and value tests declare their own components, which needs the derive
+# path's two companions. Dev-only, and therefore outside the §3 budget above,
+# which counts what ships.
+gg-math = { path = "../gg-math" }
+bytemuck = { workspace = true }

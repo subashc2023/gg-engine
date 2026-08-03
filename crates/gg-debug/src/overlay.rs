@@ -1,24 +1,31 @@
 //! The debug overlay (§4.8): frame stats, per-pass GPU milliseconds, memory,
-//! and the CVar console — immediate mode, on our own renderer, over the draw
-//! layer in [`crate::draw`].
+//! and the CVar console — immediate mode, on `gg-ui`.
+//!
+//! §6 M13's acceptance test. M8 built this on the draw layer alone and hand-rolled
+//! everything above it: rows were a `Vec<(String, u32)>` of `format!`ed lines and
+//! a fold to find the widest, positions were `PAD * 2.0 + i as f32 * line`. Both
+//! are now [`Scratch`] and [`Stack`], which is the criterion in its concrete form
+//! — the layer either does this cheaply or it is overbuilt — and costs the
+//! overlay ten heap allocations a frame less than it used to (`tests/no_alloc`).
 //!
 //! It reads what the frame already measured rather than measuring again: the
 //! pass rows are the same [`PassTiming`]s Tracy's GPU zones are fed, so the two
 //! views of one frame cannot disagree.
 //!
 //! The console line takes keys directly, and consuming a *press* is the whole
-//! of its input handling — hit-testing, focus and capture are M13's (§4.8).
-//! Releases are never consumed, so a key held when the console opened still
-//! reaches the action map and cannot latch.
+//! of its input handling. Releases are never consumed, so a key held when the
+//! console opened still reaches the action map and cannot latch. It stays
+//! keyboard-only deliberately: `gg_ui::Router` exists now, but the overlay has
+//! nothing to hit-test, and routing a panel with no clickable widget in it
+//! would be the speculative build §4.9 keeps out.
 
 use crate::capture;
 use crate::console;
-use crate::draw::{DrawList, Rect};
-use crate::font;
 use gg_core::{CVar, CVarError, cvar};
 use gg_input::Key;
-use gg_render::ui::{Coverage, UiVertex};
+use gg_render::ui::UiVertex;
 use gg_rhi::{MemoryUse, PassTiming};
+use gg_ui::{DrawList, Rect, Scratch, Span, Stack, font};
 
 /// Whether the overlay draws at all.
 pub static SHOW: CVar = CVar::new_bool("d.overlay", true, "draw the debug overlay");
@@ -33,18 +40,6 @@ pub static SCALE: CVar = CVar::new_int("d.scale", 2, "debug overlay pixel scale"
 /// A name already taken.
 pub fn register() -> Result<(), CVarError> {
     cvar::register_all(&[&SHOW, &SCALE])
-}
-
-/// The coverage atlas the UI pass cuts the overlay's glyphs from — hand it to
-/// `Renderer::set_ui_atlas` once. Expanded on first call and kept, because the
-/// renderer may be rebuilt (a device loss, a second window) and re-expanding
-/// 4.5 KiB per bring-up is not worth a second copy of the bytes.
-pub fn atlas() -> Coverage<'static> {
-    static TEXELS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    Coverage {
-        extent: font::EXTENT,
-        texels: TEXELS.get_or_init(font::atlas),
-    }
 }
 
 /// What one frame has to say for itself.
@@ -77,14 +72,27 @@ const ACCENT: u32 = 0xff7f_d0a0;
 const PAD: f32 = 4.0;
 /// The histogram's plot area, in unscaled cells. One cell per bucket, so the
 /// width is the bucket count and a bar is exactly one column — no resampling
-/// between the data and the picture.
+/// between the data and the picture. The *cell* the chart occupies is this or
+/// its label, whichever is wider; the bars stay one column each either way.
 const CHART_WIDTH: f32 = gg_render::luminance::BINS as f32;
 const CHART_HEIGHT: f32 = 20.0;
+/// The chart's axis, such as it is. A const because the panel is measured
+/// against it — a label wider than the bars it names would otherwise be the one
+/// thing in the panel the clip cuts.
+const LUMA_LABEL: &str = "luma  dark ....... 0EV ... bright";
+/// Bytes to mebibytes, the unit every GPU tool reports in.
+const MIB: f64 = 1024.0 * 1024.0;
 
-/// The overlay's own state across frames: the frame-time window it averages
-/// and the console's line and scrollback. Everything else is rebuilt per frame.
+/// The overlay's own state across frames: the frame-time window it averages,
+/// the console's line and scrollback, and the two buffers this frame's rows are
+/// rebuilt into. Everything else is rebuilt per frame.
 pub struct Overlay {
     list: DrawList,
+    scratch: Scratch,
+    /// This frame's rows: where the text landed in `scratch`, and its colour.
+    /// Cleared and refilled, never reallocated — the `Vec<String>` it replaces
+    /// was the overlay's whole allocation budget.
+    rows: Vec<(Span, u32)>,
     frame_ms: [f32; HISTORY],
     at: usize,
     seen: usize,
@@ -96,6 +104,8 @@ impl Default for Overlay {
     fn default() -> Self {
         Overlay {
             list: DrawList::default(),
+            scratch: Scratch::default(),
+            rows: Vec::new(),
             frame_ms: [0.0; HISTORY],
             at: 0,
             seen: 0,
@@ -188,113 +198,114 @@ impl Overlay {
     }
 
     fn stats_panel(&mut self, stats: &Stats<'_>) {
-        let line = DrawList::line_height();
-        let mut rows: Vec<(String, u32)> = Vec::with_capacity(stats.passes.len() + 4);
         let (average, worst) = self.frame_window();
+        let Overlay {
+            list,
+            scratch,
+            rows,
+            ..
+        } = self;
+        let line = DrawList::line_height();
+        scratch.clear();
+        rows.clear();
         rows.push((
-            format!("{:>6.2} ms  {:>3.0} fps", average, 1e3 / average.max(1e-3)),
+            scratch.line(format_args!(
+                "{average:>6.2} ms  {:>3.0} fps",
+                1e3 / average.max(1e-3)
+            )),
             ACCENT,
         ));
-        rows.push((format!("worst   {worst:>6.2} ms"), DIM));
-        rows.push((format!("tick    {:>8}", stats.tick), TEXT));
+        rows.push((scratch.line(format_args!("worst   {worst:>6.2} ms")), DIM));
+        rows.push((
+            scratch.line(format_args!("tick    {:>8}", stats.tick)),
+            TEXT,
+        ));
         match stats.passes.is_empty() {
             // Not "0.000": a build without the query pool measured nothing, and
             // a zero would read as a pass that cost nothing (§4.8).
-            true => rows.push(("gpu     (no timestamps)".to_owned(), DIM)),
+            true => rows.push((scratch.line(format_args!("gpu     (no timestamps)")), DIM)),
             false => {
                 let total: f32 = stats.passes.iter().map(|p| p.gpu_ms).sum();
-                rows.push((format!("gpu     {total:>6.3} ms"), TEXT));
+                rows.push((scratch.line(format_args!("gpu     {total:>6.3} ms")), TEXT));
                 for pass in stats.passes {
-                    rows.push((format!(" {:<14}{:>6.3}", pass.name, pass.gpu_ms), DIM));
+                    let row = scratch.line(format_args!(" {:<14}{:>6.3}", pass.name, pass.gpu_ms));
+                    rows.push((row, DIM));
                 }
             }
         }
         rows.push((
-            format!(
-                "mem  {:>7} {} buf {} img",
-                mib(stats.memory.total_bytes()),
+            scratch.line(format_args!(
+                "mem  {:>6.1}M {} buf {} img",
+                stats.memory.total_bytes() as f64 / MIB,
                 stats.memory.buffers,
                 stats.memory.images
-            ),
+            )),
             TEXT,
         ));
         // Only under RenderDoc: a row that always read "unavailable" would be a
         // row about the tool rather than about the frame.
         if capture::available() {
-            rows.push((format!("rdoc  {:>7}  F11", capture::count()), DIM));
+            let row = scratch.line(format_args!("rdoc  {:>7}  F11", capture::count()));
+            rows.push((row, DIM));
         }
 
-        let chart = stats.luminance.map_or(0.0, |_| CHART_HEIGHT + line);
-        let width = rows
-            .iter()
-            .map(|(text, _)| DrawList::width(text))
-            .fold(CHART_WIDTH, f32::max);
-        let panel = Rect::new(
-            PAD,
-            PAD,
-            width + PAD * 2.0,
-            rows.len() as f32 * line + chart + PAD * 2.0,
-        );
-        self.list.rect(panel, PANEL);
-        // Clipped to the panel it was measured against: a pass name longer than
-        // the widest row would otherwise run out over the scene.
-        self.list.push_clip(panel);
-        for (i, (text, color)) in rows.iter().enumerate() {
-            self.list
-                .text(PAD * 2.0, PAD * 2.0 + i as f32 * line, text, *color);
+        // Measured, then placed. The panel is behind the rows and so must be
+        // emitted before them, and it cannot be sized until they exist — which
+        // is the two-pass shape `Stack::rewind` is for.
+        let chart = stats.luminance.map(|_| {
+            let width = CHART_WIDTH.max(DrawList::width(LUMA_LABEL));
+            (width, CHART_HEIGHT + line)
+        });
+        let mut stack = Stack::vertical((PAD * 2.0, PAD * 2.0), 0.0);
+        for (span, _) in rows.iter() {
+            stack.push(DrawList::width(scratch.get(*span)), line);
         }
-        if let Some(bins) = stats.luminance {
-            self.histogram(bins, PAD * 2.0, PAD * 2.0 + rows.len() as f32 * line);
+        if let Some((w, h)) = chart {
+            stack.push(w, h);
         }
-        self.list.pop_clip();
-    }
-
-    /// The luminance histogram (§6 M11's exit row): one bar per bucket, darkest
-    /// on the left, normalized to the tallest.
-    ///
-    /// Normalized to the tallest rather than to the sample count, and that is
-    /// what makes it readable: a frame is usually dominated by one bucket, and a
-    /// chart scaled to the total would show that bucket and a flat line.
-    fn histogram(&mut self, bins: &[u32; gg_render::luminance::BINS], x: f32, y: f32) {
-        let line = DrawList::line_height();
-        let tallest = bins.iter().copied().max().unwrap_or(0).max(1) as f32;
-        self.list
-            .text(x, y, "luma  dark ....... 0EV ... bright", DIM);
-        let top = y + line;
-        for (i, &count) in bins.iter().enumerate() {
-            let height = (count as f32 / tallest * CHART_HEIGHT).max(f32::from(count > 0));
-            let bar = Rect::new(x + i as f32, top + CHART_HEIGHT - height, 1.0, height);
-            self.list.rect(bar, ACCENT);
+        let panel = stack.content().inset(-PAD);
+        list.rect(panel, PANEL);
+        // Clipped to what it was measured against, so anything that draws wider
+        // than it measured is cut rather than running out over the scene.
+        list.push_clip(panel);
+        stack.rewind();
+        for (span, color) in rows.iter() {
+            let text = scratch.get(*span);
+            let cell = stack.push(DrawList::width(text), line);
+            list.text(cell.x, cell.y, text, *color);
         }
-        // The bucket a luminance of 1.0 falls in — the reference an exposure
-        // decision is made against. A tick rather than a number, because the
-        // question the chart answers is "where is the mass", not "how much".
-        let zero_ev = gg_render::luminance::BINS * 2 / 3;
-        self.list
-            .rect(Rect::new(x + zero_ev as f32, top, 1.0, CHART_HEIGHT), DIM);
+        if let (Some(bins), Some((w, h))) = (stats.luminance, chart) {
+            histogram(list, bins, stack.push(w, h));
+        }
+        list.pop_clip();
     }
 
     fn console_panel(&mut self, logical: (f32, f32)) {
+        let Overlay { list, console, .. } = self;
         let line = DrawList::line_height();
-        let rows = self.console.output.len() as f32 + 1.0;
-        let height = rows * line + PAD * 2.0;
+        // The one panel that is *not* sized to its contents: it is pinned to the
+        // bottom edge and spans the window, so its box is known up front.
+        let height = (console.output.len() as f32 + 1.0) * line + PAD * 2.0;
         let panel = Rect::new(PAD, logical.1 - height - PAD, logical.0 - PAD * 2.0, height);
-        self.list.rect(panel, PANEL);
-        self.list.push_clip(panel);
-        let x = panel.x + PAD;
-        let mut y = panel.y + PAD;
-        for text in &self.console.output {
-            self.list.text(x, y, text, DIM);
-            y += line;
+        list.rect(panel, PANEL);
+        list.push_clip(panel);
+        let mut stack = Stack::vertical((panel.x + PAD, panel.y + PAD), 0.0);
+        for text in &console.output {
+            let cell = stack.push(DrawList::width(text), line);
+            list.text(cell.x, cell.y, text, DIM);
+        }
+
+        let cell = stack.push(0.0, line);
+        let mut pen = Stack::horizontal((cell.x, cell.y), 0.0);
+        for (text, color) in [("> ", ACCENT), (console.line.as_str(), TEXT)] {
+            let cell = pen.push(DrawList::width(text), line);
+            list.text(cell.x, cell.y, text, color);
         }
         // A block cursor rather than a blinking one: a blink is a clock the
         // overlay would have to own, and a screenshot of a blinked-out cursor
         // is a bug report about a missing cursor.
-        let pen = self.list.text(x, y, "> ", ACCENT);
-        let pen = self.list.text(pen, y, &self.console.line, TEXT);
-        self.list
-            .rect(Rect::new(pen, y, font::GLYPH.0 as f32, line - 1.0), ACCENT);
-        self.list.pop_clip();
+        list.rect(pen.push(font::GLYPH.0 as f32, line - 1.0), ACCENT);
+        list.pop_clip();
     }
 
     /// Mean and worst of the frames on record.
@@ -310,9 +321,30 @@ impl Overlay {
     }
 }
 
-/// Bytes as mebibytes, one decimal — the unit every GPU tool reports in.
-fn mib(bytes: u64) -> String {
-    format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
+/// The luminance histogram (§6 M11's exit row): one bar per bucket, darkest on
+/// the left, normalized to the tallest, inside the cell the stack reserved.
+///
+/// Normalized to the tallest rather than to the sample count, and that is what
+/// makes it readable: a frame is usually dominated by one bucket, and a chart
+/// scaled to the total would show that bucket and a flat line.
+fn histogram(list: &mut DrawList, bins: &[u32; gg_render::luminance::BINS], at: Rect) {
+    let line = DrawList::line_height();
+    let tallest = bins.iter().copied().max().unwrap_or(0).max(1) as f32;
+    list.text(at.x, at.y, LUMA_LABEL, DIM);
+    let top = at.y + line;
+    for (i, &count) in bins.iter().enumerate() {
+        let height = (count as f32 / tallest * CHART_HEIGHT).max(f32::from(count > 0));
+        let bar = Rect::new(at.x + i as f32, top + CHART_HEIGHT - height, 1.0, height);
+        list.rect(bar, ACCENT);
+    }
+    // The bucket a luminance of 1.0 falls in — the reference an exposure
+    // decision is made against. A tick rather than a number, because the
+    // question the chart answers is "where is the mass", not "how much".
+    let zero_ev = gg_render::luminance::BINS * 2 / 3;
+    list.rect(
+        Rect::new(at.x + zero_ev as f32, top, 1.0, CHART_HEIGHT),
+        DIM,
+    );
 }
 
 /// Lines the console keeps on screen. Deliberately short: the full history is
@@ -320,6 +352,9 @@ fn mib(bytes: u64) -> String {
 /// than one that scrolls.
 const OUTPUT: usize = 10;
 
+/// Not on [`Scratch`]: scrollback outlives the frame that produced it, which is
+/// the one thing a span into a per-frame buffer cannot do. It allocates when a
+/// human submits a line and never per frame.
 #[derive(Default)]
 struct Console {
     open: bool,
@@ -475,6 +510,31 @@ mod tests {
         }
     }
 
+    /// The panel is sized to its contents and the clip is taken from the *same*
+    /// measurement, so a row that got longer widens the panel rather than being
+    /// cut by it. A measure pass and a place pass that disagree is the failure
+    /// this shape can have and the flat `PAD + i * line` arithmetic could not.
+    #[test]
+    fn a_long_row_widens_the_panel_instead_of_being_clipped_by_it() {
+        // A fresh overlay per build: with no frame on record the timing rows
+        // format identically, so the pass name is the only difference between
+        // the two and the vertex counts are exactly comparable.
+        let count = |passes: &[PassTiming]| {
+            let mut overlay = Overlay::default();
+            overlay.build(&Stats { passes, ..stats() }).len()
+        };
+        // Exactly the column width, so the longer name adds characters rather
+        // than eating the padding that would have been there anyway.
+        let short = timings("forward-opaque", 0.5);
+        let long = timings("forward-opaque-and-then-some", 0.5);
+        let extra = (long[0].name.len() - short[0].name.len()) * 6;
+        assert_eq!(
+            count(&long),
+            count(&short) + extra,
+            "six vertices per glyph and not one dropped"
+        );
+    }
+
     /// Every quad the overlay emits stays on the target it was told about — a
     /// panel that ran off the bottom would be a panel nobody can read.
     #[test]
@@ -485,12 +545,7 @@ mod tests {
             overlay.text(c);
         }
         overlay.key(Key::Enter, true);
-        let passes = [PassTiming {
-            name: "forward-opaque".to_owned(),
-            gpu_ms: 0.5,
-            begin: 0,
-            end: 1,
-        }];
+        let passes = timings("forward-opaque", 0.5);
         let stats = Stats {
             passes: &passes,
             ..stats()
@@ -506,5 +561,14 @@ mod tests {
                 vertex.pos
             );
         }
+    }
+
+    fn timings(name: &str, gpu_ms: f32) -> [PassTiming; 1] {
+        [PassTiming {
+            name: name.to_owned(),
+            gpu_ms,
+            begin: 0,
+            end: 1,
+        }]
     }
 }

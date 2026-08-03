@@ -1,11 +1,5 @@
-//! The batched draw layer and its clip/transform stacks — the kernel of
-//! `gg-ui` (§4.9), landing here because §4.8's overlay is what first needs one.
-//!
-//! **And no further.** There is no hit-testing, no focus, no capture and no
-//! widget: those are M13 features that M13 pays for. What is here is the part
-//! the overlay genuinely uses and the part M13 would otherwise have to invent
-//! twice — one vertex stream, rectangles and glyphs batched into it, and stacks
-//! that let a panel position and bound its contents.
+//! The batched draw layer and its clip/transform stacks (§4.9) — built at M8 as
+//! the overlay's kernel inside `gg-debug`, moved here whole at M13.
 //!
 //! Clipping is geometric rather than a scissor rectangle: a quad is intersected
 //! with the clip rect and its uvs are moved with it. That is what makes the
@@ -29,8 +23,9 @@ pub struct Rect {
 }
 
 impl Rect {
-    /// A rectangle from its edges.
-    pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+    /// A rectangle from its edges. `const` so a layout can be a table of them
+    /// (§6 M15's panels are exactly that).
+    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Rect { x, y, w, h }
     }
 
@@ -49,6 +44,40 @@ impl Rect {
         self.w <= 0.0 || self.h <= 0.0
     }
 
+    /// Whether `(x, y)` is inside. Half-open on the right and bottom edges, so
+    /// two abutting rectangles cannot both claim the point between them.
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && y >= self.y && x < self.right() && y < self.bottom()
+    }
+
+    /// Shrunk by `by` on every side; a negative `by` grows it. Padding, in
+    /// whichever direction the caller happens to need it — a panel insets to
+    /// find its content area and content outsets to find its panel.
+    pub fn inset(&self, by: f32) -> Rect {
+        Rect {
+            x: self.x + by,
+            y: self.y + by,
+            w: self.w - by * 2.0,
+            h: self.h - by * 2.0,
+        }
+    }
+
+    /// The smallest rectangle covering both.
+    ///
+    /// An empty operand is *not* special-cased: a zero-sized rectangle is still
+    /// a point the result must cover, which is what lets [`crate::Stack`] start
+    /// from a bare origin and grow.
+    pub fn union(&self, other: &Rect) -> Rect {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        Rect {
+            x,
+            y,
+            w: self.right().max(other.right()) - x,
+            h: self.bottom().max(other.bottom()) - y,
+        }
+    }
+
     /// The overlap, or an empty rectangle when there is none.
     pub fn intersect(&self, other: &Rect) -> Rect {
         let x = self.x.max(other.x);
@@ -60,6 +89,20 @@ impl Rect {
             h: self.bottom().min(other.bottom()) - y,
         }
     }
+}
+
+/// A quad and the atlas rectangle to cut it from, positioned relative to the
+/// top-left of the run it belongs to.
+///
+/// This is the whole of what [`crate::text`] hands back: the draw layer is told
+/// where and from where, never what character it is drawing. That is the same
+/// seam `gg_render::ui` keeps one level down, one level up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Glyph {
+    /// Where to draw it.
+    pub rect: Rect,
+    /// Where to cut it from, as `(u0, v0, u1, v1)` over the whole atlas.
+    pub uv: (f32, f32, f32, f32),
 }
 
 /// Offset and uniform scale — what a panel needs to place its contents and what
@@ -147,6 +190,21 @@ impl DrawList {
         self.transforms.pop();
     }
 
+    /// Where `rect` actually lands: through the transform stack, cut by the clip
+    /// stack. Empty when the clip excludes it entirely.
+    ///
+    /// This is the router's half of the seam (§4.9) — a widget hit-tests the
+    /// rectangle it *drew into*, so a panel that scrolled its contents or a clip
+    /// that cut a row off cannot leave a hit region floating where nothing is
+    /// visible.
+    pub fn place(&self, rect: Rect) -> Rect {
+        let placed = self.transform().apply(&rect);
+        match self.clips.last() {
+            Some(clip) => placed.intersect(clip),
+            None => placed,
+        }
+    }
+
     /// A solid rectangle. `color` is `0xAARRGGBB`.
     pub fn rect(&mut self, rect: Rect, color: u32) {
         let (u, v) = font::solid_uv();
@@ -172,6 +230,21 @@ impl DrawList {
         pen
     }
 
+    /// A shaped run from [`crate::text::Fonts::layout`], with its top-left at
+    /// `(x, y)` — the same origin [`DrawList::text`] takes, so switching a call
+    /// site from the fallback to a real face does not move the line.
+    pub fn glyphs(&mut self, x: f32, y: f32, glyphs: &[Glyph], color: u32) {
+        for glyph in glyphs {
+            let rect = Rect::new(
+                x + glyph.rect.x,
+                y + glyph.rect.y,
+                glyph.rect.w,
+                glyph.rect.h,
+            );
+            self.quad(&rect, glyph.uv, color);
+        }
+    }
+
     /// Width of `text` in this font, unscaled.
     pub fn width(text: &str) -> f32 {
         text.chars().count() as f32 * font::CELL.0 as f32
@@ -190,10 +263,10 @@ impl DrawList {
         if placed.is_empty() {
             return;
         }
-        let clipped = match self.clips.last() {
-            Some(clip) => placed.intersect(clip),
-            None => placed,
-        };
+        // Through `place` rather than a second copy of it: the rectangle a
+        // widget hit-tests and the rectangle it draws are the same rectangle by
+        // construction, not by two functions staying in step.
+        let clipped = self.place(*rect);
         if clipped.is_empty() {
             return;
         }
@@ -329,6 +402,26 @@ mod tests {
         list.push_clip(Rect::new(0.0, 0.0, 100.0, 100.0));
         list.rect(Rect::new(0.0, 0.0, 100.0, 100.0), WHITE);
         assert_eq!(bounds(&list), Rect::new(0.0, 0.0, 10.0, 10.0));
+    }
+
+    /// The router's seam: what `place` reports and what a quad occupies are the
+    /// same rectangle under every stack state. A drift here is a hit region that
+    /// is not where the widget is.
+    #[test]
+    fn place_reports_the_rectangle_a_quad_actually_occupies() {
+        let mut list = DrawList::default();
+        list.push_transform((10.0, 20.0), 2.0);
+        list.push_clip(Rect::new(0.0, 0.0, 30.0, 30.0));
+        let rect = Rect::new(5.0, 0.0, 40.0, 5.0);
+        let placed = list.place(rect);
+        list.rect(rect, WHITE);
+        assert_eq!(bounds(&list), placed);
+        // And a rect the clip excludes places empty and draws nothing.
+        list.clear();
+        list.push_clip(Rect::new(0.0, 0.0, 10.0, 10.0));
+        assert!(list.place(Rect::new(50.0, 50.0, 5.0, 5.0)).is_empty());
+        list.rect(Rect::new(50.0, 50.0, 5.0, 5.0), WHITE);
+        assert!(list.vertices().is_empty());
     }
 
     #[test]

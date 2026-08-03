@@ -44,6 +44,11 @@ const BANNED_DIST_CRATES: &[&str] = &[
     // Banning the crate and not only Tracy is what keeps the console and the
     // overlay out too — they are absent, not disabled.
     "gg-debug",
+    // The editor (§6 M15), on §7's "shipping the lab" — an editor first of all.
+    // Named separately from `gg-debug` because it is a separate feature on a
+    // separate crate: a tier could want instruments without an editor, and the
+    // absence proof has to say which one it checked.
+    "gg-editor",
 ];
 
 /// Byte needles no shipped binary may contain (§1.13, §5.8). The validation
@@ -52,7 +57,23 @@ const BANNED_DIST_CRATES: &[&str] = &[
 /// every consumer writing `default-features = false` — this is what turns a
 /// forgotten one red here instead of shipping a binary that demands a layer on
 /// the player's machine.
-const BANNED_DIST_BYTES: &[&str] = &["tracy", "Tracy", "VK_LAYER_KHRONOS_validation"];
+const BANNED_DIST_BYTES: &[&str] = &[
+    "tracy",
+    "Tracy",
+    "VK_LAYER_KHRONOS_validation",
+    // The editor's own log lines (§6 M15). The crate ban above is the real
+    // proof; this catches the case the graph cannot see — a panel's text
+    // reaching a shipped binary through some other crate's constant.
+    "editor: field nudged",
+];
+
+/// Byte needles a shipped binary must contain: the two log lines that exist only
+/// on the paths reaching `World::snapshot` + `Snapshot::encode` (§6 M14).
+///
+/// Log messages rather than the format magics, which are `[u8; 4]` constants a
+/// compiler is free to materialize as an immediate rather than as a string — a
+/// presence check that can pass or fail on codegen mood is not a check.
+const SAVE_PATH_STRINGS: &[&str] = &["save written", "play mode entered"];
 
 pub fn gate() -> anyhow::Result<()> {
     // Build and run the exact shipping combination (§1.10: an untested dist is
@@ -138,6 +159,19 @@ pub fn gate() -> anyhow::Result<()> {
         "the dist shell carries no replay magic — the input recorder ships in every tier (§2, \
          §5.8): it is the bug-report channel, not lab equipment"
     );
+    // §6 M14's fourth exit row, as a byte check. The *read* half of the snapshot
+    // core already shipped before M14 — `--restore` is unconditional, so a dist
+    // binary could always take a handoff — and the *write* half did not, because
+    // its only caller was the hot-reload swap and fat LTO strips what nothing
+    // calls. `--save` is that caller. This is the check that would have caught
+    // the milestone's premise being false, so it is the one that keeps it true.
+    for needle in SAVE_PATH_STRINGS {
+        anyhow::ensure!(
+            bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+            "the dist shell carries no `{needle}` — a shipping build must be able to *write* a \
+             save, not only read one (§6 M14)"
+        );
+    }
 
     // Demos join the dist gate at their milestones (§5.8): the exact
     // tier-dist combination builds, and the binary passes the absence/presence

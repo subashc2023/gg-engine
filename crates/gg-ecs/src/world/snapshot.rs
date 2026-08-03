@@ -29,6 +29,7 @@ use super::{Archetype, ArchetypeId, Location, World};
 use crate::component::FieldDesc;
 use crate::entity::{EntitiesImage, Entity};
 use crate::hash::{ComponentId, SchemaHash};
+use crate::registry::Registry;
 
 /// The flattened image's magic and format word. Writer and reader are the *same
 /// build* — a successor process (§4.2.2) — so the format word exists to reject a
@@ -235,6 +236,50 @@ impl Snapshot {
         out
     }
 
+    /// What restoring into `world` would do to each captured component, having
+    /// decided nothing and touched nothing.
+    ///
+    /// The planning is [`World::restore`]'s own, so a caller that refuses on an
+    /// outcome here refuses on the outcome it would actually have got — which is
+    /// what makes it usable as a *precondition* rather than a second opinion.
+    /// [`world::save`](super::save) is the caller: a save may not lose data a
+    /// reload is allowed to drop, and that verdict has to be reached while the
+    /// world is still the one the player had.
+    pub fn dry_run(&self, world: &World) -> Result<Vec<(String, ComponentOutcome)>, SnapshotError> {
+        world.check_side_tables(self)?;
+        Ok(self.plan(&world.registry)?.1)
+    }
+
+    /// One plan and one outcome per captured component, decided once rather than
+    /// per row. Ascending by stable id, so `restore_archetype` can binary-search.
+    fn plan(&self, registry: &Registry) -> Result<PlannedRestore, SnapshotError> {
+        let mut plans: Vec<(ComponentId, Option<Plan>)> = Vec::new();
+        let mut components = Vec::with_capacity(self.components.len());
+        for old in &self.components {
+            let Some(new) = registry.get(old.id) else {
+                plans.push((old.id, None));
+                components.push((old.declared_id.clone(), ComponentOutcome::Dropped));
+                continue;
+            };
+            if new.schema == old.schema {
+                if new.size != old.size {
+                    return Err(SnapshotError::SchemaContradiction {
+                        declared: old.declared_id.clone(),
+                        captured: old.size,
+                        present: new.size,
+                    });
+                }
+                plans.push((old.id, Some(Plan::Verbatim)));
+                components.push((old.declared_id.clone(), ComponentOutcome::Reused));
+                continue;
+            }
+            let (plan, outcome) = migrate_fields(&old.fields, new.fields);
+            plans.push((old.id, Some(plan)));
+            components.push((old.declared_id.clone(), outcome));
+        }
+        Ok((plans, components))
+    }
+
     /// Read back an image [`Snapshot::encode`] wrote.
     ///
     /// Validates only that the bytes are *this build's* image and are all there.
@@ -430,6 +475,13 @@ impl MigrationReport {
     }
 }
 
+/// [`Snapshot::plan`]'s two parallel results: the per-component copy plan the
+/// rows are rebuilt through, and the outcomes the report is made of.
+type PlannedRestore = (
+    Vec<(ComponentId, Option<Plan>)>,
+    Vec<(String, ComponentOutcome)>,
+);
+
 /// How one surviving component's bytes move from the old column to the new.
 enum Plan {
     /// Same schema: one memcpy per row.
@@ -499,39 +551,8 @@ impl World {
     /// Side tables are left in place and must match what was captured — see the
     /// module docs.
     pub fn restore(&mut self, snapshot: &Snapshot) -> Result<MigrationReport, SnapshotError> {
-        let present = self.side_tables.declared_ids();
-        if present != snapshot.side_tables {
-            return Err(SnapshotError::SideTableMismatch {
-                captured: snapshot.side_tables.join(", "),
-                present: present.join(", "),
-            });
-        }
-
-        // One plan per captured component, decided once rather than per row.
-        let mut plans: Vec<(ComponentId, Option<Plan>)> = Vec::new();
-        let mut components = Vec::with_capacity(snapshot.components.len());
-        for old in &snapshot.components {
-            let Some(new) = self.registry.get(old.id) else {
-                plans.push((old.id, None));
-                components.push((old.declared_id.clone(), ComponentOutcome::Dropped));
-                continue;
-            };
-            if new.schema == old.schema {
-                if new.size != old.size {
-                    return Err(SnapshotError::SchemaContradiction {
-                        declared: old.declared_id.clone(),
-                        captured: old.size,
-                        present: new.size,
-                    });
-                }
-                plans.push((old.id, Some(Plan::Verbatim)));
-                components.push((old.declared_id.clone(), ComponentOutcome::Reused));
-                continue;
-            }
-            let (plan, outcome) = migrate_fields(&old.fields, new.fields);
-            plans.push((old.id, Some(plan)));
-            components.push((old.declared_id.clone(), outcome));
-        }
+        self.check_side_tables(snapshot)?;
+        let (plans, components) = snapshot.plan(&self.registry)?;
 
         // Before anything is torn down: a refused allocator must leave this
         // world as it was rather than half-restored.
@@ -544,6 +565,20 @@ impl World {
         Ok(MigrationReport {
             entities: snapshot.entities.live(),
             components,
+        })
+    }
+
+    /// The captured side tables must be the installed ones — see the module
+    /// docs. First check of both entry points, because a host that changed is
+    /// not a migration and there is nothing further worth planning.
+    fn check_side_tables(&self, snapshot: &Snapshot) -> Result<(), SnapshotError> {
+        let present = self.side_tables.declared_ids();
+        if present == snapshot.side_tables {
+            return Ok(());
+        }
+        Err(SnapshotError::SideTableMismatch {
+            captured: snapshot.side_tables.join(", "),
+            present: present.join(", "),
         })
     }
 

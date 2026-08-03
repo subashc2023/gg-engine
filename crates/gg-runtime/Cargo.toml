@@ -36,6 +36,18 @@ gg-math = { path = "../gg-math" }
 # graph entirely — which is why the observability init below has two shapes and
 # not a feature flag inside one.
 gg-debug = { path = "../gg-debug", optional = true }
+# The UI layer (§4.9). Unconditional since M13, and that is the tier argument
+# rather than a convenience: a game's HUD and menus are declared as `Widget`
+# components and read by `gg_ui::Ui`, so a dist build without this crate would
+# ship a game whose UI silently does not exist. The *overlay* stays lab
+# equipment — that is `gg-debug` below, which is what the absence checks name.
+gg-ui = { path = "../gg-ui" }
+# The editor (§6 M15). Lab equipment like `gg-debug`: optional here, banned from
+# the dist graph in `deny.toml`, and absent from `tier-dist` and
+# `tier-dist-verify` — the latter deliberately, because dist-verify exists to be
+# dist's codegen with a hash bolted on and a whole extra crate would stop it
+# being that.
+gg-editor = { path = "../gg-editor", optional = true }
 anyhow.workspace = true
 tracing.workspace = true
 # The dist subscriber. In every other tier `gg-debug` installs a richer one, but
@@ -67,6 +79,9 @@ fp-assert = ["gg-core/fp-assert"]
 hot-reload = ["gg-core/hot-reload", "gg-render/hot-reload"]
 cvar-console = ["debug-tools"]
 overlay = ["debug-tools"]
+# The editor. Not implied by `debug-tools`: it is its own crate and its own
+# absence proof, and a tier wanting instruments does not thereby want an editor.
+editor = ["dep:gg-editor"]
 
 # Tier meta-features (§2 Build tiers row, §3).
 # `tracy` is deliberately **not** here, though `tier-instrumented` keeps it.
@@ -92,7 +107,8 @@ tier-dev = [
     "hot-reload",
     "cvar-console",
     "overlay",
+    "editor",
 ]
-tier-instrumented = ["tracy", "gpu-timings", "state-hash"]
+tier-instrumented = ["tracy", "gpu-timings", "state-hash", "editor"]
 tier-dist = []                      # input recorder is unconditional, never a feature (§2)
 tier-dist-verify = ["state-hash"]   # dist codegen + the hash, CI-only, gates §5.6c

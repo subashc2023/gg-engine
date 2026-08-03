@@ -1,0 +1,44 @@
+# demo 07-ui: the HUD and the settings menu (§6 M13). Game code, like demos 03
+# through 06 — a dylib the host loads, three engine dependencies and no fourth.
+#
+# `gg-ui` is deliberately absent: §3's deny pin puts it out of reach, so this
+# crate declares its UI as `gg_ecs::boundary::Widget` components and the host's
+# `gg_ui::Ui` is what draws and routes them. That is the whole demonstration —
+# a game whose menu works without linking a UI framework.
+
+[package]
+name = "demo-07-ui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "demo_07_ui"
+path = "src/lib.rs"
+# cdylib is what the host loads; rlib is what the tests link. Both from one
+# build, so the artifact under test is the artifact that ships.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `gg_game!` exports fixed `extern "C"` symbol names, so two game rlibs cannot
+# link into one binary — see demo 06 for the case that forced this.
+default = ["game"]
+game = []
+
+[dependencies]
+bytemuck.workspace = true
+gg-ecs = { path = "../../crates/gg-ecs" }
+gg-math = { path = "../../crates/gg-math" }
+
+[dev-dependencies]
+# The host half, for `tests/clicks.rs` — the same `gg_ui::Ui` the shell drives,
+# so the test routes clicks through the real router rather than a stand-in.
+# Outside §3's pin by construction: the pin is `cargo tree -e normal`, which is
+# what a cdylib can *link*, and a dev-dependency is not in it (demo 05 carries
+# `gg-scene` the same way).
+gg-ui = { path = "../../crates/gg-ui" }

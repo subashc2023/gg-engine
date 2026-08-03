@@ -1,12 +1,14 @@
-//! The overlay's glyph source: a 5×7 bitmap font, ASCII `0x20..=0x7E`.
+//! The fallback glyph source: a 5×7 bitmap font, ASCII `0x20..=0x7E`.
 //!
-//! Ours, embedded, and one bit per texel — because §4.9 rents text *shaping and
-//! rasterization* (`swash`/`cosmic-text`) at M13 and renting it now would be
-//! pre-building M13's answer to a question M8 does not ask. A debug overlay
-//! needs monospace ASCII at a fixed size, which is a table, not a font stack.
-//! What survives the swap is the seam: [`atlas`] hands the renderer coverage
-//! texels and [`uv`] hands the draw layer a rectangle, and neither says where
-//! the coverage came from.
+//! Ours, embedded, one bit per texel, and *not* what §4.9 rents — it is what
+//! draws when the rented stack has nothing to draw with, which on a crash path
+//! or a stripped install is a real state. The seam is the point: [`atlas`] hands
+//! the renderer coverage texels and [`uv`] hands the draw layer a rectangle, and
+//! neither says where the coverage came from.
+//!
+//! It also carries [`solid_uv`], which is not a glyph at all: the always-inked
+//! texel that lets a plain rectangle be a glyph quad, and therefore lets the
+//! whole layer be one draw.
 //!
 //! The rows below are written as binary literals so the glyphs are legible as
 //! shapes — a font whose bugs are invisible in its source is a font nobody
@@ -17,12 +19,21 @@
 pub const CELL: (u32, u32) = (6, 8);
 /// Inked area of a cell.
 pub const GLYPH: (u32, u32) = (5, 7);
-/// Cells across the atlas.
+/// Cells across the band.
 const COLUMNS: u32 = 16;
 /// Cells down it — 96 cells for 95 glyphs plus the solid one.
 const ROWS: u32 = 6;
-/// Atlas size in texels.
-pub const EXTENT: (u32, u32) = (COLUMNS * CELL.0, ROWS * CELL.1);
+/// The corner of the atlas this font owns, at the origin. Everything below it
+/// belongs to [`crate::atlas`]'s packer.
+pub const BAND: (u32, u32) = (COLUMNS * CELL.0, ROWS * CELL.1);
+/// Atlas size in texels, **fixed** — every uv in the layer is a division by it,
+/// so a growing atlas would move the *v* of every glyph already placed and
+/// invalidate a frame mid-build. 256 KiB on the CPU, 1 MiB on the device once
+/// [`gg_render::ui`] expands it to RGBA.
+///
+/// P2: when a real face at several sizes fills this, the answer is an LRU over
+/// [`crate::atlas`]'s shelves, not a bigger constant.
+pub const EXTENT: (u32, u32) = (512, 512);
 /// The first character [`FONT`] covers.
 const FIRST: u8 = 0x20;
 /// The cell filled solid, so a plain rectangle is a glyph quad whose uv lands
@@ -129,9 +140,10 @@ const FONT: [[u8; 7]; 95] = [
     [0b00000, 0b00000, 0b01000, 0b10101, 0b00010, 0b00000, 0b00000], // '~'
 ];
 
-/// The coverage atlas: one byte per texel, `0` or `255`, row-major over
-/// [`EXTENT`]. Built rather than embedded — 4.5 KiB of expanded bytes in the
-/// binary to save a loop that runs once.
+/// A coverage atlas holding nothing but this font: one byte per texel, `0` or
+/// `255`, row-major over [`EXTENT`], the band at the origin and the rest blank
+/// for the packer. Built rather than embedded — the table is 665 bytes and the
+/// expansion is a loop that runs once.
 pub fn atlas() -> Vec<u8> {
     let mut texels = vec![0u8; (EXTENT.0 * EXTENT.1) as usize];
     let mut put = |x: u32, y: u32| texels[(y * EXTENT.0 + x) as usize] = 0xff;
@@ -203,8 +215,15 @@ mod tests {
         let x = (u * EXTENT.0 as f32) as u32;
         let y = (v * EXTENT.1 as f32) as u32;
         assert_eq!(texels[(y * EXTENT.0 + x) as usize], 0xff);
-        assert_eq!(origin(SOLID_CELL).0 + CELL.0, EXTENT.0, "last column");
-        assert_eq!(origin(SOLID_CELL).1 + CELL.1, EXTENT.1, "last row");
+        assert_eq!(origin(SOLID_CELL).0 + CELL.0, BAND.0, "last column");
+        assert_eq!(origin(SOLID_CELL).1 + CELL.1, BAND.1, "last row");
+        // And nothing of this font's is written below the band, which is what
+        // the packer is about to hand out.
+        assert!(
+            texels[(BAND.1 * EXTENT.0) as usize..]
+                .iter()
+                .all(|t| *t == 0)
+        );
     }
 
     /// Space is blank and everything else is not. A glyph silently left empty

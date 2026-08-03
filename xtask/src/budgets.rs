@@ -20,15 +20,26 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 
 /// The `gg-runtime` code-line budget (§3). Raised 300 → 500 at M5 when the shell
 /// grew the window, the renderer's three calls, live input and record/replay,
-/// and 500 → 600 at M8 for the observability stack: config, the instruments,
-/// the overlay, the crash handler, the capture trigger. Both raises are the same
-/// argument — the shell *chooses* these and implements none of them — and both
-/// were spent in a PR that said so.
-const SHELL_BUDGET: usize = 600;
+/// 500 → 600 at M8 for the observability stack (config, the instruments, the
+/// overlay, the crash handler, the capture trigger), and 600 → 1000 at M13 when
+/// the UI stage arrived: a `gg_ui::Ui` per tick, the canvas→window fit, and the
+/// verb lookup that feeds it. Every raise is the same argument — the shell
+/// *chooses* these and implements none of them — and every one was spent
+/// deliberately rather than discovered.
+const SHELL_BUDGET: usize = 1000;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.
-const DEPENDENCY_BUDGETS: &[(&str, usize)] = &[("gg-ecs", 6), ("gg-core", 8)];
+const DEPENDENCY_BUDGETS: &[(&str, usize)] = &[
+    ("gg-ecs", 6),
+    ("gg-core", 8),
+    ("gg-ui", 10),
+    // §6 M15's editor. It consumes engine crates and adds nothing of its own,
+    // which is the budget's whole argument — a `gg-editor` that had grown its
+    // own dependencies would be a second engine, which is what §6 M15 says it
+    // must not be.
+    ("gg-editor", 10),
+];
 
 /// §6 M12's exit row: the template reaches a spinning lit mesh in under 50
 /// lines. A budget rather than a claim, because the number is the whole point —

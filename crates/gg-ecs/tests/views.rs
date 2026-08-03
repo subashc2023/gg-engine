@@ -254,3 +254,71 @@ fn the_two_paths_agree_across_a_churned_world() {
         );
     }
 }
+
+/// The untyped pair (§6 M15): a caller holding a `ComponentInfo` and no `T`
+/// reaches the same bytes the typed pair does, and a write through it lands.
+///
+/// This is the whole of what the M15 inspector needs from storage — a component
+/// id chosen at runtime has no type to name — and it is a *safe* spelling of
+/// what `raw_reads`/`raw_writes` already handed over.
+#[test]
+fn untyped_columns_are_the_typed_ones_seen_as_bytes() {
+    let (mut w, _) = world_with(6);
+    // Copied out of the registry rather than borrowed: `views` wants `&mut
+    // World` and a live `&ComponentInfo` would hold the shared borrow. The
+    // inspector does the same, for the same reason.
+    let (id, size, fields) = {
+        let info = w.registry().get(component_id::<Health>()).unwrap();
+        (info.id, info.size, info.fields)
+    };
+    let read = QueryAccess::new(&[id], &[]).unwrap();
+    let mut seen = Vec::new();
+    w.views_ref(&read, |view| {
+        let bytes = view.read_bytes(0);
+        assert_eq!(bytes.len(), view.len() * size);
+        assert_eq!(
+            bytemuck::cast_slice::<u8, Health>(bytes),
+            view.read_of::<Health>()
+        );
+        // Field-addressed, which is how an inspector reads one: `hp` by its
+        // offset out of the schema rather than by a Rust type.
+        let hp = fields.iter().find(|f| f.name == "hp").unwrap();
+        for row in 0..view.len() {
+            let at = row * size + hp.offset;
+            seen.push(u32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap()));
+        }
+    });
+    assert_eq!(seen, vec![0, 2, 4]);
+
+    let write = QueryAccess::new(&[], &[id]).unwrap();
+    let shield = *fields.iter().find(|f| f.name == "shield").unwrap();
+    w.views(&write, |mut view| {
+        let bytes = view.write_bytes(0);
+        for row in 0..bytes.len() / size {
+            let at = row * size + shield.offset;
+            bytes[at..at + shield.size].copy_from_slice(&7u32.to_ne_bytes());
+        }
+    });
+    let mut shields = Vec::new();
+    w.views_ref(&read, |view| {
+        shields.extend(view.read_of::<Health>().iter().map(|h| h.shield));
+    });
+    assert_eq!(
+        shields,
+        vec![7, 7, 7],
+        "the untyped write reached the column"
+    );
+}
+
+/// The take-once rule is the untyped column's too — the returned slice outlives
+/// the `&mut self` that made it, so a second take would alias.
+#[test]
+#[should_panic(expected = "already taken")]
+fn an_untyped_write_column_cannot_be_taken_twice() {
+    let (mut w, _) = world_with(2);
+    let access = QueryAccess::new(&[], &[component_id::<Position>()]).unwrap();
+    w.views(&access, |mut view| {
+        let _first = view.write_bytes(0);
+        let _second = view.write_bytes(0);
+    });
+}

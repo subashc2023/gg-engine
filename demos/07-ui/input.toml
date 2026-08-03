@@ -1,0 +1,15 @@
+# Demo 07's bindings (§4.7). By *physical* key position, so this file means the
+# same thing on AZERTY as on QWERTY.
+#
+# The four names are §4.9's UI protocol: `gg_ui::boundary::binding` looks for
+# exactly these in the game's declared verb list, and a game that omits one gets
+# a UI that draws and cannot be clicked. They are ordinary verbs — nothing here
+# is a second input path, which is what makes the pointer replayable (§4.7).
+
+[game.actions]
+ui_click = ["Mouse1"]
+ui_focus = ["Tab"]
+
+[game.axes]
+ui_x = ["MouseX"]
+ui_y = ["MouseY"]

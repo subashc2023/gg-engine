@@ -31,6 +31,15 @@ pub use gg_ecs::boundary::log_level
 pub mod gg_ecs::boundary::light
 pub const gg_ecs::boundary::light::DIRECTIONAL: u32
 pub const gg_ecs::boundary::light::POINT: u32
+pub mod gg_ecs::boundary::state
+pub const gg_ecs::boundary::state::CLICKED: u32
+pub const gg_ecs::boundary::state::FOCUSED: u32
+pub const gg_ecs::boundary::state::HELD: u32
+pub const gg_ecs::boundary::state::HOVERED: u32
+pub mod gg_ecs::boundary::widget
+pub const gg_ecs::boundary::widget::BUTTON: u32
+pub const gg_ecs::boundary::widget::LABEL: u32
+pub const gg_ecs::boundary::widget::PANEL: u32
 pub struct gg_ecs::boundary::Access
 impl gg_ecs::boundary::Access
 pub const fn gg_ecs::boundary::Access::new() -> Self
@@ -166,6 +175,36 @@ impl<T> core::marker::Sync for gg_ecs::boundary::Table<T>
 pub struct gg_ecs::boundary::Verbs
 pub gg_ecs::boundary::Verbs::actions: &'static [&'static str]
 pub gg_ecs::boundary::Verbs::axes: &'static [&'static str]
+#[repr(C)] pub struct gg_ecs::boundary::Widget
+pub gg_ecs::boundary::Widget::color: u32
+pub gg_ecs::boundary::Widget::id: u64
+pub gg_ecs::boundary::Widget::kind: u32
+pub gg_ecs::boundary::Widget::order: u32
+pub gg_ecs::boundary::Widget::rect: [f32; 4]
+pub gg_ecs::boundary::Widget::state: u32
+pub gg_ecs::boundary::Widget::text: [u8; 32]
+pub gg_ecs::boundary::Widget::text_color: u32
+pub gg_ecs::boundary::Widget::text_len: u32
+impl gg_ecs::boundary::Widget
+pub fn gg_ecs::boundary::Widget::button(u64, [f32; 4], u32, u32, &str) -> Self
+pub fn gg_ecs::boundary::Widget::clicked(&self) -> bool
+pub fn gg_ecs::boundary::Widget::focused(&self) -> bool
+pub fn gg_ecs::boundary::Widget::held(&self) -> bool
+pub fn gg_ecs::boundary::Widget::hovered(&self) -> bool
+pub fn gg_ecs::boundary::Widget::label([f32; 4], u32, &str) -> Self
+pub fn gg_ecs::boundary::Widget::panel([f32; 4], u32) -> Self
+pub fn gg_ecs::boundary::Widget::set_text(&mut self, &str)
+pub fn gg_ecs::boundary::Widget::text(&self) -> &str
+impl bytemuck::pod::Pod for gg_ecs::boundary::Widget
+impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Widget
+impl gg_ecs::component::Component for gg_ecs::boundary::Widget
+pub const gg_ecs::boundary::Widget::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Widget::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Widget::TYPE_NAME: &'static str
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Widget
+pub fn gg_ecs::boundary::Widget::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+pub const gg_ecs::boundary::CANVAS: (u32, u32)
+pub const gg_ecs::boundary::TEXT: usize
 pub trait gg_ecs::boundary::BoundaryData
 pub type gg_ecs::boundary::BoundaryData::Columns<'w>
 pub type gg_ecs::boundary::BoundaryData::Item<'r>
@@ -244,6 +283,7 @@ pub fn gg_ecs::boundary::set_logger(fn(u32, &str)) -> core::result::Result<(), f
 pub fn gg_ecs::boundary::set_system_zone(gg_ecs::boundary::SystemZone) -> core::result::Result<(), gg_ecs::boundary::SystemZone>
 pub fn gg_ecs::boundary::system_id(&str) -> u64
 pub fn gg_ecs::boundary::verbs(&'static gg_ecs::boundary::Table<gg_abi::verb::VerbName>, &'static gg_ecs::boundary::Table<gg_abi::verb::VerbName>, &[&'static str], &[&'static str]) -> gg_abi::verb::VerbsTable
+pub const fn gg_ecs::boundary::widget_id(&str) -> u64
 pub type gg_ecs::boundary::SystemZone = fn(&str, &mut dyn core::ops::function::FnMut())
 pub mod gg_ecs::chunked
 pub struct gg_ecs::chunked::ChunkedHash<const VERSION: u64>(_)
@@ -284,6 +324,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
 pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Renderable::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Widget
+pub const gg_ecs::boundary::Widget::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Widget::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Widget::TYPE_NAME: &'static str
 pub fn gg_ecs::component::component_id<T: gg_ecs::component::Component>() -> gg_ecs::hash::ComponentId
 pub fn gg_ecs::component::schema_hash<T: gg_ecs::component::Component>() -> gg_ecs::hash::SchemaHash
 pub mod gg_ecs::entity
@@ -549,6 +593,8 @@ impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
 pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Widget
+pub fn gg_ecs::boundary::Widget::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
 pub fn gg_ecs::hash::ComponentId::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_math::sim::DMat3
@@ -622,8 +668,10 @@ pub fn gg_ecs::view::ArchetypeView<'w, 'q>::len(&self) -> usize
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_reads(&self) -> &[gg_abi::query::ColumnView]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_writes(&self) -> &[gg_abi::query::ColumnView]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read<T: gg_ecs::component::Component>(&self, usize) -> &'w [T]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read_bytes(&self, usize) -> &'w [u8]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read_of<T: gg_ecs::component::Component>(&self) -> &'w [T]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write<T: gg_ecs::component::Component>(&mut self, usize) -> &'w mut [T]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write_bytes(&mut self, usize) -> &'w mut [u8]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write_of<T: gg_ecs::component::Component>(&mut self) -> &'w mut [T]
 pub struct gg_ecs::view::QueryAccess
 impl gg_ecs::view::QueryAccess
@@ -632,6 +680,32 @@ pub fn gg_ecs::view::QueryAccess::reads(&self) -> &[gg_ecs::hash::ComponentId]
 pub fn gg_ecs::view::QueryAccess::writes(&self) -> &[gg_ecs::hash::ComponentId]
 pub const gg_ecs::view::MAX_WRITES: usize
 pub mod gg_ecs::world
+pub mod gg_ecs::world::save
+pub enum gg_ecs::world::save::SaveError
+pub gg_ecs::world::save::SaveError::Checksum
+pub gg_ecs::world::save::SaveError::Checksum::computed: u128
+pub gg_ecs::world::save::SaveError::Checksum::found: u128
+pub gg_ecs::world::save::SaveError::Dropped
+pub gg_ecs::world::save::SaveError::Dropped::declared: alloc::string::String
+pub gg_ecs::world::save::SaveError::Format
+pub gg_ecs::world::save::SaveError::Format::found: u32
+pub gg_ecs::world::save::SaveError::Magic
+pub gg_ecs::world::save::SaveError::Magic::found: [u8; 4]
+pub gg_ecs::world::save::SaveError::Retyped
+pub gg_ecs::world::save::SaveError::Retyped::declared: alloc::string::String
+pub gg_ecs::world::save::SaveError::Retyped::field: alloc::string::String
+pub gg_ecs::world::save::SaveError::Snapshot(gg_ecs::world::snapshot::SnapshotError)
+pub gg_ecs::world::save::SaveError::Truncated
+pub gg_ecs::world::save::SaveError::Truncated::left: usize
+pub gg_ecs::world::save::SaveError::Truncated::need: usize
+pub struct gg_ecs::world::save::Save
+impl gg_ecs::world::save::Save
+pub fn gg_ecs::world::save::Save::decode(&[u8]) -> core::result::Result<gg_ecs::world::save::Save, gg_ecs::world::save::SaveError>
+pub fn gg_ecs::world::save::Save::encode(&self) -> alloc::vec::Vec<u8>
+pub fn gg_ecs::world::save::Save::new(gg_ecs::world::snapshot::Snapshot, u64, u128) -> gg_ecs::world::save::Save
+pub fn gg_ecs::world::save::Save::provenance(&self) -> u128
+pub fn gg_ecs::world::save::Save::snapshot(&self) -> &gg_ecs::world::snapshot::Snapshot
+pub fn gg_ecs::world::save::Save::tick(&self) -> u64
 pub mod gg_ecs::world::snapshot
 pub enum gg_ecs::world::snapshot::ComponentOutcome
 pub gg_ecs::world::snapshot::ComponentOutcome::Dropped
@@ -667,6 +741,7 @@ pub struct gg_ecs::world::snapshot::Snapshot
 impl gg_ecs::world::snapshot::Snapshot
 pub fn gg_ecs::world::snapshot::Snapshot::components(&self) -> impl core::iter::traits::iterator::Iterator<Item = (gg_ecs::hash::ComponentId, gg_ecs::hash::SchemaHash)> + '_
 pub fn gg_ecs::world::snapshot::Snapshot::decode(&[u8]) -> core::result::Result<gg_ecs::world::snapshot::Snapshot, gg_ecs::world::snapshot::SnapshotError>
+pub fn gg_ecs::world::snapshot::Snapshot::dry_run(&self, &gg_ecs::world::World) -> core::result::Result<alloc::vec::Vec<(alloc::string::String, gg_ecs::world::snapshot::ComponentOutcome)>, gg_ecs::world::snapshot::SnapshotError>
 pub fn gg_ecs::world::snapshot::Snapshot::encode(&self) -> alloc::vec::Vec<u8>
 pub fn gg_ecs::world::snapshot::Snapshot::entity_count(&self) -> u32
 pub enum gg_ecs::world::WorldError
@@ -705,6 +780,8 @@ pub fn gg_ecs::world::World::side_table_mut<T: gg_ecs::side_table::SideTable>(&m
 pub fn gg_ecs::world::World::spawn(&mut self) -> gg_abi::entity::Entity
 pub fn gg_ecs::world::World::views<'q>(&mut self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'_, 'q>))
 pub fn gg_ecs::world::World::views_ref<'w, 'q>(&'w self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'w, 'q>))
+impl gg_ecs::world::World
+pub fn gg_ecs::world::World::load(&mut self, &gg_ecs::world::save::Save) -> core::result::Result<gg_ecs::world::snapshot::MigrationReport, gg_ecs::world::save::SaveError>
 impl gg_ecs::world::World
 pub fn gg_ecs::world::World::restore(&mut self, &gg_ecs::world::snapshot::Snapshot) -> core::result::Result<gg_ecs::world::snapshot::MigrationReport, gg_ecs::world::snapshot::SnapshotError>
 pub fn gg_ecs::world::World::snapshot(&self) -> gg_ecs::world::snapshot::Snapshot
@@ -746,6 +823,23 @@ pub gg_ecs::RegistryError::OverAligned::align: usize
 pub gg_ecs::RegistryError::OverAligned::type_name: &'static str
 pub gg_ecs::RegistryError::SchemaConflict
 pub gg_ecs::RegistryError::SchemaConflict::declared: &'static str
+pub enum gg_ecs::SaveError
+pub gg_ecs::SaveError::Checksum
+pub gg_ecs::SaveError::Checksum::computed: u128
+pub gg_ecs::SaveError::Checksum::found: u128
+pub gg_ecs::SaveError::Dropped
+pub gg_ecs::SaveError::Dropped::declared: alloc::string::String
+pub gg_ecs::SaveError::Format
+pub gg_ecs::SaveError::Format::found: u32
+pub gg_ecs::SaveError::Magic
+pub gg_ecs::SaveError::Magic::found: [u8; 4]
+pub gg_ecs::SaveError::Retyped
+pub gg_ecs::SaveError::Retyped::declared: alloc::string::String
+pub gg_ecs::SaveError::Retyped::field: alloc::string::String
+pub gg_ecs::SaveError::Snapshot(gg_ecs::world::snapshot::SnapshotError)
+pub gg_ecs::SaveError::Truncated
+pub gg_ecs::SaveError::Truncated::left: usize
+pub gg_ecs::SaveError::Truncated::need: usize
 pub enum gg_ecs::SideTableError
 pub gg_ecs::SideTableError::AlreadyInstalled
 pub gg_ecs::SideTableError::AlreadyInstalled::declared: &'static str
@@ -794,8 +888,10 @@ pub fn gg_ecs::view::ArchetypeView<'w, 'q>::len(&self) -> usize
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_reads(&self) -> &[gg_abi::query::ColumnView]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::raw_writes(&self) -> &[gg_abi::query::ColumnView]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read<T: gg_ecs::component::Component>(&self, usize) -> &'w [T]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read_bytes(&self, usize) -> &'w [u8]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::read_of<T: gg_ecs::component::Component>(&self) -> &'w [T]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write<T: gg_ecs::component::Component>(&mut self, usize) -> &'w mut [T]
+pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write_bytes(&mut self, usize) -> &'w mut [u8]
 pub fn gg_ecs::view::ArchetypeView<'w, 'q>::write_of<T: gg_ecs::component::Component>(&mut self) -> &'w mut [T]
 pub struct gg_ecs::CanonicalHash(_)
 impl gg_ecs::hash::CanonicalHash
@@ -898,6 +994,14 @@ pub fn gg_ecs::registry::Registry::new() -> Self
 pub fn gg_ecs::registry::Registry::register<T: gg_ecs::component::Component>(&mut self) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
 pub fn gg_ecs::registry::Registry::register_declared(&mut self, gg_ecs::registry::ComponentInfo) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
 pub fn gg_ecs::registry::Registry::unclassified_fields(&self) -> &[gg_ecs::nan_scan::UnclassifiedField]
+pub struct gg_ecs::Save
+impl gg_ecs::world::save::Save
+pub fn gg_ecs::world::save::Save::decode(&[u8]) -> core::result::Result<gg_ecs::world::save::Save, gg_ecs::world::save::SaveError>
+pub fn gg_ecs::world::save::Save::encode(&self) -> alloc::vec::Vec<u8>
+pub fn gg_ecs::world::save::Save::new(gg_ecs::world::snapshot::Snapshot, u64, u128) -> gg_ecs::world::save::Save
+pub fn gg_ecs::world::save::Save::provenance(&self) -> u128
+pub fn gg_ecs::world::save::Save::snapshot(&self) -> &gg_ecs::world::snapshot::Snapshot
+pub fn gg_ecs::world::save::Save::tick(&self) -> u64
 pub struct gg_ecs::SchemaHash(_)
 impl gg_ecs::hash::SchemaHash
 pub const fn gg_ecs::hash::SchemaHash::from_raw(u128) -> Self
@@ -921,6 +1025,7 @@ pub struct gg_ecs::Snapshot
 impl gg_ecs::world::snapshot::Snapshot
 pub fn gg_ecs::world::snapshot::Snapshot::components(&self) -> impl core::iter::traits::iterator::Iterator<Item = (gg_ecs::hash::ComponentId, gg_ecs::hash::SchemaHash)> + '_
 pub fn gg_ecs::world::snapshot::Snapshot::decode(&[u8]) -> core::result::Result<gg_ecs::world::snapshot::Snapshot, gg_ecs::world::snapshot::SnapshotError>
+pub fn gg_ecs::world::snapshot::Snapshot::dry_run(&self, &gg_ecs::world::World) -> core::result::Result<alloc::vec::Vec<(alloc::string::String, gg_ecs::world::snapshot::ComponentOutcome)>, gg_ecs::world::snapshot::SnapshotError>
 pub fn gg_ecs::world::snapshot::Snapshot::encode(&self) -> alloc::vec::Vec<u8>
 pub fn gg_ecs::world::snapshot::Snapshot::entity_count(&self) -> u32
 pub struct gg_ecs::StateHasher
@@ -986,6 +1091,8 @@ pub fn gg_ecs::world::World::spawn(&mut self) -> gg_abi::entity::Entity
 pub fn gg_ecs::world::World::views<'q>(&mut self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'_, 'q>))
 pub fn gg_ecs::world::World::views_ref<'w, 'q>(&'w self, &'q gg_ecs::view::QueryAccess, impl core::ops::function::FnMut(gg_ecs::view::ArchetypeView<'w, 'q>))
 impl gg_ecs::world::World
+pub fn gg_ecs::world::World::load(&mut self, &gg_ecs::world::save::Save) -> core::result::Result<gg_ecs::world::snapshot::MigrationReport, gg_ecs::world::save::SaveError>
+impl gg_ecs::world::World
 pub fn gg_ecs::world::World::restore(&mut self, &gg_ecs::world::snapshot::Snapshot) -> core::result::Result<gg_ecs::world::snapshot::MigrationReport, gg_ecs::world::snapshot::SnapshotError>
 pub fn gg_ecs::world::World::snapshot(&self) -> gg_ecs::world::snapshot::Snapshot
 pub trait gg_ecs::Component: bytemuck::pod::Pod + gg_ecs::state_hash::StateHash + core::marker::Send + core::marker::Sync + 'static
@@ -1012,6 +1119,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
 pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Renderable::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Widget
+pub const gg_ecs::boundary::Widget::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Widget::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Widget::TYPE_NAME: &'static str
 pub trait gg_ecs::QueryData
 pub type gg_ecs::QueryData::Columns<'w>
 pub type gg_ecs::QueryData::Item<'r>
@@ -1113,6 +1224,8 @@ impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
 pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Widget
+pub fn gg_ecs::boundary::Widget::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
 pub fn gg_ecs::hash::ComponentId::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_math::sim::DMat3

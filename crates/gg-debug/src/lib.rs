@@ -11,10 +11,9 @@
 //! when it holds a renderer. A host that cannot link this crate keeps a console
 //! subscriber and loses the rest.
 //!
-//! [`draw`] is the exception to "nothing here ships": it is the kernel of
-//! `gg-ui` (§4.9), living here until M13 because §4.8's overlay is what first
-//! needs a batched draw layer. When `gg-ui` lands it moves, and reimplementing
-//! the overlay on it is that milestone's acceptance test.
+//! The draw layer that used to live here is `gg-ui`'s from M13 — it was always
+//! that crate's kernel (§4.9), and the overlay being an ordinary client of it
+//! is the acceptance test §4.8 named.
 
 #![warn(missing_docs)]
 
@@ -22,15 +21,13 @@ pub mod capture;
 pub mod console;
 pub mod cpu;
 pub mod crash;
-pub mod draw;
-pub mod font;
 pub mod gpu;
 pub mod log_tail;
 pub mod overlay;
 
 pub use gpu::GpuZones;
 pub use log_tail::tail;
-pub use overlay::{Overlay, atlas};
+pub use overlay::Overlay;
 
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;

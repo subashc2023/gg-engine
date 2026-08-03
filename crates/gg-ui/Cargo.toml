@@ -1,0 +1,58 @@
+# gg-ui (§3, §4.9) — the draw layer, input routing, layout, styling. Landing at
+# M13, seeded by the M8 overlay whose `draw` module moved here whole.
+#
+# Complexity budget (§3): <= 10 dependencies, and the composition is the budget's
+# argument — four engine crates (render, input, core, math) plus the rented text
+# stack (§4.9's shaper/rasterizer) plus a layout algorithm plus the workspace's
+# usual three (bytemuck, thiserror, tracing). Standing non-goals: no widget
+# without a demo that needs it, no retained-state model before v0.1, no `egui`
+# ever (§4.9, §7). The M13 overlay reimplementation may not exceed the M8
+# overlay's line count by more than 2×.
+
+[package]
+name = "gg-ui"
+version = "0.1.0"
+description = "Draw batching, input routing, layout and styling (PLAN.md §4.9)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gg_ui"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The UI pass's vertex format and coverage-atlas type. The arrow points this way
+# and not the reverse: the *pass* is a renderer's, what fills it is ours (§4.9,
+# and `gg_render::ui`'s module docs for why the split survives this milestone).
+gg-render = { path = "../gg-render" }
+# Action state and physical key identity. The router is a *consumer* of input,
+# never a second input path (§4.7) — which is what makes a replayed click land
+# on the same widget.
+gg-input = { path = "../gg-input" }
+# The `Widget` protocol a game declares its UI in (§4.9's boundary module). A
+# game crate may not link *this* crate (§3's deny pin), so the types both sides
+# name live in `gg_ecs::boundary` beside `Renderable` — which puts the arrow
+# here, and puts the widget id hash there so there is one of it.
+gg-ecs = { path = "../gg-ecs" }
+# §4.9's rental, and the reason the boundary is drawn where it is: shaping and
+# rasterization only. `cosmic-text` is the alternative and is refused for owning
+# layout and editing, which are on the *we own* side of the same paragraph.
+#
+# It brings Google Fonts' Rust stack (skrifa/read-fonts/zeno/yazi) and
+# specifically **not** `ttf-parser`, which the workspace dropped from winit's
+# graph over RUSTSEC-2026-0192 (see `winit` in the root manifest). That is not a
+# coincidence worth relying on silently — a rental that reintroduced it would
+# make cargo-deny's advisory leg fail, which is the check that says so.
+swash = "0.2.9"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# `tests/text_pixels.rs` renders through `OffscreenRenderer`, which takes an
+# `Extracted` even when there is no scene in it. A dev dependency and therefore
+# outside the §3 budget above, which counts what ships.
+gg-extract = { path = "../gg-extract" }

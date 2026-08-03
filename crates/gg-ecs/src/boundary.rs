@@ -36,6 +36,7 @@ mod load;
 mod macros;
 mod present;
 mod scene;
+mod ui;
 
 pub use declare::{Table, entry, init, layout_of, run, verbs};
 pub use game::{Access, BoundaryData, BoundaryError, Columns, GameWorld};
@@ -43,6 +44,7 @@ pub use host::{SystemZone, host_api, set_logger, set_system_zone};
 pub use load::{SystemPanic, Verbs, read_verbs};
 pub use present::{Eye, Light, Model, Renderable, light};
 pub use scene::Node;
+pub use ui::{CANVAS, TEXT, Widget, state, widget, widget_id};
 
 pub use crate::hash::system_id;
 

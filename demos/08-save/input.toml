@@ -1,0 +1,14 @@
+# Demo 08's bindings (§4.7). By *physical* key position, so this file means the
+# same thing on AZERTY as on QWERTY.
+#
+# The two axes are key *pairs*, not pointer motion: a tick's movement is one of
+# three values, so a scripted walk covers a whole number of metres and lands on a
+# chest rather than near one. That is what lets the same replay open the same
+# chests under every tier (§6 M14).
+
+[game.actions]
+bank = ["Space", "Mouse1"]
+
+[game.axes]
+move_x = ["+D", "-A"]
+move_z = ["+S", "-W"]

@@ -40,6 +40,19 @@ pub struct Args {
     /// A world staged by this shell's *predecessor* (§4.2.2). Passed by a
     /// rejuvenating process to its successor, never by hand.
     restore: Option<PathBuf>,
+    /// A save to load before the first tick, and where to write one after the
+    /// last (§6 M14). Unlike `--restore` these are the *player's* file: written
+    /// by one build, read by another, and refused by name rather than migrated
+    /// into loss. In every tier, because that is the point of them.
+    load: Option<PathBuf>,
+    save: Option<PathBuf>,
+    /// `<enter tick>:<stop tick>` — the editor's play/stop, on a script (§6 M14).
+    play: Option<String>,
+    /// Open the editor over the game (§6 M15). Lab equipment: the flag exists
+    /// only in a tier that has the crate, and is refused elsewhere by name
+    /// rather than ignored. With it, `--save` names where its save button
+    /// writes rather than what the shell writes at exit.
+    editor: bool,
     /// Leaked-dylib bytes this session tolerates before rejuvenating. Present so
     /// the forced case — zero, restart on the first reload — is exercisable on
     /// demand instead of after a thousand edits.
@@ -121,6 +134,12 @@ fn main() -> anyhow::Result<()> {
     if let Some(path) = &args.restore {
         app.restore(&gg_core::Handoff::take(path)?)?;
     }
+    // After the handoff, and they are not two answers to one question: a
+    // predecessor's world is this process continuing, a save is a session
+    // resuming. A run given both continues into the saved one.
+    if let Some(path) = &args.load {
+        app.load_save(path)?;
+    }
 
     // Headless is windowless, not invisible-windowed: §1.5 forbids an automated
     // tier from creating an OS window *at all*, and every `xtask ci` tier sets
@@ -144,6 +163,15 @@ fn main() -> anyhow::Result<()> {
     // point a session may be handed on. Never returns on success.
     if let Some(handoff) = app.handoff() {
         gg_core::reload::rejuvenate::restart(&handoff, RESTORE_FLAG)?;
+    }
+    // Before `finish`, which consumes the app: what a save holds is the world,
+    // and the world is gone once the recorder has been taken out of it.
+    // Not with the editor open: there `--save` names where its *button* writes,
+    // and a second write at exit would bury what the operator actually did.
+    if let Some(path) = &args.save
+        && !args.editor
+    {
+        app.write_save(path)?;
     }
     if let (Some(path), Some(recorder)) = (&args.record, app.finish()) {
         let replay = recorder.finish();
@@ -170,6 +198,16 @@ fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
             "--record" => args.record = Some(PathBuf::from(value()?)),
             "--replay" => args.replay = Some(PathBuf::from(value()?)),
             RESTORE_FLAG => args.restore = Some(PathBuf::from(value()?)),
+            "--load" => args.load = Some(PathBuf::from(value()?)),
+            "--save" => args.save = Some(PathBuf::from(value()?)),
+            "--play" => args.play = Some(value()?),
+            "--editor" => {
+                anyhow::ensure!(
+                    cfg!(feature = "editor"),
+                    "--editor: this tier has no editor (§3 keeps it out of the dist graph)"
+                );
+                args.editor = true;
+            }
             "--leak-budget" => args.leak_budget = Some(value()?.parse()?),
             "--pack" => args.pack = Some(PathBuf::from(value()?)),
             other => anyhow::bail!("unknown argument `{other}`"),
