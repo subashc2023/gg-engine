@@ -63,6 +63,18 @@ pub enum SnapshotError {
     /// A declared id or type name in the image is not UTF-8.
     #[error("snapshot image holds a name that is not UTF-8")]
     NotUtf8,
+    /// The captured allocator does not satisfy the allocation contract
+    /// ([`crate::entity`]). Decoding bounds-checks truncation only, and a
+    /// rejuvenation handoff is a file a *previous process* wrote and carries no
+    /// checksum by design (§4.2.2) — so restore is the one place a corrupt
+    /// freelist can be caught before it panics in `alloc`, hands one index to two
+    /// live entities, or wraps a generation past `RETIRED` and resurrects every
+    /// stale handle at that index.
+    #[error("snapshot's entity allocator is not well formed: {detail}")]
+    Allocator {
+        /// Which rule, and the index that broke it.
+        detail: String,
+    },
     /// The world's installed side tables differ from the captured set. Side
     /// tables are host-owned, so a difference means the *host* changed.
     #[error(
@@ -226,9 +238,10 @@ impl Snapshot {
     /// Read back an image [`Snapshot::encode`] wrote.
     ///
     /// Validates only that the bytes are *this build's* image and are all there.
-    /// Everything about the game — which components exist, whether a schema
-    /// moved, whether the side tables agree — is [`World::restore`]'s to decide,
-    /// and it already does.
+    /// Everything else — which components exist, whether a schema moved, whether
+    /// the side tables agree, and whether the captured allocator satisfies its
+    /// own contract — is [`World::restore`]'s to decide, and it already does. In
+    /// particular a decoded [`Snapshot`] is well *formed*, not well *founded*.
     pub fn decode(bytes: &[u8]) -> Result<Snapshot, SnapshotError> {
         let mut r = Reader { bytes, at: 0 };
         let magic: [u8; 4] = r.array()?;
@@ -520,8 +533,10 @@ impl World {
             components.push((old.declared_id.clone(), outcome));
         }
 
+        // Before anything is torn down: a refused allocator must leave this
+        // world as it was rather than half-restored.
+        self.entities.restore(&snapshot.entities)?;
         self.reset_storage();
-        self.entities.restore(&snapshot.entities);
         for image in &snapshot.archetypes {
             self.restore_archetype(image, &plans);
         }

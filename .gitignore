@@ -1,4 +1,8 @@
 target/
+# The archived split-debug artifacts (§3, §9). Outside target/ so `cargo clean`
+# cannot delete the only copy a released tag symbolizes against; out of git
+# because a PDB is megabytes and §9's fresh-clone bar is a budget.
+dist-symbols/
 *.jsonl
 *.md
 !README.md

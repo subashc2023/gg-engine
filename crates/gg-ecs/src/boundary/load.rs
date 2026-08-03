@@ -193,6 +193,7 @@ unsafe fn info(layout: &ComponentLayout) -> ComponentInfo {
             .map(|f| FieldDesc {
                 // SAFETY: as above, per field.
                 name: unsafe { text(f.name, f.name_len) },
+                // SAFETY: as above, per field.
                 ty: unsafe { text(f.ty, f.ty_len) },
                 offset: f.offset as usize,
                 size: f.size as usize,

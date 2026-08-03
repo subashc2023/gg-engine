@@ -665,6 +665,10 @@ fn decode_loop(
 fn decode(pack: &Pack, entry: &Entry) -> Result<TextureData, TextureError> {
     let blob = pack.blob(entry);
     let container = Texture::read(blob)?;
+    // Every level at once, each sized by the file's own header: bounded only
+    // because `read` refused an extent past `texture::MAX_DIMENSION` first. A
+    // panic here — an allocation failure, an overflow — would poison the inbox
+    // mutex and end the pool for the process, not just for this texture.
     let levels = container.levels().collect::<Result<Vec<_>, _>>()?;
     Ok(TextureData {
         format: container.format,

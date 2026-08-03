@@ -192,6 +192,18 @@ impl fmt::Display for CanonicalHash {
 /// different claims and only the second one survives a port.
 pub struct StateHasher {
     inner: blake3::Hasher,
+    /// The first NaN absorbed through [`Self::f32`]/[`Self::f64`], as
+    /// `(width, bits)` — §1.13 hazard 6's witness for hashed state the column
+    /// scan cannot reach. Side tables are not flat `Pod` memory and carry no
+    /// field layout, so this funnel is the only place all of their floats are
+    /// guaranteed to pass.
+    ///
+    /// Not feature-gated, deliberately: `gg-ecs` is on the game-crate pin (§3),
+    /// so a dylib and a host disagreeing about this field would disagree about
+    /// the layout of the `&mut StateHasher` a side table's `state_hash` writes
+    /// through. One compare per float, on a path the raw column fast path does
+    /// not take, is the price of that not being a question.
+    nan: Option<(u32, u64)>,
 }
 
 impl StateHasher {
@@ -202,7 +214,7 @@ impl StateHasher {
     pub fn canonical() -> Self {
         let mut inner = blake3::Hasher::new();
         inner.update(DOMAIN_CANONICAL);
-        Self { inner }
+        Self { inner, nan: None }
     }
 
     /// A hasher for schema fingerprints — same protocol, different domain, so
@@ -211,7 +223,7 @@ impl StateHasher {
     pub fn schema() -> Self {
         let mut inner = blake3::Hasher::new();
         inner.update(DOMAIN_SCHEMA);
-        Self { inner }
+        Self { inner, nan: None }
     }
 
     /// Raw bytes, no length prefix. For `Pod` column slices, where the length
@@ -288,15 +300,37 @@ impl StateHasher {
 
     /// Floats by `to_bits()`, never by value: `-0.0 == 0.0` and `NaN != NaN`
     /// would both make the hash disagree with equality in the wrong direction.
-    /// A NaN reaching hashed state is itself the bug (§4.2.1 hazard 6) — the
-    /// debug NaN scan catches it; this encoding does not paper over it.
+    /// A NaN reaching hashed state is itself the bug (§4.2.1 hazard 6) — this
+    /// encoding does not paper over it, and [`Self::nan_witness`] records it.
     pub fn f32(&mut self, v: f32) {
-        self.u32(v.to_bits());
+        let bits = v.to_bits();
+        // First wins, so the answer is a function of the encoding order and not
+        // of how many NaNs followed. `to_bits` is a bitcast: the payload the
+        // architectures disagree about survives to the test.
+        if self.nan.is_none() && crate::nan_scan::is_nan32(bits) {
+            self.nan = Some((32, u64::from(bits)));
+        }
+        self.u32(bits);
     }
 
     /// As [`Self::f32`], by `to_bits()`.
     pub fn f64(&mut self, v: f64) {
-        self.u64(v.to_bits());
+        let bits = v.to_bits();
+        if self.nan.is_none() && crate::nan_scan::is_nan64(bits) {
+            self.nan = Some((64, bits));
+        }
+        self.u64(bits);
+    }
+
+    /// The first NaN this hasher absorbed as a float, `(width in bits, bits)`.
+    ///
+    /// Only floats offered through [`Self::f32`]/[`Self::f64`] are seen. A type
+    /// that hashes its floats as raw bytes is invisible here for the same reason
+    /// an unclassifiable `ty` token is invisible to the column scan — a hole,
+    /// and the same kind.
+    #[must_use]
+    pub const fn nan_witness(&self) -> Option<(u32, u64)> {
+        self.nan
     }
 
     /// Bool as one byte, `0` or `1`. Not reachable from a `Pod` component —

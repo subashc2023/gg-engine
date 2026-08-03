@@ -144,6 +144,57 @@ impl Role {
     }
 }
 
+/// Which ISPC kernel the block compressors will dispatch to, as a cache-key
+/// discriminator (§4.6).
+///
+/// **§4.6's byte-reproducibility is a same-machine property today, and this is
+/// the residual.** `intel_tex_2` links *prebuilt* ISPC kernels —
+/// `CompressBlocksBC7_ispc` in `_sse2`/`_sse4`/`_avx`/`_avx2`/`_avx512*`
+/// flavours, all compiled `--opt=fast-math` — and picks one by CPUID at run
+/// time. A different SIMD width plus fast-math reassociation fits different
+/// endpoints, so identical texels compress to *different bytes* on two
+/// machines. `xtask assets --check` structurally cannot see it: it builds twice
+/// on the same CPU and agrees with itself.
+///
+/// Folding this into the source hash does not make BC7 portable — pinning the
+/// encoder to one code path is a plan decision, not a cache key. It makes the
+/// *cache* honest: a pack carried between desks is rebuilt whole instead of
+/// serving machine A's blobs beside machine B's recompiles, one pack with two
+/// encoders in it.
+///
+/// The crate exposes no way to ask which kernel it chose, so this re-derives the
+/// same CPUID ladder. It only has to be *at least* as discriminating as the
+/// dispatch — a spurious full rebuild costs seconds, a false reuse ships the
+/// mixture. (No KNL rung: `avx512er`/`avx512pf` are no longer detectable from
+/// Rust, and the hardware is dead.)
+#[cfg(target_arch = "x86_64")]
+#[must_use]
+pub fn encoder_isa() -> u32 {
+    if is_x86_feature_detected!("avx512f")
+        && is_x86_feature_detected!("avx512bw")
+        && is_x86_feature_detected!("avx512dq")
+        && is_x86_feature_detected!("avx512vl")
+    {
+        5
+    } else if is_x86_feature_detected!("avx2") {
+        4
+    } else if is_x86_feature_detected!("avx") {
+        3
+    } else if is_x86_feature_detected!("sse4.1") {
+        2
+    } else {
+        1
+    }
+}
+
+/// [`encoder_isa`] off x86: `intel_tex_2` ships no ISPC kernels there, so there
+/// is one code path and nothing for the key to discriminate between.
+#[cfg(not(target_arch = "x86_64"))]
+#[must_use]
+pub fn encoder_isa() -> u32 {
+    0
+}
+
 /// Block-compress one level.
 fn compress(
     rgba: &[u8],
@@ -364,6 +415,17 @@ mod tests {
             .collect();
         let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         assert!((length - 1.0).abs() < 0.02, "normal length {length}");
+    }
+
+    #[test]
+    fn the_cache_key_names_the_encoder_this_machine_will_actually_run() {
+        // Stable within a process — CPUID does not change — and non-zero on the
+        // architecture that has the kernels, because a ladder that fell through
+        // to one value would key every machine alike and reuse across all of
+        // them, which is the bug (§4.6).
+        assert_eq!(encoder_isa(), encoder_isa());
+        #[cfg(target_arch = "x86_64")]
+        assert!((1..=5).contains(&encoder_isa()), "isa {}", encoder_isa());
     }
 
     #[test]

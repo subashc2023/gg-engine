@@ -195,6 +195,12 @@ pub fn source_hash_at(path: &Path, import_version: u32) -> Result<u64> {
     // `xtask assets --check` could not catch the omission — it builds twice
     // against the *same* library and would agree with itself.
     core::hash::Hasher::write_u32(&mut hasher, gg_assets::texture::codec_version());
+    // And the machine's SIMD, for the same reason one step further out: the BC7
+    // kernel is chosen by CPUID and its variants do not agree bit for bit (see
+    // [`crate::texture::encoder_isa`]). Without this, a pack carried from one
+    // desk to another reuses the first machine's blobs beside the second's
+    // recompiles — one pack, two encoders — and `--check` cannot see it.
+    core::hash::Hasher::write_u32(&mut hasher, crate::texture::encoder_isa());
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     core::hash::Hasher::write(&mut hasher, &bytes);
 

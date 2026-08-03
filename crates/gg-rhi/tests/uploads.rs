@@ -399,6 +399,120 @@ fn an_upload_larger_than_the_staging_ring_arrives_whole() {
     assert!(report.clean(), "unclean: {report:?}");
 }
 
+/// A block that has to wrap is charged for the bytes it *uses*, not for the
+/// dead space it steps over to stay contiguous (§4.3).
+///
+/// The cursor's phase is the whole test. A fresh uploader and the uniform-sized
+/// rounds above leave the head on a ring boundary, where a wrap skips nothing;
+/// one 256-byte upload first puts it 256 bytes past one, so the 8 MiB chunk
+/// that follows must skip almost the entire ring. Those skipped bytes belong to
+/// no batch and no wait can reclaim them, so charging them to the reservation
+/// made a legal upload unsatisfiable — the ring refused it by name rather than
+/// wrapping.
+#[test]
+fn a_wrapping_upload_is_not_charged_for_the_dead_space_it_skips() {
+    init_tracing();
+    let mut rhi = OffscreenRhi::new((8, 8)).unwrap();
+
+    // Flushed on its own: this exists only to leave the head off a boundary.
+    let phase = rhi
+        .create_buffer(&BufferDesc {
+            name: "test.phase",
+            size: 256,
+            kind: BufferKind::Readback,
+        })
+        .unwrap();
+    rhi.upload_buffer(phase, 0, &[0xa5u8; 256]).unwrap();
+    rhi.flush_uploads().unwrap();
+
+    // 12 MiB: chunk 0 is the ring exactly and has nowhere to sit but the next
+    // boundary; chunk 1 is the 4 MiB remainder.
+    const SIZE: usize = 12 << 20;
+    let big = rhi
+        .create_buffer(&BufferDesc {
+            name: "test.wrapped",
+            size: SIZE as u64,
+            kind: BufferKind::Readback,
+        })
+        .unwrap();
+    let source: Vec<u8> = (0..SIZE).map(|i| (i % 251) as u8).collect();
+    rhi.upload_buffer(big, 0, &source).unwrap();
+    rhi.flush_uploads().unwrap();
+
+    let landed = rhi.map_buffer(big).unwrap();
+    assert_eq!(
+        (0..SIZE).find(|&i| landed[i] != source[i]),
+        None,
+        "first byte that disagrees"
+    );
+    // The wrap lands on top of where the first upload staged, so it may only
+    // proceed once that batch has retired.
+    assert!(
+        rhi.map_buffer(phase).unwrap().iter().all(|b| *b == 0xa5),
+        "the wrap overwrote staging bytes a batch was still reading"
+    );
+
+    rhi.destroy_buffer(big).unwrap();
+    rhi.destroy_buffer(phase).unwrap();
+    let report = rhi.shutdown();
+    assert!(report.clean(), "unclean: {report:?}");
+}
+
+/// The same accounting, at sizes where nothing is split — `gg-render`'s
+/// residency shape (§4.6): a small mesh, then a large one, each behind its own
+/// flush. 4 MiB leaves 4 MiB before the wrap point, so the 5 MiB that follows
+/// cannot start where the cursor stands and skips to the next boundary; under
+/// the old accounting it then needed 9 MiB of an 8 MiB ring and failed.
+#[test]
+fn a_large_upload_after_a_smaller_one_wraps_instead_of_failing() {
+    init_tracing();
+    let mut rhi = OffscreenRhi::new((8, 8)).unwrap();
+
+    const SMALL: usize = 4 << 20;
+    const LARGE: usize = 5 << 20;
+    let small = rhi
+        .create_buffer(&BufferDesc {
+            name: "test.mesh.small",
+            size: SMALL as u64,
+            kind: BufferKind::Readback,
+        })
+        .unwrap();
+    let large = rhi
+        .create_buffer(&BufferDesc {
+            name: "test.mesh.large",
+            size: LARGE as u64,
+            kind: BufferKind::Readback,
+        })
+        .unwrap();
+
+    // Distinct long-period patterns: a chunk at the wrong offset cannot
+    // coincide with the bytes that belong there.
+    let small_src: Vec<u8> = (0..SMALL).map(|i| (i % 251) as u8).collect();
+    let large_src: Vec<u8> = (0..LARGE).map(|i| (i % 241 + 7) as u8).collect();
+    rhi.upload_buffer(small, 0, &small_src).unwrap();
+    rhi.flush_uploads().unwrap();
+    rhi.upload_buffer(large, 0, &large_src).unwrap();
+    rhi.flush_uploads().unwrap();
+
+    let landed_large = rhi.map_buffer(large).unwrap();
+    let landed_small = rhi.map_buffer(small).unwrap();
+    assert_eq!(
+        (0..LARGE).find(|&i| landed_large[i] != large_src[i]),
+        None,
+        "first byte of the wrapped upload that disagrees"
+    );
+    assert_eq!(
+        (0..SMALL).find(|&i| landed_small[i] != small_src[i]),
+        None,
+        "the wrap overwrote the earlier upload's staging bytes"
+    );
+
+    rhi.destroy_buffer(large).unwrap();
+    rhi.destroy_buffer(small).unwrap();
+    let report = rhi.shutdown();
+    assert!(report.clean(), "unclean: {report:?}");
+}
+
 /// A mip chain arrives level by level and every level is sampled from the same
 /// image (§4.6). The chain is uploaded smallest-first — the order a KTX2 file
 /// stores it in — to prove no level depends on another having gone before it.

@@ -46,6 +46,14 @@ const BANNED_DIST_CRATES: &[&str] = &[
     "gg-debug",
 ];
 
+/// Byte needles no shipped binary may contain (§1.13, §5.8). The validation
+/// layer name earns its place from a feature default: `gg-rhi` is
+/// `default = ["validation", "gpu-timings"]`, so dist safety rests entirely on
+/// every consumer writing `default-features = false` — this is what turns a
+/// forgotten one red here instead of shipping a binary that demands a layer on
+/// the player's machine.
+const BANNED_DIST_BYTES: &[&str] = &["tracy", "Tracy", "VK_LAYER_KHRONOS_validation"];
+
 pub fn gate() -> anyhow::Result<()> {
     // Build and run the exact shipping combination (§1.10: an untested dist is
     // an untested code path wearing a nicer name).
@@ -114,11 +122,10 @@ pub fn gate() -> anyhow::Result<()> {
 
     // Symbol/string absence check — the belt to the graph's suspenders.
     let bytes = std::fs::read(&exe)?;
-    for needle in [b"tracy" as &[u8], b"Tracy"] {
+    for needle in BANNED_DIST_BYTES {
         anyhow::ensure!(
-            !bytes.windows(needle.len()).any(|w| w == needle),
-            "dist binary contains `{}` bytes — lab equipment failed to unbolt (§1.13)",
-            String::from_utf8_lossy(needle)
+            !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+            "dist binary contains `{needle}` bytes — lab equipment failed to unbolt (§1.13)"
         );
     }
     // And the presence check the shell earned at M5, when it took delivery of
@@ -195,11 +202,10 @@ pub fn gate() -> anyhow::Result<()> {
 
         // Same absence check as the shell: lab equipment unbolted (§1.13).
         let bytes = std::fs::read(&demo_exe)?;
-        for needle in [b"tracy" as &[u8], b"Tracy"] {
+        for needle in BANNED_DIST_BYTES {
             anyhow::ensure!(
-                !bytes.windows(needle.len()).any(|w| w == needle),
-                "dist {demo} contains `{}` bytes — lab equipment failed to unbolt (§1.13)",
-                String::from_utf8_lossy(needle)
+                !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "dist {demo} contains `{needle}` bytes — lab equipment failed to unbolt (§1.13)"
             );
         }
 
@@ -289,7 +295,12 @@ const CANARY_SYMBOL: &str = "the_pass_that_faulted";
 ///    M8 rather than skipped quietly.
 fn symbolization() -> anyhow::Result<()> {
     let root = workspace_root();
-    let archive = root.join("target/dist-symbols").join(commit()?);
+    // Outside `target/`, deliberately: §9 asks that a dump from the field
+    // symbolize against the artifact its release archived, and under `target/`
+    // that artifact is one `cargo clean` from gone — which would make the claim
+    // permanently false for a tag already cut. `.gitignore`d instead; a PDB is
+    // megabytes and belongs in a release, not in the history.
+    let archive = root.join("dist-symbols").join(commit()?);
     std::fs::create_dir_all(&archive)?;
 
     // The shell's own artifact first: it is the one a release actually archives.

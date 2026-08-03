@@ -345,6 +345,7 @@ pub fn gg_ecs::hash::StateHasher::i16(&mut self, i16)
 pub fn gg_ecs::hash::StateHasher::i32(&mut self, i32)
 pub fn gg_ecs::hash::StateHasher::i64(&mut self, i64)
 pub fn gg_ecs::hash::StateHasher::i8(&mut self, i8)
+pub const fn gg_ecs::hash::StateHasher::nan_witness(&self) -> core::option::Option<(u32, u64)>
 pub fn gg_ecs::hash::StateHasher::raw_column(&mut self, usize, usize, &[u8])
 pub fn gg_ecs::hash::StateHasher::schema() -> Self
 pub fn gg_ecs::hash::StateHasher::str(&mut self, &str)
@@ -354,6 +355,38 @@ pub fn gg_ecs::hash::StateHasher::u32(&mut self, u32)
 pub fn gg_ecs::hash::StateHasher::u64(&mut self, u64)
 pub fn gg_ecs::hash::StateHasher::u8(&mut self, u8)
 pub fn gg_ecs::hash::system_id(&str) -> u64
+pub mod gg_ecs::nan_scan
+pub enum gg_ecs::nan_scan::NanSite
+pub gg_ecs::nan_scan::NanSite::Column(gg_ecs::nan_scan::NanHit)
+pub gg_ecs::nan_scan::NanSite::SideTable(gg_ecs::nan_scan::SideTableNan)
+impl gg_ecs::nan_scan::NanSite
+pub const fn gg_ecs::nan_scan::NanSite::column(self) -> core::option::Option<gg_ecs::nan_scan::NanHit>
+impl core::fmt::Display for gg_ecs::nan_scan::NanSite
+pub fn gg_ecs::nan_scan::NanSite::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::nan_scan::NanHit
+pub gg_ecs::nan_scan::NanHit::bits: u64
+pub gg_ecs::nan_scan::NanHit::component: &'static str
+pub gg_ecs::nan_scan::NanHit::entity: gg_abi::entity::Entity
+pub gg_ecs::nan_scan::NanHit::field: &'static str
+pub gg_ecs::nan_scan::NanHit::lane: u32
+pub gg_ecs::nan_scan::NanHit::type_name: &'static str
+pub gg_ecs::nan_scan::NanHit::width: u32
+impl core::fmt::Display for gg_ecs::nan_scan::NanHit
+pub fn gg_ecs::nan_scan::NanHit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::nan_scan::SideTableNan
+pub gg_ecs::nan_scan::SideTableNan::bits: u64
+pub gg_ecs::nan_scan::SideTableNan::declared: &'static str
+pub gg_ecs::nan_scan::SideTableNan::type_name: &'static str
+pub gg_ecs::nan_scan::SideTableNan::width: u32
+impl core::fmt::Display for gg_ecs::nan_scan::SideTableNan
+pub fn gg_ecs::nan_scan::SideTableNan::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::nan_scan::UnclassifiedField
+pub gg_ecs::nan_scan::UnclassifiedField::component: &'static str
+pub gg_ecs::nan_scan::UnclassifiedField::field: &'static str
+pub gg_ecs::nan_scan::UnclassifiedField::ty: &'static str
+pub gg_ecs::nan_scan::UnclassifiedField::type_name: &'static str
+impl core::fmt::Display for gg_ecs::nan_scan::UnclassifiedField
+pub fn gg_ecs::nan_scan::UnclassifiedField::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub mod gg_ecs::query
 pub struct gg_ecs::query::Query<D: gg_ecs::query::QueryData>
 impl<D: gg_ecs::query::QueryData> gg_ecs::query::Query<D>
@@ -473,6 +506,7 @@ pub fn gg_ecs::registry::Registry::len(&self) -> usize
 pub fn gg_ecs::registry::Registry::new() -> Self
 pub fn gg_ecs::registry::Registry::register<T: gg_ecs::component::Component>(&mut self) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
 pub fn gg_ecs::registry::Registry::register_declared(&mut self, gg_ecs::registry::ComponentInfo) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
+pub fn gg_ecs::registry::Registry::unclassified_fields(&self) -> &[gg_ecs::nan_scan::UnclassifiedField]
 pub type gg_ecs::registry::ProtocolHashFn = fn(&[u8], &mut gg_ecs::hash::StateHasher)
 pub mod gg_ecs::side_table
 pub enum gg_ecs::side_table::SideTableError
@@ -607,6 +641,8 @@ pub gg_ecs::world::snapshot::ComponentOutcome::Migrated::defaulted: alloc::vec::
 pub gg_ecs::world::snapshot::ComponentOutcome::Migrated::retyped: alloc::vec::Vec<alloc::string::String>
 pub gg_ecs::world::snapshot::ComponentOutcome::Reused
 pub enum gg_ecs::world::snapshot::SnapshotError
+pub gg_ecs::world::snapshot::SnapshotError::Allocator
+pub gg_ecs::world::snapshot::SnapshotError::Allocator::detail: alloc::string::String
 pub gg_ecs::world::snapshot::SnapshotError::Format
 pub gg_ecs::world::snapshot::SnapshotError::Format::found: u32
 pub gg_ecs::world::snapshot::SnapshotError::Magic
@@ -662,6 +698,7 @@ pub fn gg_ecs::world::World::register<T: gg_ecs::component::Component>(&mut self
 pub fn gg_ecs::world::World::registry(&self) -> &gg_ecs::registry::Registry
 pub fn gg_ecs::world::World::remove<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::world::World::remove_side_table<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<T>
+pub fn gg_ecs::world::World::scan_for_nan(&self) -> core::option::Option<gg_ecs::nan_scan::NanSite>
 pub fn gg_ecs::world::World::side_table<T: gg_ecs::side_table::SideTable>(&self) -> core::option::Option<&T>
 pub fn gg_ecs::world::World::side_table_count(&self) -> usize
 pub fn gg_ecs::world::World::side_table_mut<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<&mut T>
@@ -686,6 +723,13 @@ pub gg_ecs::ComponentOutcome::Migrated::copied: alloc::vec::Vec<alloc::string::S
 pub gg_ecs::ComponentOutcome::Migrated::defaulted: alloc::vec::Vec<alloc::string::String>
 pub gg_ecs::ComponentOutcome::Migrated::retyped: alloc::vec::Vec<alloc::string::String>
 pub gg_ecs::ComponentOutcome::Reused
+pub enum gg_ecs::NanSite
+pub gg_ecs::NanSite::Column(gg_ecs::nan_scan::NanHit)
+pub gg_ecs::NanSite::SideTable(gg_ecs::nan_scan::SideTableNan)
+impl gg_ecs::nan_scan::NanSite
+pub const fn gg_ecs::nan_scan::NanSite::column(self) -> core::option::Option<gg_ecs::nan_scan::NanHit>
+impl core::fmt::Display for gg_ecs::nan_scan::NanSite
+pub fn gg_ecs::nan_scan::NanSite::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum gg_ecs::RegistryError
 pub gg_ecs::RegistryError::DuplicateDeclaration
 pub gg_ecs::RegistryError::DuplicateDeclaration::declared: &'static str
@@ -717,6 +761,8 @@ pub gg_ecs::SideTableError::IdCollision::id: gg_ecs::hash::SideTableId
 pub gg_ecs::SideTableError::IdCollision::second_declared: &'static str
 pub gg_ecs::SideTableError::IdCollision::second_type: &'static str
 pub enum gg_ecs::SnapshotError
+pub gg_ecs::SnapshotError::Allocator
+pub gg_ecs::SnapshotError::Allocator::detail: alloc::string::String
 pub gg_ecs::SnapshotError::Format
 pub gg_ecs::SnapshotError::Format::found: u32
 pub gg_ecs::SnapshotError::Magic
@@ -820,6 +866,16 @@ pub gg_ecs::MigrationReport::components: alloc::vec::Vec<(alloc::string::String,
 pub gg_ecs::MigrationReport::entities: u32
 impl gg_ecs::world::snapshot::MigrationReport
 pub fn gg_ecs::world::snapshot::MigrationReport::is_clean(&self) -> bool
+pub struct gg_ecs::NanHit
+pub gg_ecs::NanHit::bits: u64
+pub gg_ecs::NanHit::component: &'static str
+pub gg_ecs::NanHit::entity: gg_abi::entity::Entity
+pub gg_ecs::NanHit::field: &'static str
+pub gg_ecs::NanHit::lane: u32
+pub gg_ecs::NanHit::type_name: &'static str
+pub gg_ecs::NanHit::width: u32
+impl core::fmt::Display for gg_ecs::nan_scan::NanHit
+pub fn gg_ecs::nan_scan::NanHit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct gg_ecs::Query<D: gg_ecs::query::QueryData>
 impl<D: gg_ecs::query::QueryData> gg_ecs::query::Query<D>
 pub fn gg_ecs::query::Query<D>::access(&self) -> &gg_ecs::view::QueryAccess
@@ -841,6 +897,7 @@ pub fn gg_ecs::registry::Registry::len(&self) -> usize
 pub fn gg_ecs::registry::Registry::new() -> Self
 pub fn gg_ecs::registry::Registry::register<T: gg_ecs::component::Component>(&mut self) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
 pub fn gg_ecs::registry::Registry::register_declared(&mut self, gg_ecs::registry::ComponentInfo) -> core::result::Result<gg_ecs::hash::ComponentId, gg_ecs::registry::RegistryError>
+pub fn gg_ecs::registry::Registry::unclassified_fields(&self) -> &[gg_ecs::nan_scan::UnclassifiedField]
 pub struct gg_ecs::SchemaHash(_)
 impl gg_ecs::hash::SchemaHash
 pub const fn gg_ecs::hash::SchemaHash::from_raw(u128) -> Self
@@ -853,6 +910,13 @@ pub const fn gg_ecs::hash::SideTableId::get(self) -> u64
 pub fn gg_ecs::hash::SideTableId::of(&str) -> Self
 impl core::fmt::Debug for gg_ecs::hash::SideTableId
 pub fn gg_ecs::hash::SideTableId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct gg_ecs::SideTableNan
+pub gg_ecs::SideTableNan::bits: u64
+pub gg_ecs::SideTableNan::declared: &'static str
+pub gg_ecs::SideTableNan::type_name: &'static str
+pub gg_ecs::SideTableNan::width: u32
+impl core::fmt::Display for gg_ecs::nan_scan::SideTableNan
+pub fn gg_ecs::nan_scan::SideTableNan::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct gg_ecs::Snapshot
 impl gg_ecs::world::snapshot::Snapshot
 pub fn gg_ecs::world::snapshot::Snapshot::components(&self) -> impl core::iter::traits::iterator::Iterator<Item = (gg_ecs::hash::ComponentId, gg_ecs::hash::SchemaHash)> + '_
@@ -874,6 +938,7 @@ pub fn gg_ecs::hash::StateHasher::i16(&mut self, i16)
 pub fn gg_ecs::hash::StateHasher::i32(&mut self, i32)
 pub fn gg_ecs::hash::StateHasher::i64(&mut self, i64)
 pub fn gg_ecs::hash::StateHasher::i8(&mut self, i8)
+pub const fn gg_ecs::hash::StateHasher::nan_witness(&self) -> core::option::Option<(u32, u64)>
 pub fn gg_ecs::hash::StateHasher::raw_column(&mut self, usize, usize, &[u8])
 pub fn gg_ecs::hash::StateHasher::schema() -> Self
 pub fn gg_ecs::hash::StateHasher::str(&mut self, &str)
@@ -882,6 +947,13 @@ pub fn gg_ecs::hash::StateHasher::u16(&mut self, u16)
 pub fn gg_ecs::hash::StateHasher::u32(&mut self, u32)
 pub fn gg_ecs::hash::StateHasher::u64(&mut self, u64)
 pub fn gg_ecs::hash::StateHasher::u8(&mut self, u8)
+pub struct gg_ecs::UnclassifiedField
+pub gg_ecs::UnclassifiedField::component: &'static str
+pub gg_ecs::UnclassifiedField::field: &'static str
+pub gg_ecs::UnclassifiedField::ty: &'static str
+pub gg_ecs::UnclassifiedField::type_name: &'static str
+impl core::fmt::Display for gg_ecs::nan_scan::UnclassifiedField
+pub fn gg_ecs::nan_scan::UnclassifiedField::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct gg_ecs::World
 impl gg_ecs::world::World
 pub unsafe fn gg_ecs::world::World::adopt(&mut self, &gg_abi::layout::ComponentsTable) -> core::result::Result<usize, gg_ecs::registry::RegistryError>
@@ -906,6 +978,7 @@ pub fn gg_ecs::world::World::register<T: gg_ecs::component::Component>(&mut self
 pub fn gg_ecs::world::World::registry(&self) -> &gg_ecs::registry::Registry
 pub fn gg_ecs::world::World::remove<T: gg_ecs::component::Component>(&mut self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::world::World::remove_side_table<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<T>
+pub fn gg_ecs::world::World::scan_for_nan(&self) -> core::option::Option<gg_ecs::nan_scan::NanSite>
 pub fn gg_ecs::world::World::side_table<T: gg_ecs::side_table::SideTable>(&self) -> core::option::Option<&T>
 pub fn gg_ecs::world::World::side_table_count(&self) -> usize
 pub fn gg_ecs::world::World::side_table_mut<T: gg_ecs::side_table::SideTable>(&mut self) -> core::option::Option<&mut T>

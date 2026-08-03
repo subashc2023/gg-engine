@@ -11,6 +11,7 @@ mod ci;
 mod dist;
 mod dx;
 mod fresh;
+mod gpuav;
 mod probe;
 mod public_api;
 mod replay;
@@ -40,6 +41,7 @@ fn main() {
         Some("assets") => assets::run(&rest),
         Some("bench") => bench::run(&rest),
         Some("dx") => dx::run(&rest),
+        Some("gpuav") => gpuav::run(&rest),
         Some("backlog") => backlog::run(),
         _ => usage(),
     };
@@ -64,6 +66,7 @@ fn usage() -> anyhow::Result<()> {
          dist                                             dist gate: build+run tier-dist, symbol absence, crash symbolization (§5.8)\n\
          reload [--cross-tier|--segments|--chaos|--latency]  the M5 shell gates over demo 03; no flag runs the set\n\
          bench [--record]                                 smoke on lavapipe; --record archives real numbers per machine (§4.11)\n\
+         gpuav [--adapter <name>]                         GPU-assisted validation: instrumented shaders, offscreen only (§5 gate 4)\n\
          dx [--record]                                    developer-experience benchmarks: steps, lines, rebuild latency (§8)\n\
          backlog                                          the P1/P2 items, found in the doc comments that defer them (§6 M12)\n\
          assets [--check]                                 compile every demo's asset tree; --check proves two clean runs agree byte for byte (§4.6)"

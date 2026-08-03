@@ -7,12 +7,16 @@
 //! see — a changed component invariant, a resized math type behind an unchanged
 //! API, or a `HOST_API_VERSION` somebody forgot to bump.
 //!
-//! Scope is the whole of `gg-abi`, `gg-ecs` and `gg-math` and nothing else,
-//! which is §3's game-crate deny pin read as a hash: a game dylib may link those
-//! three engine crates and no others, so the fingerprint's scope and the dylib's
-//! possible link set are the same list by construction. A comment edit in
-//! `gg-render` must not invalidate a running session for a layout that cannot
-//! have changed.
+//! Scope is the whole of the four crates in [`BOUNDARY_CRATES`] plus the
+//! workspace-root manifest and lock file, and nothing else. The crate list is
+//! §3's game-crate deny pin read as a hash — it must stay character-for-character
+//! `xtask`'s `GAME_CRATE_PIN`, or the fingerprint claims coverage the link set
+//! does not have. The workspace manifest is in scope because every third-party
+//! version in those crates is `{ workspace = true }` and resolved there:
+//! repinning `libm` is a Determinism Contract event that moves sim result bits,
+//! and hashing only the crate manifests would accept a game dylib built against
+//! the old pin. A comment edit in `gg-render` still must not invalidate a running
+//! session, for a layout that cannot have changed.
 //!
 //! Both sides of the seam link `gg-abi`, so both get the constant from whichever
 //! `gg-abi` they compiled against — which is what makes comparing them mean
@@ -20,15 +24,22 @@
 
 use std::path::{Path, PathBuf};
 
-/// The crates the fingerprint covers (§4.2.2). Adding one here without adding it
-/// to `deny.toml`'s game-crate pin would make the hash claim coverage the link
-/// set does not have.
-const BOUNDARY_CRATES: [&str; 3] = ["gg-abi", "gg-ecs", "gg-math"];
+/// The crates the fingerprint covers (§4.2.2) — the same list as `xtask`'s
+/// `GAME_CRATE_PIN`, and a divergence between the two is a silent hole rather
+/// than a loud one. `gg-ecs-derive` is on it because it *generates* `DECLARED_ID`,
+/// `TYPE_NAME` and `FIELDS`: an edit that requalifies a field's type token moves
+/// every `schema_hash` while leaving the fingerprint still, and `migrate_fields`
+/// then zeroes every field it can no longer type-match — the whole world silently
+/// resetting on the next reload.
+const BOUNDARY_CRATES: [&str; 4] = ["gg-abi", "gg-ecs", "gg-ecs-derive", "gg-math"];
 
 fn main() {
     let manifest = PathBuf::from(env("CARGO_MANIFEST_DIR"));
     let Some(crates_dir) = manifest.parent() else {
         panic!("gg-abi must live under crates/");
+    };
+    let Some(workspace) = crates_dir.parent() else {
+        panic!("crates/ must live under the workspace root");
     };
 
     let mut hasher = blake3::Hasher::new();
@@ -37,7 +48,23 @@ fn main() {
     // thing a rustc bump is allowed to move.
     hasher.update(rustc_version().as_bytes());
 
-    let mut files = Vec::new();
+    // Where `{ workspace = true }` resolves: the versions the boundary crates
+    // actually compile against are pinned here, not in their own manifests.
+    let mut files = vec![workspace.join("Cargo.toml")];
+    // And the manifest resolves a *range*: `libm = "0.2"` is 0.2.15 or 0.2.16
+    // depending on the lock alone, so a `cargo update` moves sim result bits
+    // while leaving every other hashed byte where it was — precisely the
+    // Determinism Contract event this fingerprint exists to catch. Hashing the
+    // whole file is deliberately over-broad: an unrelated `gg-render` bump now
+    // invalidates a running hot-reload session, which errs toward refusing a
+    // dylib that would have been fine and never toward accepting one that is not.
+    let lock = workspace.join("Cargo.lock");
+    assert!(
+        lock.is_file(),
+        "no Cargo.lock at {} — a skipped input is the hole this hashes it to close",
+        lock.display()
+    );
+    files.push(lock);
     for name in BOUNDARY_CRATES {
         let root = crates_dir.join(name);
         assert!(
@@ -55,8 +82,10 @@ fn main() {
 
     for file in &files {
         println!("cargo:rerun-if-changed={}", file.display());
+        // Relative to the workspace root, which is the one prefix every hashed
+        // file shares — an absolute path would make the hash the checkout's.
         let rel = file
-            .strip_prefix(crates_dir)
+            .strip_prefix(workspace)
             .unwrap_or(file)
             .to_string_lossy()
             // Path separators are not content: the same tree must hash the same

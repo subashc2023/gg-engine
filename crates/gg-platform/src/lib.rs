@@ -42,6 +42,22 @@ pub fn headless() -> bool {
 /// against the same number.
 pub const OFFSCREEN_POS: (i32, i32) = (-30000, -30000);
 
+/// True when a position the OS *reported* is far enough out to satisfy §1.5 —
+/// the same threshold the regression tests assert against.
+///
+/// A half-plane rather than equality with [`OFFSCREEN_POS`], because the number
+/// the platform reports back is not the number we asked for: X11 moves by the
+/// parent-relative *inner* position but emits `Moved` as the *outer* one, so
+/// under any decorating WM an equality guard never holds and every `Moved`
+/// re-parks. The same margin covers Win32's minimized-window sentinel
+/// (-32000, -32000): a minimized window is already off-screen, and moving it
+/// only makes Windows re-report the sentinel — `Moved` → park → `Moved`, with
+/// nothing to break the loop (winit's Win32 path forwards `WINDOWPOS` verbatim,
+/// with no change-detection of its own).
+fn is_parked(pos: (i32, i32)) -> bool {
+    pos.0 <= OFFSCREEN_POS.0 / 2 && pos.1 <= OFFSCREEN_POS.1 / 2
+}
+
 /// What kind of window to create.
 #[derive(Clone, Debug)]
 pub struct WindowDesc {
@@ -85,6 +101,10 @@ impl WindowDesc {
 /// winit types (§2, Windowing row).
 pub struct Window {
     inner: winit::window::Window,
+    /// Whether §1.5's off-screen parking applies. Carried on the window rather
+    /// than re-derived from a [`WindowDesc`] at each event: both drivers must
+    /// re-park, and [`Pump`]'s handler holds no desc after creation.
+    parked: bool,
 }
 
 /// The X11 half of §1.5, applied at creation because these are creation-time
@@ -172,6 +192,7 @@ impl Window {
         }
         let window = Self {
             inner: event_loop.create_window(attrs)?,
+            parked: !desc.visible,
         };
         if !desc.visible {
             window.harden_invisible();
@@ -179,15 +200,27 @@ impl Window {
         Ok(window)
     }
 
-    /// Re-assert the off-screen parking (§1.5).
+    /// Re-assert the off-screen parking (§1.5) from a reported position. Both
+    /// drivers call it on every `Moved`; it does nothing for a visible window or
+    /// a position already [`is_parked`].
     ///
     /// Parking is not a one-time act. On Windows, `SW_RESTORE` sets
     /// `WS_VISIBLE` and winit never re-hides, so after the first un-minimize
     /// the window is genuinely visible and *only* its position keeps it off a
     /// monitor — while display-topology changes (monitor hot-plug, resolution
     /// change, RDP reconnect) can relocate a window the OS considers stray.
-    /// The event loop calls this whenever an invisible window reports a move.
-    fn park_offscreen(&self) {
+    ///
+    /// Termination rests on [`is_parked`] and not on winit gating `Moved` behind
+    /// an inner-position change: a move is issued only from a position the
+    /// platform reports as on-screen, and a park that took effect reports an
+    /// off-screen one under either coordinate convention. Against a WM that
+    /// answers each move by dragging the window back onto a monitor it does not
+    /// terminate — and must not, since conceding is a window on the user's
+    /// screen; each round trip is WM-paced, not a spin.
+    fn repark_after_move(&self, pos: (i32, i32)) {
+        if !self.parked || is_parked(pos) {
+            return;
+        }
         self.inner
             .set_outer_position(winit::dpi::PhysicalPosition::new(
                 OFFSCREEN_POS.0,
@@ -647,14 +680,10 @@ impl ApplicationHandler for App<'_> {
             // §1.5: an invisible window that moved is a window whose parking
             // the OS just undid — re-park it. Not reported upward: nothing
             // above gg-platform has any business knowing where a window that
-            // must never be seen happens to sit. The position guard is what
-            // makes this terminate, since set_outer_position itself emits Moved.
+            // must never be seen happens to sit.
             WindowEvent::Moved(pos) => {
-                if !self.desc.visible
-                    && (pos.x, pos.y) != OFFSCREEN_POS
-                    && let Some(window) = &self.window
-                {
-                    window.park_offscreen();
+                if let Some(window) = &self.window {
+                    window.repark_after_move((pos.x, pos.y));
                 }
                 return;
             }
@@ -732,7 +761,20 @@ struct PumpApp<'a> {
     /// Present only during [`Pump::new`]'s creation pumps; later pumps never
     /// create windows.
     create: Option<PumpCreate<'a>>,
+    /// The window once [`Pump`] owns it; `None` during [`Pump::new`], where it
+    /// still lives inside `create`.
+    window: Option<&'a Window>,
     events: &'a mut Vec<Event>,
+}
+
+impl PumpApp<'_> {
+    /// The live window, from whichever of the two places currently holds it.
+    fn live_window(&self) -> Option<&Window> {
+        match &self.create {
+            Some(create) => create.window.as_ref(),
+            None => self.window,
+        }
+    }
 }
 
 struct PumpCreate<'a> {
@@ -766,6 +808,16 @@ impl ApplicationHandler for PumpApp<'_> {
             WindowEvent::Resized(size) => self.events.push(Event::Resized(size.width, size.height)),
             WindowEvent::CloseRequested => self.events.push(Event::CloseRequested),
             WindowEvent::RedrawRequested => self.events.push(Event::Frame),
+            // §1.5's re-park, and it has to exist here as well as in App:
+            // every window-creating test drives Pump, so a mechanism living
+            // only on the `run` path is one no test can catch no-opping — and
+            // the storms that undo the parking are exactly the tests that run
+            // here. Never surfaced as an Event; see App's arm.
+            WindowEvent::Moved(pos) => {
+                if let Some(window) = self.live_window() {
+                    window.repark_after_move((pos.x, pos.y));
+                }
+            }
             _ => {}
         }
     }
@@ -802,6 +854,7 @@ impl Pump {
                     window: &mut window,
                     error: &mut error,
                 }),
+                window: None,
                 events: &mut events,
             };
             winit::platform::pump_events::EventLoopExtPumpEvents::pump_app_events(
@@ -833,6 +886,7 @@ impl Pump {
     pub fn pump(&mut self) -> Vec<Event> {
         let mut app = PumpApp {
             create: None,
+            window: Some(&self.window),
             events: &mut self.events,
         };
         winit::platform::pump_events::EventLoopExtPumpEvents::pump_app_events(

@@ -52,12 +52,25 @@ ConstantBuffer<ScenePush> push;
 static const uint VERTEX_STRIDE = 48;
 static const uint INSTANCE_STRIDE = 128;
 
-// Positions carry scale through the matrix, which non-uniform scale would shear
-// a normal by, so normals and tangents take the rotation on its own.
 float3 rotate_by(float4 q, float3 v)
 {
     float3 t = 2.0 * cross(q.xyz, v);
     return v + q.w * t + cross(q.xyz, t);
+}
+
+// The instance scale with every component pulled off zero, sign kept.
+//
+// Only the tangent-frame paths use it; positions take `inst.scale` raw, because
+// prepass and forward agree on a fragment's depth only if they compute it from
+// bit-identical inputs. A zero component collapses the instance into a plane,
+// whose reciprocal is infinite and whose normalize is NaN — a black pixel that
+// reads as a lighting bug. Clamped, the collapsed axis merely dominates, so the
+// normal points along it: the direction a flattened surface faces. The sign
+// survives because a negative scale is a mirror and the normal flips with it.
+float3 nonzero_scale(float3 s)
+{
+    float3 magnitude = max(abs(s), 1e-8);
+    return select(s < 0.0, -magnitude, magnitude);
 }
 
 // One instance's record. Read as scalars for the same reason vertices are: a
@@ -123,13 +136,23 @@ VOut vs_main(uint vid: SV_VertexID, uint iid: SV_InstanceID)
     Frame frame = load_frame(push.frame);
 
     float3 local = float3(v[0], v[1], v[2]);
-    float3 normal = rotate_by(inst.rotation, float3(v[3], v[4], v[5]));
+    // The model matrix is T*R*S with S diagonal, so the inverse-transpose of its
+    // upper 3x3 is R*S^-1 — no inverse to compute. A normal takes that; a
+    // tangent lies *in* the surface and takes M itself. The two agree up to
+    // length under uniform scale and not otherwise, which is why taking the
+    // rotation alone shades an ellipsoid as though it were a sphere.
+    float3 scale = nonzero_scale(inst.scale);
+    float3 normal = normalize(rotate_by(inst.rotation, float3(v[3], v[4], v[5]) / scale));
 
     VOut o;
     o.pos = mul(inst.mvp, float4(local, 1.0));
     o.world = inst.offset + rotate_by(inst.rotation, local * inst.scale);
     o.normal = normal;
-    o.tangent = float4(rotate_by(inst.rotation, float3(v[8], v[9], v[10])), v[11]);
+    // No longer perpendicular to the normal once the scale is non-uniform;
+    // `apply_normal_map` re-orthogonalizes by Gram-Schmidt, which is the same
+    // repair interpolation across a triangle already needs.
+    float3 tangent = rotate_by(inst.rotation, float3(v[8], v[9], v[10]) * scale);
+    o.tangent = float4(normalize(tangent), v[11]);
     o.uv = float2(v[6], v[7]);
     o.tint = inst.tint.rgb;
     o.light_clip = to_light_clip(frame, o.world, normalize(normal));

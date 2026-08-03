@@ -96,6 +96,9 @@ pub(crate) fn ensure_lavapipe() -> anyhow::Result<PathBuf> {
 /// The M4A bindless path (§6 M0A spike 2): every row here is load-bearing for
 /// the CI quality story in §5, which is why absence is an error, not a warning.
 fn probe_device(system: bool) -> anyhow::Result<()> {
+    // SAFETY: `load` dlopen's the system Vulkan loader, whose obligation is that
+    // nothing else in the process is mid-teardown of it — this is the first
+    // Vulkan call the probe makes, and `entry` outlives every use below.
     let entry = unsafe { ash::Entry::load() }
         .map_err(|e| anyhow::anyhow!("Vulkan loader not found: {e}"))?;
 

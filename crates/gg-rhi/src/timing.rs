@@ -124,7 +124,8 @@ pub(crate) struct Timings {
     period: f32,
     /// Which bits of a reading are real (§4.8: some queues report fewer than 64).
     mask: u64,
-    /// Per slot: the names recorded there, empty until that slot has run once.
+    /// Per slot: the names recorded there, empty until a *submitted* frame has
+    /// timed that slot — which is what [`Timings::collect`] keys off.
     pending: Vec<Vec<String>>,
     /// The most recent completed frame's per-pass times.
     last: Vec<PassTiming>,
@@ -165,8 +166,15 @@ impl Timings {
         }
     }
 
-    /// Record which passes this slot is about to time. Called at record time,
-    /// so the names are captured while the graph's borrows are still alive.
+    /// Record which passes `slot` is timing.
+    ///
+    /// # Contract
+    /// A registration must not survive a frame that never **submitted**:
+    /// [`Timings::collect`] reads a slot on the strength of it, and a frame that
+    /// aborted before recording reset none of these queries and wrote none of
+    /// them. `Rhi::execute` therefore registers after its submit — its abort
+    /// path retries onto the same slot — while `OffscreenRhi` brackets one
+    /// synchronous submit between this call and its collect.
     pub(crate) fn expect(&mut self, slot: usize, names: impl Iterator<Item = String>) {
         let pending = &mut self.pending[slot];
         pending.clear();
@@ -174,7 +182,8 @@ impl Timings {
     }
 
     /// Read back the frame that last used `slot`, which the caller has already
-    /// proven retired. A slot that has not run yet reads nothing.
+    /// proven retired. A slot no submitted frame has timed reads nothing —
+    /// which is the whole guard against reading a query that was never written.
     ///
     /// Errors are logged and swallowed: a profiler that takes the frame down
     /// when a query misbehaves is worse than no profiler.
@@ -185,8 +194,11 @@ impl Timings {
         }
         let mut raw = vec![0u64; count * 2];
         let base = QUERIES_PER_SLOT * slot as u32;
-        // SAFETY: the pool is live, the range was written by a frame the caller
-        // proved retired, and `raw` is one u64 per query.
+        // SAFETY: the pool is live and `raw` is one u64 per query. The range was
+        // reset and written by the frame that registered these names (see
+        // `expect`'s contract, which is what keeps an aborted frame's names out
+        // of here) and the caller proved that frame retired, so nothing below
+        // reads a query that was never written.
         let read = unsafe {
             device.raw().get_query_pool_results(
                 self.pool,

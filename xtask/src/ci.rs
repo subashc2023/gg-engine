@@ -1,14 +1,23 @@
 //! `cargo xtask ci` — the four tiers of §3/§5. `--fast` is the Stop hook's tier
-//! and lives under a <30 s warm budget: it must never be the reason agent turns
-//! balloon. Every tier is headless (§1.5) via util::cargo() — and *windowless
-//! by construction*: no automated tier creates an OS window at all (presenting
-//! maps a Wayland surface, minimize/restore maps X11/Win32 ones, and WSLg
-//! mirrors any mapped window onto the real desktop — "invisible" is not a
-//! property CI may rely on). Everything windowed lives in the manual suite,
-//! `cargo xtask interactive`, run by a human who expects windows.
+//! and lives under [`FAST_TIER_BUDGET`], now measured rather than claimed: it
+//! must never be the reason agent turns balloon. Every tier is headless (§1.5)
+//! via util::cargo() — and *windowless by construction*: no automated tier
+//! creates an OS window at all (presenting maps a Wayland surface,
+//! minimize/restore maps X11/Win32 ones, and WSLg mirrors any mapped window onto
+//! the real desktop — "invisible" is not a property CI may rely on). Everything
+//! windowed lives in the manual suite, `cargo xtask interactive`, run by a human
+//! who expects windows.
+//!
+//! `--hook`'s exit 2 is decided in `main`, so it can only report a tier that
+//! *ran*. A hook that fails closed when `xtask` itself will not compile needs a
+//! layer above the binary, and that layer is the `|| exit 2` in
+//! `.claude/settings.json`: cargo answers a build error with 101, and Claude Code
+//! reads any nonzero-but-not-2 exit as non-blocking — an agent that broke `xtask`
+//! would otherwise have disabled the gate that catches it breaking anything else.
 
 use crate::util::{cargo, run as exec, run_capture, walk_rs, workspace_root};
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 pub fn run_tier(tier: &str) -> anyhow::Result<()> {
     match tier {
@@ -29,6 +38,26 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
     run_tier(tier)
 }
 
+/// §5's verification budget for the Stop hook's tier: `--fast` **< 30 s** warm.
+///
+/// The §3 budgets that count *artifacts* — shell lines, per-crate dependencies,
+/// reference-image bytes — live in `budgets.rs`; this one is a property of the
+/// tier running and can only be weighed where it runs. Raising it is a PR that
+/// says what the tier took delivery of, exactly as raising `SHELL_BUDGET` is;
+/// the standing rule is a faster `--fast`, never a bigger number.
+const FAST_TIER_BUDGET: Duration = Duration::from_secs(30);
+
+/// How many recent `--fast` runs the budget is judged over, by their **minimum**.
+///
+/// A cold cache, a toolchain bump and a `Cargo.toml` touch all rebuild the world,
+/// and none of them is the tier being slow — but every one of them would block an
+/// agent turn if a single sample decided. Contention and rebuilds only ever *add*
+/// time, so the fastest of the recent runs is the warm figure the budget is
+/// about; §6 M4B took the same best-of-N against §4.4's save-to-screen budget for
+/// the same reason. A tier that is over budget five runs running has no warm case
+/// left to appeal to.
+const FAST_TIER_WINDOW: usize = 5;
+
 /// Stop-hook tier: fmt + clippy on changed crates + tests for changed crates.
 /// A clean tree passes by definition — the hook blocks on dirty-and-red only.
 fn fast() -> anyhow::Result<()> {
@@ -37,11 +66,63 @@ fn fast() -> anyhow::Result<()> {
         println!("xtask ci --fast: tree clean — green by definition");
         return Ok(());
     }
+    let started = std::time::Instant::now();
     let crates = crates_touched(&changed);
     exec(cargo().args(["fmt", "--check"]), "cargo fmt --check")?;
     clippy(&crates)?;
     tests(&crates)?;
     println!("xtask ci --fast: green");
+    fast_tier_budget(started.elapsed())
+}
+
+/// Hold `--fast` to [`FAST_TIER_BUDGET`] on the evidence of its own recent runs.
+///
+/// Deliberately *not* measured on the clean-tree path above: that branch does no
+/// work, and recording its milliseconds would pin the minimum at zero forever —
+/// a budget its own no-op satisfies is not a budget. The ledger lives under
+/// `target/`, so `cargo clean` costs the window and nothing else.
+fn fast_tier_budget(took: Duration) -> anyhow::Result<()> {
+    let took_ms = u64::try_from(took.as_millis()).unwrap_or(u64::MAX);
+    let ledger = workspace_root().join("target/xtask-fast-tier.txt");
+    let mut window: Vec<u64> = std::fs::read_to_string(&ledger)
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    window.push(took_ms);
+    let window = &window[window.len().saturating_sub(FAST_TIER_WINDOW)..];
+    // Best effort: a target directory that cannot be written is not a red tier.
+    let _ = std::fs::write(
+        &ledger,
+        window
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+
+    println!("xtask: --fast took {took_ms} ms");
+    fast_tier_verdict(window)
+}
+
+/// The verdict on a window of `--fast` durations, in milliseconds.
+///
+/// Split from the measurement so the budget can be *shown* to fail, the way §3's
+/// greps are shown to (`mod tests` below): a number nobody has ever seen go red
+/// is a budget on the same footing as a gate nobody has ever seen reject.
+fn fast_tier_verdict(window: &[u64]) -> anyhow::Result<()> {
+    let budget_ms = u64::try_from(FAST_TIER_BUDGET.as_millis()).unwrap_or(u64::MAX);
+    let best = window.iter().copied().min().unwrap_or(0);
+    println!(
+        "xtask: best of the last {} --fast runs is {best} ms against a {budget_ms} ms budget (§5)",
+        window.len()
+    );
+    anyhow::ensure!(
+        best <= budget_ms || window.len() < FAST_TIER_WINDOW,
+        "the fast tier has not been under its {budget_ms} ms budget once in {FAST_TIER_WINDOW} \
+         runs (best {best} ms) — the Stop hook is what keeps agent turns sub-minute (§5), so the \
+         fix is a faster `--fast` or a check moved down the tier ladder, never a bigger number"
+    );
     Ok(())
 }
 
@@ -133,6 +214,10 @@ fn nightly() -> anyhow::Result<()> {
     // quietly measuring nothing.
     crate::dx::run(&[])?;
     gpu_tests()?;
+    // Instrumented shaders catch what the layer alone cannot see: an out-of-range
+    // bindless index, a read off the end of a device address (§8's sync/upload
+    // risk row). Nightly rather than weekly — 28 s windowless on the pin.
+    crate::gpuav::run(&[])?;
     golden_suite()?;
     println!(
         "xtask ci --nightly: green (windowless by construction — windowed WSI coverage is \
@@ -625,29 +710,37 @@ fn aarch64_leg() -> anyhow::Result<()> {
 /// `profiling` already re-enables `broadcast` through `profile-with-tracy`, and
 /// the same route could as easily drop ours in a bump.
 fn tracy_stays_on_loopback() -> anyhow::Result<()> {
-    let out = cargo()
-        .args([
-            "tree",
-            "-p",
-            "gg-runtime",
-            "--no-default-features",
-            "--features",
-            "tier-instrumented",
-            "-e",
-            "features",
-            "-i",
-            "tracy-client",
-        ])
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to spawn `cargo tree`: {e}"))?;
-    // Absent from the graph is the stronger form of the same guarantee, and
-    // that is what `-i` failing means here.
-    if !out.status.success() {
+    // Absence is proven, never inferred from a failure. `cargo tree -i` exits
+    // nonzero for "not in the graph" *and* for a renamed package, a dropped
+    // feature or a resolver error — reading the second as the first made this
+    // gate fail open. So the tier is resolved once without `-i`, which errors
+    // only if `gg-runtime`/`tier-instrumented` stopped existing, and the answer
+    // is read out of that.
+    let args = [
+        "tree",
+        "-p",
+        "gg-runtime",
+        "--no-default-features",
+        "--features",
+        "tier-instrumented",
+        "-e",
+        "features",
+    ];
+    let tree = run_capture(
+        cargo().args(args),
+        "cargo tree (tier-instrumented feature graph)",
+    )?;
+    if !tree.contains("tracy-client") {
         println!("xtask: tier-instrumented links no tracy-client — nothing binds");
         return Ok(());
     }
+    // Present: the inverted query must now succeed too, and name the feature.
+    let inverted = run_capture(
+        cargo().args(args).args(["-i", "tracy-client"]),
+        "cargo tree -i tracy-client",
+    )?;
     anyhow::ensure!(
-        String::from_utf8_lossy(&out.stdout).contains("only-localhost"),
+        inverted.contains("only-localhost"),
         "tier-instrumented resolves tracy-client without `only-localhost`: its listener would \
          bind every interface, and the desk would collect a firewall prompt per build hash. \
          Fix the feature list in the workspace Cargo.toml, not this gate."
@@ -836,15 +929,27 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
     let mut files = Vec::new();
     walk_rs(&root.join("crates"), &mut files);
     walk_rs(&root.join("demos"), &mut files);
+    // The harness and CI's own source sat outside every §3 grep on no stated
+    // ground: no SAFETY rule over `tools/`, none over the `unsafe` in this
+    // crate's own Vulkan probe. Two rules below carve `xtask` back out, and
+    // they say why at the site.
+    walk_rs(&root.join("tools"), &mut files);
+    walk_rs(&root.join("xtask"), &mut files);
 
     let mut violations = Vec::new();
     for file in &files {
         let rel = file.strip_prefix(root).unwrap_or(file);
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let text = std::fs::read_to_string(file)?;
+        let lines: Vec<&str> = text.lines().collect();
+        // `xtask` is outside the containment seam by charter — deny.toml already
+        // names it in `ash`'s wrappers for the §6 M0A capability probe — and
+        // this file must spell both bans literally to be one.
+        let spells_the_bans = rel_str.starts_with("xtask/");
 
         // API containment (§3): vk::/ash:: tokens live in gg-rhi alone.
         if !rel_str.starts_with("crates/gg-rhi/")
+            && !spells_the_bans
             && let Some(tok) = ["ash::", "vk::"]
                 .into_iter()
                 .find(|t| contains_path(&text, t))
@@ -852,64 +957,80 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
             violations.push(format!("{rel_str}: `{tok}` token outside gg-rhi (§3)"));
         }
 
-        // Float-time fields (§2 Sim time row). Scoped to hashed components for
-        // real at M3; until then any struct-field-shaped hit in engine/game
-        // code is treated as a violation.
-        for (lineno, line) in text.lines().enumerate() {
-            let t = line
-                .trim_start()
-                .strip_prefix("pub ")
-                .unwrap_or(line.trim_start());
-            for field in ["time", "elapsed", "dt", "seconds", "duration", "timer"] {
-                for width in ["f32", "f64"] {
-                    if (t.starts_with(&format!("{field}: {width}"))
-                        || t.starts_with(&format!("{field}: Option<{width}>")))
-                        && !line.contains("fn ")
-                    {
-                        violations.push(format!(
-                            "{rel_str}:{}: float time field `{field}` (§2 Sim time row)",
-                            lineno + 1
-                        ));
-                    }
+        // Float-time declarations (§2 Sim time row), matched off the
+        // declaration: visibility of any shape, whitespace either side of the
+        // colon, and the newtype spelling. Scoped to the sim half — see
+        // [`NON_SIM_TREES`]. What is still owed is M3's scoping to *hashed
+        // components*: nothing here knows which those are, so [`is_time_ish`]
+        // stands in for the type question.
+        if !NON_SIM_TREES.iter().any(|tree| rel_str.starts_with(tree)) {
+            for (lineno, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                if t.starts_with("//") {
+                    continue;
+                }
+                if let Some(name) = float_time_newtype(t) {
+                    violations.push(format!(
+                        "{rel_str}:{}: float time newtype `{name}` (§2 Sim time row)",
+                        lineno + 1
+                    ));
+                    continue;
+                }
+                // A method is not a field — and `fn` inside a comment used to
+                // trip this escape, silencing the field on the next line.
+                if t.contains("fn ") {
+                    continue;
+                }
+                let Some((name, ty)) = strip_visibility(t).split_once(':') else {
+                    continue;
+                };
+                let (name, ty) = (name.trim_end(), ty.trim_start());
+                // One bare identifier or it is not a field: segment matching
+                // would otherwise read `let ms: f32 = …` — a local, and none of
+                // this row's business — as a declaration.
+                if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    continue;
+                }
+                if is_time_ish(name) && is_float(ty) {
+                    violations.push(format!(
+                        "{rel_str}:{}: float time field `{name}` (§2 Sim time row)",
+                        lineno + 1
+                    ));
                 }
             }
         }
 
-        // Every `unsafe` block and `unsafe impl` carries a `// SAFETY:` within
-        // the preceding 8 lines (§4.2 M3 exit, and the standing rule for
+        // Every `unsafe` block and `unsafe impl` carries **its own** `// SAFETY:`
+        // within the preceding 8 lines (§4.2 M3 exit, and the standing rule for
         // gg-rhi). `unsafe fn` *declarations* are exempt: their obligation is on
         // the caller and belongs in the doc comment, not in a SAFETY note.
-        let lines: Vec<&str> = text.lines().collect();
+        let mut claimed = vec![false; lines.len()];
         for (lineno, line) in lines.iter().enumerate() {
-            let t = line.trim_start();
-            if t.starts_with("//") {
-                continue;
-            }
-            let is_site = t.contains("unsafe impl")
-                || line
-                    .split("unsafe")
-                    .skip(1)
-                    .any(|rest| rest.trim_start().starts_with('{'));
-            if is_site
-                && !lines[lineno.saturating_sub(8)..lineno]
-                    .iter()
-                    .any(|l| l.contains("SAFETY"))
-            {
+            if unsafe_site(line) && !claim_safety_note(&lines, &mut claimed, lineno) {
                 violations.push(format!(
-                    "{rel_str}:{}: unsafe without a `// SAFETY:` note (§4.2)",
+                    "{rel_str}:{}: unsafe without a `// SAFETY:` note of its own (§4.2)",
                     lineno + 1
                 ));
             }
         }
 
-        // Game crates: no smuggled state across reloads (§4.2.2). Demos 03+
-        // are the game crates; the grep stands ready from day one.
-        if rel_str.starts_with("demos/")
-            && (text.contains("static mut") || text.contains("thread_local!"))
-        {
-            violations.push(format!(
-                "{rel_str}: static mut / thread_local! in a game crate (§4.2.2)"
-            ));
+        // Game crates: no state smuggled across a reload (§4.2.2). `static mut`
+        // is one spelling of a dozen — a `static` holding an atomic, a lock, a
+        // cell or a lazy initializer survives a reload exactly as well — so the
+        // match is on the *declaration*, which is also what keeps a `let` local
+        // and a comment naming one out of it.
+        if rel_str.starts_with("demos/") {
+            for (lineno, line) in lines.iter().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                if let Some(what) = retained_state(line) {
+                    violations.push(format!(
+                        "{rel_str}:{}: {what} in a game crate (§4.2.2)",
+                        lineno + 1
+                    ));
+                }
+            }
         }
 
         // Hand-written barriers (§4.5, §6 M6): every `synchronization2` barrier
@@ -919,6 +1040,7 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
         // transfer paired across two queues, not a pass dependency the
         // single-queue v1 graph models.
         if !BARRIER_SITES.contains(&rel_str.as_str())
+            && !spells_the_bans
             && let Some(tok) = BARRIER_TOKENS.into_iter().find(|t| contains_path(&text, t))
         {
             violations.push(format!(
@@ -931,6 +1053,240 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
 
     Ok((violations, files.len()))
 }
+
+/// A declaration with its visibility removed — `pub`, `pub(crate)`, `pub(in …)`.
+/// Which of the three it is has never been a question either gate above asks,
+/// and stripping only `"pub "` is how `pub(crate) dt: f32` used to pass.
+fn strip_visibility(line: &str) -> &str {
+    let t = line.trim_start();
+    let Some(rest) = t.strip_prefix("pub") else {
+        return t;
+    };
+    match rest.strip_prefix('(').and_then(|r| r.split_once(')')) {
+        Some((_, after)) => after.trim_start(),
+        // Not an identifier that merely begins with those three letters.
+        None if rest.starts_with(char::is_whitespace) => rest.trim_start(),
+        None => t,
+    }
+}
+
+/// Where §2's Sim time row does **not** bind: the halves that measure a real
+/// clock. A GPU timestamp, a frame p99, a Tracy zone and a rebuild latency are
+/// wall clock in milliseconds, and float is the correct type for every one of
+/// them — §1.4's membrane is exactly this line. Scoping the gate is what keeps it
+/// from growing the per-file exception list that ends with the field it was
+/// written for exempted. `xtask/` is additionally here because this file must
+/// spell the planted declarations literally in order to *be* the gate.
+const NON_SIM_TREES: [&str; 5] = [
+    "crates/gg-debug/",
+    "crates/gg-render/",
+    "crates/gg-rhi/",
+    "tools/",
+    "xtask/",
+];
+
+/// Name segments that name a clock (§2 Sim time row).
+///
+/// A pattern rather than the six literals this replaces: the escapes were never
+/// exotic — `cooldown`, `timestamp`, `age_secs`, `accumulator` — and a name list
+/// is a game of whack-a-mole the gate loses by construction. Matched
+/// whole-segment (see [`segments`]), because a substring test reads `damage` as
+/// an `age` and a gate that cries wolf is one that gets switched off.
+///
+/// `remaining` and `left` are deliberately absent: bare, they are as often a
+/// count as a clock — `gg-ecs`'s side-table fixture has an order's `remaining:
+/// f64` — while `remaining_secs` and `time_remaining` are caught by their other
+/// segment anyway.
+const TIME_WORDS: [&str; 29] = [
+    "accum",
+    "accumulator",
+    "age",
+    "clock",
+    "cooldown",
+    "countdown",
+    "deadline",
+    "delay",
+    "dt",
+    "duration",
+    "elapsed",
+    "interval",
+    "lifetime",
+    "millis",
+    "ms",
+    "nanos",
+    "ns",
+    "period",
+    "sec",
+    "seconds",
+    "secs",
+    "since",
+    "time",
+    "timer",
+    "timers",
+    "times",
+    "timestamp",
+    "ttl",
+    "uptime",
+];
+
+/// Whether an identifier names a clock: any whole segment in [`TIME_WORDS`].
+fn is_time_ish(name: &str) -> bool {
+    segments(name).iter().any(|s| TIME_WORDS.contains(&&**s))
+}
+
+/// Lowercase word segments of an identifier, split on `_` and on camel humps —
+/// so one predicate reads a snake_case field and a CamelCase newtype alike.
+fn segments(name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    for c in name.chars() {
+        if c == '_' || !(c.is_ascii_alphanumeric()) {
+            if !word.is_empty() {
+                out.push(std::mem::take(&mut word));
+            }
+        } else if c.is_ascii_uppercase() && !word.is_empty() {
+            out.push(std::mem::take(&mut word));
+            word.push(c.to_ascii_lowercase());
+        } else {
+            word.push(c.to_ascii_lowercase());
+        }
+    }
+    if !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+/// Whether a type position opens with a float width, `Option` included.
+fn is_float(ty: &str) -> bool {
+    ["f32", "f64"]
+        .into_iter()
+        .any(|w| ty.starts_with(w) || ty.starts_with(&format!("Option<{w}>")))
+}
+
+/// `struct Timer(f32);` — the same ban worn as a newtype, which the field match
+/// cannot see: there is no field name, and the name under test is the type's.
+/// Any float in the tuple counts, so `struct Cooldown(u32, f32)` is still a
+/// float clock.
+fn float_time_newtype(line: &str) -> Option<&str> {
+    let decl = strip_visibility(line).strip_prefix("struct")?;
+    // The keyword, not the head of an identifier.
+    if !decl.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let (name, rest) = decl.trim_start().split_once('(')?;
+    // Generics are not part of the name: `struct Timer<T>(f32)`.
+    let name = name.trim_end().split('<').next()?;
+    let floaty = rest
+        .split(')')
+        .next()?
+        .split(',')
+        .any(|field| is_float(strip_visibility(field.trim())));
+    (is_time_ish(name) && floaty).then_some(name)
+}
+
+/// An `unsafe` *site*: a block or an `unsafe impl`. A declaration is not one —
+/// its obligation is the caller's — and neither is the word inside a string
+/// literal, which is what this crate's own needles and its planted fixtures
+/// became when the scan reached `xtask/`. Quote parity rather than a lexer: no
+/// real site in the tree follows an unbalanced quote on its own line.
+fn unsafe_site(line: &str) -> bool {
+    if line.trim_start().starts_with("//") {
+        return false;
+    }
+    const KW: &str = "unsafe";
+    line.match_indices(KW)
+        .filter(|(at, _)| line[..*at].matches('"').count().is_multiple_of(2))
+        .any(|(at, _)| {
+            let rest = line[at + KW.len()..].trim_start();
+            rest.starts_with('{') || rest.starts_with("impl")
+        })
+}
+
+/// Claim the nearest unclaimed `// SAFETY:` note in the eight lines above
+/// `site`, reporting whether there was one. One note, one site: a single line
+/// above three blocks used to justify all three, which is a decoy rather than a
+/// justification (§4.2).
+fn claim_safety_note(lines: &[&str], claimed: &mut [bool], site: usize) -> bool {
+    for at in (site.saturating_sub(8)..site).rev() {
+        if !claimed[at] && is_safety_note(lines[at]) {
+            claimed[at] = true;
+            return true;
+        }
+    }
+    false
+}
+
+/// A real `// SAFETY:` note: a line comment whose content *opens* with the
+/// token, optionally qualified the way the teardown paths' `SAFETY (all arms):`
+/// is. What this rejects is everything a `contains("SAFETY")` accepted — a `///`
+/// doc line about safety, a string literal, `SAFETY_MARGIN`, and the note that
+/// says there is nothing to note.
+fn is_safety_note(line: &str) -> bool {
+    let Some(body) = line.trim_start().strip_prefix("//") else {
+        return false;
+    };
+    // `///` and `//!` fall out here: neither `/` nor `!` opens `SAFETY`.
+    let Some(rest) = body.trim_start().strip_prefix("SAFETY") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    rest.strip_prefix('(')
+        .and_then(|r| r.split_once(')'))
+        .map_or(rest, |(_, after)| after.trim_start())
+        .starts_with(':')
+}
+
+/// What this line declares that would outlive a reload behind the host's back
+/// (§4.2.2), if anything.
+fn retained_state(line: &str) -> Option<String> {
+    let macros = ["thread_local!", "lazy_static!"];
+    if let Some(mac) = macros.into_iter().find(|m| line.contains(m)) {
+        return Some(format!("`{mac}`"));
+    }
+    let decl = strip_visibility(line).strip_prefix("static")?;
+    // The keyword, not the head of an identifier — and `static   mut` too.
+    if !decl.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let decl = decl.trim_start();
+    if decl
+        .strip_prefix("mut")
+        .is_some_and(|r| r.starts_with(char::is_whitespace))
+    {
+        return Some("`static mut`".to_string());
+    }
+    RETAINED_STATE_TYPES
+        .into_iter()
+        .find(|t| contains_path(decl, t))
+        .map(|t| format!("`static` holding `{t}`"))
+}
+
+/// What makes a `static` mutable or lazily initialized — the quiet spellings of
+/// `static mut` (§4.2.2). Whole-segment matched, so `Cell` does not also fire on
+/// the `RefCell` line above it.
+const RETAINED_STATE_TYPES: [&str; 20] = [
+    "AtomicBool",
+    "AtomicPtr",
+    "AtomicI8",
+    "AtomicI16",
+    "AtomicI32",
+    "AtomicI64",
+    "AtomicIsize",
+    "AtomicU8",
+    "AtomicU16",
+    "AtomicU32",
+    "AtomicU64",
+    "AtomicUsize",
+    "OnceLock",
+    "OnceCell",
+    "Lazy",
+    "Mutex",
+    "RwLock",
+    "RefCell",
+    "UnsafeCell",
+    "Cell",
+];
 
 /// What spelling a hand-written barrier out looks like.
 const BARRIER_TOKENS: [&str; 4] = [
@@ -980,12 +1336,27 @@ fn allowlist_crosscheck() -> anyhow::Result<()> {
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
 
+    // The direction that can actually break, and the one this gate did not
+    // check: a `wrappers` entry is *how* the rayon ban gets silenced, so a crate
+    // added there to make cargo-deny green is an exemption taken without the
+    // review §4.1 requires. The other direction can only fire if someone writes
+    // an allowlist row and then declines to use it.
+    let unreviewed: Vec<&&str> = wrappers.iter().filter(|c| !exempt.contains(**c)).collect();
+    anyhow::ensure!(
+        unreviewed.is_empty(),
+        "deny.toml lets {unreviewed:?} wrap rayon with no reviewed row in \
+         determinism-allowlist.toml (§4.1) — write the exemption with its scope and its reason, \
+         or drop the wrapper"
+    );
     let missing: Vec<&&str> = exempt.iter().filter(|c| !wrappers.contains(**c)).collect();
     anyhow::ensure!(
         missing.is_empty(),
         "determinism-allowlist.toml exempts {missing:?} for rayon, but deny.toml's rayon wrappers do not include them"
     );
-    println!("xtask: rayon allowlist and deny.toml wrappers agree");
+    println!(
+        "xtask: rayon allowlist and deny.toml wrappers agree ({} exemption(s))",
+        exempt.len()
+    );
     Ok(())
 }
 
@@ -1018,19 +1389,35 @@ mod tests {
         super::scan(root).unwrap().0
     }
 
-    /// The two bans that keep game state from surviving a reload behind the
-    /// host's back (§4.2.2). Scoped to `demos/`, which is where game crates live.
+    /// The bans that keep game state from surviving a reload behind the host's
+    /// back (§4.2.2). Scoped to `demos/`, which is where game crates live, and
+    /// matched on the declaration: `static mut` is one spelling of a dozen, and
+    /// the quiet ones below retain exactly as much across a reload.
     #[test]
     fn retained_state_in_a_game_crate_is_rejected() {
         for planted in [
             "static mut COUNT: u32 = 0;",
+            "static  mut COUNT: u32 = 0;",
+            "pub(crate) static COUNT: AtomicU32 = AtomicU32::new(0);",
+            "static REGISTRY: OnceLock<Vec<u8>> = OnceLock::new();",
+            "static STATE: Mutex<u32> = Mutex::new(0);",
             "thread_local! { static X: u8 }",
         ] {
             let root = plant("retained-state", &[("demos/03-x/src/lib.rs", planted)]);
             let found = violations(&root);
             assert_eq!(found.len(), 1, "planted `{planted}`, got {found:?}");
-            assert!(found[0].contains("static mut / thread_local!"), "{found:?}");
+            assert!(found[0].contains("(§4.2.2)"), "{found:?}");
         }
+        // A comment, a `&'static` bound and a local are none of the above — the
+        // ban is on what a `static` *holds*, not on the words.
+        let root = plant(
+            "retained-state-innocent",
+            &[(
+                "demos/03-x/src/lib.rs",
+                "// static mut here\nfn f(s: &'static str) {}\nlet c = RefCell::new(0);\n",
+            )],
+        );
+        assert!(violations(&root).is_empty(), "{:?}", violations(&root));
         // The same text in an engine crate is legal: the ban is about code that
         // crosses the reload seam, not about the tokens.
         let root = plant(
@@ -1038,6 +1425,31 @@ mod tests {
             &[("crates/gg-x/src/lib.rs", "static mut COUNT: u32 = 0;")],
         );
         assert!(violations(&root).is_empty());
+    }
+
+    /// The walk reaches the harness and CI's own source (§3). `tools/` answers
+    /// to every rule; `xtask` answers to every rule but the two it must spell
+    /// literally in order to *be* them (deny.toml names it in `ash`'s wrappers).
+    #[test]
+    fn the_walk_reaches_tools_and_xtask() {
+        let root = plant(
+            "walk",
+            &[
+                ("tools/gg-t/src/a.rs", "fn f() {\n    unsafe { g() }\n}\n"),
+                ("tools/gg-t/src/b.rs", "let f = vk::Format::UNDEFINED;\n"),
+                ("xtask/src/probe.rs", "let f = vk::Format::UNDEFINED;\n"),
+                ("xtask/src/bare.rs", "fn f() {\n    unsafe { g() }\n}\n"),
+            ],
+        );
+        let found = violations(&root);
+        for expect in [
+            "tools/gg-t/src/a.rs",
+            "tools/gg-t/src/b.rs",
+            "xtask/src/bare.rs",
+        ] {
+            assert!(found.iter().any(|v| v.starts_with(expect)), "{found:?}");
+        }
+        assert_eq!(found.len(), 3, "{found:?}");
     }
 
     /// The containment seam (§3): `gg-rhi` is the only crate that speaks Vulkan.
@@ -1075,7 +1487,9 @@ mod tests {
         assert!(violations(&root).is_empty());
     }
 
-    /// §2's Sim time row: sim-visible time is a tick count, never a float.
+    /// §2's Sim time row: sim-visible time is a tick count, never a float. The
+    /// method below is not a field — that escape hatch used to fire on any line
+    /// with `fn ` in it, comments included.
     #[test]
     fn a_float_time_field_is_rejected() {
         let root = plant(
@@ -1088,10 +1502,92 @@ mod tests {
         let found = violations(&root);
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].contains("float time field `elapsed`"), "{found:?}");
+
+        // Four spellings of the same field, all of which walked through a match
+        // that stripped exactly `"pub "` and demanded exactly one space.
+        for planted in [
+            "pub(crate) dt: f32,",
+            "pub(super) elapsed: f64,",
+            "dt : f32,",
+            "time: Option<f64>,",
+        ] {
+            let root = plant(
+                "float-time-spellings",
+                &[("crates/gg-x/src/lib.rs", planted)],
+            );
+            let found = violations(&root);
+            assert_eq!(found.len(), 1, "planted `{planted}`, got {found:?}");
+        }
+    }
+
+    /// The escapes a six-word list could not close: any clock whose name was not
+    /// one of the six, and the newtype spelling, which has no field name at all.
+    #[test]
+    fn a_float_clock_under_another_name_is_rejected() {
+        for planted in [
+            "cooldown: f32,",
+            "pub timestamp: f64,",
+            "age_seconds: f32,",
+            "remaining_secs: f32,",
+            "pub(crate) accumulator: f64,",
+            "spawn_delay: Option<f32>,",
+            "struct Timer(f32);",
+            "pub struct Cooldown(pub f32);",
+            "pub struct SinceSpawn(u32, f64);",
+            "struct Uptime<T>(f64, T);",
+        ] {
+            let root = plant("float-time-widened", &[("demos/07-x/src/lib.rs", planted)]);
+            let found = violations(&root);
+            assert_eq!(found.len(), 1, "planted `{planted}`, got {found:?}");
+            assert!(found[0].contains("Sim time row"), "{found:?}");
+        }
+    }
+
+    /// The other direction, which is what makes the widening affordable: segments
+    /// and not substrings, floats and not the tick counts §2 asks for, fields and
+    /// not locals.
+    #[test]
+    fn a_time_ish_substring_is_not_a_clock() {
+        for innocent in [
+            "damage: f32,",
+            "average: f64,",
+            "pub metallic: f32,",
+            "cooldown_ticks: u32,",
+            "struct Timer(u32);",
+            "let ms: f32 = 1.0;",
+            "// elapsed: f32,",
+        ] {
+            let root = plant(
+                "float-time-innocent",
+                &[("demos/07-x/src/lib.rs", innocent)],
+            );
+            let found = violations(&root);
+            assert!(found.is_empty(), "planted `{innocent}`, got {found:?}");
+        }
+    }
+
+    /// The row's scope, and the reason it has one (§1.4): a GPU timestamp, a
+    /// harness frame number and a Tracy zone are wall clock, and wall clock is
+    /// float. Scoping beats exempting the files one at a time.
+    #[test]
+    fn a_float_clock_in_the_render_half_is_not_the_sim_row() {
+        let root = plant(
+            "float-time-scope",
+            &[
+                ("crates/gg-rhi/src/timing.rs", "pub gpu_ms: f32,"),
+                ("crates/gg-render/src/lib.rs", "pub elapsed: f32,"),
+                ("tools/gg-golden/src/bench.rs", "sum_ms: f64,"),
+                ("crates/gg-core/src/loop.rs", "pub elapsed_ms: f32,"),
+            ],
+        );
+        let found = violations(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].starts_with("crates/gg-core/"), "{found:?}");
     }
 
     /// Every `unsafe` block carries a `// SAFETY:` within eight lines (§4.2).
     /// An `unsafe fn` *declaration* does not: that obligation is the caller's.
+    /// The last four plants are what a `contains("SAFETY")` accepted.
     #[test]
     fn an_unsafe_block_without_a_safety_note_is_rejected() {
         let root = plant(
@@ -1106,11 +1602,37 @@ mod tests {
                     "fn f() {\n    // SAFETY: g is trivially fine.\n    unsafe { g() }\n}\n",
                 ),
                 ("crates/gg-c/src/lib.rs", "pub unsafe fn h() {}\n"),
+                (
+                    // A qualified note is still a note: the teardown paths write
+                    // one per `match`, not one per arm.
+                    "crates/gg-d/src/lib.rs",
+                    "// SAFETY (all arms): handles are this device's.\nunsafe { d.destroy() };\n",
+                ),
+                (
+                    "crates/gg-e/src/lib.rs",
+                    "/// Nothing here is a SAFETY: concern.\nunsafe { g() }\n",
+                ),
+                (
+                    "crates/gg-f/src/lib.rs",
+                    "const SAFETY_MARGIN: u32 = 4;\nunsafe { g() }\n",
+                ),
+                (
+                    // One note, one site.
+                    "crates/gg-g/src/lib.rs",
+                    "// SAFETY: the first one.\nunsafe { g() }\nunsafe { h() }\n",
+                ),
             ],
         );
         let found = violations(&root);
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].starts_with("crates/gg-a/"), "{found:?}");
+        for expect in [
+            "crates/gg-a/",
+            "crates/gg-e/",
+            "crates/gg-f/",
+            "crates/gg-g/",
+        ] {
+            assert!(found.iter().any(|v| v.starts_with(expect)), "{found:?}");
+        }
+        assert_eq!(found.len(), 4, "{found:?}");
     }
 
     /// §6 M6: a barrier written by hand is rejected wherever it is — including
@@ -1150,6 +1672,29 @@ mod tests {
                 .any(|v| v.starts_with("crates/gg-rhi/src/graph.rs")),
             "the graph's own execution layer is where they live: {found:?}"
         );
+    }
+
+    /// §5's Stop-hook budget, planted the same way the greps are: a number that
+    /// has never been seen to go red is a budget on the same footing as a gate
+    /// that has never rejected anything.
+    #[test]
+    fn the_fast_tier_budget_rejects_a_tier_that_is_slow_every_time() {
+        let over = super::FAST_TIER_BUDGET.as_millis() as u64 + 1;
+        let slow = vec![over; super::FAST_TIER_WINDOW];
+        let err = super::fast_tier_verdict(&slow).unwrap_err().to_string();
+        assert!(err.contains("never a bigger number"), "{err}");
+
+        // A cold cache, a toolchain bump, a `Cargo.toml` touch: one slow run
+        // among warm ones is a rebuild, not a slow tier, and blocking an agent
+        // turn on it is the false failure the minimum exists to avoid.
+        let mut one_hitch = slow.clone();
+        one_hitch[2] = 1;
+        assert!(super::fast_tier_verdict(&one_hitch).is_ok());
+
+        // And a window that has not filled yet may be *all* cold — a fresh clone
+        // is the ordinary case — so it reports and does not judge.
+        assert!(super::fast_tier_verdict(&slow[..super::FAST_TIER_WINDOW - 1]).is_ok());
+        assert!(super::fast_tier_verdict(&[]).is_ok());
     }
 
     /// The other half of the evidence: a tree with nothing planted is silent.

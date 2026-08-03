@@ -412,6 +412,27 @@ impl World {
         out
     }
 
+    /// The first NaN in any hashed column, or `None` (§1.13 hazard 6).
+    ///
+    /// One hit per call on purpose: a NaN propagates to thousands of entities
+    /// within a tick, and sixty thousand log lines a second is not a diagnostic.
+    /// Which one is *first* is a function of the world, not of the search — see
+    /// [`nan_scan`](crate::nan_scan) for the order and for how the float
+    /// positions are derived.
+    ///
+    /// Columns first, then side tables — every hashed float, by two mechanisms
+    /// because the two are shaped differently. A column has a declared layout
+    /// and is walked; a side table has none and is made to enumerate itself
+    /// through [`StateHasher`], the funnel its floats must pass anyway. Columns
+    /// first because their answer is the precise one.
+    #[must_use]
+    pub fn scan_for_nan(&self) -> Option<crate::nan_scan::NanSite> {
+        use crate::nan_scan::NanSite;
+        crate::nan_scan::scan(&self.archetypes, &self.registry)
+            .map(NanSite::Column)
+            .or_else(|| self.side_tables.scan_for_nan().map(NanSite::SideTable))
+    }
+
     fn hash_walk(&self, encoding: Encoding) -> CanonicalHash {
         let mut h = StateHasher::canonical();
         self.entities.hash_into(&mut h);

@@ -645,12 +645,6 @@ impl Rhi {
         let resolved = graph::resolve(&self.gpu, passes)?;
 
         let slot_index = (self.frame_index % FRAMES_IN_FLIGHT) as usize;
-        // Named here, while the graph's borrows are alive; read back a frame
-        // later, when the names are all that is left of it.
-        if let Some(timings) = &mut self.timings {
-            timing::warn_pass_overflow(passes.len());
-            timings.expect(slot_index, passes.iter().map(|p| p.name.to_owned()));
-        }
         let stamps = self.timings.as_ref().map(|t| t.stamps(slot_index));
         // Before the acquire, like everything else that can fail (see above):
         // this clears the slot's marks and names the passes about to write them.
@@ -731,6 +725,19 @@ impl Rhi {
         }
         .map_err(|e| self.gpu.explain(e))?;
         self.transfer_waited = transfer_value;
+
+        // Registered after the submit, never before: a frame returning between
+        // `resolve` and here — an out-of-date acquire is the ordinary case —
+        // reset no query and wrote none, yet leaves `frame_index` alone, so the
+        // retry's `begin_frame` collects this same slot. An expectation left
+        // behind by such a frame reads queries never reset since pool creation
+        // on frame 0 (VUID-vkGetQueryPoolResults-None-09401, fatal to the §4.3
+        // zero-message report) and, later, frame N-2's ticks under the aborted
+        // frame's names. The graph's borrows outlive this point.
+        if let Some(timings) = &mut self.timings {
+            timing::warn_pass_overflow(passes.len());
+            timings.expect(slot_index, passes.iter().map(|p| p.name.to_owned()));
+        }
 
         // Present, waiting the per-image render-done semaphore.
         let wait_semaphores = [self.swapchain.render_done(image_index)];

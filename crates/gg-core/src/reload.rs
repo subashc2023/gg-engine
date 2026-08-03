@@ -21,10 +21,24 @@
 //!
 //! `dlclose`/`FreeLibrary` on a Rust dylib with lingering TLS destructors or a
 //! stray function pointer is a classic crash source, so [`GameLib`] deliberately
-//! leaks its library on drop (§4.2.2). That is a *budget*, not a pretense of
-//! infinity: [`LeakBudget`] counts the bytes, and crossing it is what triggers
-//! rejuvenation — snapshot, restart, restore — rather than an unload nobody can
-//! make safe.
+//! leaks its library on drop (§4.2.2). The leak begins where the library is
+//! *created*, not where it is accepted: by the time any check here can run the
+//! platform has run the image's initializers and `gg_game_abi()` has executed
+//! dylib code, so a **refusal** must leak exactly as an acceptance does — and
+//! refusals are the common dev case, one per save after a `HOST_API_VERSION`
+//! bump. [`ReloadError::leaked_bytes`] is how a refusal still reaches the
+//! budget.
+//!
+//! That obligation does not stop at [`GameLib::load`]'s last check. Everything
+//! the host does between a successful load and the swap — registering schemas,
+//! restoring the snapshot through migration, rebinding the action map — can fail
+//! on a library that is already mapped and can no longer be unloaded, and a
+//! failure raised any other way leaks a whole dylib the budget never sees.
+//! [`GameLib::refuse`] is the one route those steps take.
+//!
+//! That is a *budget*, not a pretense of infinity: [`LeakBudget`] counts the
+//! bytes, and crossing it is what triggers rejuvenation — snapshot, restart,
+//! restore — rather than an unload nobody can make safe.
 
 use std::path::{Path, PathBuf};
 
@@ -56,6 +70,20 @@ pub enum ReloadError {
         /// What the platform loader said.
         source: libloading::Error,
     },
+    /// The artifact's bytes could not be read. Not a paraphrase of [`Open`]: the
+    /// image *is* the size charged to the leak budget and the code hash a replay
+    /// segment is named by (§4.2.2, §4.7), and neither has a safe default —
+    /// zero bytes leaks a multi-megabyte dylib the budget never sees, and a
+    /// constant hash makes two builds indistinguishable in a recording.
+    ///
+    /// [`Open`]: ReloadError::Open
+    #[error("cannot read `{path}`: {source}")]
+    Unreadable {
+        /// The artifact.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
     /// A required `extern "C"` symbol is missing — usually a game crate that
     /// never invoked the systems-table macro.
     #[error("`{path}` exports no `{symbol}` — is the systems-table macro missing?")]
@@ -64,6 +92,10 @@ pub enum ReloadError {
         symbol: &'static str,
         /// The artifact.
         path: PathBuf,
+        /// Bytes this refusal left resident — see [`leaked_bytes`].
+        ///
+        /// [`leaked_bytes`]: ReloadError::leaked_bytes
+        leaked: u64,
     },
     /// The load-bearing check (§4.2.2), and the only one consulted first.
     #[error(
@@ -77,6 +109,10 @@ pub enum ReloadError {
         found: u32,
         /// The artifact.
         path: PathBuf,
+        /// Bytes this refusal left resident — see [`leaked_bytes`].
+        ///
+        /// [`leaked_bytes`]: ReloadError::leaked_bytes
+        leaked: u64,
     },
     /// Defense-in-depth: same version number, different boundary source.
     #[error(
@@ -90,6 +126,27 @@ pub enum ReloadError {
         found: String,
         /// The artifact.
         path: PathBuf,
+        /// Bytes this refusal left resident — see [`leaked_bytes`].
+        ///
+        /// [`leaked_bytes`]: ReloadError::leaked_bytes
+        leaked: u64,
+    },
+    /// The dylib loaded and verified, and the host could not take it into
+    /// service: a schema `World::adopt` refuses, a snapshot that will not
+    /// migrate, an action map that no longer binds (§4.2.2, §4.7). Not a load
+    /// failure, and not free — the image is mapped, its initializers ran, and it
+    /// is never unloaded, so its bytes are this session's exactly as a refused
+    /// load's are.
+    #[error("`{path}` loaded but could not be adopted: {detail}")]
+    Adoption {
+        /// The artifact.
+        path: PathBuf,
+        /// Which step gave up, and why.
+        detail: String,
+        /// Bytes this refusal left resident — see [`leaked_bytes`].
+        ///
+        /// [`leaked_bytes`]: ReloadError::leaked_bytes
+        leaked: u64,
     },
     /// Loading disturbed the FP environment (§4.2.1 hazard 5). Determinism-fatal
     /// and reported rather than asserted, so the host can refuse the swap and say
@@ -102,6 +159,10 @@ pub enum ReloadError {
         register: &'static str,
         /// Which bits are wrong.
         detail: String,
+        /// Bytes this refusal left resident — see [`leaked_bytes`].
+        ///
+        /// [`leaked_bytes`]: ReloadError::leaked_bytes
+        leaked: u64,
     },
     /// Rejuvenation could not hand this session to a successor (§4.2.2).
     #[error("rejuvenation failed while {detail}: {source}")]
@@ -127,16 +188,55 @@ pub enum ReloadError {
     },
 }
 
+impl ReloadError {
+    /// Bytes of dylib this refusal left resident, for the caller to charge to a
+    /// [`LeakBudget`].
+    ///
+    /// Nonzero only for the refusals that happen *after* the image was mapped
+    /// and its initializers ran: those are never unloaded (§4.2.2), so a session
+    /// of refused saves grows exactly as a session of accepted ones does, and a
+    /// budget that could not see them would never come due.
+    #[must_use]
+    pub fn leaked_bytes(&self) -> u64 {
+        match self {
+            Self::HostApiMismatch { leaked, .. }
+            | Self::Fingerprint { leaked, .. }
+            | Self::MissingSymbol { leaked, .. }
+            | Self::Adoption { leaked, .. }
+            | Self::FpEnv { leaked, .. } => *leaked,
+            _ => 0,
+        }
+    }
+
+    /// Attach the leak to a refusal raised by a path that also serves the
+    /// nothing-was-loaded cases ([`verify`], [`GameLib::linked`]).
+    fn leaking(mut self, bytes: u64) -> Self {
+        if let Self::HostApiMismatch { leaked, .. }
+        | Self::Fingerprint { leaked, .. }
+        | Self::MissingSymbol { leaked, .. }
+        | Self::Adoption { leaked, .. }
+        | Self::FpEnv { leaked, .. } = &mut self
+        {
+            *leaked = bytes;
+        }
+        self
+    }
+}
+
 /// Compare a dylib's self-description against this host's.
 ///
 /// Version first, and it returns on mismatch without touching the fingerprint —
 /// the version is what makes the rest of [`AbiInfo`] interpretable.
+///
+/// Reports `leaked: 0`; [`GameLib::load`] is what knows whether an image was
+/// mapped to reach this, and attaches the bytes.
 pub fn verify(info: &AbiInfo, path: &Path) -> Result<(), ReloadError> {
     if info.host_api_version != gg_abi::HOST_API_VERSION {
         return Err(ReloadError::HostApiMismatch {
             expected: gg_abi::HOST_API_VERSION,
             found: info.host_api_version,
             path: path.to_owned(),
+            leaked: 0,
         });
     }
     if info.fingerprint != gg_abi::BOUNDARY_FINGERPRINT {
@@ -144,6 +244,7 @@ pub fn verify(info: &AbiInfo, path: &Path) -> Result<(), ReloadError> {
             expected: gg_abi::BOUNDARY_FINGERPRINT_HEX,
             found: hex(&info.fingerprint),
             path: path.to_owned(),
+            leaked: 0,
         });
     }
     Ok(())
@@ -176,8 +277,9 @@ pub struct GameEntryPoints {
 /// ever called lives there too; unloading is the crash, not the cleanup. Charge
 /// the bytes to a [`LeakBudget`] instead.
 pub struct GameLib {
-    // ManuallyDrop *is* the "never unloaded" rule. Without it, swapping a dylib
-    // would call FreeLibrary on code the old replay segment still names.
+    // ManuallyDrop *is* the "never unloaded" rule, and `load` applies it at
+    // `Library::new` so a refusal cannot unload either. Without it, swapping a
+    // dylib would call FreeLibrary on code the old replay segment still names.
     // `None` is the statically-linked variant (§5.9), where the game's code is
     // this binary's and there was never anything to unload.
     _lib: Option<std::mem::ManuallyDrop<libloading::Library>>,
@@ -205,41 +307,51 @@ impl GameLib {
     /// into the dylib: the dylib keeps the pointer.
     pub unsafe fn load(path: &Path, host_api: &'static HostApiV1) -> Result<Self, ReloadError> {
         // Read rather than stat: the size and the content hash come from the
-        // same bytes, and a failure here is left for `libloading` to report —
-        // it says *why* the file could not be opened, which a read error here
-        // would only paraphrase.
-        let image = std::fs::read(path).unwrap_or_default();
+        // same bytes. A failure is an error and never a default — zero bytes
+        // would charge the budget nothing for a dylib it is about to leak, and a
+        // constant code hash would name two different builds' replay segments
+        // alike (§4.2.2, §4.7).
+        let image = std::fs::read(path).map_err(|source| ReloadError::Unreadable {
+            path: path.to_owned(),
+            source,
+        })?;
         let (bytes, code) = (image.len() as u64, code_hash(&image));
 
+        // `ManuallyDrop` here rather than on the success path: everything below
+        // runs the image's initializers and then its code, so every refusal from
+        // this line on would otherwise unload a library that has already touched
+        // `std` and stashed the host pointer (§4.2.2, and the module header).
+        //
         // SAFETY: the caller's obligation, documented above — this is the point
         // where the file's initializers run, and no check can precede it.
-        let lib =
-            unsafe { libloading::Library::new(path) }.map_err(|source| ReloadError::Open {
+        let lib = std::mem::ManuallyDrop::new(unsafe { libloading::Library::new(path) }.map_err(
+            |source| ReloadError::Open {
                 path: path.to_owned(),
                 source,
-            })?;
+            },
+        )?);
 
         // SAFETY: each symbol is read at the type §4.2.2 defines for it, and the
         // version check below is what makes that definition the right one. The
         // window between here and `verify` is exactly one `extern "C" fn() ->
         // AbiInfo` call, whose signature is pointer-free and layout-stable
         // across every version of the boundary by construction.
-        let abi_fn: GameAbiFn = unsafe { symbol(&lib, SYM_GAME_ABI, "gg_game_abi", path)? };
+        let abi_fn: GameAbiFn = unsafe { symbol(&lib, SYM_GAME_ABI, "gg_game_abi", path, bytes)? };
         // SAFETY: `abi_fn` came from this library and takes no arguments; a
         // dylib exporting the name with a different signature is the failure the
         // fingerprint exists for, and cannot be caught before the call.
         let abi = unsafe { abi_fn() };
-        verify(&abi, path)?;
+        verify(&abi, path).map_err(|refused| refused.leaking(bytes))?;
 
         // SAFETY: the version agreed, so the remaining symbols mean what this
         // build of `gg-abi` says they mean, at their declared types.
         let entries = unsafe {
             GameEntryPoints {
                 abi: abi_fn,
-                init: symbol(&lib, SYM_GAME_INIT, "gg_game_init", path)?,
-                components: symbol(&lib, SYM_GAME_COMPONENTS, "gg_game_components", path)?,
-                verbs: symbol(&lib, SYM_GAME_VERBS, "gg_game_verbs", path)?,
-                systems: symbol(&lib, SYM_GAME_SYSTEMS, "gg_game_systems", path)?,
+                init: symbol(&lib, SYM_GAME_INIT, "gg_game_init", path, bytes)?,
+                components: symbol(&lib, SYM_GAME_COMPONENTS, "gg_game_components", path, bytes)?,
+                verbs: symbol(&lib, SYM_GAME_VERBS, "gg_game_verbs", path, bytes)?,
+                systems: symbol(&lib, SYM_GAME_SYSTEMS, "gg_game_systems", path, bytes)?,
             }
         };
         // SAFETY: the entry points came from this verified library, and
@@ -302,7 +414,7 @@ impl GameLib {
     /// `abi` must already have passed [`verify`], and `entries` must be one game
     /// build's entry points. `host_api` must outlive every later call.
     unsafe fn adopt(
-        lib: Option<libloading::Library>,
+        lib: Option<std::mem::ManuallyDrop<libloading::Library>>,
         entries: &GameEntryPoints,
         abi: AbiInfo,
         host_api: &'static HostApiV1,
@@ -323,10 +435,10 @@ impl GameLib {
             )
         };
 
-        check_fp_env(&path)?;
+        check_fp_env(&path, bytes)?;
 
         Ok(Self {
-            _lib: lib.map(std::mem::ManuallyDrop::new),
+            _lib: lib,
             abi,
             components,
             verbs,
@@ -379,6 +491,26 @@ impl GameLib {
     /// Zero for a statically linked game, which has no artifact of its own.
     pub fn code_hash(&self) -> u128 {
         self.code_hash
+    }
+
+    /// Give up on this library *after* it loaded, charging its bytes.
+    ///
+    /// The step that fails here is the host's, not the loader's — `World::adopt`
+    /// on a schema it will not take, `restore` on a snapshot it cannot migrate,
+    /// the rebind against a moved verb id space — and by then the image is
+    /// mapped, its initializers have run and `ManuallyDrop` has already decided
+    /// it is never coming out (§4.2.2). Dropping the `GameLib` on that path
+    /// unloads nothing, so a failure raised any other way is a whole dylib the
+    /// [`LeakBudget`] never sees and a rejuvenation that never comes due.
+    ///
+    /// Zero for the statically linked game, which mapped nothing.
+    #[must_use]
+    pub fn refuse(&self, detail: impl std::fmt::Display) -> ReloadError {
+        ReloadError::Adoption {
+            path: self.path.clone(),
+            detail: detail.to_string(),
+            leaked: self.bytes,
+        }
     }
 }
 
@@ -450,19 +582,22 @@ unsafe fn symbol<T: Copy>(
     name: &[u8],
     label: &'static str,
     path: &Path,
+    leaked: u64,
 ) -> Result<T, ReloadError> {
     // SAFETY: the caller's obligation above. `libloading` copies the symbol out
     // by value, so nothing here outlives the borrow of `lib`.
     let found = unsafe { lib.get::<T>(name) }.map_err(|_| ReloadError::MissingSymbol {
         symbol: label,
         path: path.to_owned(),
+        leaked,
     })?;
     Ok(*found)
 }
 
 /// Hazard 5 (§4.2.1) at its mandated call site: a library initializer is one of
-/// the few things in a process that plausibly changes `MXCSR`.
-fn check_fp_env(path: &Path) -> Result<(), ReloadError> {
+/// the few things in a process that plausibly changes `MXCSR`. `leaked` is zero
+/// for the statically linked game, which mapped nothing.
+fn check_fp_env(path: &Path, leaked: u64) -> Result<(), ReloadError> {
     #[cfg(feature = "fp-assert")]
     if let Err(env) = gg_math::fpenv::check_fp_env() {
         let mut detail = Vec::new();
@@ -479,9 +614,10 @@ fn check_fp_env(path: &Path) -> Result<(), ReloadError> {
             path: path.to_owned(),
             register: gg_math::fpenv::FP_CONTROL_REGISTER,
             detail: detail.join(", "),
+            leaked,
         });
     }
-    let _ = path;
+    let _ = (path, leaked);
     Ok(())
 }
 
@@ -508,4 +644,76 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{b:02x}");
         out
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `GameLib` as the host holds one *after* a successful load: mapped,
+    /// verified, and past the point where anything could be unloaded. Built by
+    /// hand because reaching that state for real needs a game dylib, which is
+    /// demo 03's and `xtask reload`'s job (`tests/reload.rs` says the same).
+    fn mapped(bytes: u64) -> GameLib {
+        GameLib {
+            _lib: None,
+            abi: AbiInfo {
+                host_api_version: gg_abi::HOST_API_VERSION,
+                fingerprint: gg_abi::BOUNDARY_FINGERPRINT,
+            },
+            components: ComponentsTable {
+                entries: std::ptr::null(),
+                len: 0,
+                reserved: 0,
+            },
+            verbs: VerbsTable {
+                actions: std::ptr::null(),
+                axes: std::ptr::null(),
+                action_len: 0,
+                axis_len: 0,
+            },
+            systems: SystemsTable {
+                entries: std::ptr::null(),
+                len: 0,
+                reserved: 0,
+            },
+            path: PathBuf::from("game.dll"),
+            bytes,
+            code_hash: 0,
+        }
+    }
+
+    #[test]
+    fn a_failure_after_the_load_still_charges_the_budget() {
+        // The hole this closes: `load` returned, so every refusal it knows how to
+        // charge is already behind us — and the host's own steps (adopt, restore,
+        // rebind) then drop a `ManuallyDrop`ped library that unloads nothing.
+        let lib = mapped(4_000);
+        let refused = lib.refuse("restore: `Health` changed layout and cannot migrate");
+        assert_eq!(refused.leaked_bytes(), lib.bytes());
+        assert!(refused.to_string().contains("game.dll"), "{refused}");
+
+        let mut budget = LeakBudget::new(4_000);
+        budget.charge(refused.leaked_bytes());
+        assert!(
+            budget.exhausted(),
+            "a dylib refused after loading is still a leaked dylib"
+        );
+    }
+
+    #[test]
+    fn the_statically_linked_game_leaks_nothing_to_charge() {
+        // §5.9's variant mapped no image, so its adoption failures are free —
+        // the budget is dylib bytes and there are none.
+        assert_eq!(mapped(0).refuse("no verbs").leaked_bytes(), 0);
+    }
+
+    #[test]
+    fn the_leak_survives_the_paths_that_re_raise_a_refusal() {
+        // `leaking` is how a refusal raised where nothing was mapped (`verify`,
+        // `linked`) picks up the bytes when a mapped caller re-raises it. A
+        // variant it forgets is a variant that reports zero forever.
+        let charged = mapped(0).refuse("adopt: unknown component").leaking(1_024);
+        assert_eq!(charged.leaked_bytes(), 1_024);
+    }
 }

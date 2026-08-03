@@ -9,6 +9,7 @@
 use crate::column::MAX_ALIGN;
 use crate::component::{Component, FieldDesc, component_id, schema_hash};
 use crate::hash::{ComponentId, SchemaHash, StateHasher};
+use crate::nan_scan::{FloatSpan, UnclassifiedField};
 
 /// Encode one component's bytes through the explicit protocol (§4.2.1).
 ///
@@ -120,6 +121,12 @@ pub enum RegistryError {
 #[derive(Clone, Default)]
 pub struct Registry {
     sorted: Vec<ComponentInfo>,
+    /// Parallel to `sorted`: the §1.13 hazard 6 scan's float positions, derived
+    /// from the `ty` tokens here rather than re-parsed per tick.
+    float_spans: Vec<Vec<FloatSpan>>,
+    /// Fields no `ty` token placed, in registration order — the scan's own blind
+    /// spot, kept so a caller can name it instead of the gate silently shrinking.
+    unclassified: Vec<UnclassifiedField>,
 }
 
 impl Registry {
@@ -220,10 +227,36 @@ impl Registry {
                 })
             }
             Err(at) => {
+                // The one place a component's layout becomes known, hence the
+                // one place the scan's spans are computed (§1.13 hazard 6).
+                let spans = crate::nan_scan::spans_of(
+                    info.declared_id,
+                    info.type_name,
+                    info.size,
+                    info.fields,
+                    &mut self.unclassified,
+                );
+                self.float_spans.insert(at, spans);
                 self.sorted.insert(at, info);
                 Ok(id)
             }
         }
+    }
+
+    /// Fields the NaN scan could not place (§1.13 hazard 6). Empty is the
+    /// healthy state; anything here is a component the scan does not cover, and
+    /// the caller is expected to say so once rather than let it pass.
+    #[must_use]
+    pub fn unclassified_fields(&self) -> &[UnclassifiedField] {
+        &self.unclassified
+    }
+
+    /// The entry for `id` and its float spans, for [`World::scan_for_nan`].
+    ///
+    /// [`World::scan_for_nan`]: crate::World::scan_for_nan
+    pub(crate) fn floats_of(&self, id: ComponentId) -> Option<(&ComponentInfo, &[FloatSpan])> {
+        let at = self.sorted.binary_search_by_key(&id, |e| e.id).ok()?;
+        Some((&self.sorted[at], &self.float_spans[at]))
     }
 
     /// The entry for `id`, or `None` if nothing registered it.

@@ -34,13 +34,19 @@ struct VOut
 }
 
 // `0xAARRGGBB`, the same byte order the render protocol's `Renderable` uses so
-// one colour constant means one thing engine-wide. rgb is sRGB and linearized
-// by squaring — matching `srgb_to_linear` CPU-side (§4.5: `powf` is banned and
-// this is a tint, not a texture). Alpha is coverage and is already linear.
+// one colour constant means one thing engine-wide. rgb is sRGB, linearized by
+// the exact EOTF — the same curve `srgb_to_linear` tabulates CPU-side, evaluated
+// here because the GPU is not on the determinism membrane (§1.4) and `pow` is
+// free to use. Alpha is coverage and is already linear.
+float3 srgb_to_linear(float3 c)
+{
+    return select(c <= 0.04045, c / 12.92, pow((c + 0.055) / 1.055, 2.4));
+}
+
 float4 unpack(uint c)
 {
     float3 rgb = float3((c >> 16) & 0xffu, (c >> 8) & 0xffu, c & 0xffu) / 255.0;
-    return float4(rgb * rgb, float((c >> 24) & 0xffu) / 255.0);
+    return float4(srgb_to_linear(rgb), float((c >> 24) & 0xffu) / 255.0);
 }
 
 [shader("vertex")]

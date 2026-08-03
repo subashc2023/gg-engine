@@ -150,10 +150,54 @@ fn a_file_that_is_not_a_dylib_is_refused_by_name() {
 
 #[test]
 fn a_missing_artifact_is_an_error_rather_than_a_wait() {
+    // Reported as *unreadable* rather than as a load failure: the read is what
+    // produces the leak budget's charge and the replay segment's code hash
+    // (§4.2.2, §4.7), so it fails on its own terms instead of defaulting to zero
+    // bytes and a constant hash and letting `libloading` speak for it.
     let dir = scratch("missing");
     // SAFETY: nothing at this path to execute.
     let err = unsafe { GameLib::load(&dir.join("absent.dll"), &HOST_API) }.unwrap_err();
-    assert!(matches!(err, ReloadError::Open { .. }), "{err}");
+    assert!(matches!(err, ReloadError::Unreadable { .. }), "{err}");
+    assert!(err.to_string().contains("absent.dll"), "{err}");
+}
+
+#[test]
+fn a_refusal_charges_the_budget_exactly_when_it_mapped_something() {
+    // Nothing was mapped, so nothing leaked: both of these fail before the
+    // platform loader ran an initializer.
+    let dir = scratch("leak-accounting");
+    let path = dir.join("game.dll");
+    std::fs::write(&path, b"not a PE image").unwrap();
+    // SAFETY: the path is a file this test just wrote; the loader rejects it
+    // before any byte of it is executed.
+    let refused = unsafe { GameLib::load(&path, &HOST_API) }.unwrap_err();
+    assert_eq!(
+        refused.leaked_bytes(),
+        0,
+        "the image never mapped: {refused}"
+    );
+    // SAFETY: nothing at this path to execute.
+    let absent = unsafe { GameLib::load(&dir.join("absent.dll"), &HOST_API) }.unwrap_err();
+    assert_eq!(absent.leaked_bytes(), 0);
+
+    // Past the map, every refusal leaks the whole image — `ManuallyDrop` is
+    // applied at `Library::new`, not at success — and the budget has to see it
+    // or a session of refused saves never rejuvenates. Hand-built because
+    // reaching the post-map refusals needs a real dylib, which is demo 03's and
+    // `xtask reload`'s job, not this file's.
+    let after_map = ReloadError::Fingerprint {
+        expected: gg_abi::BOUNDARY_FINGERPRINT_HEX,
+        found: String::new(),
+        path,
+        leaked: 4_000,
+    };
+    assert_eq!(after_map.leaked_bytes(), 4_000);
+    let mut budget = LeakBudget::new(4_000);
+    budget.charge(after_map.leaked_bytes());
+    assert!(
+        budget.exhausted(),
+        "a refused reload is still a leaked reload"
+    );
 }
 
 #[test]
@@ -244,6 +288,35 @@ mod watching {
             assert!(unsafe { watch.poll(&HOST_API) }.is_none());
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn the_first_load_waits_for_the_artifact_and_then_stops_waiting() {
+        // `block_until_ready` is the startup path — there is no frame loop yet
+        // to be polled from, so the wait is the watcher's own. Both ends of that
+        // are the contract: a present artifact costs the two polls its settling
+        // takes and not the staging patience, and an absent one ends as a named
+        // error rather than as a wait with no end.
+        let dir = scratch("first-load");
+        let source = dir.join("game.dll");
+        std::fs::write(&source, b"present, and still not a PE image").unwrap();
+        let mut watch = Watch::new(&source, &dir.join("staging")).unwrap();
+        let started = std::time::Instant::now();
+        // SAFETY: as in `spin` — the artifact is this test's own file.
+        let err = unsafe { watch.block_until_ready(&HOST_API) }.unwrap_err();
+        assert!(matches!(err, ReloadError::Open { .. }), "{err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a settled artifact must not be charged the staging patience: {:?}",
+            started.elapsed()
+        );
+
+        let dir = scratch("first-load-absent");
+        let mut watch = Watch::new(&dir.join("never-built.dll"), &dir.join("staging")).unwrap();
+        // SAFETY: there is nothing at this path to execute.
+        let err = unsafe { watch.block_until_ready(&HOST_API) }.unwrap_err();
+        assert!(matches!(err, ReloadError::Staging { .. }), "{err}");
+        assert!(err.to_string().contains("never-built.dll"), "{err}");
     }
 
     #[test]

@@ -12,18 +12,26 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-/// Where compiled packs land.
+use crate::util::workspace_root;
+
+/// Where compiled packs land, under the workspace root — `cargo xtask` runs in
+/// the caller's directory and never chdirs, so every path here is rooted.
 const OUT: &str = "target/assets";
 
 pub fn run(args: &[&str]) -> Result<()> {
     let check = args.contains(&"--check");
     let sources = demo_sources()?;
-    if sources.is_empty() {
-        println!("xtask assets: no demo declares an `assets/` source tree yet");
-        return Ok(());
-    }
+    // Demos do ship `assets/` trees, so an empty set means the walk lost them
+    // rather than that none exist — and a §4.6 gate that compiled nothing used
+    // to report it as success (§5.8's rule: a vacuous pass is not a green one).
+    ensure!(
+        !sources.is_empty(),
+        "no demo declares an `assets/` source tree — §4.6's byte-reproducibility gate has nothing \
+         to compile, which is a broken walk and not a fact about the repository"
+    );
+    let packs = workspace_root().join(OUT);
     for (demo, source) in sources {
-        let out = PathBuf::from(OUT).join(format!("{demo}.ggpack"));
+        let out = packs.join(format!("{demo}.ggpack"));
         if check {
             // A *clean* run, twice: an incremental build that reused the file
             // it is being compared against would compare it to itself.
@@ -66,11 +74,14 @@ fn read(path: &Path) -> Result<Vec<u8>> {
 /// that reads differently on two machines.
 fn demo_sources() -> Result<Vec<(String, PathBuf)>> {
     let mut found = Vec::new();
-    let demos = Path::new("demos");
+    // Rooted, not relative: every other gate resolves through `workspace_root`,
+    // and a bare `demos` here read the *caller's* directory — from anywhere but
+    // the root it found nothing and the gate above passed on an empty set.
+    let demos = workspace_root().join("demos");
     if !demos.is_dir() {
         return Ok(found);
     }
-    for entry in std::fs::read_dir(demos).context("reading demos/")? {
+    for entry in std::fs::read_dir(&demos).context("reading demos/")? {
         let demo = entry?.path();
         let assets = demo.join("assets");
         if !assets.is_dir() {

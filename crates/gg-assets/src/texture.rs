@@ -58,6 +58,20 @@ const LEVEL_INDEX_BYTES: usize = 24;
 /// Every block format here is 4x4.
 const BLOCK_EXTENT: u32 = 4;
 
+/// The largest extent a texture blob may declare, per axis.
+///
+/// A bound, not a preference: `pixelWidth`/`pixelHeight` are two words of an
+/// 80-byte header, and everything downstream is sized from them *before* a
+/// payload byte is read — [`TextureFormat::level_bytes`], the staging ring's
+/// reservation (§4.3), and `zstd`'s output capacity, which reserves up front. A
+/// ~900-byte file declaring 65536x65536 BC7 would otherwise name 4 GiB a level
+/// and ~5.6 GiB a chain, and 2^31 square would reach `handle_alloc_error` — an
+/// abort, on a worker thread, uncatchable. 16384 is `maxImageDimension2D` on
+/// every target we ship to, so a larger texture could not be created even if the
+/// file were honest; it caps one level at 256 MiB. Packs are build output today
+/// and a mod tomorrow (§4.6), and this is the difference.
+pub const MAX_DIMENSION: u32 = 16_384;
+
 /// zstd compression level. Block-compressed texels are already near-random, so
 /// the ratio curve is flat past single digits — 9 is where more time stops
 /// buying bytes. Deterministic given the level and the linked zstd, which is
@@ -116,11 +130,30 @@ impl TextureFormat {
         matches!(self, Self::Bc7Srgb)
     }
 
-    /// Bytes a whole level of this format occupies at `width` x `height`.
+    /// Bytes a whole level of this format occupies at `width` x `height`,
+    /// saturating where [`Self::checked_level_bytes`] would give `None`. A
+    /// saturated answer is one no level index can match, so a caller that
+    /// skipped [`MAX_DIMENSION`] refuses rather than acting on a wrapped size.
     #[must_use]
     pub const fn level_bytes(self, width: u32, height: u32) -> u64 {
-        let blocks = blocks_across(width) as u64 * blocks_across(height) as u64;
-        blocks * self.block_bytes() as u64
+        match self.checked_level_bytes(width, height) {
+            Some(bytes) => bytes,
+            None => u64::MAX,
+        }
+    }
+
+    /// [`Self::level_bytes`], or `None` when the product does not fit a `u64`:
+    /// `blocks_across(u32::MAX)² * 16` is exactly 2^64, which panics where
+    /// overflow checks are on and wraps to *zero* where they are not — a
+    /// zero-byte level that then matches a hostile index (§4.6).
+    #[must_use]
+    pub const fn checked_level_bytes(self, width: u32, height: u32) -> Option<u64> {
+        let across = blocks_across(width) as u64;
+        let down = blocks_across(height) as u64;
+        match across.checked_mul(down) {
+            Some(blocks) => blocks.checked_mul(self.block_bytes() as u64),
+            None => None,
+        }
     }
 }
 
@@ -231,6 +264,20 @@ pub enum TextureError {
         width: u32,
         /// The level's height.
         height: u32,
+    },
+    /// An extent past [`MAX_DIMENSION`] — no image could be created at it, and
+    /// unbounded it is an allocation sized by the file (§4.6).
+    #[error(
+        "{width}x{height} is past the {most}-texel bound a texture blob may declare — no image \
+         could be created at it, and the size arithmetic below it is the file's to choose"
+    )]
+    DimensionTooLarge {
+        /// What the file said, or what a caller passed.
+        width: u32,
+        /// The same, for the other axis.
+        height: u32,
+        /// The bound: [`MAX_DIMENSION`].
+        most: u32,
     },
     /// The level index has more entries than the dimensions allow.
     #[error("{levels} levels is more than the {most} a {width}x{height} texture has")]
@@ -348,6 +395,16 @@ impl<'a> Texture<'a> {
                 height,
             });
         }
+        // Before `full_mip_count`, before the level index is sized, before any
+        // arithmetic on the extent at all: every allocation below is a function
+        // of these two words, and they came out of the file.
+        if width > MAX_DIMENSION || height > MAX_DIMENSION {
+            return Err(TextureError::DimensionTooLarge {
+                width,
+                height,
+                most: MAX_DIMENSION,
+            });
+        }
         let most = full_mip_count(width, height);
         if level_count > most {
             return Err(TextureError::TooManyLevels {
@@ -378,7 +435,17 @@ impl<'a> Texture<'a> {
                 uncompressed: long(16),
             };
             let (w, h) = level_extent(width, height, level as u32);
-            let expected = format.level_bytes(w, h);
+            // Checked, though the bound above already puts every level three
+            // orders under the overflow: the size arithmetic on this path has no
+            // branch that panics in dev and wraps in dist.
+            let expected =
+                format
+                    .checked_level_bytes(w, h)
+                    .ok_or(TextureError::DimensionTooLarge {
+                        width,
+                        height,
+                        most: MAX_DIMENSION,
+                    })?;
             if entry.uncompressed != expected {
                 return Err(TextureError::WrongLevelSize {
                     level: level as u32,
@@ -432,6 +499,9 @@ impl<'a> Texture<'a> {
         let frame = self
             .blob
             .get(entry.offset as usize..(entry.offset + entry.length) as usize)?;
+        // `decompress` reserves `uncompressed` before it touches the payload, so
+        // that number *is* an allocation the file asked for — bounded only
+        // because `read` refused an extent past `MAX_DIMENSION` first.
         Some(
             zstd::bulk::decompress(frame, entry.uncompressed as usize)
                 .map_err(|source| TextureError::Decompress { level, source }),
@@ -474,6 +544,15 @@ pub fn encode(
             levels: levels.len(),
             width,
             height,
+        });
+    }
+    // The writer refuses what the reader refuses, so `ggc` cannot author a pack
+    // its own loader would reject at load time on a player's machine.
+    if width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return Err(TextureError::DimensionTooLarge {
+            width,
+            height,
+            most: MAX_DIMENSION,
         });
     }
     let most = full_mip_count(width, height);
@@ -645,4 +724,85 @@ fn key_value_data() -> Vec<u8> {
         kvd.resize(kvd.len().next_multiple_of(size_of::<u32>()), 0);
     }
     kvd
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// A well-formed 8x8 BC7 blob to vandalise. The contents are irrelevant —
+    /// the reader never interprets a block.
+    fn blob() -> Vec<u8> {
+        let levels: Vec<Vec<u8>> = (0..full_mip_count(8, 8))
+            .map(|level| {
+                let (w, h) = level_extent(8, 8, level);
+                vec![level as u8; TextureFormat::Bc7Srgb.level_bytes(w, h) as usize]
+            })
+            .collect();
+        encode(TextureFormat::Bc7Srgb, 8, 8, &levels).unwrap()
+    }
+
+    /// The same blob with `pixelWidth`/`pixelHeight` rewritten — the two words a
+    /// hostile pack costs nothing to change.
+    fn with_extent(width: u32, height: u32) -> Vec<u8> {
+        let mut blob = blob();
+        blob[20..24].copy_from_slice(&width.to_le_bytes());
+        blob[24..28].copy_from_slice(&height.to_le_bytes());
+        blob
+    }
+
+    #[test]
+    fn an_extent_no_image_could_have_is_refused_before_anything_is_reserved() {
+        // 65536² BC7 is 4 GiB a level and ~5.6 GiB a chain, named by ~900 bytes.
+        let err = Texture::read(&with_extent(65_536, 65_536)).unwrap_err();
+        assert!(
+            matches!(err, TextureError::DimensionTooLarge { most, .. } if most == MAX_DIMENSION),
+            "{err}"
+        );
+        // 2^31 square is the one that reached `Vec::with_capacity(2^62)`:
+        // `handle_alloc_error` on a decode worker, which aborts the process and
+        // cannot be caught by the caller that asked for the texture.
+        let err = Texture::read(&with_extent(1 << 31, 1 << 31)).unwrap_err();
+        assert!(
+            matches!(err, TextureError::DimensionTooLarge { .. }),
+            "{err}"
+        );
+        // A bound, not a shrug: the largest legal extent is still *read* as an
+        // extent, and refused for what it then gets wrong.
+        let err = Texture::read(&with_extent(MAX_DIMENSION, MAX_DIMENSION)).unwrap_err();
+        assert!(matches!(err, TextureError::WrongLevelSize { .. }), "{err}");
+    }
+
+    #[test]
+    fn the_size_arithmetic_answers_instead_of_overflowing() {
+        // Exactly 2^64: a panic where overflow checks are on (and that panic is
+        // inside a decode worker holding the inbox mutex, which poisons it and
+        // takes the whole pool with it), a wrap to zero where they are not.
+        assert_eq!(
+            TextureFormat::Bc7Srgb.checked_level_bytes(u32::MAX, u32::MAX),
+            None
+        );
+        assert_eq!(
+            TextureFormat::Bc7Srgb.level_bytes(u32::MAX, u32::MAX),
+            u64::MAX,
+            "saturated, so no level index can match it"
+        );
+        assert_eq!(
+            TextureFormat::Bc7Srgb.checked_level_bytes(MAX_DIMENSION, MAX_DIMENSION),
+            Some(256 * 1024 * 1024)
+        );
+        assert_eq!(TextureFormat::Bc4Unorm.level_bytes(u32::MAX, 4), 1 << 33);
+    }
+
+    #[test]
+    fn the_writer_refuses_the_extent_the_reader_refuses() {
+        let level = vec![0u8; 16];
+        let err = encode(TextureFormat::Bc7Srgb, MAX_DIMENSION + 1, 4, &[level]).unwrap_err();
+        assert!(
+            matches!(err, TextureError::DimensionTooLarge { .. }),
+            "{err}"
+        );
+    }
 }

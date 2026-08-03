@@ -215,4 +215,26 @@ impl SideTables {
             table.hash_into(h);
         }
     }
+
+    /// The first NaN in any installed table, ascending by id (§1.13 hazard 6).
+    ///
+    /// A hasher per table, not one across all of them: the witness reports what
+    /// it absorbed and a shared hasher could not say which table fed it. The
+    /// digest is discarded — hashing is only how a non-`Pod` table is made to
+    /// enumerate its own floats.
+    pub(crate) fn scan_for_nan(&self) -> Option<crate::nan_scan::SideTableNan> {
+        for (_, table) in &self.sorted {
+            let mut h = StateHasher::canonical();
+            table.hash_into(&mut h);
+            if let Some((width, bits)) = h.nan_witness() {
+                return Some(crate::nan_scan::SideTableNan {
+                    declared: table.declared_id(),
+                    type_name: table.type_name(),
+                    width,
+                    bits,
+                });
+            }
+        }
+        None
+    }
 }

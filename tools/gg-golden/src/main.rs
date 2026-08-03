@@ -1065,7 +1065,24 @@ fn numbers(comparison: &Comparison, policy: Policy) -> Vec<(String, String)> {
         ("mean DSSIM".into(), format!("{:.5}", comparison.dssim_mean)),
         (
             "mean signed error".into(),
-            format!("{:+.4} / ±{:.4} LSB", comparison.mean_bias, policy.max_bias),
+            format!(
+                "R{:+.4} G{:+.4} B{:+.4} / ±{:.4} LSB",
+                comparison.channel_bias[0],
+                comparison.channel_bias[1],
+                comparison.channel_bias[2],
+                policy.max_bias
+            ),
+        ),
+        // Per channel above and per region here, because one number over R+G+B
+        // and over the whole frame cancels two errors an eye does not: a cast
+        // (+red against −blue) and a swing (one half up, the other down).
+        (
+            format!("worst {0}x{0} region bias", compare::REGION),
+            format!(
+                "{:+.4} / ±{:.4} LSB",
+                comparison.region_bias,
+                policy.max_region_bias()
+            ),
         ),
     ]
 }
@@ -1126,17 +1143,22 @@ fn verify_gates() -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(drift.verdict(policy), Verdict::BenignDrift),
         "symmetric ±3 LSB noise was not recognised as precision drift: {} differing pixel(s), \
-         worst-window DSSIM {:.5} against {:.5}, mean bias {:+.4} against ±{:.4}",
+         worst-window DSSIM {:.5} against {:.5}, mean bias {:+.4} and worst region {:+.4} against \
+         ±{:.4}",
         drift.diff_pixels,
         drift.dssim_worst,
         policy.max_dssim,
-        drift.mean_bias,
+        drift.mean_bias(),
+        drift.region_bias,
         policy.max_bias
     );
     println!(
         "gg-golden: symmetric ±3 LSB noise moves {} pixel(s), worst-window DSSIM {:.5}, mean bias \
-         {:+.4} — recorded as drift, not a regression",
-        drift.diff_pixels, drift.dssim_worst, drift.mean_bias
+         {:+.4}, worst region {:+.4} — recorded as drift, not a regression",
+        drift.diff_pixels,
+        drift.dssim_worst,
+        drift.mean_bias(),
+        drift.region_bias
     );
     Ok(())
 }
@@ -1252,6 +1274,19 @@ fn run(filter: Option<&str>) -> anyhow::Result<()> {
                              picture moved, not just its numbers",
                             comparison.dssim_worst, scene.policy.max_dssim
                         )
+                    } else if comparison.biased(scene.policy) {
+                        // A level error, which is the one thing neither the pixel
+                        // budget nor DSSIM can see: say so, or the headline reads
+                        // "0 differing pixels" beside a FAIL.
+                        format!(
+                            "a wrong level, not a moved picture: worst channel {:+.4} of ±{:.4} \
+                             LSB over the frame, worst {}px region {:+.4} of ±{:.4}",
+                            comparison.mean_bias(),
+                            scene.policy.max_bias,
+                            compare::REGION,
+                            comparison.region_bias,
+                            scene.policy.max_region_bias()
+                        )
                     } else {
                         format!(
                             "{} differing pixel(s) against a budget of {}, worst channel delta {} \
@@ -1263,15 +1298,19 @@ fn run(filter: Option<&str>) -> anyhow::Result<()> {
                     },
                 )?);
                 failures.push(format!(
-                    "{}: {} differing pixel(s), max channel delta {}, worst-window DSSIM {:.5} \
-                     against {}/{} and {:.5} — see {} and {}",
+                    "{}: {} differing pixel(s), max channel delta {}, worst-window DSSIM {:.5}, \
+                     mean signed error {:+.4}, worst region {:+.4} against {}/{}, {:.5} and \
+                     ±{:.4} — see {} and {}",
                     scene.name,
                     comparison.diff_pixels,
                     comparison.max_delta,
                     comparison.dssim_worst,
+                    comparison.mean_bias(),
+                    comparison.region_bias,
                     scene.policy.tolerance,
                     scene.policy.max_diff_pixels,
                     scene.policy.max_dssim,
+                    scene.policy.max_bias,
                     actual_path.display(),
                     heatmap_path.display(),
                 ));

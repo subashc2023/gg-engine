@@ -566,12 +566,12 @@ fn fat_source(source: &str, systems: usize) -> anyhow::Result<String> {
 /// halves are reported separately because they degrade for different reasons and
 /// have different fixes (a faster linker versus a cheaper migration).
 fn latency() -> anyhow::Result<()> {
-    let small = measure_loop("small", SMALL_SYSTEMS)?;
+    let small = measure_loop("small", SMALL_SYSTEMS, BUDGET_MS)?;
     anyhow::ensure!(
         small <= BUDGET_MS,
         "at roughly twice demo 03's size the loop takes {small} ms against M5's {BUDGET_MS} ms          budget. The fixes are compile-side and none of them is an architecture change (§6 M5):          split the game across several dylibs behind the same table, a dev-profile codegen          backend, a faster linker, or keep the fast-iteration systems in a small crate."
     );
-    let fat = measure_loop("fat", FAT_SYSTEMS)?;
+    let fat = measure_loop("fat", FAT_SYSTEMS, FAT_CEILING_MS)?;
     anyhow::ensure!(
         fat <= FAT_CEILING_MS,
         "the fat point cost {fat} ms against a {FAT_CEILING_MS} ms ceiling — that is a toolchain          or machine event, not a project one"
@@ -581,7 +581,11 @@ fn latency() -> anyhow::Result<()> {
 
 /// Time one save → new-behaviour loop at a given game-crate size, in
 /// milliseconds, and print the breakdown.
-fn measure_loop(name: &str, systems: usize) -> anyhow::Result<u128> {
+/// `budget` is the ceiling *this* point is judged against, passed in rather than
+/// read from a constant: the fat point answers to `FAT_CEILING_MS`, and printing
+/// M5's 2 s beside a number that is not measured against it reads as a gate that
+/// forgives its own failure.
+fn measure_loop(name: &str, systems: usize, budget: u128) -> anyhow::Result<u128> {
     let source = fat_source(&game_source()?, systems)?;
     let lines = source.lines().count();
     let dir = workspace_root().join("target/latency").join(name);
@@ -636,7 +640,7 @@ fn measure_loop(name: &str, systems: usize) -> anyhow::Result<u128> {
     let total = rebuild_ms + swap_ms;
     println!(
         "xtask: reload latency, {name} ({lines} game-crate lines, {systems} generated systems): \
-         rebuild {rebuild_ms} ms + swap {swap_ms} ms = {total} ms (M5 budget {BUDGET_MS} ms)"
+         rebuild {rebuild_ms} ms + swap {swap_ms} ms = {total} ms (budget {budget} ms)"
     );
     Ok(total)
 }

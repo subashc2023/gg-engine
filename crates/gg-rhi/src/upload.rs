@@ -73,7 +73,9 @@ struct Batch {
 pub(crate) struct Uploader {
     ring: Buffer,
     /// Monotonic byte cursors into the ring. `head - tail <= RING_BYTES` is the
-    /// invariant; the ring offset is the cursor modulo capacity.
+    /// invariant; the ring offset is the cursor modulo capacity. `tail` is the
+    /// first byte no *live* block owns, so it moves both when a batch retires
+    /// and when [`Uploader::stage`] steps over dead space nothing will read.
     head: u64,
     tail: u64,
     /// Where the *unflushed* batch began. A batch cannot outgrow the ring —
@@ -507,24 +509,36 @@ impl Uploader {
         // A batch cannot outgrow the ring: its own bytes are the ones the loop
         // below would have to wait on, and nothing in flight owns them. So the
         // batch is submitted here instead — which is what lets a caller push a
-        // whole pack through without knowing the ring's size (§4.6).
-        if self.head.next_multiple_of(STAGE_ALIGN) + size - self.batch_start > RING_BYTES {
+        // whole pack through without knowing the ring's size (§4.6). Measured
+        // from `placed` rather than from the raw head: the gap a wrap steps over
+        // lies between the batch's first byte and this block, so a batch that
+        // only outgrows the ring *because* of a wrap has to submit here too —
+        // otherwise the loop below reaches its own unreclaimable bytes.
+        if placed(self.head, size) + size - self.batch_start > RING_BYTES {
             self.flush(device)?;
         }
         let start = loop {
-            let mut start = self.head.next_multiple_of(STAGE_ALIGN);
-            // Never straddle the wrap point: a copy reads one contiguous range.
-            if start % RING_BYTES + size > RING_BYTES {
-                start = (start / RING_BYTES + 1) * RING_BYTES;
+            let start = placed(self.head, size);
+            // The gap that alignment and the wrap step over is *dead*, not
+            // reserved: no batch owns it, nothing is ever read from it, and no
+            // wait can release it. Once everything below has retired — nothing
+            // in flight past `tail`, current batch empty — the cursor passes it
+            // in one step instead of charging it to this batch, which is what
+            // used to refuse a wrapping stage outright.
+            if self.tail == self.head && self.batch_start == self.head {
+                self.tail = start;
+                self.batch_start = start;
             }
             if start + size - self.tail <= RING_BYTES {
                 self.head = start + size;
                 break start;
             }
             let Some(batch) = self.in_flight.pop_front() else {
-                // Unreachable: the submit above left the batch empty, so the
-                // only bytes this can be waiting on are in flight. Named rather
-                // than unwrapped, because a deadlock is the alternative.
+                // Unreachable: draining to empty leaves `tail` at `batch_start`,
+                // and the submit above left that either equal to `head` — the
+                // retirement above then applies — or near enough that
+                // `start + size` is within a ring of it. Named rather than
+                // unwrapped, because a deadlock is the alternative.
                 return Err(RhiError::Loader(format!(
                     "{size} bytes cannot be staged in the {RING_BYTES}-byte ring with nothing in \
                      flight to reclaim"
@@ -624,6 +638,19 @@ impl Uploader {
                 &vk::DependencyInfo::default().buffer_memory_barriers(&barriers),
             )
         };
+    }
+}
+
+/// Where a `size`-byte block lands with the ring cursor at `head`: aligned, and
+/// pushed on to the next ring boundary rather than straddling the wrap point,
+/// because one copy reads one contiguous range. Pure, so [`Uploader::stage`]
+/// can ask the same question before it commits to anything.
+fn placed(head: u64, size: u64) -> u64 {
+    let start = head.next_multiple_of(STAGE_ALIGN);
+    if start % RING_BYTES + size > RING_BYTES {
+        (start / RING_BYTES + 1) * RING_BYTES
+    } else {
+        start
     }
 }
 

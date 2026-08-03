@@ -2,7 +2,8 @@
 //! `validation` feature — the Khronos validation layer with synchronization
 //! checking, its messages routed to `tracing` and *counted*, because the §5.4
 //! contract is zero messages and a counter is what makes that a gate instead
-//! of a scroll-past.
+//! of a scroll-past. `GG_GPUAV=1` adds shader instrumentation on top (§5 gate
+//! 4's nightly half) — see [`gpuav_requested`].
 
 use crate::RhiError;
 use ash::vk;
@@ -16,6 +17,19 @@ static VALIDATION_MESSAGES: AtomicU64 = AtomicU64::new(0);
 /// `validation` feature — dist has no layer to hear from).
 pub fn validation_message_count() -> u64 {
     VALIDATION_MESSAGES.load(Ordering::Relaxed)
+}
+
+/// Whether `GG_GPUAV=1` asked for GPU-assisted validation (§5 gate 4's nightly
+/// half, §8's sync-bug row): the layer instruments every shader so descriptor
+/// and buffer-device-address faults are caught *at shader execution*, which no
+/// CPU-side check can see. Opt-in because instrumentation recompiles every
+/// shader and slows the run by an order of magnitude — `xtask gpuav` is the
+/// only thing that sets it. Read once: the answer must not change between
+/// instance creation and the messages that come back through the callback.
+#[cfg(feature = "validation")]
+fn gpuav_requested() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("GG_GPUAV").is_ok_and(|v| v == "1"))
 }
 
 /// The Vulkan instance plus the debug plumbing that rides with it.
@@ -97,6 +111,14 @@ impl Instance {
         let enabled = [vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION];
         #[cfg(feature = "validation")]
         let mut validation_features;
+        // Declared here so they outlive `create_instance` — the layer reads
+        // through these pointers during the call, not before it.
+        #[cfg(feature = "validation")]
+        let gpuav_on = vk::TRUE;
+        #[cfg(feature = "validation")]
+        let gpuav_settings;
+        #[cfg(feature = "validation")]
+        let mut layer_settings;
         #[cfg(feature = "validation")]
         {
             // §1.10, no silent fallbacks: if the layer is absent the run is
@@ -121,6 +143,29 @@ impl Instance {
             info = info
                 .enabled_layer_names(&layer_names)
                 .push_next(&mut validation_features);
+
+            // GPU-AV goes in through `VK_EXT_layer_settings`, not through
+            // `VkValidationFeaturesEXT`: the 1.4.335 layer marks the
+            // GPU_ASSISTED enable bit deprecated in favour of `gpuav_enable`,
+            // and the settings route is the one it honours natively. The
+            // extension is not *enabled* — a settings chain is read by layers
+            // during instance creation whether or not the app asked for it,
+            // and enabling it would make instance creation fail on a machine
+            // with no layer at all.
+            let mut setting = vk::LayerSettingEXT::default()
+                .layer_name(c"VK_LAYER_KHRONOS_validation")
+                .setting_name(c"gpuav_enable")
+                .ty(vk::LayerSettingTypeEXT::BOOL32);
+            // Not `.values()`: ash sets `value_count` from the byte length,
+            // which for a 4-byte BOOL32 would claim four settings values.
+            setting.value_count = 1;
+            setting.p_values = (&raw const gpuav_on).cast();
+            gpuav_settings = [setting];
+            layer_settings = vk::LayerSettingsCreateInfoEXT::default().settings(&gpuav_settings);
+            if gpuav_requested() {
+                tracing::info!("GPU-assisted validation on (GG_GPUAV=1) — instrumented, slow");
+                info = info.push_next(&mut layer_settings);
+            }
         }
 
         info = info.enabled_extension_names(&extensions);
@@ -208,6 +253,16 @@ unsafe extern "system" fn debug_callback(
             .to_string_lossy()
             .into_owned()
     };
+
+    // GPU-AV announces the limits and features *it* forces on to instrument
+    // (fragmentStoresAndAtomics, vulkanMemoryModel, …) as layer-internal
+    // warnings. They describe the layer's own configuration, not our usage, so
+    // they are not §5.4 messages — but only under GG_GPUAV, so the ordinary
+    // zero-messages contract keeps every id it had.
+    if gpuav_requested() && id == "WARNING-Setting-Limit-Adjusted" {
+        tracing::info!(target: "gg_rhi::validation", %id, "{message}");
+        return vk::FALSE;
+    }
 
     if suppressed().iter().any(|s| s.vuid == id) {
         tracing::debug!(target: "gg_rhi::validation", %id, "suppressed (§5.4 lease)");

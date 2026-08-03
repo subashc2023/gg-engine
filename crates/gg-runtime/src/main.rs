@@ -1,8 +1,9 @@
 //! `gg-runtime`: THE host shell — the one executable game code ever runs under,
 //! in every tier (§2 Game-code boundary, §3). Thin in code, fat in linkage: zero
-//! engine logic, zero game logic, no public API. Complexity budget: 500
-//! CI-counted *code* lines (§3) — 300 through M4, raised at M5 when the shell
-//! took delivery of the window, the renderer, live input and record/replay.
+//! engine logic, zero game logic, no public API. Complexity budget: 600
+//! CI-counted *code* lines (§3) — 300 through M4, 500 at M5 when the shell took
+//! delivery of the window, the renderer, live input and record/replay, 600 at M8
+//! for the observability stack. The number lives in `xtask`; this restates it.
 //!
 //! Boot, observability, the game dylib, and `gg-core`'s loop driven to
 //! completion. Everything it does is a choice of *which* engine piece runs;
@@ -22,6 +23,10 @@ mod play;
 /// What the shell was told to run. Hand-parsed: a handful of values, and a
 /// parser dependency would be the shell's first gram of fat. Passed to [`App`]
 /// whole rather than field by field — one struct is what a session *is*.
+///
+/// `Default` is derived rather than written out at the one construction site: a
+/// new flag then costs the field and its arm, not a third place to forget.
+#[derive(Default)]
 pub struct Args {
     game: PathBuf,
     /// Bounded run. Headless it is `Pace::Locked` — wall time ignored, so a
@@ -58,7 +63,15 @@ const CONFIG: &str = "gg.cfg";
 fn main() -> anyhow::Result<()> {
     // Bound to a named local, not `_`: the guard *is* the Tracy client's
     // lifetime, and `let _ = ..` would drop it here (see `Observability`).
+    // Dist has no guard to hold, so the binding is a unit there and the lint is
+    // right about that one tier and wrong about the shape.
+    #[cfg_attr(not(feature = "debug-tools"), allow(clippy::let_unit_value))]
     let _observability = init_observability()?;
+    // Hazard 5's startup call site (§4.2.1): before any dependency's initializer
+    // has had a chance to vandalize MXCSR/FPCR unnoticed. Demos 00–02 do the
+    // same; the shell is what every demo from 03 on actually runs under.
+    #[cfg(feature = "fp-assert")]
+    gg_math::fpenv::assert_fp_env();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = parse_args(&argv)?;
 
@@ -143,16 +156,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
-    let mut args = Args {
-        game: PathBuf::new(),
-        frames: None,
-        input: None,
-        record: None,
-        replay: None,
-        restore: None,
-        leak_budget: None,
-        pack: None,
-    };
+    let mut args = Args::default();
     let mut argv = argv.iter().cloned();
     while let Some(flag) = argv.next() {
         let mut value = || argv.next().with_context(|| format!("{flag} needs a value"));

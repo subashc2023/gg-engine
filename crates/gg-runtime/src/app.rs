@@ -24,7 +24,7 @@ use gg_core::reload::rejuvenate::Rejuvenator;
 use gg_core::{GameLib, Stages};
 #[cfg(feature = "hot-reload")]
 use gg_ecs::ComponentOutcome;
-use gg_ecs::boundary::{Eye, Model, Renderable, TickCtx, host_api};
+use gg_ecs::boundary::{Eye, Light, Model, Renderable, TickCtx, host_api};
 use gg_ecs::{Snapshot, World};
 use gg_extract::Extracted;
 use gg_input::{ActionMap, Drive, Input, InputFrame, Recorder, Replay, ReplayMeta};
@@ -104,18 +104,11 @@ impl App {
         #[cfg(feature = "hot-reload")]
         let (watch, lib) = {
             let mut watch = gg_core::reload::watch::Watch::new(game, staging)?;
-            watch.request();
-            let lib = loop {
-                // Bounded by the watcher's own staging attempts, so a missing or
-                // permanently locked artifact ends as a named error, not a spin.
-                //
-                // SAFETY: `game` is the artifact the operator named — the only
-                // provenance any host can establish (§4.2.2) — and `host_api()`
-                // is `&'static`.
-                if let Some(ready) = unsafe { watch.poll(host_api()) } {
-                    break ready?.lib;
-                }
-            };
+            // SAFETY: `game` is the artifact the operator named — the only
+            // provenance any host can establish (§4.2.2) — and `host_api()` is
+            // `&'static`. How long to wait and how hard is the watcher's, not
+            // the shell's (§3).
+            let lib = unsafe { watch.block_until_ready(host_api()) }?.lib;
             (watch, lib)
         };
         // SAFETY: `game` is the artifact the operator named, which is the only
@@ -124,9 +117,7 @@ impl App {
         let lib = unsafe { GameLib::load(game, host_api())? };
 
         let mut world = World::new();
-        // SAFETY: `lib` is verified — `GameLib::load` returned it — and is never
-        // unloaded, which is what makes its descriptors `&'static`.
-        let declared = unsafe { world.adopt(lib.components()) }?;
+        let declared = adopt(&mut world, &lib)?;
         let mut drive = match replay {
             Some(replay) => Drive::Replay(replay),
             None => Drive::Live(
@@ -298,10 +289,13 @@ impl App {
     fn swap(&mut self, reloaded: gg_core::reload::watch::Reloaded) -> anyhow::Result<()> {
         let snapshot = self.world.snapshot();
         let mut world = World::new();
-        // SAFETY: `reloaded.lib` passed `GameLib::load`'s checks and is never
-        // unloaded.
-        unsafe { world.adopt(reloaded.lib.components()) }?;
-        let report = world.restore(&snapshot)?;
+        // Every failure from here to the swap is charged to the leak budget: the
+        // image is mapped and never unloaded, so a refused adopt costs exactly
+        // what an accepted one does (§4.2.2).
+        adopt(&mut world, &reloaded.lib).map_err(|e| reloaded.lib.refuse(e))?;
+        let report = world
+            .restore(&snapshot)
+            .map_err(|e| reloaded.lib.refuse(e))?;
         // One line per component that actually moved (§4.2.2). The reused ones
         // are the majority of every reload, and printing them would bury the one
         // line the reader came for.
@@ -314,7 +308,8 @@ impl App {
         // the id space, and a map bound against the old one would fire the wrong
         // verb (§4.7). Key state resets with it, which is why this is the one
         // reload effect a player can feel.
-        self.input = bind(&self.bindings, &self.drive, &reloaded.lib)?;
+        self.input =
+            bind(&self.bindings, &self.drive, &reloaded.lib).map_err(|e| reloaded.lib.refuse(e))?;
         self.rejuvenate.retire(self.lib.bytes());
         self.lib = reloaded.lib;
         // The old segment closes and a new one opens at the first tick the new
@@ -344,6 +339,33 @@ impl App {
         );
         Ok(())
     }
+}
+
+/// Register the host's own §4.5 protocol types, then everything the dylib
+/// declares. Returns the dylib's count.
+///
+/// The order *is* the check. The host reads these four through typed queries at
+/// extract, so putting its compiled-in schemas in first is what gives
+/// `World::adopt`'s comparison something to disagree with — into a fresh world
+/// every declaration would take the insert branch, and a dylib that laid one out
+/// differently would be accepted and then panic mid-extract, outside every shim
+/// (§4.2.2).
+fn adopt(world: &mut World, lib: &GameLib) -> anyhow::Result<usize> {
+    world.register::<Renderable>()?;
+    world.register::<Eye>()?;
+    world.register::<Model>()?;
+    world.register::<Light>()?;
+    // SAFETY: `lib` is verified — `GameLib::load` returned it — and is never
+    // unloaded, which is what makes its descriptors `&'static`.
+    let declared = unsafe { world.adopt(lib.components()) }?;
+    // §1.13 hazard 6: a field the scan cannot place is a hole in the gate, and
+    // load is the once-per-build moment to say so — the alternative is a claim
+    // in PLAN.md that quietly covers less than it says.
+    #[cfg(all(feature = "nan-scan", debug_assertions))]
+    for hole in world.registry().unclassified_fields() {
+        warn!(%hole, "nan-scan cannot classify this field — its bytes are not scanned");
+    }
+    Ok(declared)
 }
 
 /// This build's verbs (§4.7).
@@ -406,12 +428,22 @@ impl Stages for App {
         // usually produces no artifact at all, so the running game never
         // notices; when one does arrive and is refused, the refusal belongs in
         // the terminal and not in the player's session (§6 M0X).
-        match ready
+        // Bound, not matched in place: the closure is a scrutinee temporary and
+        // would hold the `&mut self` borrow across the arms.
+        let outcome = ready
             .map_err(anyhow::Error::from)
-            .and_then(|r| self.swap(r))
-        {
+            .and_then(|r| self.swap(r));
+        match outcome {
             Ok(()) => Ok(()),
             Err(refused) => {
+                // A refused dylib was mapped and ran its initializers before any
+                // check could, and is never unloaded (§4.2.2) — so its bytes are
+                // this session's whether or not the swap happened. Charged, not
+                // acted on: the restart still waits for a *successful* swap,
+                // because rejuvenating into the same refusal only repeats it.
+                if let Some(reload) = refused.downcast_ref::<gg_core::ReloadError>() {
+                    self.rejuvenate.retire(reload.leaked_bytes());
+                }
                 error!(error = %refused, "reload refused — still running the last good build");
                 Ok(())
             }
@@ -423,6 +455,12 @@ impl Stages for App {
     }
 
     fn sim_tick(&mut self, tick: u64) -> anyhow::Result<()> {
+        // Hazard 5's per-tick call site (§4.2.1, §2's Build-tiers row). An ICD,
+        // layer or audio DLL initializer that sets FTZ/DAZ changes every denormal
+        // result process-wide and only on the host that loaded it — the two
+        // native legs of §5.6 then diverge with nothing naming the cause.
+        #[cfg(all(feature = "fp-assert", debug_assertions))]
+        gg_math::fpenv::assert_fp_env();
         self.next_tick = tick + 1;
         if self.halted {
             return Ok(());
@@ -460,6 +498,18 @@ impl Stages for App {
             && let Err(refused) = self.hierarchy.propagate(&mut self.world)
         {
             error!(error = %refused, tick, "hierarchy refused — sim halted until the next reload");
+            self.halted = true;
+        }
+        // §1.13 hazard 6's per-tick call site. The canonical hash absorbs raw
+        // bits and NaN payloads differ by architecture, so a NaN in hashed state
+        // is a §5.6 divergence with a math bug as its cause — banned, not
+        // canonicalized around. It halts like a panicking system, for the same
+        // reason: the rest of the tick would run over state already corrupt.
+        #[cfg(all(feature = "nan-scan", debug_assertions))]
+        if !self.halted
+            && let Some(hit) = self.world.scan_for_nan()
+        {
+            error!(%hit, tick, "NaN in hashed state — sim halted until the next reload");
             self.halted = true;
         }
         // §5.6c's material: one canonical hash per tick, on a target of its own

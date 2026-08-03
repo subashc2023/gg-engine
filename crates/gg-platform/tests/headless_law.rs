@@ -1,6 +1,11 @@
 //! §1.5's machine: under `GG_HEADLESS=1` a visible-window request is a panic,
 //! not a window. nextest runs each test in its own process, so the env var
 //! cannot leak into other tests.
+//!
+//! Only the panic test is windowless — it never reaches an event loop. Every
+//! test below it reaches a real window and is therefore `#[ignore]`d into
+//! `cargo xtask interactive`: automated tiers are windowless *by construction*,
+//! not by the window being invisible (§1.5).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -32,15 +37,21 @@ fn visible_window_under_gg_headless_panics() {
     );
 }
 
+/// §1.5's positive half: the interactive suite's own window kind stays legal
+/// under `GG_HEADLESS=1`, which is what keeps the law a rule about *visible*
+/// windows rather than a ban on the suite. It creates one, so it runs where the
+/// others do — on Wayland `set_visible` and `set_outer_position` are no-ops, so
+/// an automated tier running this would map a surface on one platform in three.
 #[test]
+#[ignore = "creates a window — manual windowed suite: cargo xtask interactive (§1.5)"]
 fn invisible_windows_are_always_legal() {
     // SAFETY: as above.
     unsafe { std::env::set_var("GG_HEADLESS", "1") };
-    // A scheduled tier has no display at all — systemd user services inherit
-    // neither DISPLAY nor WAYLAND_DISPLAY, and that is a §1.5 feature worth
-    // keeping rather than an environment to repair: a tier that cannot reach a
-    // display server cannot put a window on the user's screen by any bug. The
-    // legality of an invisible window is then untestable, not violated.
+    // A display-less lane (ssh, WSL without WSLg, a systemd user service, which
+    // inherits neither DISPLAY nor WAYLAND_DISPLAY) cannot answer the question:
+    // the legality of an invisible window is then untestable, not violated. Not
+    // an environment to repair — a lane that cannot reach a display server
+    // cannot put a window on the user's screen by any bug (§1.5).
     #[cfg(all(unix, not(target_os = "macos")))]
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         eprintln!("skipped: no display server reachable (§1.5)");
@@ -72,7 +83,8 @@ fn minimize_restore_storm_never_reaches_the_screen() {
     }
     // Force the X11 backend: the storm is a WM code path, and it is the leg
     // the interactive suite runs (see xtask's interactive_suite for why not
-    // Wayland). SAFETY: process-per-test (nextest); no other thread yet.
+    // Wayland).
+    // SAFETY: process-per-test (nextest); no other thread yet.
     unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
 
     let mut pump = Pump::new(WindowDesc::invisible("gg offscreen law", (320, 200))).unwrap();

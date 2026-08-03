@@ -400,6 +400,49 @@ fn adopting_the_same_build_twice_is_a_no_op_but_a_moved_schema_is_refused() {
 }
 
 #[test]
+fn the_host_registering_its_own_protocol_types_is_what_makes_adopt_refuse_them() {
+    // §4.5's `Renderable`/`Eye`/`Model`/`Light` are declared by the game *and*
+    // read by the host through typed queries at extract. Adopting into a fresh
+    // world takes the insert branch for every one of them, so a dylib that laid
+    // one out differently is accepted and the disagreement surfaces later as a
+    // host-side panic in `ArchetypeView::assert_shape` — outside every shim,
+    // unwinding through the window callback, the one place the boundary is not
+    // unwind-free. Registering the host's compiled-in schema *first* is what
+    // turns that into a refusal by name at load, and it is what `gg-runtime`
+    // does before every adopt.
+    let mut world = World::new();
+    world
+        .register::<gg_ecs::boundary::Renderable>()
+        .expect("the host's own protocol type registers");
+
+    let mut moved = boundary::layout_of::<gg_ecs::boundary::Renderable>();
+    moved.schema_hash[0] ^= 1; // a field reordered, resized or retyped
+    let table = ComponentsTable {
+        entries: core::ptr::from_ref(&moved),
+        len: 1,
+        reserved: 0,
+    };
+    // SAFETY: `moved` outlives the call and carries this binary's own pointers.
+    let refused = unsafe { world.adopt(&table) }
+        .expect_err("a dylib laying the protocol out differently is not adoptable")
+        .to_string();
+    assert!(
+        refused.contains("gg.renderable") && refused.contains("different schema"),
+        "refused by declared id, and by what is wrong: {refused}"
+    );
+
+    // The agreeing case must still adopt, or the check would refuse every game.
+    let agreed = boundary::layout_of::<gg_ecs::boundary::Renderable>();
+    let table = ComponentsTable {
+        entries: core::ptr::from_ref(&agreed),
+        len: 1,
+        reserved: 0,
+    };
+    // SAFETY: as above.
+    assert_eq!(unsafe { world.adopt(&table) }.unwrap(), 1);
+}
+
+#[test]
 fn a_reload_of_an_unchanged_build_is_canonical_hash_neutral() {
     // The sequence `gg-runtime` runs at every swap — snapshot, adopt into a
     // fresh world, restore — with the new build identical to the old. §6 M5

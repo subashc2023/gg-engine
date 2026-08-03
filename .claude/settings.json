@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cargo xtask ci --fast --hook",
+            "command": "cargo xtask ci --fast --hook || exit 2",
             "timeout": 120
           }
         ]

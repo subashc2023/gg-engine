@@ -156,10 +156,71 @@ impl Entities {
     }
 
     /// Replace allocator state wholesale. Restores the id sequence exactly.
-    pub(crate) fn restore(&mut self, image: &EntitiesImage) {
+    ///
+    /// # Errors
+    ///
+    /// If `image` breaks any rule at the top of this module. This is the only
+    /// path that installs an allocator it did not build, and the image reaches it
+    /// off disk from a previous process through a handoff that carries no
+    /// checksum (§4.2.2) — so the rules are checked here rather than discovered
+    /// later as a panic in [`alloc`](Self::alloc), as two live entities sharing
+    /// one index, or as a wrapped generation reviving every stale handle.
+    /// Nothing is written until every check has passed.
+    pub(crate) fn restore(&mut self, image: &EntitiesImage) -> Result<(), crate::SnapshotError> {
+        let bad = |detail: String| crate::SnapshotError::Allocator { detail };
+        let mut live: u32 = 0;
+        for (index, &generation) in image.generations.iter().enumerate() {
+            if generation == u32::MAX {
+                return Err(bad(format!(
+                    "index {index} holds generation {generation}, which reads as live and would \
+                     wrap to 0 on the next despawn — release builds do not trap it (rule 4)"
+                )));
+            }
+            live += u32::from(generation % 2 == 1);
+        }
+        if live != image.live {
+            return Err(bad(format!(
+                "live count is {} but {live} generations are odd (rule 3)",
+                image.live
+            )));
+        }
+
+        // A seen-flag per slot rather than a sort: uniqueness is the check, and
+        // the freelist's *order* is state the canonical hash covers (§4.2.1).
+        let mut seen = vec![false; image.generations.len()];
+        for &index in &image.free {
+            let Some(slot) = seen.get_mut(index as usize) else {
+                return Err(bad(format!(
+                    "freelist names index {index}, past the {} slots that exist — the next alloc \
+                     would index out of range",
+                    image.generations.len()
+                )));
+            };
+            if core::mem::replace(slot, true) {
+                return Err(bad(format!(
+                    "freelist names index {index} twice — two live entities would share one \
+                     index, and one row would silently overwrite the other"
+                )));
+            }
+            let generation = image.generations[index as usize];
+            if generation % 2 == 1 {
+                return Err(bad(format!(
+                    "freelist names index {index}, which is live at generation {generation} \
+                     (rule 3)"
+                )));
+            }
+            if generation == RETIRED {
+                return Err(bad(format!(
+                    "freelist names index {index}, which is retired — a retired index leaves \
+                     circulation permanently (rule 4)"
+                )));
+            }
+        }
+
         self.generations.clone_from(&image.generations);
         self.free.clone_from(&image.free);
         self.live = image.live;
+        Ok(())
     }
 
     /// Fold allocator state into the canonical hash (§4.2.1).
@@ -283,6 +344,81 @@ mod tests {
         assert!(e.free(all[3]));
         let seen: Vec<u32> = e.iter().map(Entity::index).collect();
         assert_eq!(seen, vec![0, 2, 4]);
+    }
+
+    #[test]
+    fn a_restored_allocator_must_satisfy_the_contract_it_was_not_built_by() {
+        // `restore` is the one entry point that installs an allocator nobody
+        // here built — the image arrives off disk from a previous process
+        // through a checksum-free handoff (§4.2.2). Each case below is a real
+        // failure of the rules at the top of this module, and the point is that
+        // it is caught *here* rather than in the next `alloc`.
+        let good = EntitiesImage {
+            generations: vec![1, 2, 1],
+            free: vec![1],
+            live: 2,
+        };
+        assert!(Entities::new().restore(&good).is_ok());
+
+        let refused = |image: EntitiesImage, needle: &str| {
+            let mut allocator = Entities::new();
+            let message = allocator.restore(&image).unwrap_err().to_string();
+            assert!(message.contains(needle), "{message}");
+            assert_eq!(allocator.len(), 0, "a refused image writes nothing");
+        };
+
+        refused(
+            EntitiesImage {
+                generations: vec![1, 2],
+                free: vec![7],
+                live: 1,
+            },
+            "past the 2 slots",
+        );
+        refused(
+            EntitiesImage {
+                generations: vec![2, 2],
+                free: vec![0, 0],
+                live: 0,
+            },
+            "twice",
+        );
+        refused(
+            EntitiesImage {
+                generations: vec![1, 2],
+                free: vec![0],
+                live: 1,
+            },
+            "live at generation 1",
+        );
+        refused(
+            EntitiesImage {
+                generations: vec![RETIRED],
+                free: vec![0],
+                live: 0,
+            },
+            "retired",
+        );
+        // Odd, so it reads as live; the next despawn wraps it to 0 under
+        // release overflow rules, the index returns to the freelist, and the
+        // next alloc reissues generation 1 — reviving every stale handle ever
+        // minted for that index, which is the one thing RETIRED exists to stop.
+        refused(
+            EntitiesImage {
+                generations: vec![u32::MAX],
+                free: Vec::new(),
+                live: 1,
+            },
+            "wrap to 0",
+        );
+        refused(
+            EntitiesImage {
+                generations: vec![1, 1],
+                free: Vec::new(),
+                live: 1,
+            },
+            "live count is 1",
+        );
     }
 
     #[test]

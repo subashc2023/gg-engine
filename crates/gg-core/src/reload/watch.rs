@@ -46,6 +46,18 @@ const SETTLE_QUIET: Duration = Duration::from_millis(40);
 /// genuinely stuck file is not silence. Also in time, for the same reason.
 const STAGING_PATIENCE: Duration = Duration::from_secs(2);
 
+/// How long [`Watch::block_until_ready`] spins before it starts sleeping, and
+/// how long it sleeps after that.
+///
+/// The first load settles in two polls (`request` sets no quiet period), so the
+/// good case never reaches the sleep and pays nothing against M9's
+/// load-to-first-frame budget. Only an absent or locked artifact polls
+/// repeatedly, and that case has [`STAGING_PATIENCE`] to burn: without the
+/// sleep it is a `stat` per iteration at full core for two seconds, to produce
+/// an error message.
+const FIRST_LOAD_SPIN: Duration = Duration::from_millis(2);
+const FIRST_LOAD_NAP: Duration = Duration::from_millis(1);
+
 /// A dylib that arrived, was staged, and passed every check.
 pub struct Reloaded {
     /// The new library. The caller swaps it in at `reload_check` and retires the
@@ -162,6 +174,33 @@ impl Watch {
     /// Whether a rebuild has been seen and not yet loaded.
     pub fn is_pending(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// Request the artifact and wait for it: the startup load, which has no
+    /// frame loop to be polled from yet.
+    ///
+    /// Ends in a staged, loaded, verified library or in a named error — a
+    /// missing path and a linker that never lets go both terminate through
+    /// [`STAGING_PATIENCE`].
+    ///
+    /// # Safety
+    ///
+    /// Inherits [`Self::poll`]'s obligations.
+    pub unsafe fn block_until_ready(
+        &mut self,
+        host_api: &'static HostApiV1,
+    ) -> Result<Reloaded, ReloadError> {
+        self.request();
+        let started = Instant::now();
+        loop {
+            // SAFETY: forwarded to this method's caller, one doc block above.
+            if let Some(ready) = unsafe { self.poll(host_api) } {
+                return ready;
+            }
+            if started.elapsed() > FIRST_LOAD_SPIN {
+                std::thread::sleep(FIRST_LOAD_NAP);
+            }
+        }
     }
 
     /// Act as though the artifact had just been rebuilt — a manual reload key,

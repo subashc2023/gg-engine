@@ -277,6 +277,57 @@ fn the_manifest_survives_the_trip_and_migration_still_runs() {
     assert_eq!(defaulted, &["z".to_owned()]);
 }
 
+/// Where the freelist's first entry sits in an encoded image: magic, format,
+/// the generation run, then the freelist's own count.
+fn free_slot(image: &[u8]) -> usize {
+    let generations = u32::from_le_bytes(image[8..12].try_into().unwrap()) as usize;
+    16 + 4 * generations
+}
+
+/// What restoring `image` into a populated world is refused with.
+fn refusal(image: &[u8]) -> String {
+    let mut world = populated();
+    world
+        .restore(&gg_ecs::Snapshot::decode(image).unwrap())
+        .expect_err("a corrupt allocator must not be installed")
+        .to_string()
+}
+
+#[test]
+fn a_byte_corrupt_handoff_is_refused_at_restore_rather_than_in_the_next_alloc() {
+    // A handoff is a file a *previous process* wrote and carries no checksum by
+    // design (§4.2.2), and decoding bounds-checks truncation only — so a
+    // corrupted-but-complete image lands straight in the allocator unless
+    // restore says otherwise. Every patch below is one of the three ways that
+    // ends: a panic indexing `generations`, two live entities sharing one index
+    // and therefore one `locations` row, or a generation wrapping past RETIRED.
+    let image = populated().snapshot().encode();
+    let free = free_slot(&image);
+
+    let mut out_of_range = image.clone();
+    out_of_range[free..free + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(refusal(&out_of_range).contains("past the 8 slots"));
+
+    let mut still_live = image.clone();
+    still_live[free..free + 4].copy_from_slice(&0u32.to_le_bytes());
+    assert!(refusal(&still_live).contains("live at generation 1"));
+
+    let mut saturated = image.clone();
+    saturated[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(refusal(&saturated).contains("wrap to 0"));
+
+    // And a refusal is not a half-restore: the destination world is untouched,
+    // which is why the allocator is checked before anything is torn down.
+    let mut world = populated();
+    let before = world.canonical_hash();
+    assert!(
+        world
+            .restore(&gg_ecs::Snapshot::decode(&still_live).unwrap())
+            .is_err()
+    );
+    assert_eq!(world.canonical_hash(), before);
+}
+
 #[test]
 fn a_truncated_image_is_refused_at_every_length() {
     // The image is written by a process that is *exiting*, so a short file is a

@@ -12,9 +12,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gg_assets::pack::{AssetId, AssetKind};
+use gg_assets::texture::{self, TextureFormat};
 use gg_assets::{Material, Node, PackWriter, Vertex, mesh, scene};
 use gg_ecs::World;
 use gg_ecs::boundary::{Light, Model};
@@ -27,13 +28,25 @@ const SCENE: &str = "test/scene";
 const MESH: &str = "test/mesh/0.0";
 const MATERIAL: &str = "test/material/0";
 
+/// The facet normal: a quad in the `z = 0` plane faces +Z.
+const FLAT: [f32; 3] = [0.0, 0.0, 1.0];
+
 /// A quad facing +Z, one metre to a side, so an unrotated eye sees its face.
-fn quad() -> Vec<u8> {
+///
+/// `normal` is *authored* per vertex and need not be the facet's — every
+/// smooth-shaded mesh in existence carries one that is not. That is what
+/// [`a_stretched_instance_shades_by_its_inverse_transposed_normal`] exploits:
+/// the transform under test is the only thing between it and the pixel.
+fn quad(normal: [f32; 3]) -> Vec<u8> {
+    quad_with_tangent(normal, [1.0, 0.0, 0.0, 1.0])
+}
+
+fn quad_with_tangent(normal: [f32; 3], tangent: [f32; 4]) -> Vec<u8> {
     let corner = |x: f32, y: f32, u: f32, v: f32| Vertex {
         position: [x, y, 0.0],
-        normal: [0.0, 0.0, 1.0],
+        normal,
         uv: [u, v],
-        tangent: [1.0, 0.0, 0.0, 1.0],
+        tangent,
     };
     let vertices = [
         corner(-1.0, -1.0, 0.0, 1.0),
@@ -45,9 +58,9 @@ fn quad() -> Vec<u8> {
 }
 
 /// A one-node scene four metres down -Z, drawn in `base_color`.
-fn pack_bytes(base_color: [f32; 4]) -> Vec<u8> {
+fn pack_bytes(base_color: [f32; 4], normal: [f32; 3]) -> Vec<u8> {
     let mut writer = PackWriter::new();
-    writer.add(MESH, AssetKind::Mesh, 0, quad()).unwrap();
+    writer.add(MESH, AssetKind::Mesh, 0, quad(normal)).unwrap();
     writer
         .add(
             MATERIAL,
@@ -151,10 +164,125 @@ fn at(pixels: &[u8], x: u32, y: u32) -> [u8; 3] {
     [pixels[i], pixels[i + 1], pixels[i + 2]]
 }
 
+/// A normal 45° between +X and +Z. Off the axis the instance is stretched along,
+/// which is the whole point, and still square enough to the eye that the
+/// specular term stays tame — a normal perpendicular to the view rides
+/// `n_dot_v`'s clamp, where the visibility term is at its most sensitive.
+const TILTED: [f32; 3] = [
+    std::f32::consts::FRAC_1_SQRT_2,
+    0.0,
+    std::f32::consts::FRAC_1_SQRT_2,
+];
+
+/// Where the quad's centre ends up: the scene node's translation, unscaled,
+/// because both stretches below leave `x` and `z` of a zero-`x` offset alone.
+const QUAD: sim::DVec3 = sim::DVec3::new(0.0, 0.0, -4.0);
+
+/// A point light rather than a sun, for two reasons that both matter here: a
+/// sun draws a shadow pass, and a sun grazing this quad's *facet* would put the
+/// shadow bias knobs between the normal and the pixel; and a point light far
+/// enough out is parallel to within a rounding at the one pixel this reads.
+/// 16 m against a 64 m range keeps the windowed falloff near 1.
+const LIGHT_DISTANCE: f64 = 16.0;
+const LIGHT_RANGE: f32 = 64.0;
+/// Chosen so the control reading lands mid-range: bright enough to be well off
+/// the ambient floor, dim enough to stay under the tonemapper's knee, where the
+/// curve is the identity and a change in shading is a change in the pixel.
+const LIGHT_INTENSITY: f32 = 520.0;
+
+/// The quad at `scale`, lit from `toward_light` — a unit axis pointing *from*
+/// the quad at the lamp.
+fn stretched_world(scale: sim::Vec3, toward_light: sim::DVec3) -> World {
+    let mut world = World::new();
+    world.register::<Model>().unwrap();
+    world.register::<Light>().unwrap();
+    let entity = world.spawn();
+    let mut model = Model::at(SCENE, sim::DVec3::ZERO);
+    model.scale = scale;
+    world.insert(entity, model).unwrap();
+    let lamp = world.spawn();
+    world
+        .insert(
+            lamp,
+            Light::point(
+                QUAD + toward_light * LIGHT_DISTANCE,
+                0x00ff_ffff,
+                LIGHT_INTENSITY,
+                LIGHT_RANGE,
+            ),
+        )
+        .unwrap();
+    world
+}
+
+/// Render one configuration and return the centre pixel summed over rgb. Grey
+/// in, grey out — the sum is the same reading at three times the resolution.
+fn lit(path: &Path, scale: sim::Vec3, toward_light: sim::DVec3) -> u32 {
+    let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
+    renderer.open_pack(path).unwrap();
+    let pixels = settle(&mut renderer, &stretched_world(scale, toward_light));
+    let middle = at(&pixels, EXTENT.0 / 2, EXTENT.1 / 2);
+    assert!(renderer.shutdown().clean(), "no leaks, no validation");
+    u32::from(middle[0]) + u32::from(middle[1]) + u32::from(middle[2])
+}
+
+#[test]
+fn a_stretched_instance_shades_by_its_inverse_transposed_normal() {
+    // The model matrix is T*R*S with S diagonal, so a normal transforms by
+    // R*S^-1 and not by R alone (`scene.slang`). Stretching X by four tips a
+    // normal that sat 45° between +X and +Z over toward +Z: `atan(1/4)` off the
+    // axis instead of 45°. So the same instance, lit along +X, must go *dimmer*
+    // than the unstretched one, and lit along +Z must go *brighter* — and the
+    // two must move by different amounts, since only one of them is the axis
+    // the stretch acts on.
+    //
+    // Under the rotation-only shortcut the instance's scale never reaches the
+    // normal at all and all four readings below collapse to one number, which is
+    // what makes this a gate rather than a comparison.
+    let path = temp("stretch");
+    write_pack(&path, &pack_bytes([1.0, 1.0, 1.0, 1.0], TILTED));
+
+    let plus_x = sim::DVec3::new(1.0, 0.0, 0.0);
+    let plus_z = sim::DVec3::new(0.0, 0.0, 1.0);
+    let unit = sim::Vec3::splat(1.0);
+    let wide = sim::Vec3::new(4.0, 1.0, 1.0);
+
+    let control_x = lit(&path, unit, plus_x);
+    let control_z = lit(&path, unit, plus_z);
+    let wide_x = lit(&path, wide, plus_x);
+    let wide_z = lit(&path, wide, plus_z);
+
+    // The control is the symmetry the rest rests on: at 45° the normal faces
+    // both lamps equally, so the two readings agree. A setup that failed this
+    // would make the comparisons below a claim about the lamp, not the scale.
+    assert!(
+        control_x.abs_diff(control_z) <= 6,
+        "the unstretched quad faces both lamps alike: {control_x} vs {control_z}"
+    );
+    // Off the ambient floor and under the knee, so the readings below are the
+    // shading and not the tonemapper.
+    assert!(
+        (150..690).contains(&control_x),
+        "the control is mid-range: {control_x}"
+    );
+
+    assert!(
+        wide_x + 90 < control_x,
+        "stretched along the lamp's own axis, the normal turns away: \
+         {wide_x} vs {control_x}"
+    );
+    assert!(
+        wide_z > control_z + 30,
+        "and toward the other one: {wide_z} vs {control_z}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn a_scene_named_by_a_game_reaches_the_target_as_pack_geometry() {
     let path = temp("draw");
-    write_pack(&path, &pack_bytes([1.0, 0.0, 0.0, 1.0]));
+    write_pack(&path, &pack_bytes([1.0, 0.0, 0.0, 1.0], FLAT));
     let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
     renderer.open_pack(&path).unwrap();
     let world = world();
@@ -193,7 +321,7 @@ fn a_rebuilt_pack_is_re_uploaded_without_the_game_noticing() {
     // colour. Nothing in the world changed — the game's `Model` still names
     // the same scene by the same name.
     let path = temp("reload");
-    write_pack(&path, &pack_bytes([1.0, 0.0, 0.0, 1.0]));
+    write_pack(&path, &pack_bytes([1.0, 0.0, 0.0, 1.0], FLAT));
     let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
     renderer.open_pack(&path).unwrap();
     let world = world();
@@ -205,7 +333,7 @@ fn a_rebuilt_pack_is_re_uploaded_without_the_game_noticing() {
     // inside one filesystem timestamp tick would be missed. Sleeping is the
     // honest fix in a test; a real edit is never this fast.
     std::thread::sleep(std::time::Duration::from_millis(20));
-    write_pack(&path, &pack_bytes([0.0, 1.0, 0.0, 1.0]));
+    write_pack(&path, &pack_bytes([0.0, 1.0, 0.0, 1.0], FLAT));
     assert!(renderer.reload_pack().unwrap(), "the rewrite was noticed");
 
     let after = settle(&mut renderer, &world);
@@ -227,7 +355,7 @@ fn a_model_naming_nothing_the_pack_holds_draws_nothing_and_does_not_fail() {
     // The state between a save and a finished rebuild. A frame that failed
     // here would make Ctrl-S look like a crash.
     let path = temp("absent");
-    write_pack(&path, &pack_bytes([1.0, 0.0, 0.0, 1.0]));
+    write_pack(&path, &pack_bytes([1.0, 0.0, 0.0, 1.0], FLAT));
     let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
     renderer.open_pack(&path).unwrap();
 
@@ -247,4 +375,133 @@ fn a_model_naming_nothing_the_pack_holds_draws_nothing_and_does_not_fail() {
 
     assert!(renderer.shutdown().clean(), "no leaks, no validation");
     let _ = std::fs::remove_file(&path);
+}
+
+// ---- the tangent half of the same transform -----------------------------
+
+const NORMAL_TEX: &str = "test/normal/0";
+
+/// A BC5 block whose sixteen texels all decode to `(r, g)`.
+///
+/// The module doc declines hand-written BC7 because a hand-written block would
+/// be asserting something about this file's encoder. This is the one case that
+/// carries no encoder: a BC4 block whose two endpoints are equal decodes to
+/// that endpoint at every index, in either interpolation mode, so the six index
+/// bytes can be zero and the result is exact by construction. BC5 is two of
+/// them, red then green.
+fn flat_bc5(r: u8, g: u8) -> Vec<u8> {
+    let mut block = vec![0u8; 16];
+    (block[0], block[1]) = (r, r);
+    (block[8], block[9]) = (g, g);
+    block
+}
+
+/// The map's tangent-space normal, `sampled * 2 - 1` (`apply_normal_map`):
+/// `(0.6, 0.0)`, so `z` reconstructs to `0.8`. Leaning hard along +t is what
+/// makes the shaded normal a function of the tangent frame at all — a flat
+/// `(0, 0, 1)` map would shade identically whatever the tangent did.
+const TS_LEAN_X: u8 = 204; // 0.8 * 255, decoding to +0.6
+const TS_ZERO_Y: u8 = 128; // 0.502 * 255, decoding to ~0
+
+/// A tangent 45° between +X and +Y, in the plane the quad's normal is
+/// perpendicular to — so Gram-Schmidt leaves it alone and the *only* thing a
+/// stretch along x changes is its direction.
+const DIAGONAL_TANGENT: [f32; 4] = [
+    std::f32::consts::FRAC_1_SQRT_2,
+    std::f32::consts::FRAC_1_SQRT_2,
+    0.0,
+    1.0,
+];
+
+/// The scene of [`a_stretched_instance_shades_by_its_scaled_tangent`]: the same
+/// quad, a normal map that leans along the tangent, and a diagonal tangent for
+/// the stretch to act on.
+fn normal_mapped_pack() -> Vec<u8> {
+    let mut writer = PackWriter::new();
+    writer
+        .add(
+            MESH,
+            AssetKind::Mesh,
+            0,
+            quad_with_tangent(FLAT, DIAGONAL_TANGENT),
+        )
+        .unwrap();
+    writer
+        .add(
+            NORMAL_TEX,
+            AssetKind::Texture,
+            1,
+            texture::encode(
+                TextureFormat::Bc5Unorm,
+                4,
+                4,
+                &[flat_bc5(TS_LEAN_X, TS_ZERO_Y)],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    writer
+        .add(
+            MATERIAL,
+            AssetKind::Material,
+            2,
+            Material {
+                base_color: [1.0; 4],
+                metallic: 0.0,
+                roughness: 1.0,
+                normal_texture: AssetId::of(NORMAL_TEX),
+                ..Material::default()
+            }
+            .encode(),
+        )
+        .unwrap();
+    writer
+        .add(
+            SCENE,
+            AssetKind::Scene,
+            3,
+            scene::encode(&[Node {
+                mesh: AssetId::of(MESH),
+                translation: [0.0, 0.0, -4.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0; 3],
+                reserved: [0; 5],
+            }]),
+        )
+        .unwrap();
+    writer.finish().unwrap()
+}
+
+#[test]
+fn a_stretched_instance_shades_by_its_scaled_tangent() {
+    // The other half of the transform the test above gates (`scene.slang`): a
+    // normal goes by R*S^-1, a *tangent* by R*S. Both readings below share one
+    // geometric normal — (0,0,1) is parallel to itself under any diagonal S —
+    // so the tangent frame is the only thing between them and the pixel.
+    //
+    // Stretching x by four swings the 45° tangent to within 14° of +X, and the
+    // mapped normal, which leans along that tangent, swings with it. Lit from
+    // +Y the stretched quad must therefore go markedly *dimmer*. Under a
+    // tangent that ignored scale — `rotate_by(q, t)`, which is what shipped
+    // before M12's audit — the two readings are one number.
+    let path = temp("tangent");
+    write_pack(&path, &normal_mapped_pack());
+
+    let plus_y = sim::DVec3::new(0.0, 1.0, 0.0);
+    let control = lit(&path, sim::Vec3::splat(1.0), plus_y);
+    let stretched = lit(&path, sim::Vec3::new(4.0, 1.0, 1.0), plus_y);
+
+    assert!(
+        control > stretched,
+        "stretching along the tangent must turn the mapped normal away from a \
+         +Y light: control {control}, stretched {stretched}"
+    );
+    // Measured 414 against 243 on both lavapipe and the 4090; the reverted
+    // shader gives 414 against 414. The threshold sits well above rounding and
+    // well below that gap — what this guards is the collapse to equality, not a
+    // drift.
+    assert!(
+        control - stretched > 40,
+        "the scale never reached the tangent: control {control}, stretched {stretched}"
+    );
 }

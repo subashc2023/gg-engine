@@ -12,4 +12,9 @@
 # The `rayon` ban's `wrappers` list in deny.toml must contain every crate named
 # here (plus rayon's chartered render/tools users); `xtask ci` cross-checks.
 
-exemptions = []
+[[exemptions]]
+crate = "gg-extract"
+dependency = "rayon"
+scope = "extract's per-archetype chunking; writes only into `Extracted`, never the world"
+why = "chunks are cut inside archetypes in world order and concatenated in chunk order regardless of completion order, so the result is order-independent by construction and no rayon output reaches the canonical hash (§1.4, §4.1)"
+reviewed = "v0.1 audit — the row deny.toml's wrappers list had always implied"

@@ -205,3 +205,95 @@ fn a_component_and_a_side_table_sharing_a_name_do_not_share_an_id() {
         gg_ecs::SideTableId::of("production-queue").get()
     );
 }
+
+// ---- §1.13 hazard 6 over non-`Pod` state --------------------------------
+//
+// A side table's floats live behind a `Vec`, so the column scan's layout walk
+// cannot reach them; they are witnessed as they pass `StateHasher` instead.
+// That is the same hash a divergence would be found by, which is what makes the
+// coverage structural rather than a second list to keep in sync.
+
+fn nan_f64() -> f64 {
+    f64::from_bits(0x7ff8_0000_0000_0001)
+}
+
+#[test]
+fn a_nan_behind_a_vec_is_found_and_names_its_table() {
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert_side_table(ProductionQueue {
+        orders: vec![order(e, 7, 1.0), order(e, 8, nan_f64())],
+        label: "forge".to_owned(),
+    })
+    .unwrap();
+
+    let site = w.scan_for_nan().expect("the NaN must be found");
+    let gg_ecs::NanSite::SideTable(hit) = site else {
+        panic!("a side-table NaN must not be reported as a column: {site}");
+    };
+    assert_eq!(hit.declared, "production-queue");
+    assert_eq!(hit.type_name, "ProductionQueue");
+    assert_eq!(hit.width, 64);
+    assert_eq!(
+        hit.bits, 0x7ff8_0000_0000_0001,
+        "the payload is what differs between architectures, so it is reported"
+    );
+    assert!(site.to_string().contains("ProductionQueue"));
+}
+
+#[test]
+fn a_clean_side_table_reports_nothing() {
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert_side_table(ProductionQueue {
+        orders: vec![order(e, 7, 12.5), order(e, 8, f64::NEG_INFINITY)],
+        label: "forge".to_owned(),
+    })
+    .unwrap();
+    assert!(
+        w.scan_for_nan().is_none(),
+        "±inf is not a NaN: its mantissa is zero and it is architecture-agnostic"
+    );
+}
+
+#[test]
+fn integer_bytes_that_spell_a_nan_in_a_table_are_not_reported() {
+    // The false positive that would make the gate useless — the same control
+    // the column scan carries, on the path that reaches values by type rather
+    // than by layout.
+    let mut w = World::new();
+    w.insert_side_table(TradeRoutes {
+        edges: vec![0x7ff8_0000_0000_0001, 0xffff_ffff_ffff_ffff],
+    })
+    .unwrap();
+    assert!(
+        w.scan_for_nan().is_none(),
+        "a `Vec<u64>` is hashed as integers, whatever its bytes spell"
+    );
+}
+
+#[test]
+fn a_column_nan_outranks_a_side_table_one() {
+    // Order is a property of the world, not of the search (§1.13 hazard 6), and
+    // the column answer is the precise one — it names a field and a lane.
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert(
+        e,
+        Position {
+            p: sim::DVec3::new(0.0, nan_f64(), 0.0),
+        },
+    )
+    .unwrap();
+    w.insert_side_table(ProductionQueue {
+        orders: vec![order(e, 7, nan_f64())],
+        label: String::new(),
+    })
+    .unwrap();
+    let hit = w
+        .scan_for_nan()
+        .and_then(gg_ecs::NanSite::column)
+        .expect("the column hit must win");
+    assert_eq!(hit.field, "p");
+    assert_eq!(hit.lane, 1);
+}
