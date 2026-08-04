@@ -518,12 +518,20 @@ impl App {
         tick: u64,
         ui: &UiTick,
         extent: (u32, u32),
-    ) -> Option<std::path::PathBuf> {
+    ) -> anyhow::Result<Option<std::path::PathBuf>> {
         // Before the borrow below, which takes the editor mutably while this
         // reads the dylib beside it.
         let title = self.title();
-        let editing = self.editor.as_mut()?;
+        let Some(editing) = self.editor.as_mut() else {
+            return Ok(None);
+        };
         let path = editing.save.display().to_string();
+        // The editor opens playing, so the first tick is the play edge nobody
+        // clicked. Here rather than in `Editing::new` because that is where the
+        // world first exists to capture.
+        if !core::mem::replace(&mut editing.opened, true) {
+            editing.stash.enter(tick, &self.world);
+        }
         let commands = editing.ui.tick(
             &mut self.world,
             ui,
@@ -531,7 +539,8 @@ impl App {
                 extent,
                 dpi: self.dpi,
                 tick,
-                playing: !editing.paused,
+                play: editing.play(),
+                input: Some(&self.input),
                 passes: self.gpu.as_ref().map_or(&[][..], Renderer::pass_timings),
                 memory: self.gpu.as_ref().map(Renderer::memory).unwrap_or_default(),
                 save_path: &path,
@@ -544,6 +553,12 @@ impl App {
             },
         );
         if let Some(playing) = commands.playing {
+            // Entering from `Stopped` is what captures; entering from `Paused`
+            // is a no-op inside `Stash`, because the world to go back to is the
+            // one play *began* at and not the one it was last unpaused at.
+            if playing {
+                editing.stash.enter(tick, &self.world);
+            }
             editing.paused = !playing;
             info!(
                 tick,
@@ -552,8 +567,23 @@ impl App {
                 "editor: play state"
             );
         }
+        // A step from `Stopped` is a play of exactly one tick, so it captures
+        // first: stepping the scene itself is the one thing stop exists to
+        // prevent, and `Editing::advance` refuses a step with nothing held.
+        if commands.step {
+            editing.stash.enter(tick, &self.world);
+        }
         editing.step = commands.step;
-        commands.save.then(|| editing.save.clone())
+        if commands.stop {
+            // Paused rather than left advancing: `Stopped` is where edits stick,
+            // and a stop that kept running would discard the next one too.
+            editing.paused = true;
+            // Unlogged here on purpose — `Stash::stop` states `changed` and
+            // `identical`, which is the pair the gate reads, and a second line
+            // beside it would be a second thing to keep true.
+            editing.stash.stop(tick, &mut self.world)?;
+        }
+        Ok(commands.save.then(|| editing.save.clone()))
     }
 
     /// What the title bar asked of the window (§6 M15.1 item 5). Applied by the
@@ -732,6 +762,13 @@ struct Editing {
     /// The sim is not advancing. Starts **false**: an editor that opened paused
     /// would show a world whose bootstrap system had never run.
     paused: bool,
+    /// The world captured at the play edge (§6 M15.2). Empty is `Stopped`, and
+    /// `Stopped` is the only state an inspector edit survives.
+    stash: Stash,
+    /// False until the first tick has captured. The editor opens *playing* for
+    /// `paused`'s reason, one level further out — and a capture needs a world,
+    /// which exists at the first tick and not at construction.
+    opened: bool,
     /// Advance one tick, then pause again. Consumed by [`Editing::advance`].
     step: bool,
     /// Where the save button writes — `--save` if given, so a gate can name it.
@@ -769,6 +806,8 @@ impl Editing {
         Editing {
             ui,
             paused: false,
+            stash: Stash::default(),
+            opened: false,
             step: false,
             save,
             extent: args.editor_extent,
@@ -785,24 +824,97 @@ impl Editing {
     }
 
     /// Whether the sim advances this tick, spending a single step if one is due.
+    ///
+    /// A stopped session does not advance whatever the step says: `Commands`
+    /// turns a step from `Stopped` into a play first, so a step that reached
+    /// here with nothing captured would be one the editor never asked for.
     fn advance(&mut self) -> bool {
-        !self.paused || core::mem::take(&mut self.step)
+        let step = core::mem::take(&mut self.step);
+        self.stash.held() && (!self.paused || step)
+    }
+
+    /// What the transport draws, derived rather than stored — two bits already
+    /// say it, and a third field could disagree with them.
+    fn play(&self) -> gg_editor::Play {
+        match (self.stash.held(), self.paused) {
+            (false, _) => gg_editor::Play::Stopped,
+            (true, false) => gg_editor::Play::Running,
+            (true, true) => gg_editor::Play::Paused,
+        }
+    }
+}
+
+/// The world as it was when play began — the bytes a stop returns to (§6 M14,
+/// §6 M15.2).
+///
+/// Kept **encoded**. Comparing bytes at stop then proves the round trip and the
+/// equality at once; a `Snapshot` held by value would prove neither, because
+/// nothing would have serialized it.
+///
+/// One type for both clocks that drive it: `--play <enter>:<stop>` reaches these
+/// two methods from a tick number and the editor's transport reaches them from a
+/// button, which is what makes "both reach the same two calls" checkable rather
+/// than a claim about two similar functions.
+#[derive(Default)]
+struct Stash(Option<Vec<u8>>);
+
+impl Stash {
+    /// Whether a world is captured — play mode, paused or not.
+    fn held(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// The play edge. Re-entering without a stop is a no-op rather than a
+    /// second capture: the world to go back to is the one play *began* at.
+    fn enter(&mut self, tick: u64, world: &World) {
+        if self.held() {
+            return;
+        }
+        let stash = world.snapshot().encode();
+        info!(
+            tick,
+            entities = world.len(),
+            bytes = stash.len(),
+            "play mode entered"
+        );
+        self.0 = Some(stash);
+    }
+
+    /// The stop edge: restore what was captured, and report both halves of the
+    /// claim. `Ok(false)` means nothing was captured, which is a stop from
+    /// `Stopped` and does nothing to the world.
+    ///
+    /// `identical` over a session that changed nothing is a gate that cannot
+    /// fail, so `changed` is read *before* the restore and reported beside it —
+    /// the caller requires both.
+    fn stop(&mut self, tick: u64, world: &mut World) -> anyhow::Result<bool> {
+        let Some(stash) = self.0.take() else {
+            return Ok(false);
+        };
+        let changed = world.snapshot().encode() != stash;
+        world.restore(&Snapshot::decode(&stash)?)?;
+        let identical = world.snapshot().encode() == stash;
+        info!(
+            tick,
+            entities = world.len(),
+            changed,
+            identical,
+            "play mode stopped"
+        );
+        Ok(true)
     }
 }
 
 /// The editor's play/stop on a script, so a tier can run it (§6 M14).
 ///
-/// M15 drives these two edges from a button; a `<enter>:<stop>` spec drives them
-/// from a tick number, and both reach the same two calls. It reports rather than
-/// asserts: a gate that lived inside the program under test would be graded by
-/// the thing it grades, so the shell states what happened and `xtask` decides.
+/// M15.2 drives these two edges from a button; a `<enter>:<stop>` spec drives
+/// them from a tick number, and both reach the same [`Stash`]. It reports rather
+/// than asserts: a gate that lived inside the program under test would be graded
+/// by the thing it grades, so the shell states what happened and `xtask` decides.
 struct PlayMode {
     enter: u64,
     stop: u64,
-    /// The captured world, kept *encoded*. Comparing bytes at stop then proves
-    /// the round trip and the equality at once — a `Snapshot` held by value
-    /// would prove neither, because nothing would have serialized it.
-    stash: Option<Vec<u8>>,
+    stash: Stash,
 }
 
 impl PlayMode {
@@ -818,7 +930,7 @@ impl PlayMode {
         Ok(PlayMode {
             enter,
             stop,
-            stash: None,
+            stash: Stash::default(),
         })
     }
 
@@ -827,31 +939,9 @@ impl PlayMode {
     /// half-advanced between the two readings.
     fn edge(&mut self, tick: u64, world: &mut World) -> anyhow::Result<()> {
         if tick == self.enter {
-            let stash = world.snapshot().encode();
-            info!(
-                tick,
-                entities = world.len(),
-                bytes = stash.len(),
-                "play mode entered"
-            );
-            self.stash = Some(stash);
-        } else if tick == self.stop
-            && let Some(stash) = self.stash.take()
-        {
-            // Read before the restore as well as after. `identical` over a
-            // session that changed nothing is a gate that cannot fail, so the
-            // *other* half of the claim is reported beside it and the caller
-            // requires both.
-            let changed = world.snapshot().encode() != stash;
-            world.restore(&Snapshot::decode(&stash)?)?;
-            let identical = world.snapshot().encode() == stash;
-            info!(
-                tick,
-                entities = world.len(),
-                changed,
-                identical,
-                "play mode stopped"
-            );
+            self.stash.enter(tick, world);
+        } else if tick == self.stop {
+            self.stash.stop(tick, world)?;
         }
         Ok(())
     }
@@ -1108,7 +1198,7 @@ impl Stages for App {
         // the same reason: an inspector edit is ordinary world state and belongs
         // in the tick that took the click.
         #[cfg(feature = "editor")]
-        if let Some(path) = self.editor_tick(tick, &ui_tick, self.editor_surface()) {
+        if let Some(path) = self.editor_tick(tick, &ui_tick, self.editor_surface())? {
             self.write_save(&path)?;
         }
         // §1.13 hazard 6's per-tick call site. The canonical hash absorbs raw
@@ -1151,6 +1241,12 @@ impl Stages for App {
             return Ok(());
         };
         let eye = Eye::of(&self.world)?;
+        // The editor's own camera while the scene is stopped (§6 M15.2 item 2):
+        // host state, in no archetype and in no save, so what the operator flies
+        // moves nothing the canonical hash can see. `game` back in every other
+        // state, which is why this is unconditional.
+        #[cfg(feature = "editor")]
+        let eye = self.editor.as_ref().map_or(eye, |e| e.ui.eye(eye));
         // Rebuilt, not mutated: `View::default()` is where the render CVars are
         // read, so a console edit lands on the next frame (§4.8).
         self.view = View {

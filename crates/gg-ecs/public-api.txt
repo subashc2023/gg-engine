@@ -758,6 +758,7 @@ pub fn gg_ecs::world::World::canonical_hash(&self) -> gg_ecs::hash::CanonicalHas
 pub fn gg_ecs::world::World::canonical_hash_via_protocol(&self) -> gg_ecs::hash::CanonicalHash
 pub fn gg_ecs::world::World::contains<T: gg_ecs::component::Component>(&self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::world::World::despawn(&mut self, gg_abi::entity::Entity) -> bool
+pub fn gg_ecs::world::World::duplicate(&mut self, gg_abi::entity::Entity) -> core::option::Option<gg_abi::entity::Entity>
 pub fn gg_ecs::world::World::each<D: gg_ecs::query::QueryData>(&mut self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
 pub fn gg_ecs::world::World::each_ref<D: gg_ecs::query::QueryData + gg_ecs::query::ReadOnly>(&self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
 pub fn gg_ecs::world::World::entity_hashes(&self) -> alloc::vec::Vec<(gg_abi::entity::Entity, gg_ecs::hash::CanonicalHash)>
@@ -1068,6 +1069,7 @@ pub fn gg_ecs::world::World::canonical_hash(&self) -> gg_ecs::hash::CanonicalHas
 pub fn gg_ecs::world::World::canonical_hash_via_protocol(&self) -> gg_ecs::hash::CanonicalHash
 pub fn gg_ecs::world::World::contains<T: gg_ecs::component::Component>(&self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::world::World::despawn(&mut self, gg_abi::entity::Entity) -> bool
+pub fn gg_ecs::world::World::duplicate(&mut self, gg_abi::entity::Entity) -> core::option::Option<gg_abi::entity::Entity>
 pub fn gg_ecs::world::World::each<D: gg_ecs::query::QueryData>(&mut self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
 pub fn gg_ecs::world::World::each_ref<D: gg_ecs::query::QueryData + gg_ecs::query::ReadOnly>(&self, &gg_ecs::query::Query<D>, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::query::QueryData>::Item))
 pub fn gg_ecs::world::World::entity_hashes(&self) -> alloc::vec::Vec<(gg_abi::entity::Entity, gg_ecs::hash::CanonicalHash)>

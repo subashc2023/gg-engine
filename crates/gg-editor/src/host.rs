@@ -24,35 +24,76 @@
 //! [`InputFrame`]: gg_input::InputFrame
 
 use gg_ecs::boundary::Verbs;
-use gg_ui::boundary::verb;
+use gg_ui::boundary::verb as ui;
 
-/// The default binding for each of the four, used only for a verb this host had
-/// to append. A build that declared its own keeps whatever its bindings file
-/// says — the editor is a second consumer of one mouse, not the owner of it.
+/// The editor's *own* verbs — what flies its camera (§6 M15.2 item 4).
+///
+/// Prefixed rather than borrowing a game's movement names: `move_forward` means
+/// a game's character, and the editor camera has to fly a scene that has no
+/// character in it. Sharing the keys is fine and sharing the verb is not.
+///
+/// All actions, no axes, and that is `MAX_AXES` arithmetic rather than taste —
+/// see [`crate::camera`] for why a look pair does not fit.
+pub mod verb {
+    /// Along the eye's forward axis, and against it.
+    pub const FORWARD: &str = "editor_forward";
+    /// See [`FORWARD`].
+    pub const BACK: &str = "editor_back";
+    /// Along the eye's right axis, and against it.
+    pub const LEFT: &str = "editor_left";
+    /// See [`LEFT`].
+    pub const RIGHT: &str = "editor_right";
+    /// Along **world** up, not the eye's: a fly camera whose lift tilted with
+    /// its pitch cannot be flown level, which is the one thing it is for.
+    pub const UP: &str = "editor_up";
+    /// See [`UP`].
+    pub const DOWN: &str = "editor_down";
+    /// Held while a drag turns the camera.
+    pub const LOOK: &str = "editor_look";
+}
+
+/// The default binding for each verb this host appends. A build that declared
+/// its own keeps whatever its bindings file says — the editor is a second
+/// consumer of one mouse, not the owner of it.
 const DEFAULTS: &[(&str, &str, bool)] = &[
-    (verb::CLICK, "Mouse1", true),
-    (verb::FOCUS, "Tab", true),
+    (ui::CLICK, "Mouse1", true),
+    (ui::FOCUS, "Tab", true),
     // `PointerX`, not `MouseX`: the editor wants the arrow the operator can
     // see, and a camera wants raw device deltas. They were one source through
     // M15, so every editor click also aimed the game (§6 M15.1). Note what the
     // split does *not* fix: raw deltas arrive whatever the pointer is over, so
     // a pointer crossing the viewport still swung the camera until the host
     // stopped feeding the game at all while the editor holds the mouse.
-    (verb::X, "PointerX", false),
-    (verb::Y, "PointerY", false),
+    (ui::X, "PointerX", false),
+    (ui::Y, "PointerY", false),
     // Actions and not axes, which is `gg_input::Wheel`'s decision rather than
     // this table's: `MAX_AXES` is 8, and a game declaring six axes of its own
     // would otherwise have no slot left for the editor's pointer — losing the
     // cursor because the wheel wanted a seat.
-    (verb::SCROLL_UP, "WheelUp", true),
-    (verb::SCROLL_DOWN, "WheelDown", true),
+    (ui::SCROLL_UP, "WheelUp", true),
+    (ui::SCROLL_DOWN, "WheelDown", true),
+    // The camera (§6 M15.2 item 4). Appended **after** the six above so a build
+    // predating them resolves `ui_*` to the same ids it always did — appending
+    // renumbers nothing, and that is the only reason the order here matters.
+    //
+    // A demo binding `W` to its own `move_forward` keeps it: one key can feed
+    // two verbs, and the collision is harmless because these only fly while the
+    // scene is stopped, which is exactly when the game's systems are not
+    // running to read theirs.
+    (verb::FORWARD, "W", true),
+    (verb::BACK, "S", true),
+    (verb::LEFT, "A", true),
+    (verb::RIGHT, "D", true),
+    (verb::UP, "E", true),
+    (verb::DOWN, "Q", true),
+    (verb::LOOK, "Mouse2", true),
 ];
 
 /// The verb lists a shell should bind against with the editor open, and the
 /// bindings text to append to the game's own.
 ///
-/// Six now rather than M15.1's four; a game that declares some of them keeps
-/// its own, as it always did.
+/// Thirteen now — M15.1's four, the wheel's two, and §6 M15.2's seven camera
+/// verbs; a game that declares some of them keeps its own, as it always did.
 ///
 /// The lists are leaked because [`Verbs`] is `&'static` by construction — the
 /// dylib's own arrays are, and there must be one type for both. It is a few
@@ -95,7 +136,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_game_with_no_ui_verbs_gains_all_four_without_moving_its_own() {
+    fn a_game_with_no_ui_verbs_gains_all_of_them_without_moving_its_own() {
         let game = Verbs {
             actions: &["freeze"],
             axes: &["move_right", "aim_x"],
@@ -105,13 +146,20 @@ mod tests {
             verbs.actions,
             &[
                 "freeze",
-                verb::CLICK,
-                verb::FOCUS,
-                verb::SCROLL_UP,
-                verb::SCROLL_DOWN
+                ui::CLICK,
+                ui::FOCUS,
+                ui::SCROLL_UP,
+                ui::SCROLL_DOWN,
+                verb::FORWARD,
+                verb::BACK,
+                verb::LEFT,
+                verb::RIGHT,
+                verb::UP,
+                verb::DOWN,
+                verb::LOOK,
             ]
         );
-        assert_eq!(verbs.axes, &["move_right", "aim_x", verb::X, verb::Y]);
+        assert_eq!(verbs.axes, &["move_right", "aim_x", ui::X, ui::Y]);
         // Appended, so every id the game already had still means what it did —
         // which is what keeps a plain replay valid (§4.7).
         assert_eq!(verbs.actions[0], game.actions[0]);
@@ -121,10 +169,38 @@ mod tests {
         // and a camera's `aim_y` are different numbers (§6 M15.1).
         assert!(bindings.contains("ui_y = [\"PointerY\"]"));
         assert!(!bindings.contains("MouseY"));
+        // The camera costs no axis slot at all, which is the constraint that
+        // shaped it (§6 M15.2 item 4).
+        assert!(bindings.contains("editor_forward = [\"W\"]"));
+        assert_eq!(verbs.axes.len(), game.axes.len() + 2);
         assert!(
             gg_ui::boundary::binding(&verbs).is_some(),
             "all four resolve"
         );
+    }
+
+    /// The appended text is a map a shell can actually parse, and no two of the
+    /// editor's own verbs share a source. Parsing *is* the first assertion: an
+    /// unspellable key is a `MapError` there and is reported nowhere else.
+    #[test]
+    fn every_appended_verb_parses_and_no_two_share_a_source() {
+        let game = Verbs {
+            actions: &[],
+            axes: &[],
+        };
+        let (verbs, bindings) = open(&game);
+        assert!(
+            gg_input::ActionMap::parse(&bindings, verbs.actions, verbs.axes).is_ok(),
+            "the editor appended a binding no map can read:\n{bindings}"
+        );
+        let mut seen: Vec<&str> = Vec::new();
+        for (name, source, _) in DEFAULTS {
+            assert!(
+                !seen.contains(source),
+                "`{source}` is bound twice, at {name}"
+            );
+            seen.push(source);
+        }
     }
 
     /// A game that already declares them keeps its own bindings: the editor
@@ -132,8 +208,20 @@ mod tests {
     #[test]
     fn a_game_that_declares_them_is_left_alone() {
         let game = Verbs {
-            actions: &[verb::CLICK, verb::FOCUS, verb::SCROLL_UP, verb::SCROLL_DOWN],
-            axes: &[verb::X, verb::Y],
+            actions: &[
+                ui::CLICK,
+                ui::FOCUS,
+                ui::SCROLL_UP,
+                ui::SCROLL_DOWN,
+                verb::FORWARD,
+                verb::BACK,
+                verb::LEFT,
+                verb::RIGHT,
+                verb::UP,
+                verb::DOWN,
+                verb::LOOK,
+            ],
+            axes: &[ui::X, ui::Y],
         };
         let (verbs, bindings) = open(&game);
         assert_eq!(verbs.actions, game.actions);
@@ -146,17 +234,19 @@ mod tests {
     #[test]
     fn a_partly_declared_build_gains_only_what_it_lacks() {
         let game = Verbs {
-            actions: &[verb::CLICK],
+            actions: &[ui::CLICK, verb::FORWARD],
             axes: &["aim_x"],
         };
         let (verbs, bindings) = open(&game);
         assert_eq!(
-            verbs.actions,
-            &[verb::CLICK, verb::FOCUS, verb::SCROLL_UP, verb::SCROLL_DOWN]
+            &verbs.actions[..4],
+            &[ui::CLICK, verb::FORWARD, ui::FOCUS, ui::SCROLL_UP]
         );
-        assert_eq!(verbs.axes, &["aim_x", verb::X, verb::Y]);
+        assert_eq!(verbs.axes, &["aim_x", ui::X, ui::Y]);
         assert!(!bindings.contains("ui_click"), "already the game's");
+        assert!(!bindings.contains("editor_forward"), "and so is that");
         assert!(bindings.contains("ui_focus"));
         assert!(bindings.contains("ui_x") && bindings.contains("ui_y"));
+        assert!(bindings.contains("editor_back"));
     }
 }

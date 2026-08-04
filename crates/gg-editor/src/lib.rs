@@ -59,9 +59,13 @@
 
 #![warn(missing_docs)]
 
+mod camera;
+mod history;
 pub mod host;
+mod marker;
 pub mod panels;
 pub mod persist;
+mod pick;
 pub mod scan;
 pub mod session;
 pub mod value;
@@ -84,12 +88,60 @@ use gg_ui::{Axis, FaceId, Fit, Fonts, WidgetId, font};
 /// them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Commands {
-    /// `Some(true)` to start advancing the sim, `Some(false)` to stop.
+    /// `Some(true)` to advance the sim, `Some(false)` to hold it. Entering play
+    /// from [`Play::Stopped`] is what captures the world a [`stop`] returns to;
+    /// the host owns that edge, because the bytes are the host's.
+    ///
+    /// [`stop`]: Commands::stop
     pub playing: Option<bool>,
-    /// Advance exactly one tick, then stop again.
+    /// Advance exactly one tick, then hold again. Implies play from
+    /// [`Play::Stopped`]: a step with no capture behind it would advance the
+    /// scene itself, which is the one thing stop exists to prevent.
     pub step: bool,
+    /// Leave play mode, restoring the world captured when it was entered (§6
+    /// M15.2). An edit made during play is discarded by this; an edit made
+    /// while stopped is the scene.
+    pub stop: bool,
     /// Write a save where the operator named (§6 M14).
     pub save: bool,
+}
+
+/// What the transport is showing, and what a tick does (§6 M15.2).
+///
+/// Three states rather than one `playing` bool, because there are three: the
+/// difference between [`Paused`] and [`Stopped`] is not whether the sim is
+/// advancing — neither is — but whether the host is holding a world to go back
+/// to. Which is also why the editor cannot decide this on its own: the capture
+/// is bytes, and the bytes are the shell's (§3).
+///
+/// [`Paused`]: Play::Paused
+/// [`Stopped`]: Play::Stopped
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Play {
+    /// Not advancing and nothing captured: the world **is** the scene, and an
+    /// edit made here survives the next play.
+    #[default]
+    Stopped,
+    /// Advancing, over a world captured at the play edge.
+    Running,
+    /// A play that is not advancing — the capture is still held, so an edit
+    /// made here is still discarded at stop.
+    Paused,
+}
+
+impl Play {
+    /// Whether the sim advances this tick.
+    #[must_use]
+    pub fn running(self) -> bool {
+        matches!(self, Play::Running)
+    }
+
+    /// Whether a world is captured — true in play mode, paused or not, and the
+    /// only state a stop can be asked for from.
+    #[must_use]
+    pub fn entered(self) -> bool {
+        matches!(self, Play::Running | Play::Paused)
+    }
 }
 
 /// What a click on the editor's own title bar asks the host to do.
@@ -147,8 +199,17 @@ pub struct Frame<'a> {
     pub dpi: f32,
     /// The tick about to run.
     pub tick: u64,
-    /// Whether the sim is advancing.
-    pub playing: bool,
+    /// Whether the sim is advancing, and whether a world is captured behind it.
+    pub play: Play,
+    /// This host's action map, as of this tick — what the editor's own appended
+    /// verbs are read through (`host`, §6 M15.2 item 4).
+    ///
+    /// The map and not a frame, because the ids are the *host's*: `editor_up` is
+    /// a different index over every game, so the editor resolves its verbs by
+    /// name against the list the host bound (§4.7). `None` for a host that
+    /// routes no input at all — a golden render — which is exactly the host
+    /// whose reference image must keep showing the game's own view.
+    pub input: Option<&'a gg_input::Input>,
     /// This frame's per-pass GPU readings, empty in a headless run.
     pub passes: &'a [gg_rhi::PassTiming],
     /// Device memory in use.
@@ -369,6 +430,10 @@ pub(crate) const MENUS: &[gg_ui::menu::Menu<'static>] = &[
         items: &["save", "quit"],
     },
     gg_ui::menu::Menu {
+        title: "edit",
+        items: &["undo", "redo"],
+    },
+    gg_ui::menu::Menu {
         title: "view",
         items: &["reset layout"],
     },
@@ -380,7 +445,9 @@ fn menu_action(menu: usize, item: usize) -> Option<MenuAction> {
     Some(match (menu, item) {
         (0, 0) => MenuAction::Save,
         (0, 1) => MenuAction::Quit,
-        (1, 0) => MenuAction::ResetLayout,
+        (1, 0) => MenuAction::Undo,
+        (1, 1) => MenuAction::Redo,
+        (2, 0) => MenuAction::ResetLayout,
         _ => return None,
     })
 }
@@ -390,6 +457,8 @@ fn menu_action(menu: usize, item: usize) -> Option<MenuAction> {
 enum MenuAction {
     Save,
     Quit,
+    Undo,
+    Redo,
     ResetLayout,
 }
 
@@ -576,6 +645,26 @@ pub struct Editor {
     /// [`Frame::maximized`], as of this tick — read by the caption button one
     /// call below the frame that carries it.
     maximized: bool,
+    /// The editor's own camera (§6 M15.2 item 2) — host state, and held here
+    /// rather than by the shell because it is flown by ordinary routed input and
+    /// this is what routes it.
+    camera: camera::Camera,
+    /// The translate handle a press is holding, if any (§6 M15.4 item 3). Host
+    /// state like every other panel field, and for the same reason: it is a pure
+    /// function of the replayed input stream.
+    gizmo: Option<marker::Gizmo>,
+    /// Worlds as they were before each edit (§6 M15.4 item 4) — host state,
+    /// absent from the world and so from the hash, though re-applying a step
+    /// writes through `World` like every other edit and is.
+    history: history::History,
+    /// The play state the last tick ran under, so a change of it can drop the
+    /// history — see [`history`].
+    play_was: Play,
+    /// Where each axis handle's grab pad was drawn last tick, in logical units.
+    /// Read by [`Editor::handle`] — a script cannot compute one, because unlike
+    /// every other target in this editor a handle's position is a property of
+    /// the world and the camera rather than of the layout.
+    arms: [Option<(f32, f32)>; 3],
     /// Saves issued this session — the status line, and what a gate greps for.
     saves: u32,
     /// Edits applied this session, for the same reason.
@@ -592,6 +681,7 @@ impl Editor {
         // fails: `ui_scale` reads the static directly, so registration buys the
         // console and the config file a name, not the read path.
         let _ = gg_core::cvar::register(&SCALE);
+        let _ = gg_core::cvar::register(&history::DEPTH);
         let pack = pack.and_then(|path| match gg_assets::Pack::open(path) {
             Ok(pack) => Some(pack),
             Err(error) => {
@@ -632,6 +722,11 @@ impl Editor {
             atlas_seen: 0,
             window: None,
             maximized: false,
+            camera: camera::Camera::default(),
+            gizmo: None,
+            history: history::History::default(),
+            play_was: Play::default(),
+            arms: [None; 3],
             saves: 0,
             edits: 0,
             commands: Commands::default(),
@@ -739,8 +834,19 @@ impl Editor {
         // `take_window_command` is the reset.
         self.wheel = tick.scroll;
         self.maximized = frame.maximized;
+        // A step recorded on one side of the transport cannot be restored on the
+        // other: it would put a play-mode world back into a stopped scene, or a
+        // stopped one on top of a running sim (§6 M15.4 item 4).
+        if frame.play != self.play_was {
+            self.play_was = frame.play;
+            self.history.clear();
+        }
         self.place(frame.extent, frame.dpi);
         self.router.begin(tick, self.fit.canvas);
+        // After `begin`, which is what advances the pointer a look drag
+        // differences — and before the panels, so a camera moved this tick is
+        // the one the viewport tag and the shell's extract both see.
+        self.camera.fly(world, frame, self.router.pointer().raw());
         self.scan.run(world);
         self.scan
             .page(world, self.first_row, self.per_page + 1, &mut self.rows);
@@ -753,7 +859,7 @@ impl Editor {
         self.panes(world, frame);
         // After the panes, because a dropped-down menu hangs over them and the
         // last declaration is the one a click reaches (§4.9's router).
-        self.menu_popup(frame);
+        self.menu_popup(world, frame);
         self.resize_grips(tick);
         self.drag(tick);
 
@@ -809,7 +915,7 @@ impl Editor {
     }
 
     /// The open menu, hanging over the panes.
-    fn menu_popup(&mut self, frame: &Frame) {
+    fn menu_popup(&mut self, world: &mut gg_ecs::World, frame: &Frame) {
         let Some(panel) = self.menus.panel() else {
             return;
         };
@@ -835,13 +941,13 @@ impl Editor {
             self.label_mid(*rect, rect.x + gg_ui::menu::PAD, label, INK);
             if response.clicked {
                 self.menus.close();
-                self.run_menu(menu, i, frame);
+                self.run_menu(world, menu, i, frame);
             }
         }
     }
 
     /// What a menu item does, once it has been clicked.
-    fn run_menu(&mut self, menu: usize, item: usize, frame: &Frame) {
+    fn run_menu(&mut self, world: &mut gg_ecs::World, menu: usize, item: usize, frame: &Frame) {
         match menu_action(menu, item) {
             Some(MenuAction::Save) => {
                 self.commands.save = true;
@@ -849,6 +955,31 @@ impl Editor {
                 tracing::info!(path = frame.save_path, "editor: save requested");
             }
             Some(MenuAction::Quit) => self.window = Some(WindowCommand::Close),
+            // Counted as an edit, because it is one: the world changed, through
+            // `World`, and the canonical hash will say so.
+            Some(MenuAction::Undo) => {
+                let (back, forward) = self.history.depths();
+                // Logged inside the branch that did something: a line printed
+                // whether or not the ring had a step in it would say a menu item
+                // was clicked, which is not the claim any gate wants.
+                match self.history.undo(world) {
+                    true => {
+                        self.edits += 1;
+                        tracing::info!(back, forward, "editor: undo");
+                    }
+                    false => tracing::info!("editor: nothing to undo"),
+                }
+            }
+            Some(MenuAction::Redo) => {
+                let (back, forward) = self.history.depths();
+                match self.history.redo(world) {
+                    true => {
+                        self.edits += 1;
+                        tracing::info!(back, forward, "editor: redo");
+                    }
+                    false => tracing::info!("editor: nothing to redo"),
+                }
+            }
             Some(MenuAction::ResetLayout) => {
                 self.reset_layout();
                 tracing::info!("editor: layout reset");
@@ -963,8 +1094,8 @@ impl Editor {
             };
             let body = group.body;
             match pane {
-                Pane::Tree => self.tree(body),
-                Pane::Viewport => self.viewport(frame, body),
+                Pane::Tree => self.tree(world, body),
+                Pane::Viewport => self.viewport(world, frame, body),
                 Pane::Cvars => self.cvars(body),
                 Pane::Assets => self.assets(body),
                 Pane::Perf => self.perf(body, frame),
@@ -1056,6 +1187,17 @@ impl Editor {
         }
     }
 
+    /// Where the viewport is looked at from, given the eye the *game* declared
+    /// (§6 M15.2 item 2).
+    ///
+    /// `game` back whenever the scene is not stopped, and back unchanged before
+    /// the first stop — so a host may call this unconditionally and a session
+    /// that never stops renders exactly as it did before this existed.
+    #[must_use]
+    pub fn eye(&self, game: gg_ecs::boundary::Eye) -> gg_ecs::boundary::Eye {
+        self.camera.eye(game)
+    }
+
     /// Whether the pointer is over a panel rather than over the viewport.
     ///
     /// What the host decides with it is whether a *press* hands the mouse to
@@ -1128,6 +1270,18 @@ impl Editor {
     #[must_use]
     pub fn selected(&self) -> Option<Entity> {
         self.selected
+    }
+
+    /// Where the `axis`-th translate handle was drawn last tick, in logical
+    /// units — `0` is world X, `1` Y, `2` Z (§6 M15.4 item 3).
+    ///
+    /// `None` when there is no gizmo to grab: nothing selected, the selection is
+    /// not a `Renderable`, the scene is not stopped, or it is behind the camera.
+    /// The one aiming point in this editor that a script cannot compute for
+    /// itself, which is why it is asked for rather than derived.
+    #[must_use]
+    pub fn handle(&self, axis: usize) -> Option<(f32, f32)> {
+        self.arms.get(axis).copied().flatten()
     }
 
     /// Edits applied and saves requested this session.
@@ -1532,7 +1686,8 @@ mod tests {
             extent,
             dpi: 1.0,
             tick,
-            playing: false,
+            play: Play::Paused,
+            input: None,
             passes: &[],
             memory: gg_rhi::MemoryUse::default(),
             save_path: "target/editor/test.ggsv",
@@ -1676,8 +1831,13 @@ mod tests {
             let mut editor = Editor::new(None);
             editor.place(extent, 1.0);
             let bar = editor.bar_rect();
-            let (play, step) = (editor.transport(0), editor.transport(1));
-            let middle = (play.x + step.right()) * 0.5;
+            // The whole set, not a numbered pair: what is centred is the
+            // transport, so a button added to it must not need this line edited.
+            let (play, last) = (
+                editor.transport(0),
+                editor.transport(panels::TOOLBAR.len() - 1),
+            );
+            let middle = (play.x + last.right()) * 0.5;
             assert!(
                 (middle - bar.w * 0.5).abs() <= 1.0,
                 "{extent:?}: the transport's middle is {middle} on a {} bar",
@@ -1700,7 +1860,14 @@ mod tests {
         // the top resize grip, which is.
         let bar = driver.editor.bar_rect();
         driver.step(None, false);
-        let empty = (driver.editor.transport(1).right() + 6.0, bar.bottom() - 1.5);
+        // Past the *last* transport cell, not a numbered one: the set is
+        // centred, so adding a button moves everything and a literal index
+        // here would silently start pressing whatever grew into that gap.
+        let last = panels::TOOLBAR.len() - 1;
+        let empty = (
+            driver.editor.transport(last).right() + 6.0,
+            bar.bottom() - 1.5,
+        );
         driver.click(empty);
         assert_eq!(driver.window, Some(WindowCommand::Drag));
         // Straight away again: the same press is a double-click.
@@ -2003,6 +2170,11 @@ mod tests {
     /// draws *around* the viewport, never over it. Judged at the centre of the
     /// pane rather than over the whole of it, because the play-state tag is
     /// deliberately inside the top-left corner.
+    ///
+    /// The world here is empty, which is now load-bearing: §6 M15.4 item 2 draws
+    /// the selection's outline into this rectangle on purpose, and it is the one
+    /// thing that ever does. `the_selection_is_outlined_in_the_scene…` is the
+    /// other side of the same claim.
     #[test]
     fn nothing_is_drawn_over_the_middle_of_the_game() {
         for extent in [(1280, 720), (2560, 1080), (3840, 2064)] {

@@ -211,9 +211,10 @@ impl Light {
 /// from them in one order (Y then X, never roll), and a quaternion here would
 /// make "which way is up" the game's problem to get right per frame.
 ///
-/// The first one the host finds wins, in world iteration order. A game with no
-/// eye renders from the origin — visible, wrong, and obviously so, which beats
-/// a black screen that could mean anything.
+/// With more than one in a world the **lowest entity index** wins — see
+/// [`Eye::of`] for why that and not iteration order. A game with no eye renders
+/// from the origin — visible, wrong, and obviously so, which beats a black
+/// screen that could mean anything.
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
 #[component(id = "gg.eye")]
 #[repr(C)]
@@ -248,8 +249,14 @@ impl Eye {
         }
     }
 
-    /// The eye a host renders from: the first one in world iteration order, or
-    /// [`Eye::ORIGIN`].
+    /// The eye a host renders from: the live one with the **lowest entity
+    /// index**, or [`Eye::ORIGIN`] when the game declared none.
+    ///
+    /// A rule and not an accident (§6 M15.2). Iteration order is archetype
+    /// order, so "the first one" is decided by which archetype a camera landed
+    /// in — adding an unrelated component to the observer would silently move
+    /// the scene onto the other eye. Index order is stable under that, and a
+    /// game wanting the other camera moves the spawn rather than the layout.
     ///
     /// Visible and obviously wrong beats a black screen, which could mean the
     /// game declared no eye, spawned nothing, or crashed.
@@ -259,14 +266,21 @@ impl Eye {
     /// If the world refuses the query, which one read alone cannot cause.
     pub fn of(world: &crate::World) -> Result<Eye, crate::AliasError> {
         let query = crate::Query::<&Eye>::new()?;
-        let mut found = None;
-        world.each_ref(&query, |_, eye: &Eye| found = found.or(Some(*eye)));
-        Ok(found.unwrap_or(Eye::ORIGIN))
+        let mut found: Option<(u32, Eye)> = None;
+        world.each_ref(&query, |entity, eye: &Eye| {
+            let index = entity.index();
+            if found.is_none_or(|(best, _)| index < best) {
+                found = Some((index, *eye));
+            }
+        });
+        Ok(found.map_or(Eye::ORIGIN, |(_, eye)| eye))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     #[test]
@@ -314,5 +328,61 @@ mod tests {
         let r = Renderable::boxed(sim::DVec3::ZERO, sim::Vec3::splat(0.5), 0x00ff_8000);
         assert_eq!(r.rotation, sim::DQuat::IDENTITY);
         assert_eq!(r.color, 0x00ff_8000);
+    }
+
+    /// The two orders are made to **disagree** on purpose: the low-index eye is
+    /// pushed into a later archetype by gaining a second component, so "first
+    /// in iteration order" and "lowest index" name different cameras. Without
+    /// that the test would pass against the rule it is meant to pin (§6 M15.2).
+    #[test]
+    fn two_eyes_render_from_the_lower_index_whatever_archetype_holds_it() {
+        let mut world = crate::World::new();
+        let (low, high) = (world.spawn(), world.spawn());
+        assert!(low.index() < high.index(), "spawn order is index order");
+
+        // `high` reaches the plain-`Eye` archetype first, so iteration arrives
+        // there before the `(Eye, Renderable)` one `low` ends up in.
+        world
+            .insert(high, Eye::at(sim::DVec3::new(0.0, 0.0, 9.0), 0.0, 0.0))
+            .unwrap();
+        world
+            .insert(low, Eye::at(sim::DVec3::new(0.0, 0.0, 1.0), 0.0, 0.0))
+            .unwrap();
+        world
+            .insert(
+                low,
+                Renderable::boxed(sim::DVec3::ZERO, sim::Vec3::splat(0.5), 0x00ff_8000),
+            )
+            .unwrap();
+
+        // The disagreement is asserted rather than assumed: if archetype order
+        // ever reached `low` first this test would pass against the rule it
+        // replaced and prove nothing.
+        let query = crate::Query::<&Eye>::new().unwrap();
+        let mut first = None;
+        world.each_ref(&query, |entity, _: &Eye| first = first.or(Some(entity)));
+        assert_eq!(
+            first.unwrap(),
+            high,
+            "iteration order reaches the high index"
+        );
+
+        assert_eq!(
+            Eye::of(&world).unwrap().position.z,
+            1.0,
+            "lowest index wins"
+        );
+
+        // And the rule holds when the survivor is the *other* one: despawning
+        // the low index hands the scene to the eye that is left, rather than to
+        // whichever archetype happens to be walked first.
+        world.despawn(low);
+        assert_eq!(Eye::of(&world).unwrap().position.z, 9.0);
+    }
+
+    #[test]
+    fn a_world_with_no_eye_renders_from_the_origin() {
+        let world = crate::World::new();
+        assert_eq!(Eye::of(&world).unwrap(), Eye::ORIGIN);
     }
 }

@@ -50,7 +50,7 @@ pub mod aim {
     use super::{Editor, Pane, Rect, centre, panels};
 
     /// The title bar's `i`-th transport button, in declaration order: play,
-    /// step.
+    /// step, stop.
     #[must_use]
     pub fn toolbar(editor: &Editor, i: usize) -> (f32, f32) {
         centre(editor.transport(i))
@@ -66,6 +66,13 @@ pub mod aim {
     #[must_use]
     pub fn step(editor: &Editor) -> (f32, f32) {
         toolbar(editor, 1)
+    }
+
+    /// Leave play mode, restoring the world captured when it was entered (§6
+    /// M15.2).
+    #[must_use]
+    pub fn stop(editor: &Editor) -> (f32, f32) {
+        toolbar(editor, 2)
     }
 
     /// The `i`-th menu's title in the strip — clicking it drops the menu down.
@@ -116,17 +123,53 @@ pub mod aim {
         )))
     }
 
+    /// The `i`-th button in the tree's header, counted from the right: `>` is 0,
+    /// `<` is 1, then delete, duplicate and spawn (§6 M15.4 item 5).
+    fn head(editor: &Editor, i: usize) -> Option<(f32, f32)> {
+        let body = editor.pane_body(Pane::Tree)?;
+        let head = Rect::new(body.x + 2.0, body.y + 2.0, (body.w - 4.0).max(0.0), 9.0);
+        Some(centre(panels::head_button(head, i)))
+    }
+
     /// The tree's page buttons, `<` and `>`, at the right end of its header.
     #[must_use]
     pub fn page(editor: &Editor, next: bool) -> Option<(f32, f32)> {
-        let body = editor.pane_body(Pane::Tree)?;
-        let right = body.x + 2.0 + (body.w - 4.0).max(0.0);
-        let x = if next { right - 10.0 } else { right - 20.0 };
-        Some(centre(Rect::new(x, body.y + 2.0, 9.0, 9.0)))
+        head(editor, usize::from(!next))
     }
 
-    /// The middle of the game pane — the one rectangle in the editor with no
-    /// widget in it, which is what a test that must click on *nothing* needs.
+    /// New entity, in front of the camera.
+    #[must_use]
+    pub fn spawn(editor: &Editor) -> Option<(f32, f32)> {
+        head(editor, 4)
+    }
+
+    /// Copy the selection.
+    #[must_use]
+    pub fn duplicate(editor: &Editor) -> Option<(f32, f32)> {
+        head(editor, 3)
+    }
+
+    /// Despawn the selection.
+    #[must_use]
+    pub fn delete(editor: &Editor) -> Option<(f32, f32)> {
+        head(editor, 2)
+    }
+
+    /// `edit → undo`, as the pair of clicks a menu item takes.
+    #[must_use]
+    pub fn undo(editor: &Editor) -> Option<((f32, f32), (f32, f32))> {
+        Some((menu(editor, 1)?, menu_item(editor, 1, 0)?))
+    }
+
+    /// `edit → redo`.
+    #[must_use]
+    pub fn redo(editor: &Editor) -> Option<((f32, f32), (f32, f32))> {
+        Some((menu(editor, 1)?, menu_item(editor, 1, 1)?))
+    }
+
+    /// The middle of the game pane — no panel widget, and since §6 M15.4 item 1
+    /// a pick while the scene is stopped. What a test that must click on
+    /// *nothing* needs, over a world holding nothing to pick.
     #[must_use]
     pub fn nowhere(editor: &Editor) -> Option<(f32, f32)> {
         editor.pane_body(Pane::Viewport).map(centre)
@@ -196,11 +239,20 @@ pub mod aim {
     }
 }
 
-/// The session §6 M15's gate replays, extended by §6 M15.1's gestures: pause a
-/// running game, select an entity, nudge one field of it six times across two
-/// step sizes, single-step twice, play and pause again, walk the instrument
-/// tabs, save out of the `file` menu — and then drag a seam and re-dock a pane,
+/// The session §6 M15's gate replays, extended by §6 M15.1's gestures, §6
+/// M15.2's stop and §6 M15.4's structural edits: pause a running game, select an
+/// entity, nudge one field of it six times across two step sizes, single-step
+/// twice, play and pause again, walk the instrument tabs, save out of the `file`
+/// menu, **stop**, spawn an entity and pick it out of the viewport, duplicate
+/// it, delete it, undo the delete — and then drag a seam and re-dock a pane,
 /// which is where the layout stops being the editor's.
+///
+/// What is deliberately **not** here is a gizmo drag. Every act above aims at a
+/// rectangle this crate declares; a handle aims *into the game*, and where it
+/// lands is a property of the world and the camera at the tick it is grabbed, so
+/// a blind script cannot name one (§6 M15.4's named residual). The drag is
+/// covered in process, over a world the test builds, against
+/// [`Editor::handle`](crate::Editor::handle).
 ///
 /// What it deliberately does **not** touch is the title bar's drag region or its
 /// window buttons: a replay that maximized the window would be a replay whose
@@ -275,6 +327,40 @@ pub fn script(editor: &Editor) -> Vec<Act> {
             Act::Click,
         ]);
     }
+    // §6 M15.2: leave play mode. Deliberately *after* the save, so the file on
+    // disk still holds the six nudges that this then discards — which is what
+    // makes "an edit made during play is discarded" checkable against two
+    // artifacts rather than against a log line.
+    acts.extend([Act::To(aim::stop(editor)), Act::Settle(3), Act::Click]);
+    // §6 M15.4, and it runs here because every one of these needs the scene
+    // *stopped*: spawn, pick what was spawned, duplicate it, delete it, and undo
+    // the delete. The spawn is deliberately first, and that is what makes the
+    // pick blind-authorable — a spawned entity lands a fixed distance down the
+    // camera's own forward axis, so it projects to the exact centre of the game
+    // pane whatever the camera is doing, which is the one thing in the scene a
+    // script can aim at without knowing the world.
+    for at in [
+        aim::spawn(editor),
+        aim::nowhere(editor),
+        aim::duplicate(editor),
+        aim::delete(editor),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        acts.extend([Act::To(at), Act::Settle(4), Act::Click]);
+    }
+    // And back: `edit` → `undo` returns the entity the click above deleted.
+    if let Some((title, item)) = aim::undo(editor) {
+        acts.extend([
+            Act::To(title),
+            Act::Settle(3),
+            Act::Click,
+            Act::To(item),
+            Act::Settle(3),
+            Act::Click,
+        ]);
+    }
     // §6 M15.1: the two gestures that move the layout itself. The seam first,
     // because a re-dock changes how many seams there are.
     if let Some((at, to)) = aim::seam(editor, 0, 24.0) {
@@ -299,8 +385,30 @@ const GLIDE: f32 = 8.0;
 /// [`gg_ui::boundary::verb`]'s four names to.
 #[must_use]
 pub fn frames(acts: &[Act], click: ActionId, x: AxisId, y: AxisId) -> Vec<InputFrame> {
+    frames_from((0.0, 0.0), acts, click, x, y)
+}
+
+/// [`frames`] for a stream that is being built in more than one piece, with the
+/// pointer already at `from`.
+///
+/// The frames carry *motion*, not positions, so a second call starting over at
+/// the origin would aim every glide at the sum of the two. A caller needs this
+/// exactly when the second half of a script depends on what the first half did
+/// — aiming at a gizmo handle, whose position is a property of the world and the
+/// camera rather than of the layout (§6 M15.4 item 3).
+#[must_use]
+pub fn frames_from(
+    from: (f32, f32),
+    acts: &[Act],
+    click: ActionId,
+    x: AxisId,
+    y: AxisId,
+) -> Vec<InputFrame> {
     let mut out = Vec::new();
-    let mut at = (0i32, 0i32);
+    let mut at = (
+        (from.0 * AXIS_SCALE as f32) as i32,
+        (from.1 * AXIS_SCALE as f32) as i32,
+    );
     let hold = |out: &mut Vec<InputFrame>, ticks: u32, down: bool| {
         for _ in 0..ticks {
             out.push(InputFrame {
@@ -355,6 +463,34 @@ pub fn frames(acts: &[Act], click: ActionId, x: AxisId, y: AxisId) -> Vec<InputF
         }
     }
     out
+}
+
+/// Frames holding `action` for `ticks`, each carrying `motion` on `axes` — a
+/// camera move, and with motion a look drag (§6 M15.2 item 4).
+///
+/// Outside [`Act`] on purpose. Every act above aims at a rectangle this crate
+/// declares, which is why they are authored here; a camera verb aims at nothing
+/// at all, so what it needs is an *id*, and ids belong to whichever game the
+/// editor was opened over (§4.7). A caller that resolved one composes with this
+/// and keeps the script free of them.
+#[must_use]
+pub fn hold(
+    action: ActionId,
+    ticks: u32,
+    axes: (AxisId, AxisId),
+    motion: (i32, i32),
+) -> Vec<InputFrame> {
+    (0..ticks)
+        .map(|_| {
+            let mut frame = InputFrame {
+                buttons: 1 << action.index(),
+                axes: [0; MAX_AXES],
+            };
+            frame.axes[axes.0.index()] = motion.0;
+            frame.axes[axes.1.index()] = motion.1;
+            frame
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -479,8 +615,10 @@ mod tests {
         let editor = placed();
         let acts = script(&editor);
         let clicks = acts.iter().filter(|a| matches!(a, Act::Click)).count();
-        // The save is two: the `file` title, then the item under it.
-        assert_eq!(clicks, 3 + 1 + 1 + 6 + 1 + 2 + 3 + 2);
+        // The save is two: the `file` title, then the item under it. The single
+        // one after it is §6 M15.2's stop, and the last group is §6 M15.4's
+        // spawn, pick, duplicate, delete and two-click undo.
+        assert_eq!(clicks, 3 + 1 + 1 + 6 + 1 + 2 + 3 + 2 + 1 + 4 + 2);
         let drags = acts.iter().filter(|a| matches!(a, Act::Drag(_))).count();
         assert_eq!(drags, 2, "a seam and a re-dock");
     }

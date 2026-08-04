@@ -24,6 +24,7 @@ use gg_ui::router::Tick;
 
 const PLAY: WidgetId = WidgetId::new("editor.play");
 const STEP: WidgetId = WidgetId::new("editor.step");
+const STOP: WidgetId = WidgetId::new("editor.stop");
 const MENU: WidgetId = WidgetId::new("editor.menu");
 const DRAG: WidgetId = WidgetId::new("editor.titlebar");
 const WINDOW: WidgetId = WidgetId::new("editor.window");
@@ -35,12 +36,44 @@ const LANE: WidgetId = WidgetId::new("editor.lane");
 const MINUS: WidgetId = WidgetId::new("editor.nudge.minus");
 const PLUS: WidgetId = WidgetId::new("editor.nudge.plus");
 const GRAIN: WidgetId = WidgetId::new("editor.nudge.step");
+const SPAWN: WidgetId = WidgetId::new("editor.tree.spawn");
+const COPY: WidgetId = WidgetId::new("editor.tree.duplicate");
+const KILL: WidgetId = WidgetId::new("editor.tree.delete");
 
-/// Transport cells, in declaration order: play, step — offset and width, from
-/// the start of the set. Square-ish because they are drawn and not set: the
-/// glyph is the meaning, the way it is on every transport an operator has used,
-/// and a cell sized for the word `pause` is a cell mostly full of nothing.
-pub(crate) const TOOLBAR: [(f32, f32); 2] = [(0.0, 20.0), (23.0, 20.0)];
+/// How far in front of the camera a spawned entity lands, in metres. Far enough
+/// to see whole at the default field of view, near enough that its gizmo arms
+/// are a comfortable size (§6 M15.4 item 5).
+const SPAWN_AT: f64 = 5.0;
+/// What a spawned box is coloured, so it is obvious which one is new.
+const SPAWN_INK: u32 = 0x00c8_d4e0;
+
+/// Width the tree's header reserves for its five buttons, in logical units.
+const HEAD_BUTTONS: f32 = 52.0;
+
+/// The `i`-th button in a header strip, counted **from the right** so adding one
+/// on the left of the row does not move the others. Nine units square, a unit
+/// apart, which is the plate the rest of this panel is drawn in.
+pub(crate) fn head_button(head: Rect, i: usize) -> Rect {
+    Rect::new(head.right() - 10.0 * (i as f32 + 1.0), head.y, 9.0, 9.0)
+}
+/// The game's own rectangle, declared **only while the scene is stopped** (§6
+/// M15.4 item 1). While it plays the viewport is the game's and this is the hole
+/// it always was, which is what keeps a press there the player's rather than
+/// something the editor and the game both answer.
+const VIEWPORT: WidgetId = WidgetId::new("editor.viewport");
+
+/// Transport cells, in declaration order: play, step, stop — offset and width,
+/// from the start of the set. Square-ish because they are drawn and not set:
+/// the glyph is the meaning, the way it is on every transport an operator has
+/// used, and a cell sized for the word `pause` is a cell mostly full of
+/// nothing.
+///
+/// Stop is **last** rather than beside play, which is where a tape deck put it.
+/// The destructive one is the one an operator must reach for deliberately, and
+/// the set is centred (see [`transport_at`]), so growing it from two to three
+/// moved play and step by half a cell — which is why §6 M15.2 costs a re-bless
+/// of the recorded editor stream.
+pub(crate) const TOOLBAR: [(f32, f32); 3] = [(0.0, 20.0), (23.0, 20.0), (46.0, 20.0)];
 
 /// A window button's width. Its height is the bar's — a caption button reaching
 /// the window's top edge is the one proportion every desktop shares, and the
@@ -117,6 +150,7 @@ enum Transport {
     Play,
     Pause,
     Step,
+    Stop,
 }
 
 /// The [`ICON`] box inside a bar cell, on whole units so a stroke lands on
@@ -223,6 +257,10 @@ impl Editor {
                     wedge(cell.x, w - stroke * 2.0);
                     list.rect(Rect::new(cell.right() - stroke, cell.y, stroke, h), ink);
                 }
+                // A filled square, which is what every transport ever built
+                // draws for it — and the one glyph in the set that needs no
+                // stepping, so it is a single quad at any scale.
+                Transport::Stop => list.rect(Rect::new(cell.x, cell.y, w, h), ink),
             }
         });
     }
@@ -275,16 +313,28 @@ impl Editor {
             self.menus.close();
         }
 
-        let glyph = match frame.playing {
+        let running = frame.play.running();
+        let glyph = match running {
             true => Transport::Pause,
             false => Transport::Play,
         };
-        if self.icon_button(PLAY, self.transport(0), glyph, frame.playing) {
-            self.commands.playing = Some(!frame.playing);
+        if self.icon_button(PLAY, self.transport(0), glyph, running, true) {
+            self.commands.playing = Some(!running);
         }
         // A step over a running sim is meaningless — it is the paused verb.
         self.commands.step =
-            self.icon_button(STEP, self.transport(1), Transport::Step, false) && !frame.playing;
+            self.icon_button(STEP, self.transport(1), Transport::Step, false, !running);
+        // Inert with nothing captured: a stop from `Stopped` would restore
+        // nothing over a scene that is already the scene. Dimmed rather than
+        // lit — stop is a verb and not a state, so a plate under it would read
+        // as "stopped" exactly when the session is not (§6 M15.2).
+        self.commands.stop = self.icon_button(
+            STOP,
+            self.transport(2),
+            Transport::Stop,
+            false,
+            frame.play.entered(),
+        );
 
         // Bare until the pointer is on them, like every desktop's: a caption
         // button that is always a plate is a toolbar, and the close one goes
@@ -324,16 +374,28 @@ impl Editor {
 
     /// A transport cell: the plate every button in this crate is, with a shape
     /// in it instead of a word.
-    fn icon_button(&mut self, id: WidgetId, rect: Rect, which: Transport, on: bool) -> bool {
+    /// `on` is *state* — the sim is advancing — and lights the plate. `enabled`
+    /// is whether the verb can act at all, and only dims the glyph: a transport
+    /// button that vanished or moved when it went inert would make the set jump
+    /// under the pointer. A disabled button still eats its click rather than
+    /// letting the drag region behind it take one.
+    fn icon_button(
+        &mut self,
+        id: WidgetId,
+        rect: Rect,
+        which: Transport,
+        on: bool,
+        enabled: bool,
+    ) -> bool {
         let response = self.router.hit(id, rect);
         let fill = match (on, response.hovered || response.held) {
             (true, _) => crate::LIVE,
-            (false, true) => PICKED,
-            (false, false) => BUTTON,
+            (false, true) if enabled => PICKED,
+            (false, _) => BUTTON,
         };
         self.plate(rect, fill, HEADER);
-        self.transport_icon(which, rect, INK);
-        response.clicked
+        self.transport_icon(which, rect, if enabled { INK } else { DIM });
+        response.clicked && enabled
     }
 
     /// A menu title: the cell, with no plate under it.
@@ -385,7 +447,7 @@ impl Editor {
     /// The list is a *window*: only the rows the pane can show are fetched
     /// ([`crate::Editor::first_row`]), so ten thousand entities cost what ten do
     /// and the bar is the only thing that knows the difference.
-    pub(crate) fn tree(&mut self, body: Rect) {
+    pub(crate) fn tree(&mut self, world: &mut gg_ecs::World, body: Rect) {
         let head = Rect::new(body.x + 2.0, body.y + 2.0, (body.w - 4.0).max(0.0), 9.0);
         self.plate(head, HEADER, HEADER);
         let pages = self.scan.total.div_ceil(self.per_page).max(1);
@@ -394,26 +456,22 @@ impl Editor {
         // whichever panel answers "what is in this world", and this is that
         // panel — a number in a title bar is a number nobody asked.
         self.label(
-            Rect::new(head.x + 2.0, head.y + 1.0, (head.w - 22.0).max(0.0), 8.0),
+            Rect::new(
+                head.x + 2.0,
+                head.y + 1.0,
+                (head.w - HEAD_BUTTONS).max(0.0),
+                8.0,
+            ),
             &format!("{} entities  {page}/{pages}", self.scan.total),
             ACCENT,
         );
         let list = tree_list(body);
         let page_by = self.per_page as f32 * PITCH;
-        if self.button(
-            PREV,
-            Rect::new(head.right() - 20.0, head.y, 9.0, 9.0),
-            "<",
-            false,
-        ) {
+        self.structure(world, head);
+        if self.button(PREV, head_button(head, 1), "<", false) {
             self.scroll_by(Pane::Tree, -page_by);
         }
-        if self.button(
-            NEXT,
-            Rect::new(head.right() - 10.0, head.y, 9.0, 9.0),
-            ">",
-            false,
-        ) {
+        if self.button(NEXT, head_button(head, 0), ">", false) {
             self.scroll_by(Pane::Tree, page_by);
         }
 
@@ -447,16 +505,105 @@ impl Editor {
         self.list.pop_clip();
     }
 
+    /// Spawn, duplicate and delete — what makes the tree an editor rather than a
+    /// viewer (§6 M15.4 item 5).
+    ///
+    /// All three reach the world through machinery that names no game type: a
+    /// spawn writes the one component the *host* is allowed to have an opinion
+    /// about (`Renderable` is the render protocol, §4.2.2), a duplicate is
+    /// `World::duplicate`'s component-set walk, and a delete is a despawn. So a
+    /// build that was compiled against none of the game's types can still
+    /// restructure its world.
+    fn structure(&mut self, world: &mut gg_ecs::World, head: Rect) {
+        if self.button(SPAWN, head_button(head, 4), "+", false) {
+            self.history.edit(world);
+            // In front of the camera being looked through, at a fixed distance,
+            // in the one shape the host knows how to draw. A spawn that produced
+            // an entity with nothing on it would be a button whose whole effect
+            // is a row appearing in a list — and over a game that never declared
+            // `Renderable` this *introduces* it, which the save policy permits
+            // (a save may gain, never lose) and the tree shows.
+            let eye =
+                self.eye(gg_ecs::boundary::Eye::of(world).unwrap_or(gg_ecs::boundary::Eye::ORIGIN));
+            let (_, _, forward) = crate::pick::basis(eye.yaw, eye.pitch);
+            let entity = world.spawn();
+            let box_ = gg_ecs::boundary::Renderable::boxed(
+                eye.position + forward * SPAWN_AT,
+                gg_math::sim::Vec3::splat(0.5),
+                SPAWN_INK,
+            );
+            match world.insert(entity, box_) {
+                Ok(()) => {
+                    self.selected = Some(entity);
+                    self.lane = None;
+                    self.edits += 1;
+                    tracing::info!(entity = entity.index(), "editor: spawned");
+                }
+                Err(error) => tracing::warn!(%error, "editor: spawn refused"),
+            }
+        }
+        let Some(entity) = self.selected else {
+            // Both of the rest act on a selection, and both are still *drawn*
+            // without one: a control that appears and disappears is a control an
+            // operator cannot learn where to find.
+            self.button(COPY, head_button(head, 3), "c", false);
+            self.button(KILL, head_button(head, 2), "x", false);
+            return;
+        };
+        if self.button(COPY, head_button(head, 3), "c", false) {
+            self.history.edit(world);
+            match world.duplicate(entity) {
+                Some(copy) => {
+                    self.selected = Some(copy);
+                    self.lane = None;
+                    self.edits += 1;
+                    tracing::info!(
+                        entity = entity.index(),
+                        copy = copy.index(),
+                        "editor: duplicated"
+                    );
+                }
+                None => tracing::warn!(entity = entity.index(), "editor: nothing to duplicate"),
+            }
+        }
+        if self.button(KILL, head_button(head, 2), "x", false) {
+            self.history.edit(world);
+            if world.despawn(entity) {
+                self.edits += 1;
+                tracing::info!(entity = entity.index(), "editor: deleted");
+            }
+            // Cleared either way: a selection naming a dead entity shows an
+            // empty inspector for as long as nobody clicks elsewhere.
+            self.selected = None;
+            self.lane = None;
+            self.gizmo = None;
+        }
+    }
+
     /// The border and the play-state tag around the running game. Only the
     /// border: the interior is the renderer's, drawn into the rectangle
     /// [`Editor::viewport_rect`](crate::Editor::viewport_rect) hands the shell,
     /// so an object at the edge of this pane is at the edge of the picture
     /// rather than off-screen.
-    pub(crate) fn viewport(&mut self, frame: &Frame, body: Rect) {
+    pub(crate) fn viewport(&mut self, world: &mut gg_ecs::World, frame: &Frame, body: Rect) {
         self.outline(body, ACCENT);
-        let tag = match frame.playing {
-            true => "playing",
-            false => "paused",
+        // Inside the border, which is what `viewport_rect` hands the renderer:
+        // the picture and the rectangle a click is measured against have to be
+        // the same rectangle or a pick near an edge lands off by the border.
+        let view = body.inset(1.0);
+        let lens = self.lens(world);
+        // In this order, and it is the order that arbitrates a click: the pick
+        // declares the pane, the marker draws over it, and the gizmo's handles
+        // are declared **last** so a press on one is a drag rather than a pick.
+        // Nothing is plumbed between them to say so — the router's capture is
+        // what keeps the pane from reporting a click during a drag (§4.9).
+        self.pick(world, frame, view, &lens);
+        self.mark(world, view, &lens);
+        self.gizmo(world, frame, view, &lens);
+        let tag = match frame.play {
+            crate::Play::Running => "playing",
+            crate::Play::Paused => "paused",
+            crate::Play::Stopped => "stopped",
         };
         // The tag gets a backing plate: it reads over whatever the game happens
         // to be drawing behind it, and the game is not this crate's to know.
@@ -472,6 +619,56 @@ impl Editor {
             &format!("viewport {tag}"),
             ACCENT,
         );
+    }
+
+    /// The camera the viewport was drawn through this tick — the one both the
+    /// pick and the marker read, so a click and an outline cannot disagree
+    /// (`crate::pick::Lens`).
+    ///
+    /// Everything in it moves: the eye is the editor's while the scene is
+    /// stopped and the game's otherwise (§6 M15.2 item 2), the field of view and
+    /// the near plane are CVars the console edits live, and the aspect is the
+    /// **rendered** rectangle's rather than the pane's — the two differ by the
+    /// rounding `viewport_rect` does, and the picture came out of the first one.
+    fn lens(&self, world: &gg_ecs::World) -> crate::pick::Lens {
+        let rendered = self.viewport_rect();
+        crate::pick::Lens::new(
+            self.eye(gg_ecs::boundary::Eye::of(world).unwrap_or(gg_ecs::boundary::Eye::ORIGIN)),
+            gg_render::cvars::FOV.float(),
+            f64::from(rendered.width.max(1)) / f64::from(rendered.height.max(1)),
+            gg_render::cvars::NEAR.float(),
+        )
+    }
+
+    /// A click in the stopped viewport selects what the ray under it hits, and
+    /// deselects when it hits nothing (§6 M15.4 item 1).
+    ///
+    /// Stopped only, and that is [`crate::camera`]'s rule rather than a second
+    /// one: while the scene is stopped the viewport is the operator's and the
+    /// camera being looked through is the editor's, so a pick and a picture
+    /// agree by construction. While it plays, the pane is the game's — no widget
+    /// is declared over it at all, so a press there is a press the player made.
+    fn pick(&mut self, world: &gg_ecs::World, frame: &Frame, view: Rect, lens: &crate::pick::Lens) {
+        if !matches!(frame.play, crate::Play::Stopped) {
+            return;
+        }
+        let response = self.router.hit(VIEWPORT, view);
+        if !response.clicked || view.w <= 0.0 || view.h <= 0.0 {
+            return;
+        }
+        let (px, py) = self.router.pointer().position();
+        let at = (
+            f64::from((px - view.x) / view.w),
+            f64::from((py - view.y) / view.h),
+        );
+        self.selected = crate::pick::nearest(world, &lens.ray(at));
+        // The lane is an offset into whatever was selected before, so it cannot
+        // survive the selection moving — including to nothing.
+        self.lane = None;
+        match self.selected {
+            Some(entity) => tracing::info!(entity = entity.index(), "editor: picked"),
+            None => tracing::info!("editor: picked nothing"),
+        }
     }
 
     /// The §4.8 registry, over the same globals `gg_debug`'s console edits — one
@@ -757,6 +954,9 @@ impl Editor {
         );
         if minus || plus {
             let by = if plus { grain } else { -grain };
+            // The edge, before the write: one step per press, which is what an
+            // operator undoing a nudge expects (§6 M15.4 item 4).
+            self.history.edit(world);
             let applied = write_row(world, entity, &slot, |bytes| {
                 value::nudge(bytes, &field, lane.lane as usize, by);
             });

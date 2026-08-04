@@ -190,6 +190,47 @@ impl World {
         Ok(())
     }
 
+    /// A new entity carrying a copy of every component `entity` has. `None` if
+    /// it is dead.
+    ///
+    /// Public where [`World::insert_raw`](Self::insert_raw) deliberately is not,
+    /// and the difference is the contract rather than the mechanism: an untyped
+    /// insert is "here are some bytes, trust me", which is the §4.2.2 boundary's
+    /// bargain and nobody else's. This is a *closed* operation — the bytes come
+    /// out of this world's own columns and go straight back into them, so there
+    /// is no way to spell a call that puts the wrong ones anywhere. What it buys
+    /// is an editor that can duplicate an entity of a type it was never compiled
+    /// against (§6 M15.4 item 5).
+    ///
+    /// The copy is a new [`Entity`] with its own index and generation. Nothing
+    /// dereferences it — no component here holds an entity id the engine knows
+    /// how to follow — so a game whose components point at each other by id gets
+    /// a duplicate pointing where the original did, which is the only answer a
+    /// copy without a schema for references can give.
+    pub fn duplicate(&mut self, entity: Entity) -> Option<Entity> {
+        let loc = self.location(entity)?;
+        let source = &self.archetypes[loc.archetype.index() as usize];
+        // Copied out before anything moves: `spawn` and the inserts below both
+        // reshape storage, and a borrow of a column would not survive either.
+        let rows: Vec<(ComponentId, Vec<u8>)> = source
+            .ids()
+            .iter()
+            .enumerate()
+            .map(|(at, id)| (*id, source.column(at).row(loc.row as usize).to_vec()))
+            .collect();
+        let copy = self.spawn();
+        for (id, bytes) in rows {
+            if self.insert_raw(copy, id, &bytes) != gg_abi::AbiStatus::Ok {
+                // All or nothing: half an entity is worse than none, and the
+                // only way here is a registry that lost a component between two
+                // statements.
+                self.despawn(copy);
+                return None;
+            }
+        }
+        Some(copy)
+    }
+
     /// Remove a component. Returns whether the entity had it.
     pub fn remove<T: Component>(&mut self, entity: Entity) -> bool {
         let id = crate::component_id::<T>();

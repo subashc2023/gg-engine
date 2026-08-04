@@ -305,3 +305,54 @@ fn entity_hashes_locate_the_one_row_that_moved() {
     // ...and exactly one row moved.
     assert_eq!(ha.iter().zip(&hb).filter(|(x, y)| x != y).count(), 1);
 }
+
+/// A duplicate carries every component the original had, with the same bytes,
+/// and is a distinct entity — including for a component the caller never names.
+///
+/// The last part is the point of the API existing (§6 M15.4 item 5): the copy
+/// below goes through no `T`, so an editor holding no game types can make one.
+#[test]
+fn a_duplicate_copies_every_component_and_is_its_own_entity() {
+    let mut world = World::new();
+    let original = world.spawn();
+    world.insert(original, pos(3.5)).unwrap();
+    world
+        .insert(original, Velocity { v: sim::DVec3::Y })
+        .unwrap();
+    world.insert(original, Health { hp: 7, shield: 2 }).unwrap();
+
+    let copy = world.duplicate(original).expect("the original is alive");
+    assert_ne!(copy, original);
+    assert_eq!(world.get::<Position>(copy), world.get::<Position>(original));
+    assert_eq!(world.get::<Velocity>(copy), world.get::<Velocity>(original));
+    assert_eq!(world.get::<Health>(copy), world.get::<Health>(original));
+    assert_eq!(world.len(), 2);
+
+    // Its own storage: editing the copy leaves the original where it was, which
+    // a duplicate that shared a row would not.
+    world.get_mut::<Position>(copy).unwrap().p.x = 9.0;
+    assert_eq!(world.get::<Position>(original).unwrap().p.x, 3.5);
+
+    // And it hashes as a second entity rather than as the same one twice.
+    let hashes = world.entity_hashes();
+    assert_eq!(hashes.len(), 2);
+    assert_ne!(hashes[0].0, hashes[1].0);
+}
+
+/// An entity with nothing on it duplicates into another entity with nothing on
+/// it, and a dead one duplicates into `None` — the two ends a loop over columns
+/// gets wrong by iterating zero of them and by indexing a freed row.
+#[test]
+fn duplicating_an_empty_entity_and_a_dead_one() {
+    let mut world = World::new();
+    let bare = world.spawn();
+    let copy = world.duplicate(bare).expect("an empty entity is alive");
+    assert_ne!(copy, bare);
+    assert!(world.is_alive(copy));
+    assert_eq!(world.len(), 2);
+
+    let gone = world.spawn();
+    world.insert(gone, pos(1.0)).unwrap();
+    world.despawn(gone);
+    assert_eq!(world.duplicate(gone), None);
+}

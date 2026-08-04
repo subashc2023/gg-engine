@@ -1068,6 +1068,12 @@ fn render_ui_at(
 /// process-global registry whose contents depend on which crates have
 /// registered by the time this scene runs, and a reference image whose value
 /// depends on scene *order* is a reference that fails for the wrong reason.
+///
+/// Since §6 M15.4 the selection also has a **box**, so the frame carries the
+/// outline and the three gizmo arms drawn into the viewport's hole. Those are
+/// the only things this editor ever draws there, and they are geometry produced
+/// by a projection rather than by the layout — which is exactly the kind of
+/// thing a numeric test agrees with and a picture catches.
 fn render_editor() -> Render {
     use gg_editor::session::{Act, aim, frames};
     use gg_input::{ActionId, AxisId};
@@ -1075,6 +1081,7 @@ fn render_editor() -> Render {
     let mut world = gg_ecs::World::new();
     world.register::<Spinner>()?;
     world.register::<gg_ecs::boundary::Model>()?;
+    world.register::<gg_ecs::boundary::Renderable>()?;
     // Three archetypes, so the tree has variety and the mask column has
     // something to say. Which one lands on which row is archetype order and
     // therefore the ECS's business, not this scene's (`gg_editor::scan`).
@@ -1094,6 +1101,19 @@ fn render_editor() -> Render {
                     awake: u32::from(i % 3 != 0),
                     _pad: 0,
                 },
+            )?;
+            // Every one of them, and all within a few metres of the origin
+            // looking down -Z: which entity lands on tree row 1 is archetype
+            // order and so the ECS's business, and the selection's outline is
+            // only in this reference if *whichever* one it is has a box on the
+            // pane (§6 M15.4 item 2).
+            world.insert(
+                entity,
+                gg_ecs::boundary::Renderable::boxed(
+                    gg_math::sim::DVec3::new(f64::from(i % 3) - 1.0, 0.25, -6.0),
+                    gg_math::sim::Vec3::splat(0.5),
+                    0x00d0_9a4a,
+                ),
             )?;
             if models {
                 world.insert(
@@ -1156,7 +1176,18 @@ fn render_editor() -> Render {
                 extent: EDITOR_EXTENT,
                 dpi: GOLDEN_DPI,
                 tick: 41_337 + tick as u64,
-                playing: false,
+                // `Stopped` since §6 M15.4, and the trade is deliberate: the
+                // selection's outline and its three gizmo arms are drawn only in
+                // that state, and they are a whole new drawing path — a
+                // projection, a near clip and a stepped line — where the tag it
+                // costs is one word in a corner that `xtask reload --editor`
+                // greps for anyway.
+                play: gg_editor::Play::Stopped,
+                // No action map here at all: this host drives the editor from
+                // authored frames, so there is nothing for the editor's own
+                // camera verbs to resolve against and the reference keeps
+                // showing the game's declared eye (§6 M15.2 item 2).
+                input: None,
                 passes: &passes,
                 memory: gg_rhi::MemoryUse {
                     buffers: 41,

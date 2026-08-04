@@ -335,12 +335,38 @@ pub fn editor_replay_at(extent: (u32, u32)) -> anyhow::Result<Replay> {
     };
     let mut editor = gg_editor::Editor::new(None);
     editor.place(extent, HEADLESS_DPI);
-    let frames = gg_editor::session::frames(
-        &gg_editor::session::script(&editor),
-        gg_input::ActionId::new(find(verbs.actions, "ui_click")?),
+    let (x, y) = (
         gg_input::AxisId::new(find(verbs.axes, "ui_x")?),
         gg_input::AxisId::new(find(verbs.axes, "ui_y")?),
     );
+    let mut frames = gg_editor::session::frames(
+        &gg_editor::session::script(&editor),
+        gg_input::ActionId::new(find(verbs.actions, "ui_click")?),
+        x,
+        y,
+    );
+    // §6 M15.2 item 4: fly the editor camera. Appended here rather than inside
+    // `script` because a camera verb aims at no rectangle — the script is
+    // authored beside the panels precisely because its clicks are, and this has
+    // nothing to be authored beside. It lands *after* the stop above, which is
+    // the state the camera is live in.
+    let camera = |name| -> anyhow::Result<gg_input::ActionId> {
+        Ok(gg_input::ActionId::new(find(verbs.actions, name)?))
+    };
+    frames.extend(gg_editor::session::hold(
+        camera(gg_editor::host::verb::FORWARD)?,
+        24,
+        (x, y),
+        (0, 0),
+    ));
+    // And a look drag: the same verb held while the pointer moves, which is the
+    // gesture and also the reason the camera reads a *pointer* delta (§6 M15.2).
+    frames.extend(gg_editor::session::hold(
+        camera(gg_editor::host::verb::LOOK)?,
+        24,
+        (x, y),
+        (4 * gg_input::AXIS_SCALE, 0),
+    ));
     let mut meta = ReplayMeta::new(
         gg_math::DETERMINISM_CONTRACT,
         "curated",
@@ -1491,8 +1517,20 @@ const EDITOR_LOG: &[&str] = &[
     "component=\"demo05.hub\"", // the inspector reached a *game's* own component
     "field=\"angle\"",          // by name, out of a schema this host never compiled
     "editor: play state",       // and played it again
-    "editor: play state",       // and stopped it again
+    "editor: play state",       // and paused it again
     "save written",             // `file` → `save`, not the shell's exit path
+    "play mode stopped",        // §6 M15.2: and left play mode, restoring the capture
+    "editor: camera taken",     // item 2: the stopped scene is the operator's to look at
+    // §6 M15.4, in the order the script performs them. The pick is only
+    // blind-aimable because the spawn precedes it: a spawned entity lands down
+    // the camera's own forward axis and so projects to the centre of the game
+    // pane, which is where the click goes.
+    "editor: spawned",    // item 5: the tree makes an entity
+    "editor: picked",     // item 1: and a ray through the viewport finds it
+    "editor: duplicated", // item 5 again, through the registry rather than a type
+    "editor: deleted",
+    "editor: undo",         // item 4: and the delete is taken back out of the ring
+    "editor: camera flown", // item 4 of M15.2: the appended verbs moved the camera
 ];
 
 /// Nudges the script performs. Pinned, because "at least one edit" would pass
@@ -1581,6 +1619,22 @@ fn editor() -> anyhow::Result<()> {
         anyhow::ensure!(
             nudges == EDITOR_NUDGES,
             "[{label}] the inspector applied {nudges} edits, not {EDITOR_NUDGES}:\n{log}"
+        );
+
+        // §6 M15.2 item 3, and it is M14's comparison pointed at a button: the
+        // stop restored the world play began at. Both halves together, for
+        // `play_mode`'s reason — `identical` over a session that changed
+        // nothing is a gate that cannot fail, and this session has six nudges
+        // in it precisely so `changed` is an achievement too.
+        anyhow::ensure!(
+            log.contains("changed=true"),
+            "[{label}] the world at the stop was the world that entered play — the six nudges \
+             above did not reach it, so the restore proves nothing:\n{log}"
+        );
+        anyhow::ensure!(
+            log.contains("identical=true"),
+            "[{label}] the transport's stop did not give back the world that entered play \
+             (§6 M15.2):\n{log}"
         );
 
         let seq = sequence(&log)?;

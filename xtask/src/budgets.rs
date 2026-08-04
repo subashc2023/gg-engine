@@ -30,12 +30,26 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 /// argument — the shell *chooses* these and implements none of them — and every
 /// one was spent deliberately rather than discovered.
 ///
-/// This one was argued rather than taken: the alternative homes were both worse.
+/// That one was argued rather than taken: the alternative homes were both worse.
 /// `gg-editor` cannot call `gg-platform` (it would put winit in `gg-golden`,
 /// which a §1.5 gate scans the binary for), and `gg-platform` cannot name the
 /// editor's command type. The shell is the only place that has heard of both,
 /// which is what it is *for*.
-const SHELL_BUDGET: usize = 1050;
+///
+/// 1050 → 1100 at M15.2 for play mode: the captured world a stop returns to,
+/// and the three states around it. Argued on the same test, and it is the one
+/// raise where *both* other homes are closed by a rule rather than by taste.
+/// `gg-editor` is dev-only by §3's deny pin while `--play` is unconditional in
+/// every tier (§6 M14) — a shipping binary must be able to enter and leave play
+/// mode, so the code cannot live in a crate dist does not link. And `gg-ecs`,
+/// which owns snapshots, deliberately does not log: it carries no `tracing` and
+/// has a five-dependency budget, while `changed`/`identical` on the stop line
+/// are exactly what `xtask reload --save` and `--editor` read to grade the
+/// round trip. Holding encoded bytes and saying what happened to them is
+/// therefore the host's, and the shell still *implements* neither the snapshot
+/// nor the restore — it calls two `World` methods, which is the same shape
+/// every raise above it has.
+const SHELL_BUDGET: usize = 1100;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.
