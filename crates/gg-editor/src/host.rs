@@ -32,8 +32,9 @@ use gg_ui::boundary::verb as ui;
 /// a game's character, and the editor camera has to fly a scene that has no
 /// character in it. Sharing the keys is fine and sharing the verb is not.
 ///
-/// All actions, no axes, and that is `MAX_AXES` arithmetic rather than taste —
-/// see [`crate::camera`] for why a look pair does not fit.
+/// Seven actions and, since `MAX_AXES` doubled, the look pair that used to be
+/// unaffordable — see [`crate::camera`] for what differencing the cursor instead
+/// cost while it was.
 pub mod verb {
     /// Along the eye's forward axis, and against it.
     pub const FORWARD: &str = "editor_forward";
@@ -50,6 +51,16 @@ pub mod verb {
     pub const DOWN: &str = "editor_down";
     /// Held while a drag turns the camera.
     pub const LOOK: &str = "editor_look";
+    /// Raw device motion the drag turns by, yaw then pitch.
+    ///
+    /// Deliberately not the `ui_x`/`ui_y` the panels point with: those are
+    /// *cursor* motion, which the OS stops at the window edge, so a drag that
+    /// reached it stopped turning (§6 M15.2's residual). A device delta arrives
+    /// whatever the cursor is doing, which is also why it is only read while
+    /// [`LOOK`] is held.
+    pub const LOOK_X: &str = "editor_look_x";
+    /// See [`LOOK_X`].
+    pub const LOOK_Y: &str = "editor_look_y";
 }
 
 /// The default binding for each verb this host appends. A build that declared
@@ -67,9 +78,8 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     (ui::X, "PointerX", false),
     (ui::Y, "PointerY", false),
     // Actions and not axes, which is `gg_input::Wheel`'s decision rather than
-    // this table's: `MAX_AXES` is 8, and a game declaring six axes of its own
-    // would otherwise have no slot left for the editor's pointer — losing the
-    // cursor because the wheel wanted a seat.
+    // this table's: a notch is discrete, and a wheel that took two axis slots
+    // would be spending the headroom the look pair below now sits in.
     (ui::SCROLL_UP, "WheelUp", true),
     (ui::SCROLL_DOWN, "WheelDown", true),
     // The camera (§6 M15.2 item 4). Appended **after** the six above so a build
@@ -87,13 +97,18 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     (verb::UP, "E", true),
     (verb::DOWN, "Q", true),
     (verb::LOOK, "Mouse2", true),
+    // Demo 05 binds `MouseX` to its own `aim_x`, and keeps it: the delta reaches
+    // both verbs, harmlessly and for the same reason `W` above is shared.
+    (verb::LOOK_X, "MouseX", false),
+    (verb::LOOK_Y, "MouseY", false),
 ];
 
 /// The verb lists a shell should bind against with the editor open, and the
 /// bindings text to append to the game's own.
 ///
-/// Thirteen now — M15.1's four, the wheel's two, and §6 M15.2's seven camera
-/// verbs; a game that declares some of them keeps its own, as it always did.
+/// Fifteen now — M15.1's four, the wheel's two, and §6 M15.2's seven camera
+/// verbs plus the look pair a widened `MAX_AXES` made room for; a game that
+/// declares some of them keeps its own, as it always did.
 ///
 /// The lists are leaked because [`Verbs`] is `&'static` by construction — the
 /// dylib's own arrays are, and there must be one type for both. It is a few
@@ -159,20 +174,30 @@ mod tests {
                 verb::LOOK,
             ]
         );
-        assert_eq!(verbs.axes, &["move_right", "aim_x", ui::X, ui::Y]);
+        assert_eq!(
+            verbs.axes,
+            &[
+                "move_right",
+                "aim_x",
+                ui::X,
+                ui::Y,
+                verb::LOOK_X,
+                verb::LOOK_Y
+            ]
+        );
         // Appended, so every id the game already had still means what it did —
         // which is what keeps a plain replay valid (§4.7).
         assert_eq!(verbs.actions[0], game.actions[0]);
         assert!(bindings.contains("ui_click = [\"Mouse1\"]"));
         assert!(bindings.contains("ui_scroll_up = [\"WheelUp\"]"));
-        // Cursor motion, not look motion — the two sources exist so this line
-        // and a camera's `aim_y` are different numbers (§6 M15.1).
+        // The two motion sources, on the two verbs that want different things
+        // out of one mouse: the panels point with the cursor, the camera turns
+        // by the device (§6 M15.1, §6 M15.2). Asserted as a pair, because the
+        // failure worth catching is them collapsing back onto one source.
         assert!(bindings.contains("ui_y = [\"PointerY\"]"));
-        assert!(!bindings.contains("MouseY"));
-        // The camera costs no axis slot at all, which is the constraint that
-        // shaped it (§6 M15.2 item 4).
+        assert!(bindings.contains("editor_look_y = [\"MouseY\"]"));
         assert!(bindings.contains("editor_forward = [\"W\"]"));
-        assert_eq!(verbs.axes.len(), game.axes.len() + 2);
+        assert_eq!(verbs.axes.len(), game.axes.len() + 4);
         assert!(
             gg_ui::boundary::binding(&verbs).is_some(),
             "all four resolve"
@@ -221,7 +246,7 @@ mod tests {
                 verb::DOWN,
                 verb::LOOK,
             ],
-            axes: &[ui::X, ui::Y],
+            axes: &[ui::X, ui::Y, verb::LOOK_X, verb::LOOK_Y],
         };
         let (verbs, bindings) = open(&game);
         assert_eq!(verbs.actions, game.actions);
@@ -242,7 +267,10 @@ mod tests {
             &verbs.actions[..4],
             &[ui::CLICK, verb::FORWARD, ui::FOCUS, ui::SCROLL_UP]
         );
-        assert_eq!(verbs.axes, &["aim_x", ui::X, ui::Y]);
+        assert_eq!(
+            verbs.axes,
+            &["aim_x", ui::X, ui::Y, verb::LOOK_X, verb::LOOK_Y]
+        );
         assert!(!bindings.contains("ui_click"), "already the game's");
         assert!(!bindings.contains("editor_forward"), "and so is that");
         assert!(bindings.contains("ui_focus"));

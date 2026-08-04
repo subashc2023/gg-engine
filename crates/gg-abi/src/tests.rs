@@ -35,8 +35,12 @@ fn an_entity_survives_the_bit_encoding_and_zero_is_never_alive() {
 }
 
 #[test]
-fn input_frame_is_forty_bytes() {
-    assert_eq!(size_of::<InputFrame>(), 40);
+fn input_frame_is_seventy_two_bytes() {
+    // Both: the first says the `repr(C)` shape carries no padding, the second
+    // pins the absolute number so raising `MAX_AXES` is an edit here rather than
+    // a silent growth of every replay change record.
+    assert_eq!(size_of::<InputFrame>(), 8 + 4 * MAX_AXES);
+    assert_eq!(size_of::<InputFrame>(), 72);
     assert_eq!(align_of::<InputFrame>(), 8);
     assert_eq!(offset_of!(InputFrame, buttons), 0);
     assert_eq!(offset_of!(InputFrame, axes), 8);
@@ -46,9 +50,12 @@ fn input_frame_is_forty_bytes() {
 
 #[test]
 fn an_axis_reads_back_exactly_because_the_scale_is_a_power_of_two() {
+    let mut axes = [0; MAX_AXES];
+    axes[0] = AXIS_SCALE;
+    axes[1] = -AXIS_SCALE / 2;
     let frame = InputFrame {
         buttons: 0b101,
-        axes: [AXIS_SCALE, -AXIS_SCALE / 2, 0, 0, 0, 0, 0, 0],
+        axes,
     };
     assert!(frame.pressed(ActionId::new(0)));
     assert!(!frame.pressed(ActionId::new(1)));
@@ -64,8 +71,10 @@ fn tick_ctx_has_no_implicit_padding() {
     assert_eq!(offset_of!(TickCtx, tick_hz), 8);
     assert_eq!(offset_of!(TickCtx, reserved), 12);
     assert_eq!(offset_of!(TickCtx, input), 16);
-    assert_eq!(offset_of!(TickCtx, previous), 56);
-    assert_eq!(size_of::<TickCtx>(), 96);
+    // Two `InputFrame`s, so both numbers move with `MAX_AXES` — 16 bytes of
+    // header, then this tick's frame and the one before it.
+    assert_eq!(offset_of!(TickCtx, previous), 88);
+    assert_eq!(size_of::<TickCtx>(), 160);
     assert_eq!(align_of::<TickCtx>(), 8);
 }
 

@@ -17,25 +17,26 @@
 //!   what play is *for*. It is also what makes shared keys safe: demo 05 binds
 //!   `W` as well, and while the scene is stopped its systems are not running to
 //!   read it.
-//! - **Look is the pointer's delta, not a raw device axis.** `MAX_AXES` is 8,
-//!   demo 05 declares five and the editor's own pointer takes two — a `MouseX`/
-//!   `MouseY` look pair does not fit over the one game the editor's gate runs
-//!   on, so it would be a camera that broke the demo it was built to inspect.
-//!   The cost is real and named in §6 M15.2: a drag that reaches the window edge
-//!   stops turning, because the pointer it is differencing has clamped there.
+//! - **Look is a raw device delta, not the pointer's.** It was the pointer's
+//!   through M15.2, because `MAX_AXES` was 8 and demo 05's five plus the
+//!   editor's cursor pair left no room for a second motion pair — a camera that
+//!   fitted only by breaking the demo it was built to inspect. The cost was the
+//!   residual M15.2 named: the OS stops the cursor at the window edge, so a drag
+//!   that reached one stopped turning while the hand kept moving. A wider cap
+//!   (`gg_abi::MAX_AXES`) buys the pair, and a device delta has no edge to reach.
 
 use crate::host::verb;
 use gg_ecs::boundary::Eye;
-use gg_input::{ActionId, Input, MAX_ACTIONS};
+use gg_input::{ActionId, AxisId, Input, MAX_ACTIONS, MAX_AXES};
 use gg_math::sim;
 
 /// Metres per tick held. At 60 Hz that is 15 m/s — a second crosses demo 05's
 /// scene rather than the room it is in.
 const MOVE_PER_TICK: f64 = 0.25;
 
-/// Radians per canvas unit of look drag. A drag across `gg_ecs::boundary::CANVAS`
-/// turns about half a circle, which is the gesture-to-rotation ratio every
-/// editor with a right-drag has settled on.
+/// Radians per unit of raw device motion — a mouse count, near enough a pixel
+/// on an ordinary desk. A 600-unit sweep turns three radians, which is the
+/// gesture-to-rotation ratio every editor with a right-drag has settled on.
 const LOOK_PER_UNIT: f32 = 0.005;
 
 /// Just under a right angle: at exactly one the forward and world-up axes are
@@ -47,25 +48,23 @@ const PITCH_LIMIT: f32 = 1.5533;
 pub(crate) struct Camera {
     /// `None` until the first stop, and `Some` for the rest of the session.
     eye: Option<Eye>,
-    /// The pointer in [`gg_input::AXIS_SCALE`]ths as the look drag last saw it,
-    /// or `None` while the look verb is up. Integer, so the differences
-    /// accumulate exactly and a replayed drag lands where the recorded one did.
-    anchor: Option<(i32, i32)>,
     /// The scene is stopped — whether a host should be rendering from this.
     live: bool,
-    /// It has been flown, so the log line below is once per session.
-    flown: bool,
+    /// A drag has turned it, and a key has moved it. Separately, because one
+    /// line for both is a line the *other* gesture can satisfy: a session gate
+    /// reading it could not tell a look that reached no axis from one that did
+    /// (§6 M15.2 item 4). Each logs once, for §5.6c's reason.
+    turned: bool,
+    moved: bool,
 }
 
 impl Camera {
-    /// One tick. `pointer` is the router's, already advanced by this tick's
-    /// motion, in [`gg_input::AXIS_SCALE`]ths.
-    pub(crate) fn fly(&mut self, world: &gg_ecs::World, frame: &crate::Frame, pointer: (i32, i32)) {
+    /// One tick.
+    pub(crate) fn fly(&mut self, world: &gg_ecs::World, frame: &crate::Frame) {
         self.live = matches!(frame.play, crate::Play::Stopped);
         // A host that routes no input at all (a golden render) never latches,
         // which is what keeps a reference image the game's own view.
         let Some(input) = frame.input.filter(|_| self.live) else {
-            self.anchor = None;
             return;
         };
         if self.eye.is_none() {
@@ -80,23 +79,19 @@ impl Camera {
 
         // Look first: the move below is along the basis this leaves, so a drag
         // that turns and a key that pushes compose within one tick.
-        let turned = match held(verb::LOOK) {
-            // `replace` hands back the previous anchor and arms the next tick in
-            // one step; the first tick of a drag differences against itself and
-            // so contributes nothing, which is what stops a press from snapping
-            // the view to wherever the pointer had wandered.
-            true => {
-                let (was_x, was_y) = self.anchor.replace(pointer).unwrap_or(pointer);
-                let unit = LOOK_PER_UNIT / gg_input::AXIS_SCALE as f32;
-                let (dx, dy) = (pointer.0 - was_x, pointer.1 - was_y);
-                eye.yaw -= dx as f32 * unit;
-                eye.pitch = (eye.pitch - dy as f32 * unit).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-                (dx, dy) != (0, 0)
-            }
-            false => {
-                self.anchor = None;
-                false
-            }
+        //
+        // No anchor and no previous value: a device axis is already this tick's
+        // delta, so a press turns nothing on its own and there is no state to
+        // reset on release. Integer, so a replayed drag lands where the recorded
+        // one did — the same reason the recorder quantizes at all (§4.7).
+        let turned = held(verb::LOOK) && {
+            let axes = input.frame().axes;
+            let delta = |name| axis_id(input, name).map_or(0, |a| axes[a.index()]);
+            let (dx, dy) = (delta(verb::LOOK_X), delta(verb::LOOK_Y));
+            let unit = LOOK_PER_UNIT / gg_input::AXIS_SCALE as f32;
+            eye.yaw -= dx as f32 * unit;
+            eye.pitch = (eye.pitch - dy as f32 * unit).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+            (dx, dy) != (0, 0)
         };
 
         // The renderer's own basis, built once for both this and the pick ray
@@ -111,11 +106,14 @@ impl Camera {
             + forward * axis(verb::FORWARD, verb::BACK);
         eye.position += motion * MOVE_PER_TICK;
 
-        // Once, and only once something actually moved: the gate wants to know
-        // the appended verbs reached a camera, and sixty lines a second would
-        // bury every other thing the session says (§5.6c's reasoning).
-        if !self.flown && (turned || motion != sim::DVec3::ZERO) {
-            self.flown = true;
+        // Once each, and only once the gesture actually did something — sixty
+        // lines a second would bury every other thing the session says (§5.6c).
+        if !self.turned && turned {
+            self.turned = true;
+            tracing::info!(tick = frame.tick, "editor: camera turned");
+        }
+        if !self.moved && motion != sim::DVec3::ZERO {
+            self.moved = true;
             tracing::info!(tick = frame.tick, "editor: camera flown");
         }
     }
@@ -145,6 +143,18 @@ fn id(input: &Input, name: &str) -> Option<ActionId> {
         .position(|n| n == name)
         .filter(|i| *i < MAX_ACTIONS)
         .map(ActionId::new)
+}
+
+/// [`id`] for an axis, and resolved per tick for the same reason. Named apart
+/// from the local `axis` closure in [`Camera::fly`], which is a digital pair.
+fn axis_id(input: &Input, name: &str) -> Option<AxisId> {
+    input
+        .map()
+        .axis_names()
+        .iter()
+        .position(|n| n == name)
+        .filter(|i| *i < MAX_AXES)
+        .map(AxisId::new)
 }
 
 #[cfg(test)]
@@ -193,6 +203,21 @@ mod tests {
         });
     }
 
+    /// The look verb held with this tick's device motion on the pair the host
+    /// appended beside it.
+    fn drag(input: &mut Input, motion: (i32, i32)) {
+        let action = id(input, verb::LOOK).expect("the host appended it");
+        let mut frame = InputFrame {
+            buttons: 1 << action.index(),
+            ..InputFrame::default()
+        };
+        for (name, value) in [(verb::LOOK_X, motion.0), (verb::LOOK_Y, motion.1)] {
+            let at = axis_id(input, name).expect("and the axis pair with it");
+            frame.axes[at.index()] = value;
+        }
+        input.tick_from(frame);
+    }
+
     fn frame<'a>(play: Play, input: Option<&'a Input>) -> Frame<'a> {
         Frame {
             extent: gg_ecs::boundary::CANVAS,
@@ -216,7 +241,7 @@ mod tests {
     #[test]
     fn the_first_stop_latches_the_game_eye_and_the_viewport_does_not_jump() {
         let (world, input, mut camera) = (world(), input(), Camera::default());
-        camera.fly(&world, &frame(Play::Stopped, Some(&input)), (0, 0));
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)));
         assert_eq!(camera.eye(Eye::ORIGIN).position, AT, "latched the game's");
     }
 
@@ -228,7 +253,7 @@ mod tests {
         let before = world.canonical_hash();
         for _ in 0..4 {
             press(&mut input, verb::FORWARD);
-            camera.fly(&world, &frame(Play::Stopped, Some(&input)), (0, 0));
+            camera.fly(&world, &frame(Play::Stopped, Some(&input)));
         }
         let flown = camera.eye(Eye::ORIGIN).position;
         // Yaw zero looks down -Z, so four ticks forward is exactly that far
@@ -249,55 +274,88 @@ mod tests {
     #[test]
     fn up_is_world_up_however_the_camera_is_pitched() {
         let (world, mut input, mut camera) = (world(), input(), Camera::default());
-        camera.fly(&world, &frame(Play::Stopped, Some(&input)), (0, 0));
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)));
         camera.eye.as_mut().unwrap().pitch = -0.9;
         press(&mut input, verb::UP);
-        camera.fly(&world, &frame(Play::Stopped, Some(&input)), (0, 0));
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)));
         let flown = camera.eye(Eye::ORIGIN).position;
         assert_eq!(flown.y, AT.y + MOVE_PER_TICK);
         assert_eq!((flown.x, flown.z), (AT.x, AT.z), "it drifted sideways");
     }
 
-    /// The look drag turns, its first tick turns nothing, and pitch clamps
-    /// rather than passing through vertical.
+    /// The drag turns by *this tick's* delta, a press carrying no motion turns
+    /// nothing, and pitch clamps rather than passing through vertical.
     #[test]
-    fn a_look_drag_turns_from_the_press_and_clamps_at_the_poles() {
+    fn a_look_drag_turns_by_the_device_delta_and_clamps_at_the_poles() {
         let (world, mut input, mut camera) = (world(), input(), Camera::default());
-        let far = (900 * gg_input::AXIS_SCALE, 0);
-        press(&mut input, verb::LOOK);
-        // Pressed with the pointer already somewhere: the anchor arms here, so
-        // this tick must not turn the camera by 900 units of accumulated wander.
-        camera.fly(&world, &frame(Play::Stopped, Some(&input)), far);
+        // Held, with the mouse still: nothing to turn by, and no accumulated
+        // wander to snap to either — which is what a device axis buys over the
+        // cursor position the anchor used to have to defend against.
+        drag(&mut input, (0, 0));
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)));
         assert_eq!(
             camera.eye(Eye::ORIGIN).yaw,
             0.0,
             "the press snapped the view"
         );
-        press(&mut input, verb::LOOK);
-        camera.fly(&world, &frame(Play::Stopped, Some(&input)), (0, 0));
-        assert!((camera.eye(Eye::ORIGIN).yaw - 900.0 * LOOK_PER_UNIT).abs() < 1e-4);
+        drag(&mut input, (900 * gg_input::AXIS_SCALE, 0));
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)));
+        assert!((camera.eye(Eye::ORIGIN).yaw + 900.0 * LOOK_PER_UNIT).abs() < 1e-4);
         // Straight down, well past the limit, in one absurd drag.
         for _ in 0..4 {
-            press(&mut input, verb::LOOK);
-            camera.fly(
-                &world,
-                &frame(Play::Stopped, Some(&input)),
-                (0, 900 * gg_input::AXIS_SCALE),
-            );
-            press(&mut input, verb::LOOK);
-            camera.fly(&world, &frame(Play::Stopped, Some(&input)), (0, 0));
+            drag(&mut input, (0, 900 * gg_input::AXIS_SCALE));
+            camera.fly(&world, &frame(Play::Stopped, Some(&input)));
         }
-        assert_eq!(camera.eye(Eye::ORIGIN).pitch, PITCH_LIMIT);
+        assert_eq!(camera.eye(Eye::ORIGIN).pitch, -PITCH_LIMIT);
+        // And the axes carry a delta every tick the mouse moves, so the verb is
+        // the only thing deciding whether it counts. Read unconditionally, the
+        // camera would swing whenever the operator reached for a menu.
+        let was = camera.eye(Eye::ORIGIN).yaw;
+        let at = axis_id(&input, verb::LOOK_X).expect("the host appended it");
+        let mut moved = InputFrame::default();
+        moved.axes[at.index()] = 900 * gg_input::AXIS_SCALE;
+        input.tick_from(moved);
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)));
+        assert_eq!(
+            camera.eye(Eye::ORIGIN).yaw,
+            was,
+            "it turned with nothing held"
+        );
+    }
+
+    /// §6 M15.2's residual, closed: a drag far longer than the surface keeps
+    /// turning for all of it. The cursor this used to difference stops at the
+    /// window edge, so the same gesture turned until it got there and no
+    /// further; the sum below is six canvas widths.
+    #[test]
+    fn a_drag_past_the_window_edge_keeps_turning() {
+        let (world, mut input, mut camera) = (world(), input(), Camera::default());
+        const STEP: i32 = 200;
+        const TICKS: i32 = 40;
+        for _ in 0..TICKS {
+            drag(&mut input, (STEP * gg_input::AXIS_SCALE, 0));
+            camera.fly(&world, &frame(Play::Stopped, Some(&input)));
+        }
+        let yaw = camera.eye(Eye::ORIGIN).yaw;
+        let want = -((TICKS * STEP) as f32) * LOOK_PER_UNIT;
+        assert!(
+            (yaw - want).abs() < 1e-2,
+            "turned {yaw} of an expected {want} — a clamp somewhere ate the tail"
+        );
+        assert!(
+            (STEP * TICKS) as f32 > 6.0 * gg_ecs::boundary::CANVAS.0 as f32,
+            "the drag no longer outruns the surface, so it proves nothing"
+        );
     }
 
     /// Play renders from the game, and the keys are the game's while it does.
     #[test]
     fn while_playing_the_host_renders_from_the_game_and_the_verbs_do_nothing() {
         let (world, mut input, mut camera) = (world(), input(), Camera::default());
-        camera.fly(&world, &frame(Play::Stopped, Some(&input)), (0, 0));
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)));
         for play in [Play::Running, Play::Paused] {
             press(&mut input, verb::FORWARD);
-            camera.fly(&world, &frame(play, Some(&input)), (0, 0));
+            camera.fly(&world, &frame(play, Some(&input)));
             assert_eq!(
                 camera.eye(Eye::ORIGIN),
                 Eye::ORIGIN,
@@ -307,7 +365,7 @@ mod tests {
         // And the flight resumes exactly where it was left, rather than
         // re-latching onto whatever the game's eye did meanwhile.
         press(&mut input, verb::FORWARD);
-        camera.fly(&world, &frame(Play::Stopped, Some(&input)), (0, 0));
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)));
         let flown = camera.eye(Eye::ORIGIN).position;
         assert!(
             (flown.z - (AT.z - MOVE_PER_TICK)).abs() < 1e-12,
@@ -320,7 +378,7 @@ mod tests {
     #[test]
     fn a_host_that_routes_no_input_renders_from_the_game() {
         let (world, mut camera) = (world(), Camera::default());
-        camera.fly(&world, &frame(Play::Stopped, None), (0, 0));
+        camera.fly(&world, &frame(Play::Stopped, None));
         assert_eq!(camera.eye(Eye::ORIGIN), Eye::ORIGIN);
     }
 }

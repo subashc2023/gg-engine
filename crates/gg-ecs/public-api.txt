@@ -656,8 +656,8 @@ pub use gg_ecs::view::ColumnView
 pub enum gg_ecs::view::AliasError
 pub gg_ecs::view::AliasError::ReadWrite
 pub gg_ecs::view::AliasError::ReadWrite::id: gg_ecs::hash::ComponentId
-pub gg_ecs::view::AliasError::TooManyWrites
-pub gg_ecs::view::AliasError::TooManyWrites::count: usize
+pub gg_ecs::view::AliasError::TooManyTerms
+pub gg_ecs::view::AliasError::TooManyTerms::count: usize
 pub gg_ecs::view::AliasError::WriteWrite
 pub gg_ecs::view::AliasError::WriteWrite::id: gg_ecs::hash::ComponentId
 pub struct gg_ecs::view::ArchetypeView<'w, 'q>
@@ -678,7 +678,7 @@ impl gg_ecs::view::QueryAccess
 pub fn gg_ecs::view::QueryAccess::new(&[gg_ecs::hash::ComponentId], &[gg_ecs::hash::ComponentId]) -> core::result::Result<Self, gg_ecs::view::AliasError>
 pub fn gg_ecs::view::QueryAccess::reads(&self) -> &[gg_ecs::hash::ComponentId]
 pub fn gg_ecs::view::QueryAccess::writes(&self) -> &[gg_ecs::hash::ComponentId]
-pub const gg_ecs::view::MAX_WRITES: usize
+pub const gg_ecs::view::MAX_TERMS: usize
 pub mod gg_ecs::world
 pub mod gg_ecs::world::save
 pub enum gg_ecs::world::save::SaveError
@@ -790,8 +790,8 @@ pub macro gg_ecs::gg_game!
 pub enum gg_ecs::AliasError
 pub gg_ecs::AliasError::ReadWrite
 pub gg_ecs::AliasError::ReadWrite::id: gg_ecs::hash::ComponentId
-pub gg_ecs::AliasError::TooManyWrites
-pub gg_ecs::AliasError::TooManyWrites::count: usize
+pub gg_ecs::AliasError::TooManyTerms
+pub gg_ecs::AliasError::TooManyTerms::count: usize
 pub gg_ecs::AliasError::WriteWrite
 pub gg_ecs::AliasError::WriteWrite::id: gg_ecs::hash::ComponentId
 pub enum gg_ecs::ComponentOutcome

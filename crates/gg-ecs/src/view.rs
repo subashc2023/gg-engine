@@ -48,10 +48,28 @@ pub struct QueryAccess {
     all: Vec<ComponentId>,
 }
 
-/// Mutable columns per query, capped so [`ArchetypeView`]'s take-once bookkeeping
-/// fits one word. A query writing 64 distinct components is a design error long
-/// before it is a limit.
-pub const MAX_WRITES: usize = 64;
+/// Columns one query may name, reads and writes together — the cap that lets
+/// [`ArchetypeView`] hold them inline instead of allocating per archetype.
+///
+/// It *is* [`MAX_QUERY_COLUMNS`](gg_abi::MAX_QUERY_COLUMNS) rather than a
+/// number that happens to match: the boundary's payload has been one flat
+/// `repr(C)` array of this length since M5, and a host that allocated two
+/// `Vec`s to copy into it was paying for storage the shape had already ruled
+/// out. One number, so the two cannot drift.
+pub const MAX_TERMS: usize = gg_abi::MAX_QUERY_COLUMNS;
+
+// `taken` is one word of take-once bits, one per write column.
+const _: () = assert!(MAX_TERMS <= u64::BITS as usize);
+
+/// Filler for the slots of [`ArchetypeView::columns`] past `reads + writes`.
+/// Never handed out — [`raw_reads`](ArchetypeView::raw_reads) and its siblings
+/// cut the array to length first — and null so a slot that escaped that would
+/// fault rather than read somewhere plausible.
+pub(crate) const EMPTY_COLUMN: ColumnView = ColumnView {
+    ptr: core::ptr::null_mut(),
+    len: 0,
+    stride: 0,
+};
 
 /// Why a set of accesses cannot be granted.
 #[derive(Debug, thiserror::Error)]
@@ -74,13 +92,16 @@ pub enum AliasError {
         /// The component on both sides of the borrow.
         id: ComponentId,
     },
-    /// More mutable borrows than [`MAX_WRITES`] — the fixed-size write set is
-    /// what keeps the borrow check allocation-free.
+    /// More columns than [`MAX_TERMS`], counted after duplicate reads collapse.
+    /// The refusal is what makes [`ArchetypeView`]'s inline storage safe: past
+    /// the cap there is nowhere to put the columns, so this is an error at
+    /// validation rather than a truncation at build.
     #[error(
-        "a query may borrow at most {MAX_WRITES} components mutably; this one asks for {count}"
+        "a query may name at most {MAX_TERMS} components across its reads and writes; this one \
+         asks for {count}"
     )]
-    TooManyWrites {
-        /// How many were asked for.
+    TooManyTerms {
+        /// How many were asked for, deduplicated.
         count: usize,
     },
 }
@@ -94,14 +115,20 @@ impl QueryAccess {
         if let Some(dup) = w.windows(2).find(|p| p[0] == p[1]) {
             return Err(AliasError::WriteWrite { id: dup[0] });
         }
-        if w.len() > MAX_WRITES {
-            return Err(AliasError::TooManyWrites { count: w.len() });
-        }
         let mut r = read.to_vec();
         r.sort_unstable();
         r.dedup(); // reading twice is harmless, unlike writing twice
         if let Some(id) = r.iter().find(|id| w.binary_search(id).is_ok()) {
             return Err(AliasError::ReadWrite { id: *id });
+        }
+        // After the aliasing checks, so a query that is both over the cap and
+        // self-aliasing is named by the more specific fault; after the dedup,
+        // because the column count is what the view must hold, not what the
+        // caller typed.
+        if r.len() + w.len() > MAX_TERMS {
+            return Err(AliasError::TooManyTerms {
+                count: r.len() + w.len(),
+            });
         }
         let mut all = r.clone();
         all.extend_from_slice(&w);
@@ -151,8 +178,14 @@ impl QueryAccess {
 pub struct ArchetypeView<'w, 'q> {
     entities: *const Entity,
     entities_len: usize,
-    read: Vec<ColumnView>,
-    write: Vec<ColumnView>,
+    /// Reads then writes, in access-set order — the flat shape
+    /// [`ArchetypeMatch`](gg_abi::ArchetypeMatch) already hands the dylib.
+    /// Inline, so building one archetype's view allocates nothing (§4.2.2).
+    columns: [ColumnView; MAX_TERMS],
+    /// `columns[..reads]`.
+    reads: usize,
+    /// `columns[reads..reads + writes]`.
+    writes: usize,
     /// Which write columns have already been handed out. The returned slices
     /// live for `'w`, not for the `&mut self` that produced them, so nothing but
     /// this bit stops a second call from minting a second `&mut` to one column.
@@ -189,16 +222,20 @@ impl<'w, 'q> ArchetypeView<'w, 'q> {
     }
 
     /// The raw views, as the §4.2.2 boundary would hand them over.
+    ///
+    /// Cut to length here rather than indexed in place, so every `[i]` below
+    /// still panics past the *query's* column count instead of reading a
+    /// [`EMPTY_COLUMN`] slot the cap left behind.
     #[must_use]
     pub fn raw_reads(&self) -> &[ColumnView] {
-        &self.read
+        &self.columns[..self.reads]
     }
 
     /// As [`Self::raw_reads`], for the mutable half. Handing one out does not
     /// consume it — [`Self::write`] is what tracks that.
     #[must_use]
     pub fn raw_writes(&self) -> &[ColumnView] {
-        &self.write
+        &self.columns[self.reads..self.reads + self.writes]
     }
 
     /// The `i`-th read column as a typed slice, where `i` indexes
@@ -211,7 +248,7 @@ impl<'w, 'q> ArchetypeView<'w, 'q> {
     /// which is otherwise a silent reinterpretation.
     #[must_use]
     pub fn read<T: Component>(&self, i: usize) -> &'w [T] {
-        let view = self.read[i];
+        let view = self.raw_reads()[i];
         Self::assert_shape::<T>(view, "read");
         // SAFETY: `view` was built from a live column of this archetype under
         // the `&mut World` borrow this view holds. `QueryAccess` proved `T`'s
@@ -278,7 +315,7 @@ impl<'w, 'q> ArchetypeView<'w, 'q> {
     /// If `i` is out of range, if `T` does not match the column's stride, or if
     /// this column was already taken.
     pub fn write<T: Component>(&mut self, i: usize) -> &'w mut [T] {
-        let view = self.write[i];
+        let view = self.raw_writes()[i];
         Self::assert_shape::<T>(view, "write");
         let bit = 1u64 << i;
         assert_eq!(
@@ -318,7 +355,7 @@ impl<'w, 'q> ArchetypeView<'w, 'q> {
     /// If `i` is out of range.
     #[must_use]
     pub fn read_bytes(&self, i: usize) -> &'w [u8] {
-        let view = self.read[i];
+        let view = self.raw_reads()[i];
         if view.stride == 0 {
             return &[]; // a zero-sized component has no bytes and no pointer
         }
@@ -336,7 +373,7 @@ impl<'w, 'q> ArchetypeView<'w, 'q> {
     ///
     /// If `i` is out of range, or if this column was already taken.
     pub fn write_bytes(&mut self, i: usize) -> &'w mut [u8] {
-        let view = self.write[i];
+        let view = self.raw_writes()[i];
         let bit = 1u64 << i;
         assert_eq!(
             self.taken & bit,
@@ -374,12 +411,12 @@ impl<'w, 'q> ArchetypeView<'w, 'q> {
 /// to a lifetime-tagged view; disjointness is [`QueryAccess`]'s job, already
 /// done before this is called.
 ///
-/// P1: the two `Vec`s below are a heap allocation per matching archetype per
-/// call, so every `each` over a live world allocates once a tick per archetype
-/// — measured at M13 by `gg-ui/tests/no_alloc_widgets.rs`, which had to bound
-/// what it asserts because of it. A query's term count is one to a handful, so
-/// the fix is inline storage with a cap and a loud refusal past it; it is not
-/// M13's to make, because it touches the ECS hot path and its own benches.
+/// Allocation-free: [`MAX_TERMS`] is what [`QueryAccess::new`] already refused
+/// past, so the columns land in the view's inline array. It reads as one write
+/// per column into `columns` rather than a push into a `Vec` per half, which is
+/// the whole of the difference — every `each` over a live world used to charge
+/// the allocator once per matching archetype per tick, for storage the §4.2.2
+/// payload was going to copy into a fixed array anyway.
 pub(crate) fn build<'w, 'q>(
     archetype: &'w mut Archetype,
     access: &'q QueryAccess,
@@ -390,27 +427,21 @@ pub(crate) fn build<'w, 'q>(
     let entities_len = archetype.len();
     let entities = archetype.entities_ptr();
 
-    let mut read = Vec::with_capacity(access.read.len());
-    let mut write = Vec::with_capacity(access.write.len());
-    for (out, ids) in [
-        (&mut read, access.read.as_slice()),
-        (&mut write, access.write.as_slice()),
-    ] {
-        for &id in ids {
-            let at = archetype.column_index(id)?;
-            let column = archetype.column_mut(at);
-            out.push(ColumnView {
-                ptr: column.base_ptr(),
-                len: column.rows(),
-                stride: column.stride(),
-            });
-        }
+    let mut columns = [EMPTY_COLUMN; MAX_TERMS];
+    for (at, &id) in access.read.iter().chain(access.write.iter()).enumerate() {
+        let column = archetype.column_mut(archetype.column_index(id)?);
+        columns[at] = ColumnView {
+            ptr: column.base_ptr(),
+            len: column.rows(),
+            stride: column.stride(),
+        };
     }
     Some(ArchetypeView {
         entities,
         entities_len,
-        read,
-        write,
+        columns,
+        reads: access.read.len(),
+        writes: access.write.len(),
         taken: 0,
         access,
         _lifetime: core::marker::PhantomData,
@@ -437,20 +468,21 @@ pub(crate) fn build_ref<'w, 'q>(
     if !archetype.contains_all(access.matched()) {
         return None;
     }
-    let mut read = Vec::with_capacity(access.read.len());
-    for &id in &access.read {
+    let mut columns = [EMPTY_COLUMN; MAX_TERMS];
+    for (at, &id) in access.read.iter().enumerate() {
         let column = archetype.column(archetype.column_index(id)?);
-        read.push(ColumnView {
+        columns[at] = ColumnView {
             ptr: column.base_ptr_shared(),
             len: column.rows(),
             stride: column.stride(),
-        });
+        };
     }
     Some(ArchetypeView {
         entities: archetype.entities_ptr_shared(),
         entities_len: archetype.len(),
-        read,
-        write: Vec::new(),
+        columns,
+        reads: access.read.len(),
+        writes: 0,
         taken: 0,
         access,
         _lifetime: core::marker::PhantomData,

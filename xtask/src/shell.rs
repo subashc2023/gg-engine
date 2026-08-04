@@ -354,19 +354,31 @@ pub fn editor_replay_at(extent: (u32, u32)) -> anyhow::Result<Replay> {
     let camera = |name| -> anyhow::Result<gg_input::ActionId> {
         Ok(gg_input::ActionId::new(find(verbs.actions, name)?))
     };
+    // The look drag, on its own axes and with its own log line: a turn and a
+    // move are two claims, and one line for both would let the keys below
+    // satisfy a drag that reached no axis at all — which is the failure this
+    // pair can have, since the axes are appended per session.
+    //
+    // Not `(x, y)`: those are cursor motion, which is what this differenced
+    // until a wider `MAX_AXES` bought the camera its own axes — and with them a
+    // drag that does not stop at the window edge (§6 M15.2's residual).
+    let look = |name| -> anyhow::Result<gg_input::AxisId> {
+        Ok(gg_input::AxisId::new(find(verbs.axes, name)?))
+    };
+    frames.extend(gg_editor::session::hold(
+        camera(gg_editor::host::verb::LOOK)?,
+        24,
+        (
+            look(gg_editor::host::verb::LOOK_X)?,
+            look(gg_editor::host::verb::LOOK_Y)?,
+        ),
+        (4 * gg_input::AXIS_SCALE, 0),
+    ));
     frames.extend(gg_editor::session::hold(
         camera(gg_editor::host::verb::FORWARD)?,
         24,
         (x, y),
         (0, 0),
-    ));
-    // And a look drag: the same verb held while the pointer moves, which is the
-    // gesture and also the reason the camera reads a *pointer* delta (§6 M15.2).
-    frames.extend(gg_editor::session::hold(
-        camera(gg_editor::host::verb::LOOK)?,
-        24,
-        (x, y),
-        (4 * gg_input::AXIS_SCALE, 0),
     ));
     let mut meta = ReplayMeta::new(
         gg_math::DETERMINISM_CONTRACT,
@@ -1535,8 +1547,12 @@ const EDITOR_LOG: &[&str] = &[
     "editor: picked",     // item 1: and a ray through the viewport finds it
     "editor: duplicated", // item 5 again, through the registry rather than a type
     "editor: deleted",
-    "editor: undo",         // item 4: and the delete is taken back out of the ring
-    "editor: camera flown", // item 4 of M15.2: the appended verbs moved the camera
+    "editor: undo", // item 4: and the delete is taken back out of the ring
+    // Item 4 of M15.2, as two lines because it is two claims: a drag reached the
+    // axis pair the host appends for it, and the keys reached the camera. One
+    // line for both would be satisfied by whichever gesture came first.
+    "editor: camera turned",
+    "editor: camera flown",
 ];
 
 /// Nudges the script performs. Pinned, because "at least one edit" would pass
@@ -1617,6 +1633,18 @@ fn editor() -> anyhow::Result<()> {
              {EDITOR_LOG:?} in order; a click that landed on a different panel is what this \
              looks like:\n{log}",
             EDITOR_LOG.len()
+        );
+        // Every viewport press in this script is made while the scene is
+        // stopped, so the take must never fire: §6 M15.4's pick and the game's
+        // mouse-look share one click in one rectangle, and the pointer used to
+        // win it — the operator selected an entity and lost the cursor, with
+        // Escape the only way back. Absence is the assertion because the
+        // session has no running viewport click to assert the other half with;
+        // `gg_runtime`'s own `takes_pointer` test carries that direction.
+        anyhow::ensure!(
+            !log.contains("editor: pointer taken by the game"),
+            "[{label}] a stopped session handed the mouse to the game — a click that picks is not \
+             a click the player made (§6 M15.4):\n{log}"
         );
         let nudges = log
             .lines()

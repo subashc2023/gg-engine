@@ -18,8 +18,11 @@ use crate::entity::Entity;
 ///
 /// Fixed rather than heap-allocated so a match is one flat `repr(C)` value and
 /// the dylib can page a query through stack space alone. A query touching more
-/// than this many components is a design error long before it is a limit — the
-/// same judgement `gg-ecs`'s `MAX_WRITES` already makes.
+/// than this many components is a design error long before it is a limit.
+///
+/// `gg-ecs` does not make the same judgement separately — its `MAX_TERMS` *is*
+/// this constant, so the storage a view holds inline and the payload it is
+/// copied into cannot disagree about how many columns exist.
 pub const MAX_QUERY_COLUMNS: usize = 16;
 
 /// One column of one archetype match: base pointer, row count, stride.

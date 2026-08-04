@@ -53,7 +53,7 @@ impl gg_abi::input::AxisId
 pub const fn gg_abi::input::AxisId::index(self) -> usize
 pub const fn gg_abi::input::AxisId::new(usize) -> Self
 #[repr(C)] pub struct gg_abi::input::InputFrame
-pub gg_abi::input::InputFrame::axes: [i32; 8]
+pub gg_abi::input::InputFrame::axes: [i32; 16]
 pub gg_abi::input::InputFrame::buttons: u64
 impl gg_abi::input::InputFrame
 pub fn gg_abi::input::InputFrame::axis(&self, gg_abi::input::AxisId) -> f32
@@ -213,7 +213,7 @@ pub gg_abi::HostApiV1::reserved: u32
 pub gg_abi::HostApiV1::spawn: fn(*mut gg_abi::host::WorldHandle) -> gg_abi::entity::Entity
 pub gg_abi::HostApiV1::version: u32
 #[repr(C)] pub struct gg_abi::InputFrame
-pub gg_abi::InputFrame::axes: [i32; 8]
+pub gg_abi::InputFrame::axes: [i32; 16]
 pub gg_abi::InputFrame::buttons: u64
 impl gg_abi::input::InputFrame
 pub fn gg_abi::input::InputFrame::axis(&self, gg_abi::input::AxisId) -> f32

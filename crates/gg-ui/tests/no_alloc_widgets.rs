@@ -8,14 +8,19 @@
 //! two are: a `#[global_allocator]` belongs to one process and counts
 //! everything in it.
 //!
-//! # What it asserts is a bound, not zero, and that is a finding
+//! # It asserts zero, and it used to assert a floor
 //!
-//! `gg_ecs::view::build` allocates two `Vec`s per matching archetype, so *any*
-//! `World::each` costs one allocation a call here — nothing to do with the UI,
-//! and paid by every game system on every tick. This file measures that number
-//! rather than hiding it: the bound below is exactly the two `each` calls
-//! [`Ui::frame`] makes over one archetype, and a UI that allocated anything of
-//! its own would push past it. The ECS side carries the P1 (`view::build`).
+//! `gg_ecs::view::build` allocated two `Vec`s per matching archetype, so *any*
+//! `World::each` cost one allocation a call here — nothing to do with the UI,
+//! and paid by every game system on every tick. This file measured that number
+//! rather than hiding it, as an exact `assert_eq!` against a two-per-frame ECS
+//! floor with a message saying a *drop* below it meant the deferred fix had
+//! landed and the bound was a line to delete. It had, and this is that line
+//! deleted: the view
+//! holds its columns inline now (`gg_ecs::view::MAX_TERMS`). Kept in the header
+//! because the shape is the reusable part — a bound recorded as equality is
+//! what let the fix arrive as a failing test rather than as an unnoticed
+//! improvement.
 
 // unwrap is permitted in tests (§2, Error handling row).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -106,11 +111,9 @@ fn tick_of(tick: u64) -> Tick {
     }
 }
 
-/// Frames in the measured window, and what the ECS charges for them: one
-/// allocation per `World::each` per matching archetype, twice a frame over the
-/// single archetype these widgets share. Everything above that is the UI's.
+/// Frames in the measured window. The ECS charges nothing for them, so every
+/// call the counter sees is the UI's.
 const MEASURED: u64 = 128;
-const ECS_FLOOR: usize = 2 * MEASURED as usize;
 
 #[test]
 fn a_settled_widget_frame_allocates_nothing_of_its_own() {
@@ -136,15 +139,11 @@ fn a_settled_widget_frame_allocates_nothing_of_its_own() {
         before > cold,
         "the counter never moved during warmup, so it is not watching this path"
     );
-    // Equality, not `<=`: the floor is the ECS's and is known exactly, so a
-    // *drop* below it means the P1 above was fixed and this bound is stale —
-    // which is a line to delete, and a test that silently forgave it would
-    // never say so.
     assert_eq!(
-        allocations, ECS_FLOOR,
-        "{MEASURED} settled widget frames asked the allocator {allocations} times against a \
-         {ECS_FLOOR}-call ECS floor — above it is the UI allocating, below it means \
-         `gg_ecs::view::build` stopped and this bound should go"
+        allocations, 0,
+        "{MEASURED} settled widget frames asked the allocator {allocations} times — a settled \
+         frame allocates nothing, so this is either the UI or something under it that stopped \
+         holding its storage inline"
     );
     assert!(vertices > 0, "the frame under test drew nothing");
 }

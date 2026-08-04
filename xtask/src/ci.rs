@@ -508,14 +508,59 @@ fn demo_runs() -> anyhow::Result<()> {
 /// at all: `wait_with_output` returns only once the *last* process in the chain
 /// has closed it.
 ///
-/// P1: this is the one flaky gate in the push tier, observed on the WSL lane at
-/// M14 — the child ran its 300k frames in 1.55 s, the rewrite landed at 400 ms,
-/// and no reload fired; the identical rerun passed at tick 88218. The frame
-/// count is a *proxy* for "long enough", which is the bug: the trigger should be
-/// the shell reporting it is running and the bound should be wall time, not a
-/// number of frames whose duration nobody controls. Left as it is because the
-/// fix belongs with whoever next touches the watcher's debounce, and a rerun is
-/// currently cheaper than a wrong redesign.
+/// **The rewrite waits for the shell to say it is watching.** This was the push
+/// tier's one flaky gate — observed on the WSL lane at M14, where the child ran
+/// its 300k frames in 1.55 s, the rewrite landed on a 400 ms sleep, and no
+/// reload fired; the identical rerun passed at tick 88218. The sleep was the
+/// bug, and not for the reason the note here used to give: 400 ms of a 1.55 s
+/// run leaves plenty of frames, so the run was never too short — the *watcher*
+/// was not up yet, and a file event with nobody listening is not late, it is
+/// gone. `Watch::new` runs at `app.rs`'s `game loaded`, so that line is the
+/// readiness signal, and this now reads the child's output for it rather than
+/// guessing at a duration.
+///
+/// The frame count stays a bound rather than becoming wall time, because with
+/// the trigger fixed it is no longer a proxy for anything: every one of the 300k
+/// frames now falls *after* the rewrite, against a settle period of 40 ms
+/// (`SETTLE_QUIET`) plus a stage-and-load. If that headroom ever runs out the
+/// run says so by name below instead of coming back as a rerun.
+/// What the shell logs once its watcher exists (`app.rs`, after `Watch::new`).
+const READY: &str = "game loaded";
+
+/// Read a child stream to EOF on its own thread, signalling the first time a
+/// line contains `marker`, and hand back the whole thing ANSI-stripped.
+///
+/// Per line rather than at the end, because `tracing` writes escapes *inside* a
+/// record — a marker matched against the raw bytes would work until someone
+/// coloured the message.
+fn drain<R: std::io::Read + Send + 'static>(
+    stream: Option<R>,
+    marker: &'static str,
+    tx: std::sync::mpsc::Sender<()>,
+) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        use std::io::BufRead as _;
+        let Some(stream) = stream else {
+            return String::new();
+        };
+        let mut log = String::new();
+        let mut seen = false;
+        for line in std::io::BufReader::new(stream)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let line = crate::util::plain(line.as_bytes());
+            if !seen && line.contains(marker) {
+                seen = true;
+                let _ = tx.send(()); // the other stream may have got there first
+            }
+            log.push_str(&line);
+            log.push('\n');
+        }
+        log
+    })
+}
+
 fn rejuvenation() -> anyhow::Result<()> {
     use std::process::Stdio;
 
@@ -550,20 +595,47 @@ fn rejuvenation() -> anyhow::Result<()> {
         .env("GG_HEADLESS", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = cmd.spawn()?;
+    let mut child = cmd.spawn()?;
+
+    // Drained on threads rather than through `wait_with_output`, which cannot
+    // hand over a line while the child is still running — and one line is what
+    // this gate has to wait for. The property that call was here for survives:
+    // a reader returns at EOF, and EOF is when the *last* holder of the pipe
+    // closes it, so joining these still waits out the successor process.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = drain(child.stdout.take(), READY, tx.clone());
+    let stderr = drain(child.stderr.take(), READY, tx);
 
     // Only a *reload* charges the leak budget, so the rewrite is the trigger and
-    // there is no rejuvenation without one. 300k headless frames is around a
-    // second of runtime; a busier machine makes that window wider, never
-    // narrower, which is the direction a timing assumption should fail in.
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    // there is no rejuvenation without one — but a rewrite before `Watch::new`
+    // is a trigger nobody is holding. The wait is generous because it is not
+    // measuring anything: it is the difference between a failure and a hang.
+    if rx.recv_timeout(std::time::Duration::from_secs(60)).is_err() {
+        let _ = child.kill();
+        anyhow::bail!(
+            "the shell never logged `{READY}`, so it never started watching and a rewrite would \
+             have gone to nobody:\n{}{}",
+            stdout.join().unwrap_or_default(),
+            stderr.join().unwrap_or_default()
+        );
+    }
     std::fs::copy(&built, &game)?;
-    let out = child.wait_with_output()?;
+    child.wait()?;
 
     let log = format!(
         "{}{}",
-        crate::util::plain(&out.stdout),
-        crate::util::plain(&out.stderr)
+        stdout.join().unwrap_or_default(),
+        stderr.join().unwrap_or_default()
+    );
+    // Named ahead of the `rejuvenating` lookup, which would otherwise report a
+    // missing line for a run that simply ended first — the one way the frame
+    // bound below can still be wrong, and the reading that sent M14's flake
+    // back for a rerun.
+    anyhow::ensure!(
+        log.contains("rejuvenating") || !log.contains("clean exit"),
+        "the run finished its frames without reloading: the rewrite landed while the shell was \
+         watching, so the bound is too short for this machine's settle-and-stage rather than \
+         mistimed:\n{log}"
     );
     let line = |needle: &str| {
         log.lines()

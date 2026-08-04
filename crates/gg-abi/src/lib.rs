@@ -72,7 +72,10 @@ pub use verb::{VerbName, VerbsTable};
 // registration needs to name persisted identity, not the Rust type).
 // v3: `gg_game_verbs` — the action and axis names, which the host needs to
 // parse an action map and to check a replay's id space (§4.7).
-pub const HOST_API_VERSION: u32 = 3;
+// v4: `MAX_AXES` 8 → 16, which widens `InputFrame` and so the value every
+// system is handed each tick. The one v-line here that is a constant rather
+// than a symbol, and it is exactly why the rule says *any* change.
+pub const HOST_API_VERSION: u32 = 4;
 
 /// Bytes in a boundary fingerprint: a blake3 output, named here so the host and
 /// the dylib agree on the width without `gg-abi` depending on a hash.

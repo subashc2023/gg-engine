@@ -150,6 +150,22 @@ impl Play {
     pub fn entered(self) -> bool {
         matches!(self, Play::Running | Play::Paused)
     }
+
+    /// Whether a press hands the physical mouse to the game — the other side of
+    /// the pick rule in [`Editor::over_panels`], and stated here so the host
+    /// cannot hold a second one. `over_panels` is the caller's because the
+    /// pointer is (§6 M15.1).
+    ///
+    /// [`Running`](Play::Running) and not [`entered`](Play::entered). Stopped is
+    /// the state that bit: the viewport is the operator's there, a press in it
+    /// is §6 M15.4's pick, and taking the mouse on the same click made selecting
+    /// an entity cost the cursor until Escape gave it back. Paused goes the same
+    /// way for a weaker reason — nothing reads the input either, and the panels
+    /// are what a pause is *for*.
+    #[must_use]
+    pub fn takes_pointer(self, over_panels: bool) -> bool {
+        self.running() && !over_panels
+    }
 }
 
 /// What a click on the editor's own title bar asks the host to do.
@@ -868,10 +884,11 @@ impl Editor {
         }
         self.place(frame.extent, frame.dpi);
         self.router.begin(tick, self.fit.canvas);
-        // After `begin`, which is what advances the pointer a look drag
-        // differences — and before the panels, so a camera moved this tick is
-        // the one the viewport tag and the shell's extract both see.
-        self.camera.fly(world, frame, self.router.pointer().raw());
+        // Before the panels, so a camera moved this tick is the one the viewport
+        // tag and the shell's extract both see. It no longer reads the router's
+        // pointer at all — a look drag is a device delta (`camera`) — so the
+        // order against `begin` above is now free rather than load-bearing.
+        self.camera.fly(world, frame);
         self.scan.run(world);
         self.scan
             .page(world, self.first_row, self.per_page + 1, &mut self.rows);
@@ -1225,13 +1242,15 @@ impl Editor {
 
     /// Whether the pointer is over a panel rather than over the viewport.
     ///
-    /// What the host decides with it is whether a *press* hands the mouse to
-    /// the game (§6 M15.1): the editor and the game share one physical mouse,
-    /// and a click on `pause` must not also fire whatever the game bound to
-    /// that button. Not the dead-frame rule — that one is "the editor holds the
-    /// pointer", which is true over the viewport as well until a click there
-    /// takes it. Reads the pointer the last tick left, which is the same frame
-    /// of lag every hit test already has.
+    /// One half of what the host decides a *press* is (§6 M15.1): the editor
+    /// and the game share one physical mouse, and a click on `pause` must not
+    /// also fire whatever the game bound to that button. The other half is the
+    /// transport — the viewport is the game's only while the game runs, which
+    /// is `panels`' pick rule and `gg_runtime`'s `takes_pointer` reading it
+    /// from the host's side. Not the dead-frame rule either; that one is "the
+    /// editor holds the pointer", which is true over the viewport as well until
+    /// a press there takes it. Reads the pointer the last tick left, which is
+    /// the same frame of lag every hit test already has.
     #[must_use]
     pub fn over_panels(&self) -> bool {
         let (x, y) = self.router.pointer().position();
@@ -1609,6 +1628,24 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// The mouse rule in both directions, because the bug was one of them: §6
+    /// M15.4's pick and the game's mouse-look share one click in one rectangle,
+    /// and the pointer used to win it whatever the transport said — so selecting
+    /// an entity in a stopped scene cost the cursor until Escape gave it back.
+    #[test]
+    fn the_mouse_is_the_games_only_while_the_game_runs() {
+        assert!(Play::Running.takes_pointer(false));
+        for play in [Play::Stopped, Play::Paused] {
+            assert!(!play.takes_pointer(false), "{play:?}");
+        }
+        // And a press on a panel is never the game's, whatever the transport
+        // says: a click on `pause` must not also fire what the game bound to
+        // that button ([`Editor::over_panels`]).
+        for play in [Play::Stopped, Play::Running, Play::Paused] {
+            assert!(!play.takes_pointer(true), "{play:?}");
+        }
+    }
 
     /// The three numbers the tables rest on are the *face's* and not chosen:
     /// [`EM`] is its advance at [`ROW`] pixels per em, letters sit inside the

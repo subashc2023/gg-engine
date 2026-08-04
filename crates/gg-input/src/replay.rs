@@ -26,6 +26,11 @@ pub const MAGIC: [u8; 4] = *b"GGRP";
 /// Replay format version. Bumped when the *encoding* changes; the Determinism
 /// Contract version in the header is a separate axis and answers a different
 /// question (can these bits still be reproduced, versus can they still be read).
+///
+/// Still 1 after [`MAX_AXES`] doubled, which is the point of the slot count
+/// being in the header: the encoding did not change, only how many slots a
+/// given file happens to carry, and a bump would have made every replay
+/// recorded before the widening unreadable to buy nothing.
 pub const FORMAT: u32 = 1;
 
 /// The engine commit this binary was built from, stamped by `build.rs`, or
@@ -125,8 +130,15 @@ pub enum ReplayError {
         /// Offset of the field.
         at: usize,
     },
-    /// The file carries a different number of axis slots than this build.
-    #[error("replay carries {found} axis slots, this build has {MAX_AXES}")]
+    /// The file carries more axis slots than this build can hold.
+    ///
+    /// One-directional on purpose, and it is `World::load`'s policy rather than
+    /// `World::restore`'s (§6 M14): a file recorded under a *narrower* cap is
+    /// zero-extended, because slot `i` is the verb at index `i` in a list
+    /// [`Replay::check_verbs`] has already agreed on and the slots past it were
+    /// declared by nobody. A file recorded under a wider one is refused, because
+    /// truncating it would drop input the sim was recorded reading.
+    #[error("replay carries {found} axis slots, this build holds only {MAX_AXES}")]
     AxisSlots {
         /// Slots per frame in the file.
         found: usize,
@@ -217,6 +229,18 @@ impl Replay {
     /// target in the contract, and picking the host's would make a replay
     /// unreadable on the architecture most likely to be asked to reproduce it.
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_slots(MAX_AXES)
+    }
+
+    /// [`encode`](Self::encode) writing `slots` axes per frame instead of this
+    /// build's cap — how a narrower build wrote its files, and so the only way
+    /// to author one from a build whose cap has already moved.
+    ///
+    /// Private, and stays private: a recorder writes what it can hold. It exists
+    /// because the decoder's zero-extension is otherwise untestable without a
+    /// checked-in fixture that would have to be regenerated to stay a fixture.
+    fn encode_slots(&self, slots: usize) -> Vec<u8> {
+        debug_assert!(slots <= MAX_AXES);
         let mut out = Vec::with_capacity(64 + self.changes.len() * 48);
         out.extend_from_slice(&MAGIC);
         out.extend_from_slice(&FORMAT.to_le_bytes());
@@ -224,7 +248,7 @@ impl Replay {
         out.extend_from_slice(&self.meta.tick_hz.to_le_bytes());
         out.extend_from_slice(&self.meta.seed.to_le_bytes());
         out.extend_from_slice(&self.ticks.to_le_bytes());
-        out.push(MAX_AXES as u8);
+        out.push(slots as u8);
         put_str(&mut out, &self.meta.engine_commit);
         put_str(&mut out, &self.meta.tier);
         put_list(&mut out, &self.meta.actions);
@@ -239,7 +263,7 @@ impl Replay {
         for (tick, frame) in &self.changes {
             out.extend_from_slice(&tick.to_le_bytes());
             out.extend_from_slice(&frame.buttons.to_le_bytes());
-            for axis in frame.axes {
+            for axis in &frame.axes[..slots] {
                 out.extend_from_slice(&axis.to_le_bytes());
             }
         }
@@ -262,7 +286,7 @@ impl Replay {
         let seed = r.u64()?;
         let ticks = r.u64()?;
         let slots = r.u8()? as usize;
-        if slots != MAX_AXES {
+        if slots > MAX_AXES {
             return Err(ReplayError::AxisSlots { found: slots });
         }
         let engine_commit = r.string()?;
@@ -285,7 +309,10 @@ impl Replay {
                 buttons,
                 axes: [0; MAX_AXES],
             };
-            for axis in &mut frame.axes {
+            // `slots`, not `MAX_AXES`: the header's count is how many are in the
+            // file, and the rest of the array is already the zero a slot no
+            // recorder ever wrote should read as.
+            for axis in &mut frame.axes[..slots] {
                 *axis = r.u32()? as i32;
             }
             changes.push((tick, frame));
@@ -571,6 +598,35 @@ mod tests {
         let err = replay.check_verbs(&[], &["move_right"]).unwrap_err();
         assert!(
             matches!(err, ReplayError::VerbCount { found: 2, .. }),
+            "{err}"
+        );
+    }
+
+    /// §4.7's compatibility claim for a widened [`MAX_AXES`]: a file recorded
+    /// under a narrower cap replays unchanged, and one recorded under a wider
+    /// cap is refused rather than quietly cut short.
+    ///
+    /// The first half is what let the cap go from 8 to 16 without re-authoring
+    /// a single checked-in replay — the count has been in the header since the
+    /// format existed, and until now nothing read it as anything but equality.
+    #[test]
+    fn a_narrower_recording_zero_extends_and_a_wider_one_is_refused() {
+        let replay = recorded();
+        let narrow = Replay::decode(&replay.encode_slots(1)).unwrap();
+        // Slot 0 is `move_right` in both files, which is `check_verbs`'s claim
+        // and not an assumption: the slots past it were declared by nobody.
+        for tick in 0..12 {
+            assert_eq!(narrow.frame(tick), replay.frame(tick), "tick {tick}");
+        }
+        assert!(replay.encode_slots(1).len() < replay.encode().len());
+
+        // magic 4 + format 4 + contract 4 + tick_hz 4 + seed 8 + ticks 8.
+        const SLOTS_AT: usize = 32;
+        let mut wider = replay.encode();
+        wider[SLOTS_AT] = MAX_AXES as u8 + 1;
+        let err = Replay::decode(&wider).unwrap_err();
+        assert!(
+            matches!(err, ReplayError::AxisSlots { found } if found == MAX_AXES + 1),
             "{err}"
         );
     }

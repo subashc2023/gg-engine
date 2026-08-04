@@ -18,7 +18,15 @@
 pub const MAX_ACTIONS: usize = 64;
 
 /// Axes one map may declare.
-pub const MAX_AXES: usize = 8;
+///
+/// Sixteen because eight ran out, and it is worth naming where: demo 05 declares
+/// five, an editor opened over it appends a cursor pair and a raw-motion pair,
+/// and nine does not fit in eight. Under the old cap the editor's look had to
+/// difference the *cursor* — which the OS stops at the window edge, so a drag
+/// stopped turning there (§6 M15.2's named residual). What it costs is 32 bytes
+/// on [`InputFrame`], which is also 32 bytes on every replay change record — the
+/// reason to double rather than to keep raising it one pair at a time.
+pub const MAX_AXES: usize = 16;
 
 /// Fixed-point unit for axis values: `1.0` is `AXIS_SCALE`. A power of two, so
 /// the conversion back to `f32` is exact and identical on every target.
@@ -72,7 +80,7 @@ impl AxisId {
 /// One tick of input, as recorded and as replayed.
 ///
 /// This *is* the replay stream's element — the whole sim-visible input surface
-/// in 40 bytes — and it crosses the reload boundary by value inside
+/// in 72 bytes — and it crosses the reload boundary by value inside
 /// [`TickCtx`](crate::TickCtx). A system cannot tell a live tick from a replayed
 /// one, which is the property that makes a replay a replay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

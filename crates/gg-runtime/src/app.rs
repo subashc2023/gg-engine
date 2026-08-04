@@ -1154,6 +1154,21 @@ impl Stages for App {
         // frame that owes three of them must not report the same edge to all
         // three. Platform events accumulate in `self.input` as they arrive.
         let input = self.drive.frame(&mut self.input, tick);
+        // The transport, and where the pointer is: read once by value, because
+        // both decisions below want them and the second writes through `self`.
+        #[cfg(feature = "editor")]
+        let mouse = self.editor.as_ref().map(|e| (e.play(), e.ui.over_panels()));
+        // Handed back the moment the scene stops running, which is the take's
+        // own rule (`Play::takes_pointer`) read the other way rather than a
+        // second edge to keep in step with it. What it closes is `--play`'s stop
+        // with the mouse held: the arrow would have stayed hidden over a scene
+        // nothing advances, with Escape — which a script cannot press — as the
+        // only way out.
+        #[cfg(feature = "editor")]
+        if self.cursor.held && mouse.is_none_or(|(play, _)| !play.running()) {
+            self.cursor.held = false;
+            info!(tick, "editor: pointer handed back — the scene is stopped");
+        }
         // The editor and the game share one physical mouse (§6 M15), and while
         // the editor holds it the game gets a dead frame — wherever the pointer
         // is, not merely over a panel. Hovering the viewport is not playing:
@@ -1167,16 +1182,16 @@ impl Stages for App {
             true => InputFrame::default(),
             false => input,
         };
-        // A press in the viewport is how the game takes the pointer, and it is
-        // read off the *recorded* click rather than off a window event — so a
-        // replayed session enters and leaves mouse-look exactly where the
-        // operator did, with no window anywhere (§6 M15.1). Escape hands it
-        // back; `play.rs` owns that edge, Escape not being a verb.
+        // A press in a *running* viewport is how the game takes the pointer, and
+        // it is read off the *recorded* click rather than off a window event —
+        // so a replayed session enters and leaves mouse-look exactly where the
+        // operator did, with no window anywhere (§6 M15.1). Escape hands it back
+        // too; `play.rs` owns that edge, Escape not being a verb.
         #[cfg(feature = "editor")]
         if !self.cursor.held
             && let Some(binding) = self.ui_binding
             && self.input.just_pressed(binding.primary)
-            && self.editor.as_ref().is_some_and(|e| !e.ui.over_panels())
+            && mouse.is_some_and(|(play, panels)| play.takes_pointer(panels))
         {
             self.cursor.held = true;
             info!(tick, "editor: pointer taken by the game");

@@ -133,30 +133,59 @@ fn world() -> World {
     world
 }
 
-/// Render a few frames and keep the last.
-///
-/// A fixed count rather than "until nothing is pending", because the first
-/// frame's request is what *loads* the scene: extract cannot expand a scene the
-/// renderer has not been shown yet, so an idle-looking frame one is the state
-/// before the meshes are even known about. Streaming is frames deep by design
-/// (§4.6) and a settle that stopped at the first idle would stop before it.
-const SETTLE_FRAMES: usize = 4;
+/// Frames that run before an idle reading is believed. The first frame's
+/// request is what *loads* the scene — extract cannot expand a scene the
+/// renderer has not been shown yet — so frame one reads idle for the reason
+/// that it is the state before the meshes are even known about, and streaming
+/// is frames deep by design (§4.6).
+const SETTLE_MIN: usize = 4;
 
+/// The bound, not the target. Reached only if something never becomes resident,
+/// which is a failure worth naming rather than a picture worth returning: an
+/// under-settled frame draws the fallback and fails whatever *shading* claim
+/// the caller was making, several inferences away from the cause.
+const SETTLE_MAX: usize = 240;
+
+/// Render until nothing is pending and one whole frame has been drawn since,
+/// then keep the last.
+///
+/// A count was what this used to be, and a count is a proxy: four frames is
+/// enough on an idle desk and not obviously enough on one running the rest of
+/// the suite against the same GPU. `pack.rs`'s tangent test was seen to fail
+/// once inside a full-workspace run on 2026-08-04 and did not reproduce in six
+/// further runs, so this is the leading suspect rather than a confirmed cause —
+/// but the two idle frames are what the count was *approximating*, and if
+/// residency is ever the reason again the panic below says so by name.
 fn settle(renderer: &mut OffscreenRenderer, world: &World) -> Vec<u8> {
     let mut extracted = Extracted::default();
-    let mut pixels = Vec::new();
-    for _ in 0..SETTLE_FRAMES {
+    let mut idle = 0;
+    for frame in 1..=SETTLE_MAX {
         extracted.clear(sim::DVec3::ZERO, gg_extract::Frustum::UNBOUNDED);
         extracted
             .append_models::<Model>(world, renderer.scenes())
             .unwrap();
         extracted.append_lights(world).unwrap();
-        pixels = renderer
+        let pixels = renderer
             .frame(&extracted, &View::default(), [0.0, 0.0, 0.0, 1.0], &[])
             .unwrap()
             .pixels;
+        // Two, not one: the frame that drains the last request may have drawn
+        // before it, so the second is the first drawn wholly resident.
+        idle = if renderer.pack().is_none_or(|pack| pack.pending() == 0) {
+            idle + 1
+        } else {
+            0
+        };
+        if frame >= SETTLE_MIN && idle >= 2 {
+            return pixels;
+        }
     }
-    pixels
+    panic!(
+        "still streaming after {SETTLE_MAX} frames: {} assets pending",
+        renderer
+            .pack()
+            .map_or(0, gg_render::content::Content::pending)
+    );
 }
 
 fn at(pixels: &[u8], x: u32, y: u32) -> [u8; 3] {

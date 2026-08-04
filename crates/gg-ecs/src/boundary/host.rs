@@ -8,12 +8,11 @@
 //! failure the dylib-side shims exist to avoid, arriving from the other side.
 
 use gg_abi::{
-    AbiStatus, ArchetypeMatch, ColumnView, Entity, HostApiV1, MAX_QUERY_COLUMNS, QueryDesc,
-    WorldHandle,
+    AbiStatus, ArchetypeMatch, Entity, HostApiV1, MAX_QUERY_COLUMNS, QueryDesc, WorldHandle,
 };
 
 use crate::hash::ComponentId;
-use crate::view::QueryAccess;
+use crate::view::{EMPTY_COLUMN, QueryAccess};
 use crate::world::World;
 
 /// Where a game's `log` calls go.
@@ -255,12 +254,6 @@ unsafe extern "C" fn query(
     unsafe { *written = produced as u32 };
     AbiStatus::Ok
 }
-
-const EMPTY_COLUMN: ColumnView = ColumnView {
-    ptr: core::ptr::null_mut(),
-    len: 0,
-    stride: 0,
-};
 
 /// # Safety
 ///

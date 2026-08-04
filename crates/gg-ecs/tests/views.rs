@@ -3,7 +3,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use gg_ecs::{Component, Entity, QueryAccess, World, component_id};
+use gg_ecs::view::MAX_TERMS;
+use gg_ecs::{Component, ComponentId, Entity, QueryAccess, World, component_id};
 use gg_math::sim;
 
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable, Component)]
@@ -146,6 +147,31 @@ fn aliasing_is_rejected_at_view_construction_naming_the_component() {
     let ok = QueryAccess::new(&[p, p], &[v]).unwrap();
     assert_eq!(ok.reads().len(), 1);
     assert_eq!(ok.writes().len(), 1);
+}
+
+#[test]
+fn a_query_past_the_column_cap_is_refused_rather_than_truncated() {
+    // `ArchetypeView` holds its columns inline, so this cap is what stands
+    // between a query and storage that does not exist. Ids are spelled rather
+    // than derived from types: seventeen `#[derive(Component)]` structs would
+    // say nothing this does not.
+    let id = |i: usize| ComponentId::of(&format!("cap-probe-{i}"));
+    let ids: Vec<_> = (0..=MAX_TERMS).map(id).collect();
+
+    // Exactly the cap, split across both halves — the count is reads *plus*
+    // writes, and a cap that only watched one of them would pass this and then
+    // overrun on the other.
+    QueryAccess::new(&ids[..MAX_TERMS / 2], &ids[MAX_TERMS / 2..MAX_TERMS]).unwrap();
+
+    let err = QueryAccess::new(&ids[..1], &ids[1..=MAX_TERMS]).unwrap_err();
+    assert!(err.to_string().contains("at most"), "{err}");
+
+    // Counted after the dedup, because duplicate reads collapse into one
+    // column: a caller naming the cap plus two repeats asks for the cap.
+    let mut with_repeats = ids[..MAX_TERMS].to_vec();
+    with_repeats.extend_from_slice(&ids[..2]);
+    let ok = QueryAccess::new(&with_repeats, &[]).unwrap();
+    assert_eq!(ok.reads().len(), MAX_TERMS);
 }
 
 #[test]

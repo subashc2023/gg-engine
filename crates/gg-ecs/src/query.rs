@@ -10,6 +10,21 @@
 //! indexes them; there is no per-entity dispatch, no filter DSL, and no
 //! iterator adaptors. §7 keeps the scheduler out of this crate, and a query
 //! language is how a scheduler gets in by increments.
+//!
+//! P1: that resolution is not cheap enough to be per-archetype. [`columns`]
+//! reaches `read_of`/`write_of`, each of which calls
+//! [`component_id`](crate::component_id) — a **hash of `DECLARED_ID` computed
+//! fresh every call** — and then binary-searches the access set for it, so a
+//! pass over 256 small archetypes pays 512 string hashes to look up terms it
+//! knew before the pass began. `benches/query.rs`'s scattered leg prices it:
+//! 18x the native loop against column views' 4x, on the same world. The fix is
+//! to make the id a compile-time constant of the type rather than a call — the
+//! derive already writes `DECLARED_ID`, and a `const` id needs
+//! [`ComponentId::of`](crate::ComponentId::of) to be `const fn` — which is a
+//! change to the hash's own surface and wants the state-hash protocol's tests
+//! (§4.2.1) around it, not a line here.
+//!
+//! [`columns`]: QueryData::columns
 
 use crate::component::Component;
 use crate::hash::ComponentId;

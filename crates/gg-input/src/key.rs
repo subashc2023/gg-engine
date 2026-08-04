@@ -185,18 +185,16 @@ impl MouseButton {
 
 /// A wheel notch, by direction.
 ///
-/// **An edge and not an axis**, which is a decision worth its sentence. The
-/// obvious shape is a third motion pair beside [`MouseAxis`], and it does not
-/// fit: `MAX_AXES` is 8, the replay format writes that number into every file's
-/// header, and a game declaring six axes of its own would have no slot left for
-/// the editor's — so an editor opened over it would lose its pointer entirely
-/// rather than lose its wheel. A notch is discrete anyway, and X11 has numbered
-/// the two of them among its buttons since before this engine existed.
+/// **An edge and not an axis**, which is a decision worth its sentence. It was
+/// first an arithmetic one — `MAX_AXES` was 8, and a wheel taking a slot was a
+/// wheel taking it from an editor's pointer — and that argument is spent now the
+/// cap is 16. What stands is the shape: a notch is discrete, and X11 has
+/// numbered the two of them among its buttons since before this engine existed.
 ///
 /// What it costs is magnitude: a tick either notched or it did not, so a flick
 /// of five notches inside one tick scrolls once. At 60 Hz that ceiling is above
-/// what a hand does. P2: a pixel-precise trackpad wants the axis, and wants
-/// `MAX_AXES` raised first.
+/// what a hand does. P2: a pixel-precise trackpad wants the axis, and the slots
+/// it wanted first now exist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Wheel {
     /// Away from the operator — content moves *up* the screen by convention.

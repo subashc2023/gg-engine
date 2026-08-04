@@ -442,9 +442,11 @@ mod tests {
         let mut i = input();
         i.key(Key::Tab, true);
         i.motion(10.0, 0.0);
+        let mut axes = [0; MAX_AXES];
+        axes[LOOK_X.index()] = 512;
         i.tick_from(InputFrame {
             buttons: 1 << SPAWN.index(),
-            axes: [0, 512, 0, 0, 0, 0, 0, 0],
+            axes,
         });
         assert!(i.pressed(SPAWN) && !i.pressed(LOOK));
         assert_eq!(i.axis(LOOK_X), 0.5);
@@ -460,10 +462,9 @@ mod tests {
         assert_eq!(quantize(f32::NAN), 0);
         assert_eq!(quantize(f32::INFINITY), 0);
         let mut i = input();
-        i.tick_from(InputFrame {
-            buttons: 0,
-            axes: [0, AXIS_SCALE * 3, 0, 0, 0, 0, 0, 0],
-        });
+        let mut axes = [0; MAX_AXES];
+        axes[LOOK_X.index()] = AXIS_SCALE * 3;
+        i.tick_from(InputFrame { buttons: 0, axes });
         assert_eq!(i.axis(LOOK_X), 3.0, "a flick is not clipped");
     }
 }
