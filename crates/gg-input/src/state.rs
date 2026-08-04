@@ -10,7 +10,7 @@
 //! recorded, and [`Input::axis`] divides by a power of two — exact on every
 //! target, and the same value on replay as on the day it was recorded.
 
-use crate::key::{Key, MouseAxis, MouseButton};
+use crate::key::{Key, MouseAxis, MouseButton, Wheel};
 use crate::map::{ActionId, ActionMap, AxisId, ContextId, MAX_AXES, Source};
 
 /// The recorded frame and its fixed-point unit live in `gg-abi`: the frame is
@@ -29,10 +29,21 @@ pub struct Input {
     stack: Vec<ContextId>,
     keys_held: [u64; Input::KEY_WORDS],
     buttons_held: u16,
-    /// Raw pointer motion accumulated since the last tick, still in device
+    /// Raw device motion accumulated since the last tick, still in device
     /// units — the only float in the live path, and it never reaches the sim
     /// un-quantized.
     motion: [f32; 2],
+    /// Cursor motion accumulated since the last tick, already in
+    /// [`AXIS_SCALE`]ths. Integers all the way because a host derives these by
+    /// *differencing positions* it has already quantized (§6 M15.1): passing
+    /// them through a float would put a rounding step between the delta a host
+    /// computed and the delta the sim sees, and the whole point of the source
+    /// is that the two agree exactly.
+    cursor: [i32; 2],
+    /// Wheel notches accumulated since the last tick, signed, positive up. An
+    /// impulse rather than a held state: [`Input::tick`] spends it and clears
+    /// it, so a notch is down for exactly the tick it arrived in ([`Wheel`]).
+    wheel: f32,
     current: InputFrame,
     previous: InputFrame,
 }
@@ -49,6 +60,8 @@ impl Input {
             keys_held: [0; Self::KEY_WORDS],
             buttons_held: 0,
             motion: [0.0; 2],
+            cursor: [0; 2],
+            wheel: 0.0,
             current: InputFrame::default(),
             previous: InputFrame::default(),
         }
@@ -112,13 +125,36 @@ impl Input {
         }
     }
 
-    /// Accumulate relative pointer motion for this tick.
+    /// Accumulate raw device motion for this tick —
+    /// [`MouseAxis::X`]/[`MouseAxis::Y`].
     pub fn motion(&mut self, dx: f32, dy: f32) {
         // A non-finite delta is a driver bug, not an input: dropping it keeps
         // one bad event from poisoning every later tick through the accumulator.
         if dx.is_finite() && dy.is_finite() {
             self.motion[0] += dx;
             self.motion[1] += dy;
+        }
+    }
+
+    /// Accumulate cursor motion for this tick —
+    /// [`MouseAxis::PointerX`]/[`MouseAxis::PointerY`] — in [`AXIS_SCALE`]ths of
+    /// a surface unit.
+    ///
+    /// Saturating, for the reason `gg_ui`'s pointer clamps one layer up: an
+    /// absurd delta parks the cursor at an edge rather than wrapping it to the
+    /// other one.
+    pub fn cursor(&mut self, dx: i32, dy: i32) {
+        self.cursor[0] = self.cursor[0].saturating_add(dx);
+        self.cursor[1] = self.cursor[1].saturating_add(dy);
+    }
+
+    /// Accumulate wheel travel for this tick, in notches, positive away from the
+    /// operator. A pixel-precise device divides by its own line height first —
+    /// what reaches here is notches or a fraction of one, and a fraction that
+    /// never reaches a whole notch never presses anything.
+    pub fn wheel(&mut self, notches: f32) {
+        if notches.is_finite() {
+            self.wheel += notches;
         }
     }
 
@@ -161,8 +197,36 @@ impl Input {
                 deflect(&mut positive, &mut negative, axis.index(), sign);
             }
         }
-        for (raw, which) in self.motion.into_iter().zip([MouseAxis::X, MouseAxis::Y]) {
-            let quantized = quantize(raw);
+        // The wheel, as the edge it is: whichever direction crossed a whole
+        // notch this tick presses for this tick only. Both directions are asked
+        // so a map may bind them to one axis with opposite signs, which is the
+        // shape a "zoom" verb wants.
+        for wheel in Wheel::ALL {
+            let notched = match wheel {
+                Wheel::Up => self.wheel >= 1.0,
+                Wheel::Down => self.wheel <= -1.0,
+            };
+            if !notched {
+                continue;
+            }
+            let source = Source::Wheel(wheel);
+            for action in self.map.actions_for(&self.stack, source) {
+                buttons |= 1 << action.index();
+            }
+            for (axis, sign) in self.map.axes_for(&self.stack, source) {
+                deflect(&mut positive, &mut negative, axis.index(), sign);
+            }
+        }
+        // Device motion quantizes here; cursor motion arrived quantized. Same
+        // loop either way — what differs is which accumulator was in whose
+        // units, and a source is only ever in one of them.
+        let deltas = [
+            quantize(self.motion[0]),
+            quantize(self.motion[1]),
+            self.cursor[0],
+            self.cursor[1],
+        ];
+        for (quantized, which) in deltas.into_iter().zip(MouseAxis::ALL) {
             for (axis, sign) in self.map.motion_axes(&self.stack, which) {
                 motion[axis.index()] += sign * quantized;
             }
@@ -180,6 +244,11 @@ impl Input {
             frame.axes[i] = digital * AXIS_SCALE + motion[i];
         }
         self.motion = [0.0; 2];
+        self.cursor = [0; 2];
+        // Spent whole rather than decremented: a notch that pressed this tick
+        // must not press again next tick, and travel that never reached one is
+        // a hand resting on the wheel rather than a scroll being saved up.
+        self.wheel = 0.0;
         self.set_frame(frame);
         frame
     }
@@ -190,6 +259,11 @@ impl Input {
     /// a replay a replay.
     pub fn tick_from(&mut self, frame: InputFrame) {
         self.motion = [0.0; 2];
+        self.cursor = [0; 2];
+        // Spent whole rather than decremented: a notch that pressed this tick
+        // must not press again next tick, and travel that never reached one is
+        // a hand resting on the wheel rather than a scroll being saved up.
+        self.wheel = 0.0;
         self.set_frame(frame);
     }
 
@@ -257,11 +331,12 @@ mod tests {
     use super::*;
 
     const ACTIONS: &[&str] = &["look", "spawn"];
-    const AXES: &[&str] = &["move_right", "look_x"];
+    const AXES: &[&str] = &["move_right", "look_x", "ui_x"];
     const LOOK: ActionId = ActionId::new(0);
     const SPAWN: ActionId = ActionId::new(1);
     const MOVE_RIGHT: AxisId = AxisId::new(0);
     const LOOK_X: AxisId = AxisId::new(1);
+    const UI_X: AxisId = AxisId::new(2);
 
     const MAP: &str = "
         [game.actions]
@@ -271,6 +346,7 @@ mod tests {
         [game.axes]
         move_right = [\"+D\", \"+Right\", \"-A\"]
         look_x = [\"MouseX\"]
+        ui_x = [\"PointerX\"]
     ";
 
     fn input() -> Input {
@@ -327,6 +403,38 @@ mod tests {
         assert_eq!(i.axis(LOOK_X), 0.75);
         i.tick();
         assert_eq!(i.axis(LOOK_X), 0.0);
+    }
+
+    /// The two pointer sources are two sources (§6 M15.1). One mouse moving
+    /// feeds whichever of them the host chose to feed, and a verb bound to the
+    /// other one does not move — which is what stops a cursor crossing a
+    /// viewport from also turning the camera.
+    #[test]
+    fn device_motion_and_cursor_motion_reach_different_verbs() {
+        let mut i = input();
+        i.motion(2.0, 0.0);
+        i.tick();
+        assert_eq!(i.axis(LOOK_X), 2.0);
+        assert_eq!(i.axis(UI_X), 0.0, "a look delta is not cursor motion");
+
+        i.cursor(AXIS_SCALE * 3, 0);
+        i.tick();
+        assert_eq!(i.axis(UI_X), 3.0);
+        assert_eq!(i.axis(LOOK_X), 0.0, "and the reverse");
+    }
+
+    /// Cursor deltas never touch a float: a host differences two positions it
+    /// already quantized, and what the sim sees is that integer and not a
+    /// re-rounding of it. Checked at a value `f32` would not have kept.
+    #[test]
+    fn a_cursor_delta_arrives_as_the_integer_the_host_computed() {
+        let mut i = input();
+        let odd = 16_777_217; // 2^24 + 1 — the first integer an f32 cannot hold
+        i.cursor(odd, 0);
+        i.tick();
+        assert_eq!(i.frame().axes[UI_X.index()], odd);
+        i.tick();
+        assert_eq!(i.frame().axes[UI_X.index()], 0, "and does not survive");
     }
 
     #[test]

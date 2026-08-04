@@ -102,6 +102,7 @@ fn tick_of(tick: u64) -> Tick {
         ),
         primary: tick.is_multiple_of(4),
         advance_focus: tick.is_multiple_of(16),
+        scroll: i32::from(tick.is_multiple_of(120)),
     }
 }
 

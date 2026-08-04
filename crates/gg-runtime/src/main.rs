@@ -53,6 +53,17 @@ pub struct Args {
     /// rather than ignored. With it, `--save` names where its save button
     /// writes rather than what the shell writes at exit.
     editor: bool,
+    /// `<w>x<h>` — lay the editor out for this surface instead of the real one
+    /// (§6 M15.1).
+    ///
+    /// The panes fill their surface, so where a widget *is* depends on how big
+    /// that surface is, and a session recorded at one size lands its clicks
+    /// somewhere else at another. This is how a recording made in a window is
+    /// replayed headlessly: name the extent it was recorded at. It changes
+    /// nothing else — the window, the swapchain and the game's own canvas are
+    /// still the real one, so passing it to a *windowed* run deliberately draws
+    /// an editor that does not match its window.
+    editor_extent: Option<(u32, u32)>,
     /// Leaked-dylib bytes this session tolerates before rejuvenating. Present so
     /// the forced case — zero, restart on the first reload — is exercisable on
     /// demand instead of after a thousand edits.
@@ -156,7 +167,8 @@ fn main() -> anyhow::Result<()> {
             .resuming_at(app.next_tick())
             .run(&mut app, target)?
     } else {
-        play::play(&mut app, "golden", target)?
+        let title = app.title();
+        play::play(&mut app, &title, target)?
     };
 
     // The window is down and the GPU is accounted for (§4.3), which is the only
@@ -208,6 +220,13 @@ fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
                 );
                 args.editor = true;
             }
+            "--editor-extent" => {
+                let text = value()?;
+                let (w, h) = text
+                    .split_once(['x', 'X'])
+                    .with_context(|| format!("--editor-extent wants <w>x<h>, got `{text}`"))?;
+                args.editor_extent = Some((w.trim().parse()?, h.trim().parse()?));
+            }
             "--leak-budget" => args.leak_budget = Some(value()?.parse()?),
             "--pack" => args.pack = Some(PathBuf::from(value()?)),
             other => anyhow::bail!("unknown argument `{other}`"),
@@ -216,6 +235,10 @@ fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
     anyhow::ensure!(
         args.record.is_none() || args.replay.is_none(),
         "--record and --replay are two answers to where this run's input comes from"
+    );
+    anyhow::ensure!(
+        args.editor_extent.is_none_or(|(w, h)| w > 0 && h > 0),
+        "--editor-extent must be positive: a zero-sized editor lays out nothing"
     );
     anyhow::ensure!(
         !args.game.as_os_str().is_empty(),

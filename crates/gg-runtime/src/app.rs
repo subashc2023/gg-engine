@@ -48,6 +48,11 @@ pub struct App {
     /// held there too: what dist must not contain is the *watcher*, and gating a
     /// pair of counters would buy a second body for every method that reads it.
     rejuvenate: Rejuvenator,
+    /// What the window last reported as its inner size, in physical pixels —
+    /// the surface every UI on it is laid out for ([`App::surface`]). Starts at
+    /// the headless canvas and is only ever moved by [`App::resize`], so a run
+    /// with no window keeps the extent its recorded session was made at.
+    extent: (u32, u32),
     hz: u32,
     /// A panicking system halts the sim and leaves the process running
     /// (§4.2.2); a reload is what clears this, which is the "agent broke it,
@@ -94,9 +99,18 @@ pub struct App {
     /// four: pause, single-step and the save target only exist because it does.
     #[cfg(feature = "editor")]
     editor: Option<Editing>,
+    /// The OS cursor, and who has the pointer (§6 M15.1).
+    cursor: Cursor,
+    /// `gg_editor::Editor::font_revision` as last uploaded. Zero is "the
+    /// fallback band, from `attach`" — no editor ever reports it.
+    #[cfg(feature = "editor")]
+    ui_atlas_rev: u64,
     /// The window's GPU state, absent in a headless run — and that absence is
     /// the extract and render stages' off switch.
     gpu: Option<Renderer>,
+    /// The monitor's scale factor, `1.0` until a window says otherwise — which
+    /// is what a headless run and a golden render both stay at (§6 M15.1).
+    dpi: f32,
     /// The pack, opened against the renderer once there is one (§4.6). Held as
     /// a path rather than opened here because a headless run has no renderer to
     /// stream into and mapping a file for nobody would be work with no reader.
@@ -173,6 +187,7 @@ impl App {
             world,
             lib,
             rejuvenate: Rejuvenator::new(args.leak_budget),
+            extent: gg_ecs::boundary::CANVAS,
             hz,
             halted: false,
             #[cfg(feature = "hot-reload")]
@@ -188,11 +203,15 @@ impl App {
             view: View::default(),
             ui: gg_ui::Ui::new()?,
             ui_binding,
+            cursor: Cursor::new(args.editor),
+            #[cfg(feature = "editor")]
+            ui_atlas_rev: 0,
             ui_geometry: Vec::new(),
             play: args.play.as_deref().map(PlayMode::parse).transpose()?,
             #[cfg(feature = "editor")]
             editor: editing,
             gpu: None,
+            dpi: 1.0,
             pack: args.pack.clone(),
             #[cfg(feature = "debug-tools")]
             zones: None,
@@ -224,11 +243,30 @@ impl App {
     /// `Event::WindowReady` — the surface may not outlive the window it came
     /// from, which is what [`App::detach`] is for at the other end.
     pub fn attach(&mut self, window: &Window) -> anyhow::Result<()> {
+        // Before the first `Resized`, which winit sends only after this: a
+        // window that laid its first frame out at `boundary::CANVAS` would
+        // relayout on the very next event for no reason.
+        self.extent = window.inner_size();
         let mut renderer = Renderer::new(window, window.inner_size())?;
         // The renderer never learns what a glyph is; it takes coverage texels
         // and a rectangle (§4.9). Unconditional since M13: the game's own UI
         // draws from this atlas in every tier, the overlay is a second caller.
-        renderer.set_ui_atlas(&gg_ui::atlas::fallback())?;
+        //
+        // The editor's, when there is one, rather than uploading the fallback
+        // and replacing it on the first frame: its atlas *contains* the
+        // fallback band, so one upload serves all three callers, and an image
+        // uploaded and thrown away inside a frame is churn nobody asked for.
+        #[cfg(feature = "editor")]
+        let coverage = match &self.editor {
+            Some(editing) => {
+                self.ui_atlas_rev = editing.ui.font_revision();
+                editing.ui.coverage()
+            }
+            None => gg_ui::atlas::fallback(),
+        };
+        #[cfg(not(feature = "editor"))]
+        let coverage = gg_ui::atlas::fallback();
+        renderer.set_ui_atlas(&coverage)?;
         if let Some(pack) = &self.pack {
             renderer.open_pack(pack)?;
         }
@@ -266,9 +304,22 @@ impl App {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        // Recorded here as well as queued below, because the two are not the
+        // same size until the next frame: `Rhi::resize` only raises a flag, so
+        // the swapchain is still the old one while this tick lays the editor
+        // out. Laying out against the swapchain would put the whole UI one
+        // resize event behind the window for the length of a drag (§6 M15.1).
+        self.extent = (width, height);
         if let Some(renderer) = &mut self.gpu {
             renderer.resize(width, height);
         }
+    }
+
+    /// What the monitor says a logical pixel is worth (§6 M15.1) — stated by
+    /// the windowed loop, since a window is the only thing that can ask. A
+    /// headless run leaves the 1.0 it starts at, which is the truth there.
+    pub fn set_dpi(&mut self, dpi: f32) {
+        self.dpi = dpi;
     }
 
     /// The live input state, for `gg_platform::feed` to apply raw events to.
@@ -276,6 +327,86 @@ impl App {
     /// state and must work identically while a replay is driving.
     pub fn input(&mut self) -> &mut Input {
         &mut self.input
+    }
+
+    /// Where the OS cursor is, in physical pixels — `gg_platform::feed` will
+    /// not take it, for the reason `Event::CursorMoved` documents.
+    pub fn cursor_at(&mut self, x: f32, y: f32) {
+        self.cursor.at = Some((x, y));
+    }
+
+    /// Whether the game should hold and hide the pointer this frame. Applied by
+    /// the windowed loop, which is the only place a window exists.
+    pub fn pointer_held(&self) -> bool {
+        self.cursor.held
+    }
+
+    /// Hand the pointer back, reporting where a system cursor should be warped
+    /// to — in physical pixels, so the arrow reappears where the operator left
+    /// it rather than wherever the OS parked it while it was hidden.
+    ///
+    /// `None` means there was nothing to release and Escape keeps its older
+    /// meaning. Two ways to get it, and both are deliberate: the pointer is
+    /// already free, or **there is no editor** — a plain run has nowhere to
+    /// hand a pointer back *to*, and Escape has quit every demo since M4 (§6
+    /// M15.1).
+    pub fn release_pointer(&mut self) -> Option<(f32, f32)> {
+        let (x, y) = self.editor_pointer().filter(|_| self.cursor.held)?;
+        self.cursor.held = false;
+        let at = self.ui_fit().to_surface(x, y);
+        self.cursor.at = Some(at);
+        Some(at)
+    }
+
+    /// The surface the canvas is fitted into: what the *window* last said it
+    /// is, which leads the swapchain by one recreate (see [`App::resize`]).
+    ///
+    /// A headless run never resizes, so this stays the canvas it starts at —
+    /// which is what a headless editor session is laid out at, and so what a
+    /// recorded one must be replayed at (`gg_editor::ui_scale`, §6 M15.1's
+    /// residual).
+    fn surface(&self) -> (u32, u32) {
+        self.extent
+    }
+
+    /// The swapchain's extent, or `None` before a renderer exists. For the
+    /// windowed loop's `gg::resize` diagnostic: the question a black band
+    /// during a drag asks is whether the swapchain followed the window, and
+    /// only this side can answer it.
+    pub fn surface_extent(&self) -> Option<(u32, u32)> {
+        self.gpu.as_ref().map(Renderer::extent)
+    }
+
+    /// How the UI's canvas sits on the surface.
+    ///
+    /// Two different answers, because there are two different UIs: the editor
+    /// fills the window at a whole scale (§6 M15.1) and a game's canvas is
+    /// letterboxed into it (§4.9). One function so the arrow the OS draws and
+    /// the pointer a hit test uses cannot be mapped by two different rules.
+    fn ui_fit(&self) -> gg_ui::Fit {
+        #[cfg(feature = "editor")]
+        if self.editor.is_some() {
+            return gg_editor::fit(self.editor_surface(), self.dpi);
+        }
+        gg_ui::Fit::new(self.surface())
+    }
+
+    /// The surface the editor lays its panes out for: `--editor-extent` when
+    /// one was named, the real one otherwise (§6 M15.1).
+    #[cfg(feature = "editor")]
+    fn editor_surface(&self) -> (u32, u32) {
+        self.editor
+            .as_ref()
+            .and_then(|editing| editing.extent)
+            .unwrap_or_else(|| self.surface())
+    }
+
+    /// The editor's pointer in canvas units, if there is an editor.
+    fn editor_pointer(&self) -> Option<(f32, f32)> {
+        #[cfg(feature = "editor")]
+        return self.editor.as_ref().map(|e| e.ui.pointer());
+        #[cfg(not(feature = "editor"))]
+        None
     }
 
     /// Ticks the replay covers — what bounds a `--replay` run that named no
@@ -342,6 +473,13 @@ impl App {
     pub fn write_save(&self, path: &Path) -> anyhow::Result<()> {
         let save = Save::new(self.world.snapshot(), self.next_tick, self.lib.code_hash());
         let bytes = save.encode();
+        // The directory is made, not required: with the editor open the default
+        // target is this shell's own invention (`Editing::new`), and a save
+        // button that fails because nobody had run one before is not a missing
+        // directory, it is a lost session.
+        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir)?;
+        }
         std::fs::write(path, &bytes)?;
         info!(
             path = %path.display(),
@@ -359,8 +497,13 @@ impl App {
         self.rejuvenate.take()
     }
 
-    /// The recording, once the loop is over.
+    /// The recording, once the loop is over. Also where the editor's layout is
+    /// written down (§6 M15.1) — the one point every exit path passes through.
     pub fn finish(self) -> Option<Box<Recorder>> {
+        #[cfg(feature = "editor")]
+        if let Some(editing) = &self.editor {
+            editing.remember();
+        }
         self.drive.recorder()
     }
 
@@ -376,6 +519,9 @@ impl App {
         ui: &UiTick,
         extent: (u32, u32),
     ) -> Option<std::path::PathBuf> {
+        // Before the borrow below, which takes the editor mutably while this
+        // reads the dylib beside it.
+        let title = self.title();
         let editing = self.editor.as_mut()?;
         let path = editing.save.display().to_string();
         let commands = editing.ui.tick(
@@ -383,11 +529,18 @@ impl App {
             ui,
             &gg_editor::Frame {
                 extent,
+                dpi: self.dpi,
                 tick,
                 playing: !editing.paused,
                 passes: self.gpu.as_ref().map_or(&[][..], Renderer::pass_timings),
                 memory: self.gpu.as_ref().map(Renderer::memory).unwrap_or_default(),
                 save_path: &path,
+                title: &title,
+                maximized: editing.maximized,
+                // Never: a windowed session has the system cursor on the same
+                // pixel, and a headless one has no frame to draw into (§6
+                // M15.1). What draws its own is `gg-golden`.
+                draw_cursor: false,
             },
         );
         if let Some(playing) = commands.playing {
@@ -403,9 +556,47 @@ impl App {
         commands.save.then(|| editing.save.clone())
     }
 
-    /// Whether the editor is open, asked from a path that exists without it.
-    #[cfg(feature = "hot-reload")]
-    fn editing(&self) -> bool {
+    /// What the title bar asked of the window (§6 M15.1 item 5). Applied by the
+    /// windowed loop, which is the only place a window exists — a headless
+    /// session produces these and drops them, which is the whole reason they
+    /// are commands and not state.
+    #[cfg(feature = "editor")]
+    pub fn take_window_command(&mut self) -> Option<gg_editor::WindowCommand> {
+        self.editor.as_mut()?.ui.take_window_command()
+    }
+
+    /// Which resize border the editor's pointer is over, for the system cursor
+    /// (§6 M15.1 item 5). `None` while the game holds the pointer: the arrow is
+    /// hidden then, and the shape it would carry back out is stale.
+    #[cfg(feature = "editor")]
+    pub fn resize_edge(&self) -> Option<gg_editor::Edge> {
+        self.editor
+            .as_ref()
+            .filter(|_| !self.cursor.held)?
+            .ui
+            .resize_edge()
+    }
+
+    /// Tell the editor what the window is, for the caption button that draws
+    /// maximize or restore. Stated by the windowed loop for `pointer_held`'s
+    /// reason: the answer is the OS's and this is the only side that can ask.
+    #[cfg(feature = "editor")]
+    pub fn set_maximized(&mut self, maximized: bool) {
+        if let Some(editing) = self.editor.as_mut() {
+            editing.maximized = maximized;
+        }
+    }
+
+    /// What to call the window: the game this shell was pointed at. Also what
+    /// the editor's own title bar says, since there is no OS one to say it (§6
+    /// M15.1 item 5).
+    pub fn title(&self) -> String {
+        format!("gg — {}", self.lib.name())
+    }
+
+    /// Whether the editor is open, asked from paths that exist without it — the
+    /// reload's verb list, and the window's decorations.
+    pub fn editing(&self) -> bool {
         #[cfg(feature = "editor")]
         return self.editor.is_some();
         #[cfg(not(feature = "editor"))]
@@ -479,6 +670,57 @@ impl App {
     }
 }
 
+/// The OS cursor, and which of the two things a mouse does is happening (§6
+/// M15.1).
+///
+/// Two motion sources exist because there are two jobs — raw device deltas for
+/// looking, cursor motion for pointing — and this decides which one the sim is
+/// being fed. Held is the game's: the pointer is locked and hidden and the
+/// deltas are raw. Free is the editor's: the OS draws the arrow, and the shell
+/// *steers* the derived pointer onto it by feeding the difference, so the
+/// cursor a human sees and the cursor a hit test uses are the same pixel.
+///
+/// Steering rather than assigning is what keeps this out of the sim: the
+/// difference is an ordinary axis value in an ordinary recorded frame, so a
+/// session replays without anything here existing (§4.7).
+struct Cursor {
+    /// Where the OS last said the cursor is, in physical pixels. `None` until
+    /// it has been over the surface at all — a session driven by a replay never
+    /// sets it, which is exactly right.
+    at: Option<(f32, f32)>,
+    /// The canvas position, in `AXIS_SCALE`ths, the last steer aimed at. Not a
+    /// copy of the router's pointer: it is what this shell *asked* for, and the
+    /// router applies precisely that delta and lands there.
+    steered: (i32, i32),
+    /// The game holds the pointer.
+    held: bool,
+}
+
+impl Cursor {
+    /// Held from the start unless an editor is opening: mouse-look wants the
+    /// pointer inside the window before the first frame, and every demo has
+    /// always started that way.
+    fn new(editor: bool) -> Cursor {
+        Cursor {
+            at: None,
+            steered: (0, 0),
+            held: !editor,
+        }
+    }
+
+    /// The cursor delta to feed this tick, if any.
+    ///
+    /// `None` while the game holds the pointer — the arrow is locked and hidden
+    /// and the editor's pointer parks where it was — and `None` before the OS
+    /// has reported a position at all.
+    fn steer(&mut self, fit: gg_ui::Fit) -> Option<(i32, i32)> {
+        let (x, y) = self.at.filter(|_| !self.held)?;
+        let delta = fit.steer(self.steered, x, y);
+        self.steered = fit.to_canvas_fixed(x, y);
+        (delta != (0, 0)).then_some(delta)
+    }
+}
+
 /// The editor and the three shell states only it creates (§6 M15).
 ///
 /// One struct rather than three fields, so the whole of what `--editor` costs
@@ -494,20 +736,51 @@ struct Editing {
     step: bool,
     /// Where the save button writes — `--save` if given, so a gate can name it.
     save: std::path::PathBuf,
+    /// `--editor-extent`, when the layout is to be built for a surface other
+    /// than this run's (§6 M15.1).
+    extent: Option<(u32, u32)>,
+    /// Where the dock layout is remembered between sessions, or `None` for a
+    /// run that must not remember one.
+    layout: Option<std::path::PathBuf>,
+    /// What the window last said it was, for the caption button that draws it.
+    /// Stated by the windowed loop, so a headless session leaves it false and
+    /// draws the maximize glyph — which is the truth with no window (§1.5).
+    maximized: bool,
 }
 
 #[cfg(feature = "editor")]
 impl Editing {
     fn new(args: &crate::Args, lib: &GameLib) -> Editing {
-        let save = args.save.clone().unwrap_or_else(|| {
-            let stem = lib.path().file_stem().unwrap_or_default().to_string_lossy();
-            std::path::Path::new("target/editor").join(format!("{stem}.ggsv"))
-        });
+        use gg_editor::persist;
+        let stem = &lib.name();
+        let save = args
+            .save
+            .clone()
+            .unwrap_or_else(|| persist::save_path(stem));
+        // Not while recording or replaying. The layout *is* hit-testing (§6
+        // M15.1), so a session that started from a file the gate never saw
+        // would land its clicks somewhere else.
+        let layout =
+            (args.record.is_none() && args.replay.is_none()).then(|| persist::layout_path(stem));
+        let mut ui = gg_editor::Editor::new(args.pack.as_deref());
+        if let Some(path) = &layout {
+            persist::restore(&mut ui, path);
+        }
         Editing {
-            ui: gg_editor::Editor::new(args.pack.as_deref()),
+            ui,
             paused: false,
             step: false,
             save,
+            extent: args.editor_extent,
+            layout,
+            maximized: false,
+        }
+    }
+
+    /// Remember the layout, if this run is one that may.
+    fn remember(&self) {
+        if let Some(path) = &self.layout {
+            gg_editor::persist::remember(&self.ui, path);
         }
     }
 
@@ -735,22 +1008,46 @@ impl Stages for App {
         if self.halted {
             return Ok(());
         }
+        // The cursor's own accumulator, filled before the latch below for the
+        // same reason platform events are: it is this tick's input (§6 M15.1).
+        // A steer emitted after the latch would arrive one tick late and the
+        // arrow would trail the OS cursor by a frame.
+        let surface = self.surface();
+        if let Some((dx, dy)) = self.cursor.steer(self.ui_fit()) {
+            self.input.cursor(dx, dy);
+        }
         // Latched here rather than at `poll_input`, because the frame is a
         // *tick's* input: `just_pressed` is an edge between two ticks, and a
         // frame that owes three of them must not report the same edge to all
         // three. Platform events accumulate in `self.input` as they arrive.
         let input = self.drive.frame(&mut self.input, tick);
-        // The editor and the game share one physical mouse (§6 M15). While the
-        // pointer is over a panel the game gets a dead frame, or a click on
-        // `pause` would also fire whatever the game bound to that button — and
-        // the reading is the *previous* tick's pointer, which is the same frame
-        // of lag every hit test already has. Recorded before this, never after:
-        // what a replay holds is what the operator did, not what the game saw.
+        // The editor and the game share one physical mouse (§6 M15), and while
+        // the editor holds it the game gets a dead frame — wherever the pointer
+        // is, not merely over a panel. Hovering the viewport is not playing:
+        // raw device motion arrives whatever the pointer is over (it is a
+        // *device* delta, not a position), demo 05 binds it to `aim_x`, and a
+        // pointer crossing the pane on its way between two panels used to pan
+        // the camera as it went. Recorded before this, never after: what a
+        // replay holds is what the operator did, not what the game saw.
         #[cfg(feature = "editor")]
-        let input = match self.editor.as_ref().is_some_and(|e| e.ui.over_panels()) {
+        let input = match self.editor.is_some() && !self.cursor.held {
             true => InputFrame::default(),
             false => input,
         };
+        // A press in the viewport is how the game takes the pointer, and it is
+        // read off the *recorded* click rather than off a window event — so a
+        // replayed session enters and leaves mouse-look exactly where the
+        // operator did, with no window anywhere (§6 M15.1). Escape hands it
+        // back; `play.rs` owns that edge, Escape not being a verb.
+        #[cfg(feature = "editor")]
+        if !self.cursor.held
+            && let Some(binding) = self.ui_binding
+            && self.input.just_pressed(binding.primary)
+            && self.editor.as_ref().is_some_and(|e| !e.ui.over_panels())
+        {
+            self.cursor.held = true;
+            info!(tick, "editor: pointer taken by the game");
+        }
         let ctx = TickCtx {
             tick,
             tick_hz: self.hz,
@@ -806,16 +1103,12 @@ impl Stages for App {
             .ui_binding
             .map(|binding| UiTick::from_input(&self.input, &binding))
             .unwrap_or_default();
-        let extent = self
-            .gpu
-            .as_ref()
-            .map_or(gg_ecs::boundary::CANVAS, Renderer::extent);
-        self.ui.frame(&mut self.world, &ui_tick, extent);
+        self.ui.frame(&mut self.world, &ui_tick, surface);
         // The editor tick (§6 M15), after the game's UI and before the hash for
         // the same reason: an inspector edit is ordinary world state and belongs
         // in the tick that took the click.
         #[cfg(feature = "editor")]
-        if let Some(path) = self.editor_tick(tick, &ui_tick, extent) {
+        if let Some(path) = self.editor_tick(tick, &ui_tick, self.editor_surface()) {
             self.write_save(&path)?;
         }
         // §1.13 hazard 6's per-tick call site. The canonical hash absorbs raw
@@ -844,6 +1137,16 @@ impl Stages for App {
     /// per entity. The loop hands it over anyway so the day a second buffer
     /// exists, the signature does not move.
     fn extract(&mut self, _alpha: f32) -> anyhow::Result<()> {
+        // Restated every frame rather than on `Resized`: the pane's pixels move
+        // with the window *and* with a seam the operator drags, and one
+        // assignment ahead of the two stages that read it is cheaper than an
+        // event path that could be missed. The editor is the only thing that
+        // ever sets it — a plain run renders into the whole window, which is
+        // what `None` means.
+        #[cfg(feature = "editor")]
+        if let (Some(editing), Some(renderer)) = (self.editor.as_ref(), self.gpu.as_mut()) {
+            renderer.set_viewport(Some(editing.ui.viewport_rect()));
+        }
         let Some(renderer) = &self.gpu else {
             return Ok(());
         };
@@ -858,7 +1161,11 @@ impl Stages for App {
         // The frustum crosses from the renderer, which owns the projection, to
         // extract, which owns the narrowing. Building it here would put §2's
         // reverse-Z convention in the shell.
-        let frustum = self.view.frustum(renderer.extent());
+        //
+        // `view_extent` and not `extent`: with the editor open the picture is
+        // composed for the viewport panel, and a frustum built from the whole
+        // window would cull what the panel can still see.
+        let frustum = self.view.frustum(renderer.view_extent());
         self.extracted
             .transforms::<Renderable>(&self.world, eye.position, frustum)?;
         // Pack content, expanded through whatever the renderer has mapped. A
@@ -876,6 +1183,17 @@ impl Stages for App {
         let Some(renderer) = &mut self.gpu else {
             return Ok(());
         };
+        // The editor sets its text in a rented face, so the atlas the game's UI
+        // was given at attach is not the one the editor's glyphs are cut from
+        // (§4.9). Uploaded on a change and never otherwise — which after the
+        // warm-up means resizes across a scale boundary, and nothing else.
+        #[cfg(feature = "editor")]
+        if let Some(editing) = &self.editor
+            && self.ui_atlas_rev != editing.ui.font_revision()
+        {
+            self.ui_atlas_rev = editing.ui.font_revision();
+            renderer.set_ui_atlas(&editing.ui.coverage())?;
+        }
         // Game UI first, instruments over the top — the overlay is a lab
         // instrument and must never be the thing a click lands under. Copied
         // into one buffer because the renderer takes one slice; cleared and

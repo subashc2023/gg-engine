@@ -21,12 +21,21 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 /// The `gg-runtime` code-line budget (§3). Raised 300 → 500 at M5 when the shell
 /// grew the window, the renderer's three calls, live input and record/replay,
 /// 500 → 600 at M8 for the observability stack (config, the instruments, the
-/// overlay, the crash handler, the capture trigger), and 600 → 1000 at M13 when
+/// overlay, the crash handler, the capture trigger), 600 → 1000 at M13 when
 /// the UI stage arrived: a `gg_ui::Ui` per tick, the canvas→window fit, and the
-/// verb lookup that feeds it. Every raise is the same argument — the shell
-/// *chooses* these and implements none of them — and every one was spent
-/// deliberately rather than discovered.
-const SHELL_BUDGET: usize = 1000;
+/// verb lookup that feeds it, and 1000 → 1050 at M15.1 for client-side window
+/// decorations — the editor draws its own title bar, so the shell takes the OS
+/// frame off and routes what the bar asks (drag, resize, minimize, maximize,
+/// close) to `gg-platform`, plus the window's name. Every raise is the same
+/// argument — the shell *chooses* these and implements none of them — and every
+/// one was spent deliberately rather than discovered.
+///
+/// This one was argued rather than taken: the alternative homes were both worse.
+/// `gg-editor` cannot call `gg-platform` (it would put winit in `gg-golden`,
+/// which a §1.5 gate scans the binary for), and `gg-platform` cannot name the
+/// editor's command type. The shell is the only place that has heard of both,
+/// which is what it is *for*.
+const SHELL_BUDGET: usize = 1050;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

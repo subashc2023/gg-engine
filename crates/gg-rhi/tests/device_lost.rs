@@ -147,6 +147,7 @@ fn a_hung_pass_is_named_by_the_device_lost_report() {
                 clear: Some(BLUE),
             }),
             depth: None,
+            viewport: None,
             draws: &draws,
         },
     }];

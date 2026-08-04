@@ -418,37 +418,55 @@ pub(crate) struct ResolvedDraw<'a> {
     pub depth_bias: Option<crate::DepthBias>,
 }
 
-/// Record one draw inside an active dynamic-rendering pass: full-target
-/// viewport/scissor, the global bindless set, push constants, and an indexed
-/// or non-indexed draw. Every pass records draws through here, so a draw means
-/// the same thing everywhere.
+/// Record one draw inside an active dynamic-rendering pass: viewport/scissor
+/// over `region`, the global bindless set, push constants, and an indexed or
+/// non-indexed draw. Every pass records draws through here, so a draw means the
+/// same thing everywhere.
+///
+/// Viewport *and* scissor from the same rectangle, never one without the other:
+/// a viewport alone still lets a primitive whose clip-space coordinates run past
+/// the rectangle rasterize outside it, which is the whole thing a composited
+/// pass is trying to prevent.
 ///
 /// Infallible: the push-constant length is checked when the draw is resolved,
 /// which happens before the swapchain acquire (see `graph::resolve`).
 ///
 /// # Safety
 /// `cmd` must be recording inside `cmd_begin_rendering`; the pipeline must be
-/// live and compatible with the pass's attachment formats; and `set` must be
-/// the global set, which every pipeline layout declares.
+/// live and compatible with the pass's attachment formats; `region` must lie
+/// within the pass's render area; and `set` must be the global set, which every
+/// pipeline layout declares.
 pub(crate) unsafe fn record_draw(
     device: &Device,
     cmd: vk::CommandBuffer,
-    extent: (u32, u32),
+    region: crate::Viewport,
     set: vk::DescriptorSet,
     draw: &ResolvedDraw<'_>,
 ) {
     let entry = &draw.entry;
     let device = device.raw();
+    // A region may legitimately be zero-sized — `gg_editor::viewport_rect` asks
+    // for one whenever the game is docked behind another tab — and the two
+    // states differ in the spec: a zero-extent *scissor* is valid and discards
+    // everything, a zero-width *viewport* is VUID-VkViewport-width-01770. So the
+    // viewport keeps a unit floor and the scissor below is what does the
+    // discarding. A viewport reaching a pixel past the attachment is fine;
+    // unlike the scissor it is not bounded by the render area.
     let viewport = [vk::Viewport::default()
-        .width(extent.0 as f32)
-        .height(extent.1 as f32)
+        .x(region.x as f32)
+        .y(region.y as f32)
+        .width(region.width.max(1) as f32)
+        .height(region.height.max(1) as f32)
         .min_depth(0.0)
         .max_depth(1.0)];
     let scissor = [vk::Rect2D {
-        offset: vk::Offset2D::default(),
+        offset: vk::Offset2D {
+            x: region.x as i32,
+            y: region.y as i32,
+        },
         extent: vk::Extent2D {
-            width: extent.0,
-            height: extent.1,
+            width: region.width,
+            height: region.height,
         },
     }];
     // SAFETY: caller contract — recording command buffer, live pipeline, and a

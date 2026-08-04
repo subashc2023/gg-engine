@@ -745,6 +745,56 @@ fn uploads_are_clean_on_whichever_queue_topology_this_device_has() {
     assert!(report.clean(), "unclean: {report:?}");
 }
 
+/// A resource uploaded and then retired *before* the frame that would have
+/// read it leaves no barrier behind it.
+///
+/// The acquire queue holds raw handles (`upload::Acquire`), so a retire between
+/// the flush and the next frame used to leave that frame recording a barrier
+/// over a destroyed image — `VUID-VkImageMemoryBarrier2-image-parameter`, then
+/// an access violation. Found by replacing the editor's glyph atlas on the
+/// frame after the one that uploaded it (§6 M15.1), which is ordinary use.
+///
+/// **Vacuous where one queue family owns everything**, which is every lavapipe
+/// run and so every automated tier: nothing is owed and nothing can be stale.
+/// The real assertion runs on the desk's GPU (`GG_ADAPTER`) and in the nightly
+/// real-GPU leg — the same split `uploads_are_clean_on_whichever_queue_topology`
+/// documents.
+#[test]
+fn a_resource_retired_before_its_first_read_leaves_no_barrier_owed() {
+    init_tracing();
+    let mut rhi = OffscreenRhi::new((8, 8)).unwrap();
+    if !rhi.transfer_crosses_queue_families() {
+        tracing::warn!("single queue family: nothing is owed here, so nothing can be stale");
+    }
+    let buffer = rhi
+        .create_buffer(&BufferDesc {
+            name: "test.retired.buffer",
+            size: 256,
+            kind: BufferKind::Index,
+        })
+        .unwrap();
+    let image = rhi
+        .create_image(&ImageDesc {
+            name: "test.retired.image",
+            extent: (16, 16),
+            format: ImageFormat::Rgba8Srgb,
+            usage: ImageUse::Sampled,
+            mip_levels: 1,
+        })
+        .unwrap();
+    rhi.upload_buffer(buffer, 0, &[7u8; 256]).unwrap();
+    rhi.upload_image(image, 0, &[9u8; 16 * 16 * 4]).unwrap();
+    let _ = rhi.register_texture(image).unwrap();
+    rhi.flush_uploads().unwrap();
+    // Both retired with their acquires still owed. The render is the recording
+    // that would name them.
+    rhi.destroy_buffer(buffer).unwrap();
+    rhi.destroy_image(image).unwrap();
+    let _ = common::render(&mut rhi, [0.0, 0.0, 0.0, 1.0], &[]).unwrap();
+    let report = rhi.shutdown();
+    assert!(report.clean(), "unclean: {report:?}");
+}
+
 /// A storage image takes a slot in the other global array and the layout
 /// transition that array's descriptors declare (§4.3).
 #[test]

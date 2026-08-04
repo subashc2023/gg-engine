@@ -150,6 +150,7 @@ float4 fs_main() : SV_Target {{ return float4({BRIGHT}, 0.5, 0.0, 1.0); }}
                     clear: Some([0.0, 0.0, 0.0, 1.0]),
                 }),
                 depth: None,
+                viewport: None,
                 draws: &draws,
             },
         },
@@ -318,6 +319,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
                     clear: Some([0.0, 0.0, 0.0, 1.0]),
                 }),
                 depth: None,
+                viewport: None,
                 draws: &draws,
             },
         }])

@@ -147,6 +147,7 @@ pub fn declare<'a>(
         body: gg_render::graph::Body::Draw {
             color: Some((backbuffer, gg_render::graph::Load::Clear(CLEAR))),
             depth: Some((depth, gg_render::graph::DepthUse::Write)),
+            viewport: None,
             samples: &[],
             draws,
         },

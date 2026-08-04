@@ -16,7 +16,7 @@
 
 use gg_rhi::{
     Access, BufferHandle, ColorAttachment, DepthAttachment, DrawSpec, GraphContext, ImageDesc,
-    ImageFormat, ImageHandle, ImageUse, Pass, PassKind, RhiError, Target, TextureIndex,
+    ImageFormat, ImageHandle, ImageUse, Pass, PassKind, RhiError, Target, TextureIndex, Viewport,
 };
 
 /// A virtual resource inside one frame's graph.
@@ -61,6 +61,10 @@ pub enum Body<'a> {
         color: Option<(ResourceId, Load)>,
         /// Tested against, if any.
         depth: Option<(ResourceId, DepthUse)>,
+        /// Where in the attachments the draws land; `None` is all of them. A
+        /// [`Load::Clear`] still covers the whole attachment — that pairing is
+        /// what fills the area a composited pass does not draw into.
+        viewport: Option<Viewport>,
         /// Read through the bindless sampled array. Declared even though the
         /// draws reach them by index: an undeclared read is a missing barrier,
         /// and the index is exactly what hides it.
@@ -95,6 +99,7 @@ pub fn single_pass<'a>(
         body: Body::Draw {
             color: Some((backbuffer, load)),
             depth: None,
+            viewport: None,
             samples: &[],
             draws,
         },
@@ -150,6 +155,7 @@ enum CompiledBody<'a> {
     Draw {
         color: Option<ColorAttachment>,
         depth: Option<DepthAttachment>,
+        viewport: Option<Viewport>,
         draws: &'a [DrawSpec<'a>],
     },
     Readback {
@@ -172,10 +178,12 @@ impl<'a> Compiled<'a> {
                     CompiledBody::Draw {
                         color,
                         depth,
+                        viewport,
                         draws,
                     } => PassKind::Render {
                         color: *color,
                         depth: *depth,
+                        viewport: *viewport,
                         draws,
                     },
                     CompiledBody::Readback { source, dest } => PassKind::Readback {
@@ -292,10 +300,29 @@ impl<'p> Frame<'p> {
     ///
     /// Allocation.
     pub fn depth(&mut self, name: &'static str) -> Result<ResourceId, RhiError> {
+        self.depth_at(name, self.extent)
+    }
+
+    /// A pooled depth attachment at **its own** extent — the camera's depth
+    /// buffer when the scene is composited into part of the target rather than
+    /// all of it, and so is smaller than the frame.
+    ///
+    /// [`Self::shadow`]'s [`ImageUse`] would do the wrong thing here: nothing
+    /// samples a prepass target, and asking for `SAMPLED` costs some drivers
+    /// the compressed depth layout it should keep.
+    ///
+    /// # Errors
+    ///
+    /// Allocation.
+    pub fn depth_at(
+        &mut self,
+        name: &'static str,
+        extent: (u32, u32),
+    ) -> Result<ResourceId, RhiError> {
         let entry = self.pool.acquire(
             self.ctx,
             name,
-            self.extent,
+            extent,
             ImageFormat::Depth32,
             ImageUse::Depth,
         )?;
@@ -397,6 +424,7 @@ impl<'p> Frame<'p> {
                 Body::Draw {
                     color,
                     depth,
+                    viewport,
                     samples,
                     draws,
                 } => {
@@ -435,6 +463,7 @@ impl<'p> Frame<'p> {
                     CompiledBody::Draw {
                         color,
                         depth,
+                        viewport: *viewport,
                         draws,
                     }
                 }
@@ -739,6 +768,7 @@ mod tests {
             body: Body::Draw {
                 color: None,
                 depth: Some((id, DepthUse::Write)),
+                viewport: None,
                 samples: &[],
                 draws: &[],
             },

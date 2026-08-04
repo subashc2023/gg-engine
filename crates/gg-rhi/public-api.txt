@@ -64,6 +64,7 @@ pub gg_rhi::PassKind::Render
 pub gg_rhi::PassKind::Render::color: core::option::Option<gg_rhi::ColorAttachment>
 pub gg_rhi::PassKind::Render::depth: core::option::Option<gg_rhi::DepthAttachment>
 pub gg_rhi::PassKind::Render::draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_rhi::PassKind::Render::viewport: core::option::Option<gg_rhi::Viewport>
 pub enum gg_rhi::RhiError
 pub gg_rhi::RhiError::Allocator(alloc::string::String)
 pub gg_rhi::RhiError::DeviceLost(alloc::string::String)
@@ -257,6 +258,14 @@ pub struct gg_rhi::Transition
 pub gg_rhi::Transition::from: gg_rhi::Access
 pub gg_rhi::Transition::target: gg_rhi::Target
 pub gg_rhi::Transition::to: gg_rhi::Access
+pub struct gg_rhi::Viewport
+pub gg_rhi::Viewport::height: u32
+pub gg_rhi::Viewport::width: u32
+pub gg_rhi::Viewport::x: u32
+pub gg_rhi::Viewport::y: u32
+impl gg_rhi::Viewport
+pub fn gg_rhi::Viewport::clamped(self, (u32, u32)) -> gg_rhi::Viewport
+pub fn gg_rhi::Viewport::whole((u32, u32)) -> gg_rhi::Viewport
 pub const gg_rhi::DEPTH_CLEAR: f32
 pub const gg_rhi::FRAMES_IN_FLIGHT: u64
 pub trait gg_rhi::GraphContext

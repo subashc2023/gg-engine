@@ -181,6 +181,8 @@ fn main() -> anyhow::Result<()> {
             input.motion(dx, dy);
             Control::Continue
         }
+        // A fly camera on the raw source; this demo has no cursor to steer.
+        Event::CursorMoved { .. } | Event::MouseWheel { .. } => Control::Continue,
         Event::Frame => {
             #[cfg(all(feature = "fp-assert", debug_assertions))]
             gg_math::fpenv::assert_fp_env();

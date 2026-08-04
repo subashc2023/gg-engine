@@ -23,6 +23,7 @@ fn visible_window_under_gg_headless_panics() {
             size: (320, 200),
             visible: true,
             resizable: true,
+            decorated: true,
         });
     });
     let payload = result.expect_err("visible window under GG_HEADLESS must panic (§1.5)");
@@ -34,6 +35,34 @@ fn visible_window_under_gg_headless_panics() {
     assert!(
         message.contains("GG_HEADLESS") && message.contains("1.5"),
         "panic must cite the law: {message}"
+    );
+}
+
+/// A window is asked for at the size it wants and created at the size the
+/// monitor has. Windowless — the cap is arithmetic, and the only part that
+/// needs a display is the monitor it is given here as a number.
+#[test]
+fn a_window_never_asks_for_more_than_the_monitor_shows() {
+    let desc = WindowDesc::invisible("gg cap", (1920, 1080));
+    assert_eq!(desc.capped_to(None), (1920, 1080), "no monitor, no opinion");
+    assert_eq!(desc.capped_to(Some((3840, 2160))), (1920, 1080), "room");
+    // 1080p asked for on a 1080p screen is a window under the taskbar.
+    assert_eq!(desc.capped_to(Some((1920, 1080))), (1728, 972));
+    assert_eq!(desc.capped_to(Some((0, 0))), (1920, 1080), "minimized-ish");
+}
+
+/// Decoration is opt-out and nothing else moves with it: a shell that takes the
+/// OS frame off is still asking for the same window at the same size, and every
+/// other demo keeps the frame it always had (§6 M15.1 item 5).
+#[test]
+fn only_a_host_that_asks_loses_its_os_frame() {
+    let plain = WindowDesc::visible_unless_headless("gg", (1280, 720));
+    assert!(plain.decorated, "decorations are the default");
+    let bare = plain.clone().decorations(false);
+    assert!(!bare.decorated);
+    assert_eq!(
+        (bare.size, bare.visible, bare.resizable),
+        (plain.size, plain.visible, plain.resizable)
     );
 }
 

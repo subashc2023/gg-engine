@@ -1,4 +1,5 @@
 pub mod gg_render
+pub use gg_render::Viewport
 pub mod gg_render::content
 pub enum gg_render::content::ContentError
 pub gg_render::content::ContentError::Asset(gg_assets::load::AssetError)
@@ -52,6 +53,7 @@ pub gg_render::graph::Body::Draw::color: core::option::Option<(gg_render::graph:
 pub gg_render::graph::Body::Draw::depth: core::option::Option<(gg_render::graph::ResourceId, gg_render::graph::DepthUse)>
 pub gg_render::graph::Body::Draw::draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::graph::Body::Draw::samples: &'a [gg_render::graph::ResourceId]
+pub gg_render::graph::Body::Draw::viewport: core::option::Option<gg_rhi::graph::Viewport>
 pub gg_render::graph::Body::Readback
 pub gg_render::graph::Body::Readback::dest: gg_render::graph::ResourceId
 pub gg_render::graph::Body::Readback::source: gg_render::graph::ResourceId
@@ -78,6 +80,7 @@ pub fn gg_render::graph::Frame<'p>::color(&mut self, &'static str, gg_rhi::resou
 pub fn gg_render::graph::Frame<'p>::color_at(&mut self, &'static str, (u32, u32), gg_rhi::resource::ImageFormat) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
 pub fn gg_render::graph::Frame<'p>::compile<'a>(self, &'a [gg_render::graph::Declared<'a>]) -> core::result::Result<gg_render::graph::Compiled<'a>, gg_rhi::RhiError>
 pub fn gg_render::graph::Frame<'p>::depth(&mut self, &'static str) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
+pub fn gg_render::graph::Frame<'p>::depth_at(&mut self, &'static str, (u32, u32)) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
 pub fn gg_render::graph::Frame<'p>::readback_buffer(&mut self, &'static str, gg_rhi::resource::BufferHandle) -> gg_render::graph::ResourceId
 pub fn gg_render::graph::Frame<'p>::shadow(&mut self, &'static str, (u32, u32)) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
 pub fn gg_render::graph::Frame<'p>::texture(&self, gg_render::graph::ResourceId) -> core::option::Option<gg_rhi::bindless::TextureIndex>
@@ -119,7 +122,9 @@ pub fn gg_render::OffscreenRenderer::pass_timings(&self) -> &[gg_rhi::timing::Pa
 pub fn gg_render::OffscreenRenderer::reload_pack(&mut self) -> core::result::Result<bool, gg_render::content::ContentError>
 pub fn gg_render::OffscreenRenderer::scenes(&self) -> &dyn gg_extract::Scenes
 pub fn gg_render::OffscreenRenderer::set_ui_atlas(&mut self, &gg_render::ui::Coverage<'_>) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::OffscreenRenderer::set_viewport(&mut self, core::option::Option<gg_rhi::graph::Viewport>)
 pub fn gg_render::OffscreenRenderer::shutdown(self) -> gg_rhi::ShutdownReport
+pub fn gg_render::OffscreenRenderer::view_extent(&self) -> (u32, u32)
 pub struct gg_render::Renderer
 impl gg_render::Renderer
 pub fn gg_render::Renderer::device(&self) -> &gg_rhi::device::DeviceReport
@@ -138,7 +143,9 @@ pub fn gg_render::Renderer::reload_pack(&mut self) -> core::result::Result<bool,
 pub fn gg_render::Renderer::resize(&mut self, u32, u32)
 pub fn gg_render::Renderer::scenes(&self) -> &dyn gg_extract::Scenes
 pub fn gg_render::Renderer::set_ui_atlas(&mut self, &gg_render::ui::Coverage<'_>) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::Renderer::set_viewport(&mut self, core::option::Option<gg_rhi::graph::Viewport>)
 pub fn gg_render::Renderer::shutdown(self) -> gg_rhi::ShutdownReport
+pub fn gg_render::Renderer::view_extent(&self) -> (u32, u32)
 pub struct gg_render::SceneFrame<'a>
 pub gg_render::SceneFrame::backbuffer: gg_render::graph::ResourceId
 pub gg_render::SceneFrame::clear: [f32; 4]
@@ -151,6 +158,7 @@ pub gg_render::SceneFrame::samples: &'a [gg_render::graph::ResourceId]
 pub gg_render::SceneFrame::scene: gg_render::graph::ResourceId
 pub gg_render::SceneFrame::shadow: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::SceneFrame::shadow_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::viewport: core::option::Option<gg_rhi::graph::Viewport>
 pub struct gg_render::View
 pub gg_render::View::fov_y: f32
 pub gg_render::View::near: f32

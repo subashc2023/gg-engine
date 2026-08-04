@@ -124,6 +124,7 @@ fn record(
                     store: false,
                     read_only: false,
                 }),
+                viewport: None,
                 draws,
             },
         },

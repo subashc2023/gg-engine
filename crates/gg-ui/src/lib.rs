@@ -14,17 +14,23 @@
 
 pub mod atlas;
 pub mod boundary;
+pub mod dock;
 pub mod draw;
 pub mod font;
 pub mod layout;
+pub mod menu;
 pub mod router;
 pub mod scratch;
+pub mod scroll;
 pub mod text;
 
 pub use atlas::Atlas;
 pub use boundary::Ui;
+pub use dock::{Dock, PaneId};
 pub use draw::{DrawList, Glyph, Rect};
-pub use layout::{Axis, Stack};
+pub use layout::{Axis, Fit, Stack};
+pub use menu::{Menu, MenuBar};
 pub use router::{Pointer, Router, WidgetId};
 pub use scratch::{Scratch, Span};
+pub use scroll::Scroll;
 pub use text::{FaceId, Fonts};

@@ -160,6 +160,58 @@ pub struct ColorAttachment {
     pub clear: Option<[f32; 4]>,
 }
 
+/// Where in its attachments a pass draws, in pixels from the top-left — the
+/// viewport and the scissor, which are one rectangle here because a pass that
+/// set them apart would be a pass drawing where it said it would not.
+///
+/// Absent on a pass means the whole attachment, which is what every pass that
+/// owns its target wants. It is present when a pass *composites*: the render
+/// area still covers the attachment, so a clear reaches every pixel, while the
+/// draws land only here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Viewport {
+    /// Left edge.
+    pub x: u32,
+    /// Top edge.
+    pub y: u32,
+    /// Width in pixels. Zero draws nothing rather than being an error — a
+    /// window mid-resize is allowed to have no room for a viewport.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+impl Viewport {
+    /// The whole of an attachment `extent` pixels across.
+    #[must_use]
+    pub fn whole(extent: (u32, u32)) -> Viewport {
+        Viewport {
+            x: 0,
+            y: 0,
+            width: extent.0,
+            height: extent.1,
+        }
+    }
+
+    /// This rectangle cut down to an attachment `extent` pixels across.
+    ///
+    /// Clamped rather than refused because the caller is a window: a viewport
+    /// derived from last frame's extent arrives one frame stale after a resize,
+    /// and a scissor past the render area is a validation error the frame after
+    /// it would fix by itself.
+    #[must_use]
+    pub fn clamped(self, extent: (u32, u32)) -> Viewport {
+        let x = self.x.min(extent.0);
+        let y = self.y.min(extent.1);
+        Viewport {
+            x,
+            y,
+            width: self.width.min(extent.0 - x),
+            height: self.height.min(extent.1 - y),
+        }
+    }
+}
+
 /// A pass's depth attachment. The three flags are three Vulkan knobs, named
 /// one-to-one so a pass says what it means: `clear` is the load op, `store` the
 /// store op, and `read_only` the layout — which must agree with the pipeline's
@@ -186,6 +238,8 @@ pub enum PassKind<'a> {
         color: Option<ColorAttachment>,
         /// The depth attachment, if any.
         depth: Option<DepthAttachment>,
+        /// Where the draws land. `None` is the whole attachment.
+        viewport: Option<Viewport>,
         /// Drawn in order.
         draws: &'a [DrawSpec<'a>],
     },
@@ -266,10 +320,17 @@ enum ResolvedTransition {
     },
 }
 
+/// What a render pass draws into, resolved. A struct because the three travel
+/// together everywhere and the recorder takes them all at once.
+struct Attachments {
+    color: Option<(Ref, Option<[f32; 4]>)>,
+    depth: Option<(Ref, Option<f32>, bool, bool)>,
+    viewport: Option<Viewport>,
+}
+
 enum ResolvedKind<'a> {
     Render {
-        color: Option<(Ref, Option<[f32; 4]>)>,
-        depth: Option<(Ref, Option<f32>, bool, bool)>,
+        into: Attachments,
         draws: Vec<ResolvedDraw<'a>>,
     },
     Readback {
@@ -310,6 +371,7 @@ pub(crate) fn resolve<'a>(
                 PassKind::Render {
                     color,
                     depth,
+                    viewport,
                     draws,
                 } => {
                     if color.is_none() && depth.is_none() {
@@ -320,19 +382,24 @@ pub(crate) fn resolve<'a>(
                         )));
                     }
                     ResolvedKind::Render {
-                        color: color
-                            .map(|c| Ok::<_, RhiError>((resolve_image(gpu, c.target)?, c.clear)))
-                            .transpose()?,
-                        depth: depth
-                            .map(|d| {
-                                Ok::<_, RhiError>((
-                                    resolve_image(gpu, d.target)?,
-                                    d.clear,
-                                    d.store,
-                                    d.read_only,
-                                ))
-                            })
-                            .transpose()?,
+                        into: Attachments {
+                            color: color
+                                .map(|c| {
+                                    Ok::<_, RhiError>((resolve_image(gpu, c.target)?, c.clear))
+                                })
+                                .transpose()?,
+                            depth: depth
+                                .map(|d| {
+                                    Ok::<_, RhiError>((
+                                        resolve_image(gpu, d.target)?,
+                                        d.clear,
+                                        d.store,
+                                        d.read_only,
+                                    ))
+                                })
+                                .transpose()?,
+                            viewport: *viewport,
+                        },
                         draws: resolve_draws(gpu, draws)?,
                     }
                 }
@@ -483,11 +550,9 @@ pub(crate) unsafe fn record(
             }
             barrier(device, cmd, &pass.transitions, &backbuffer);
             match &pass.kind {
-                ResolvedKind::Render {
-                    color,
-                    depth,
-                    draws,
-                } => render(device, cmd, set, color, depth, draws, &backbuffer),
+                ResolvedKind::Render { into, draws } => {
+                    render(device, cmd, set, into, draws, &backbuffer);
+                }
                 ResolvedKind::Readback { source, dest } => {
                     readback(device, cmd, source.get(&backbuffer), *dest);
                 }
@@ -570,14 +635,14 @@ unsafe fn render(
     device: &Device,
     cmd: vk::CommandBuffer,
     set: vk::DescriptorSet,
-    color: &Option<(Ref, Option<[f32; 4]>)>,
-    depth: &Option<(Ref, Option<f32>, bool, bool)>,
+    into: &Attachments,
     draws: &[ResolvedDraw<'_>],
     backbuffer: &Bound,
 ) {
-    let color = color.map(|(r, clear)| (r.get(backbuffer), clear));
-    let depth =
-        depth.map(|(r, clear, store, read_only)| (r.get(backbuffer), clear, store, read_only));
+    let color = into.color.map(|(r, clear)| (r.get(backbuffer), clear));
+    let depth = into
+        .depth
+        .map(|(r, clear, store, read_only)| (r.get(backbuffer), clear, store, read_only));
     // The render area is the color attachment's, or the depth one's when a
     // prepass has no color. resolve() refused the pass that has neither.
     let extent = color
@@ -644,12 +709,21 @@ unsafe fn render(
         rendering = rendering.depth_attachment(depth);
     }
 
-    // SAFETY: caller contract — cmd is recording, every view is live, and each
-    // draw's pipeline was validated against its push constants in resolve().
+    // Clamped to the render area declared above: a scissor reaching past it is
+    // a validation error, and the rectangle came from a window that may have
+    // resized since (`Viewport::clamped`).
+    let region = into
+        .viewport
+        .unwrap_or(Viewport::whole(extent))
+        .clamped(extent);
+
+    // SAFETY: caller contract — cmd is recording, every view is live, each
+    // draw's pipeline was validated against its push constants in resolve(),
+    // and `region` was just clamped into the render area.
     unsafe {
         device.raw().cmd_begin_rendering(cmd, &rendering);
         for draw in draws {
-            record_draw(device, cmd, extent, set, draw);
+            record_draw(device, cmd, region, set, draw);
         }
         device.raw().cmd_end_rendering(cmd);
     }

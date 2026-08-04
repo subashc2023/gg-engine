@@ -53,6 +53,7 @@ use content::{Content, ContentError};
 use gg_assets::AssetId;
 use gg_extract::{Extracted, Frustum, Instance, Scenes};
 use gg_math::render;
+pub use gg_rhi::Viewport;
 use gg_rhi::{
     Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthBias, DepthMode, DeviceAddress,
     DeviceReport, DrawSpec, FrameOutcome, FrameStart, GpuClock, GraphContext, ImageDesc,
@@ -161,6 +162,8 @@ pub struct Renderer {
     /// boxes and nothing else — which is every tier before M9 and every run
     /// without `--pack`.
     content: Option<Content>,
+    /// Where the frame lands in the window. See [`Renderer::set_viewport`].
+    viewport: Option<Viewport>,
 }
 
 impl Renderer {
@@ -193,6 +196,7 @@ impl Renderer {
             luminance,
             transients: Transients::default(),
             content: None,
+            viewport: None,
         })
     }
 
@@ -277,13 +281,49 @@ impl Renderer {
         self.rhi.device_report()
     }
 
-    /// The size the next frame will render at, in physical pixels.
+    /// The surface the next frame will present, in physical pixels — the whole
+    /// window. What the *game* is composed for is [`Renderer::view_extent`],
+    /// which is smaller whenever a viewport is set.
     pub fn extent(&self) -> (u32, u32) {
         self.rhi.swapchain_extent()
     }
 
+    /// Put the game inside `viewport` instead of over the whole window, in
+    /// physical pixels from the top-left; `None` restores the whole window.
+    ///
+    /// This is a **render target and not a crop**: the scene and depth
+    /// attachments are allocated at the viewport's size and the projection is
+    /// built from its aspect, so an object at the edge of the viewport is at the
+    /// edge of the picture. A host that instead let the frame cover the window
+    /// and drew panels over it — which is what M15 shipped — is showing the
+    /// middle of a frame composed for a wider rectangle, and leaves the
+    /// letterbox `gg_ui::Fit` opens at any non-16:9 window showing bare game.
+    ///
+    /// Sticky, like the pack and the atlas: a shell sets it when the editor
+    /// opens and clears it when the editor closes, rather than restating it
+    /// every frame. Kept in physical pixels because that is what a scissor is
+    /// in — converting canvas units is the caller's, and `gg_editor::viewport`
+    /// is where that arithmetic lives.
+    pub fn set_viewport(&mut self, viewport: Option<Viewport>) {
+        self.viewport = viewport;
+    }
+
+    /// The extent the next frame's projection will be built from: the viewport's
+    /// when one is set, the surface's otherwise.
+    ///
+    /// A shell culling against [`View::frustum`] must pass *this*, not
+    /// [`Renderer::extent`] — a frustum built from the window while the picture
+    /// is composed for a narrower rectangle culls objects that are on screen.
+    pub fn view_extent(&self) -> (u32, u32) {
+        view_extent(self.viewport, self.rhi.swapchain_extent())
+    }
+
     /// New window size in physical pixels. `(0, 0)` suspends rather than
     /// recreates.
+    ///
+    /// A viewport set against the old size survives: it is clamped to the
+    /// attachment when the frame records (`gg_rhi::Viewport::clamped`), and the
+    /// host restates it from the new extent on the tick that follows.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.rhi.resize(width, height);
     }
@@ -318,9 +358,42 @@ impl Renderer {
         color: [f32; 4],
         ui: &[ui::UiVertex],
     ) -> Result<FrameOutcome, RhiError> {
+        /// Attempts before a frame gives up and leaves the surface to the next
+        /// one. Three, because each costs a recreate and the operator's drag is
+        /// still moving underneath it — spinning would stall the resize instead
+        /// of tracking it.
+        const ATTEMPTS: u32 = 3;
+
         // Before `begin_frame`, not inside it: uploads go to the transfer queue
-        // through the staging ring and belong to no frame slot (§4.3).
+        // through the staging ring and belong to no frame slot (§4.3). Above the
+        // retry as well, so a second attempt re-acquires without re-streaming.
         stream(&mut self.content, &mut self.rhi, extracted)?;
+        // An out-of-date acquire is ordinary while a window is being dragged:
+        // the surface moves faster than a frame can be built. Retried *here*
+        // rather than left to the next frame, because during a Win32 modal
+        // resize loop there is no next frame until the operator lets go — a
+        // skipped frame is then a window that shows nothing new for the whole
+        // drag, which is what the black band trailing the border was (§6 M15.1).
+        let mut outcome = FrameOutcome::SkippedOutOfDate;
+        for _ in 0..ATTEMPTS {
+            outcome = self.frame_once(extracted, view, color, ui)?;
+            if !matches!(outcome, FrameOutcome::SkippedOutOfDate) {
+                break;
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// One attempt at [`Renderer::frame`]: recreate if due, compile, record,
+    /// submit, present. Split out so the retry above re-enters `begin_frame`,
+    /// which is the only place the swapchain is rebuilt.
+    fn frame_once(
+        &mut self,
+        extracted: &Extracted,
+        view: &View,
+        color: [f32; 4],
+        ui: &[ui::UiVertex],
+    ) -> Result<FrameOutcome, RhiError> {
         let token = match self.rhi.begin_frame()? {
             FrameStart::Ready(token) => token,
             FrameStart::Skipped(outcome) => return Ok(outcome),
@@ -344,12 +417,18 @@ impl Renderer {
         // acquired it, and acquiring it holds the borrow the write would need.
         let frame_address = self.lighting.slot_address(slot);
         let sun = self.lighting.plan(&extracted.lights);
+        // Everything the game is composed for is this, not the window: the
+        // projection, the culling frustum the shell already built from
+        // `view_extent`, and both attachments below. The window's own extent is
+        // left to the two things that really are the window's — the UI layer,
+        // and where the post pass puts the result.
+        let view_extent = view_extent(self.viewport, extent);
         self.pass.build(extracted, frame_address);
         let content = self.content.as_ref();
         self.scene.build(
             &mut self.rhi,
             slot,
-            extent,
+            view_extent,
             extracted,
             view,
             content,
@@ -361,8 +440,8 @@ impl Renderer {
 
         let mut frame = self.transients.frame(&mut self.rhi, extent)?;
         let backbuffer = frame.backbuffer();
-        let scene = frame.color("scene.color", SCENE_FORMAT)?;
-        let depth = frame.depth("scene.depth")?;
+        let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT)?;
+        let depth = frame.depth_at("scene.depth", view_extent)?;
         let shadow = sun
             .map(|sun| frame.shadow("scene.shadow", (sun.size, sun.size)))
             .transpose()?;
@@ -384,6 +463,7 @@ impl Renderer {
             depth,
             shadow,
             clear: color,
+            viewport: self.viewport,
             prepass_draws: &prepass_draws,
             shadow_draws: &shadow_draws,
             forward_draws: &forward_draws,
@@ -407,7 +487,7 @@ impl Renderer {
         self.lighting.write(
             &mut self.rhi,
             slot,
-            view.view_projection(extent),
+            view.view_projection(view_extent),
             &extracted.lights,
             shadow_texture,
         )?;
@@ -426,10 +506,11 @@ impl Renderer {
         // The sun as the *last* frame planned it, like the UI pass below: what
         // the next frame's lights will be is not knowable here.
         let sun = self.lighting.sun();
+        let view_extent = view_extent(self.viewport, extent);
         let mut frame = self.transients.frame(&mut self.rhi, extent)?;
         let backbuffer = frame.backbuffer();
-        let scene = frame.color("scene.color", SCENE_FORMAT)?;
-        let depth = frame.depth("scene.depth")?;
+        let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT)?;
+        let depth = frame.depth_at("scene.depth", view_extent)?;
         let shadow = sun
             .map(|sun| frame.shadow("scene.shadow", (sun.size, sun.size)))
             .transpose()?;
@@ -446,6 +527,7 @@ impl Renderer {
             depth,
             shadow,
             clear: [0.0; 4],
+            viewport: self.viewport,
             prepass_draws: &prepass_draws,
             shadow_draws: &shadow_draws,
             forward_draws: &forward_draws,
@@ -512,6 +594,7 @@ pub struct OffscreenRenderer {
     readback: BufferHandle,
     extent: (u32, u32),
     content: Option<Content>,
+    viewport: Option<Viewport>,
 }
 
 impl OffscreenRenderer {
@@ -545,7 +628,24 @@ impl OffscreenRenderer {
             readback,
             extent,
             content: None,
+            viewport: None,
         })
+    }
+
+    /// Put the frame inside `viewport` — see [`Renderer::set_viewport`].
+    ///
+    /// Here as well as on the windowed renderer because the windowed one is
+    /// manual (§1.5): this is the only path that can prove the composite lands
+    /// where it says, in a test with no window in it.
+    pub fn set_viewport(&mut self, viewport: Option<Viewport>) {
+        self.viewport = viewport;
+    }
+
+    /// The extent this renderer's projection is built from — see
+    /// [`Renderer::view_extent`].
+    #[must_use]
+    pub fn view_extent(&self) -> (u32, u32) {
+        view_extent(self.viewport, self.extent)
     }
 
     /// Map a pack — see [`Renderer::open_pack`].
@@ -645,10 +745,11 @@ impl OffscreenRenderer {
         let histogram = luminance::Luminance::enabled();
         self.pass.build(extracted, frame_address);
         let content = self.content.as_ref();
+        let view_extent = view_extent(self.viewport, self.extent);
         self.scene.build(
             &mut self.rhi,
             0,
-            self.extent,
+            view_extent,
             extracted,
             view,
             content,
@@ -659,8 +760,8 @@ impl OffscreenRenderer {
         let ui_push = self.ui.push(self.extent);
         let mut frame = self.transients.frame(&mut self.rhi, self.extent)?;
         let backbuffer = frame.backbuffer();
-        let scene = frame.color("scene.color", SCENE_FORMAT)?;
-        let depth = frame.depth("scene.depth")?;
+        let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT)?;
+        let depth = frame.depth_at("scene.depth", view_extent)?;
         let shadow = sun
             .map(|sun| frame.shadow("scene.shadow", (sun.size, sun.size)))
             .transpose()?;
@@ -683,6 +784,7 @@ impl OffscreenRenderer {
             depth,
             shadow,
             clear: color,
+            viewport: self.viewport,
             prepass_draws: &prepass_draws,
             shadow_draws: &shadow_draws,
             forward_draws: &forward_draws,
@@ -1103,6 +1205,7 @@ fn luminance_passes<'a>(
                 // writes.
                 color: Some((grid, Load::Keep)),
                 depth: None,
+                viewport: None,
                 samples,
                 draws,
             },
@@ -1121,6 +1224,9 @@ pub fn ui_pass<'a>(backbuffer: graph::ResourceId, draws: &'a [DrawSpec<'a>]) -> 
         body: Body::Draw {
             color: Some((backbuffer, Load::Keep)),
             depth: None,
+            // The whole target, never the scene's viewport: the panels that
+            // frame a viewport are exactly the pixels outside it (§6 M15).
+            viewport: None,
             // The coverage atlas is an uploaded texture like any material's,
             // already in a sampled layout — not a graph resource, so there is
             // no transition for the graph to derive.
@@ -1145,6 +1251,12 @@ pub struct SceneFrame<'a> {
     pub shadow: Option<graph::ResourceId>,
     /// Linear clear for the scene attachment.
     pub clear: [f32; 4],
+    /// Where the post pass lands the scene in the backbuffer. `None` is all of
+    /// it — a window showing nothing but the game. The scene and depth
+    /// attachments must already be this size: the viewport crops the *resolve*,
+    /// while what makes the picture right for a narrower rectangle is that the
+    /// projection was built from its aspect.
+    pub viewport: Option<Viewport>,
     /// Depth-prepass draws.
     pub prepass_draws: &'a [DrawSpec<'a>],
     /// Shadow-pass draws. Unread when `shadow` is `None`.
@@ -1181,6 +1293,7 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
                 color: None,
                 // Stored, unlike the prepass's: the forward pass samples it.
                 depth: Some((shadow, DepthUse::WriteStore)),
+                viewport: None,
                 samples: &[],
                 draws: frame.shadow_draws,
             },
@@ -1191,6 +1304,9 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
         body: Body::Draw {
             color: None,
             depth: Some((frame.depth, DepthUse::WriteStore)),
+            // Every pass up to the post owns an attachment sized to the
+            // viewport already, so all three draw over the whole of theirs.
+            viewport: None,
             samples: &[],
             draws: frame.prepass_draws,
         },
@@ -1200,6 +1316,7 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
         body: Body::Draw {
             color: Some((frame.scene, Load::Clear(frame.clear))),
             depth: Some((frame.depth, DepthUse::Test)),
+            viewport: None,
             // The shadow map is read through the bindless array like any
             // texture, so the graph would see no dependency at all unless the
             // pass declares it — which is exactly the hazard §4.5 warns that an
@@ -1210,18 +1327,47 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
     });
     declared.push(Declared {
         name: "post",
-        // `Keep`, not a clear: the pass writes every pixel of the target
-        // from a fullscreen triangle, so clearing first would be a full
-        // target's worth of writes thrown away.
         body: Body::Draw {
-            color: Some((frame.backbuffer, Load::Keep)),
+            // `Keep` when the resolve covers the target: the pass writes every
+            // pixel of it from a fullscreen triangle, so clearing first would be
+            // a full target's worth of writes thrown away. A viewport is exactly
+            // the case where that stops being true — the pixels outside it are
+            // written by nothing in this graph, and an unwritten backbuffer is
+            // whatever the last frame in that slot left there.
+            color: Some((
+                frame.backbuffer,
+                match frame.viewport {
+                    Some(_) => Load::Clear(LETTERBOX),
+                    None => Load::Keep,
+                },
+            )),
             depth: None,
+            viewport: frame.viewport,
             samples: frame.samples,
             draws: frame.post_draws,
         },
     });
     declared
 }
+
+/// The extent a frame's projection and attachments are sized from, given the
+/// surface it presents into. One function because both renderers and the
+/// shell's culling have to agree on it exactly — a frustum and a projection
+/// built from different aspects is geometry that pops in at the frame edge.
+fn view_extent(viewport: Option<Viewport>, surface: (u32, u32)) -> (u32, u32) {
+    match viewport.map(|v| v.clamped(surface)) {
+        // A zero-width viewport allocates nothing and draws nothing; the
+        // attachment pool refuses a zero extent, so fall back to the surface
+        // and let the scissor discard the frame instead.
+        Some(v) if v.width > 0 && v.height > 0 => (v.width, v.height),
+        _ => surface,
+    }
+}
+
+/// What surrounds a viewport that does not cover the backbuffer. Opaque black
+/// rather than the scene's clear: the border of a composited frame is not more
+/// sky, and a host drawing panels over it (§6 M15) covers this anyway.
+const LETTERBOX: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// The depth prepass: position only, no colour, depth stored for the forward
 /// pass to test against.

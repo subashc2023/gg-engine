@@ -70,7 +70,7 @@ fn face_bytes() -> Vec<u8> {
         .ancestors()
         .nth(2)
         .expect("crates/gg-ui is two below the workspace root");
-    std::fs::read(root.join("tests/fonts/FiraMono-Regular.ttf")).expect("the vendored face")
+    std::fs::read(root.join("assets/fonts/FiraMono-Regular.ttf")).expect("the vendored face")
 }
 
 /// Everything a real frame does: route input, format rows, shape and rasterize
@@ -91,6 +91,9 @@ fn frame(
             motion,
             primary: tick.is_multiple_of(4),
             advance_focus: tick.is_multiple_of(16),
+            // A notch every other second, so a scrolled pane is inside the
+            // steady state this gate is measuring and not beside it.
+            scroll: i32::from(tick.is_multiple_of(120)),
         },
         EXTENT,
     );

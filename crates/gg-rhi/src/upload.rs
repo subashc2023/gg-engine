@@ -168,6 +168,30 @@ impl Uploader {
         std::mem::take(&mut self.acquires)
     }
 
+    /// Drop the barriers owed for an image about to be destroyed.
+    ///
+    /// Uploading a resource and retiring it before the next frame is ordinary
+    /// use — a texture replaced twice between two presents does it — and the
+    /// acquire queue holds *raw* handles, so without this the next frame
+    /// records a barrier naming a destroyed image. That is a validation error
+    /// and, on a real driver, a crash. Nothing is lost by dropping it: the
+    /// barrier exists to hand ownership to a reader, and a retired resource
+    /// has none.
+    ///
+    /// Unreachable where one family owns everything, which is every lavapipe
+    /// run and therefore every automated tier (§4.3).
+    pub fn forget_image_acquires(&mut self, image: vk::Image) {
+        self.acquires
+            .retain(|owed| !matches!(owed, Acquire::Image { image: dead, .. } if *dead == image));
+    }
+
+    /// [`Uploader::forget_image_acquires`] for a buffer.
+    pub fn forget_buffer_acquires(&mut self, buffer: vk::Buffer) {
+        self.acquires.retain(
+            |owed| !matches!(owed, Acquire::Buffer { buffer: dead, .. } if *dead == buffer),
+        );
+    }
+
     /// The transfer timeline value the last [`Uploader::flush`] signaled — what
     /// a graphics submit waits on to order its acquires after the releases.
     pub fn timeline_value(&self) -> u64 {

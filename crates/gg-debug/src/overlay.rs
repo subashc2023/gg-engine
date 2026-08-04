@@ -135,7 +135,8 @@ impl Overlay {
                 self.console.open = !self.console.open;
                 true
             }
-            Key::F1 => {
+            // Two keys, one switch — F3 is the one hands already reach for.
+            Key::F1 | Key::F3 => {
                 SHOW.set_bool(!SHOW.bool());
                 true
             }
@@ -473,10 +474,13 @@ mod tests {
         assert!(!overlay.build(&stats()).is_empty());
         SHOW.set_bool(false);
         assert!(overlay.build(&stats()).is_empty());
-        // F1 is the same switch, so the key and the CVar cannot disagree.
-        overlay.key(Key::F1, true);
+        // F1 and F3 are the same switch, so a key and the CVar cannot disagree.
+        assert!(overlay.key(Key::F1, true));
         assert!(SHOW.bool());
         assert!(!overlay.build(&stats()).is_empty());
+        assert!(overlay.key(Key::F3, true));
+        assert!(!SHOW.bool());
+        assert!(overlay.build(&stats()).is_empty());
         SHOW.reset();
     }
 

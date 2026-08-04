@@ -180,6 +180,11 @@ impl Gpu {
 
     /// Retire a buffer behind the timeline.
     pub fn retire_buffer(&mut self, handle: BufferHandle, after: u64) -> Result<(), RhiError> {
+        // Before the retire, and see `Uploader::forget_image_acquires`: an
+        // upload the graphics queue has not yet acquired leaves a barrier
+        // naming this handle, and the retire is what makes it a dead one.
+        let raw = self.resources.buffer(handle)?.raw;
+        self.uploader.forget_buffer_acquires(raw);
         self.resources
             .retire_buffer(handle, &mut self.deletions, after)
     }
@@ -187,6 +192,8 @@ impl Gpu {
     /// Retire an image behind the timeline, queueing its bindless slots for
     /// reuse at the same value.
     pub fn retire_image(&mut self, handle: ImageHandle, after: u64) -> Result<(), RhiError> {
+        let raw = self.resources.image(handle)?.raw; // as `retire_buffer`
+        self.uploader.forget_image_acquires(raw);
         let slots = self
             .resources
             .retire_image(handle, &mut self.deletions, after)?;

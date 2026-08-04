@@ -69,6 +69,7 @@ fn clear_frame(rhi: &mut Rhi, color: [f32; 4]) -> FrameOutcome {
                     clear: Some(color),
                 }),
                 depth: None,
+                viewport: None,
                 draws: &[],
             },
         },
@@ -167,7 +168,9 @@ fn interactive_resize_minimize_spam_1000() {
                 | Event::Exiting
                 | Event::Key { .. }
                 | Event::MouseButton { .. }
-                | Event::MouseMotion { .. } => {}
+                | Event::MouseMotion { .. }
+                | Event::CursorMoved { .. }
+                | Event::MouseWheel { .. } => {}
             }
         }
         match clear_frame(&mut rhi, [0.3, 0.2, 0.1, 1.0]) {

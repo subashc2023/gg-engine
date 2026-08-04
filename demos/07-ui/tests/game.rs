@@ -102,6 +102,9 @@ impl Game {
                 // `just_pressed` for the same reason.
                 advance_focus: held(&frame, self.binding.advance_focus)
                     && !held(&self.previous, self.binding.advance_focus),
+                // Demo 07 declares no wheel verbs, so its UI never scrolls —
+                // which is the case `gg_ui::boundary::binding` leaves optional.
+                scroll: 0,
             },
             self.target,
         );

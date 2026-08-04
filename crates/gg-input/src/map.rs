@@ -26,7 +26,7 @@
 //! look_x = ["MouseX"]               # pointer motion
 //! ```
 
-use crate::key::{Key, MouseAxis, MouseButton};
+use crate::key::{Key, MouseAxis, MouseButton, Wheel};
 
 /// The verb identities and the ceilings on them live in `gg-abi` (§4.2.2).
 ///
@@ -59,6 +59,8 @@ pub enum Source {
     Key(Key),
     /// A mouse button.
     Button(MouseButton),
+    /// A wheel notch. Down for exactly the tick it arrived in — see [`Wheel`].
+    Wheel(Wheel),
 }
 
 /// What feeds an axis.
@@ -414,6 +416,9 @@ fn find(names: &[&str], name: &str) -> Option<usize> {
 fn button_source(token: &str) -> Option<Source> {
     if let Some(key) = Key::from_name(token) {
         return Some(Source::Key(key));
+    }
+    if let Some(wheel) = Wheel::from_name(token) {
+        return Some(Source::Wheel(wheel));
     }
     MouseButton::from_name(token).map(Source::Button)
 }

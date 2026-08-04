@@ -48,7 +48,7 @@ fn face_bytes() -> Vec<u8> {
         .ancestors()
         .nth(2)
         .expect("crates/gg-ui is two below the workspace root");
-    std::fs::read(root.join("tests/fonts/FiraMono-Regular.ttf")).expect("the vendored face")
+    std::fs::read(root.join("assets/fonts/FiraMono-Regular.ttf")).expect("the vendored face")
 }
 
 /// A solid rectangle and one shaped glyph, in two colours so each can be
@@ -119,6 +119,50 @@ fn a_rasterized_glyph_and_a_solid_rectangle_share_one_atlas() {
             }
         }
     }
+}
+
+/// Replacing the atlas between two frames is clean — the shell does exactly
+/// this when the editor's resident glyph size changes under a resize (§6
+/// M15.1), and the retired image's uploads must not outlive it.
+///
+/// On a device with a dedicated transfer family the first upload leaves an
+/// ownership acquire the *next* frame records, so a replace-then-render is a
+/// barrier over a destroyed image unless the retire drops it
+/// (`gg-rhi/tests/uploads.rs` names the same bug at its own level). Lavapipe
+/// has one family and cannot see it; this is written to run on either.
+#[test]
+fn an_atlas_replaced_between_frames_leaves_nothing_behind() {
+    let mut fonts = Fonts::default();
+    let face = fonts.load(face_bytes(), 0).unwrap();
+    let mut list = DrawList::default();
+    list.rect(Rect::new(0.0, 0.0, 8.0, 8.0), RED);
+
+    let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
+    let frame = |renderer: &mut OffscreenRenderer, list: &DrawList| {
+        renderer
+            .frame(
+                &Extracted::default(),
+                &View::default(),
+                [0.0, 0.0, 0.0, 1.0],
+                list.vertices(),
+            )
+            .map(|_| ())
+    };
+    renderer.set_ui_atlas(&fonts.coverage()).unwrap();
+    frame(&mut renderer, &list).unwrap();
+    // A second atlas, uploaded and handed over with the first still resident.
+    fonts.layout(face, PX, "replaced");
+    renderer.set_ui_atlas(&fonts.coverage()).unwrap();
+    frame(&mut renderer, &list).unwrap();
+    // And one replaced *before* any frame reads it, which is the tighter case.
+    fonts.layout(face, PX * 2, "again");
+    renderer.set_ui_atlas(&fonts.coverage()).unwrap();
+    fonts.layout(face, PX * 3, "once more");
+    renderer.set_ui_atlas(&fonts.coverage()).unwrap();
+    frame(&mut renderer, &list).unwrap();
+
+    let report = renderer.shutdown();
+    assert!(report.clean(), "unclean: {report:?}");
 }
 
 /// The upload schedule: the version moves while glyphs are arriving and stops

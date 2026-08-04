@@ -269,7 +269,7 @@ mod tests {
     use super::*;
     use crate::font;
 
-    /// The vendored face (`tests/fonts`, OFL-1.1). Monospace on purpose: the
+    /// The vendored face (`assets/fonts`, OFL-1.1). Monospace on purpose: the
     /// overlay's rows are column-aligned by format specifiers, so a
     /// proportional face would be a feature loss the M13 criterion names.
     fn face_bytes() -> Vec<u8> {
@@ -277,7 +277,7 @@ mod tests {
             .ancestors()
             .nth(2)
             .expect("crates/gg-ui is two below the workspace root");
-        std::fs::read(root.join("tests/fonts/FiraMono-Regular.ttf")).expect("the vendored face")
+        std::fs::read(root.join("assets/fonts/FiraMono-Regular.ttf")).expect("the vendored face")
     }
 
     fn loaded() -> (Fonts, FaceId) {

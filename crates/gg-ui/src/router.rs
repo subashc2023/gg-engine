@@ -101,6 +101,16 @@ pub struct Pointer {
 }
 
 impl Pointer {
+    /// Position in [`AXIS_SCALE`]ths, which is what it actually is.
+    ///
+    /// For a host differencing against an OS cursor position (§6 M15.1): the
+    /// delta it must feed is `desired - raw()`, and computing that in pixels
+    /// would put a rounding step in the one place the two must agree exactly.
+    #[must_use]
+    pub fn raw(self) -> (i32, i32) {
+        (self.x, self.y)
+    }
+
     /// Position in pixels. Exact: [`AXIS_SCALE`] is a power of two.
     #[must_use]
     pub fn position(self) -> (f32, f32) {
@@ -146,6 +156,10 @@ pub struct Binding {
     pub primary: ActionId,
     /// Move focus to the next widget.
     pub advance_focus: ActionId,
+    /// One wheel notch away from the operator, if this build declared one.
+    pub scroll_up: Option<ActionId>,
+    /// One toward.
+    pub scroll_down: Option<ActionId>,
 }
 
 /// One tick of input as the router consumes it.
@@ -159,6 +173,13 @@ pub struct Tick {
     /// Focus moves on this tick. An edge, not a held state: a held key must not
     /// walk the whole panel in a second.
     pub advance_focus: bool,
+    /// Wheel notches this tick: `+1` away from the operator, `-1` toward, `0`
+    /// for the overwhelming majority of ticks.
+    ///
+    /// One notch at most in each direction because that is what the source is
+    /// (`gg_input::Wheel`) — a tick either notched or it did not. Both at once
+    /// is a wheel spun both ways inside 16 ms, which cancels.
+    pub scroll: i32,
 }
 
 impl Tick {
@@ -167,10 +188,15 @@ impl Tick {
     #[must_use]
     pub fn from_input(input: &Input, binding: &Binding) -> Tick {
         let axes = input.frame().axes;
+        // `pressed` and not `just_pressed`: a notch is already an edge — it is
+        // set for the one tick it arrived in — and asking for the edge of an
+        // edge drops every second notch of a steady scroll.
+        let notch = |verb: Option<ActionId>| i32::from(verb.is_some_and(|id| input.pressed(id)));
         Tick {
             motion: (axes[binding.x.index()], axes[binding.y.index()]),
             primary: input.pressed(binding.primary),
             advance_focus: input.just_pressed(binding.advance_focus),
+            scroll: notch(binding.scroll_up) - notch(binding.scroll_down),
         }
     }
 }

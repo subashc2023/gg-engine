@@ -66,6 +66,15 @@ pub mod verb {
     pub const CLICK: &str = "ui_click";
     /// Move focus to the next widget.
     pub const FOCUS: &str = "ui_focus";
+    /// One wheel notch away from the operator, and one toward.
+    ///
+    /// **Optional, unlike the four above**, and the only pair a build may
+    /// declare half of. A UI without them scrolls nothing, which is the right
+    /// answer for a HUD and for every game that had a working pointer before
+    /// they existed; the editor appends them like the rest (§6 M15.1).
+    pub const SCROLL_UP: &str = "ui_scroll_up";
+    /// See [`SCROLL_UP`].
+    pub const SCROLL_DOWN: &str = "ui_scroll_down";
 }
 
 /// Resolve [`verb`]'s names against a build's declared verbs (§4.7).
@@ -81,11 +90,16 @@ pub fn binding(verbs: &Verbs) -> Option<Binding> {
     let find = |names: &[&str], name: &str, limit: usize| {
         names.iter().position(|v| *v == name).filter(|i| *i < limit)
     };
+    let action = |name| find(verbs.actions, name, MAX_ACTIONS).map(ActionId::new);
     Some(Binding {
         x: AxisId::new(find(verbs.axes, verb::X, MAX_AXES)?),
         y: AxisId::new(find(verbs.axes, verb::Y, MAX_AXES)?),
         primary: ActionId::new(find(verbs.actions, verb::CLICK, MAX_ACTIONS)?),
         advance_focus: ActionId::new(find(verbs.actions, verb::FOCUS, MAX_ACTIONS)?),
+        // Absent is a UI that does not scroll, not a UI that does not route —
+        // which is why these two are outside the `?`s above.
+        scroll_up: action(verb::SCROLL_UP),
+        scroll_down: action(verb::SCROLL_DOWN),
     })
 }
 
@@ -154,11 +168,8 @@ impl Ui {
         });
 
         list.clear();
-        let scale = (f32::from(target.0 as u16) / CANVAS.0 as f32)
-            .min(f32::from(target.1 as u16) / CANVAS.1 as f32);
-        let fit =
-            |extent: u32, canvas: u32| ((extent as f32 - canvas as f32 * scale) * 0.5).floor();
-        list.push_transform((fit(target.0, CANVAS.0), fit(target.1, CANVAS.1)), scale);
+        let fit = crate::layout::Fit::new(target);
+        list.push_transform(fit.offset, fit.scale);
         for index in order.iter() {
             let w = &mut widgets[*index as usize];
             let rect = Rect::new(w.rect[0], w.rect[1], w.rect[2], w.rect[3]);

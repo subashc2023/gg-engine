@@ -296,13 +296,36 @@ fn editor_verbs() -> gg_ecs::boundary::Verbs {
     verbs
 }
 
+/// What `gg_runtime`'s `Stages::surface` reports with no renderer — the extent
+/// a headless editor session is laid out at, and therefore the one its script
+/// must be aimed at.
+const HEADLESS_EXTENT: (u32, u32) = gg_ecs::boundary::CANVAS;
+
+/// And the monitor it reports: none, which is 1.0 (§6 M15.1). The shell's own
+/// `App` starts there and a headless run never moves it, so a script aimed with
+/// this lands where the replayed session clicks.
+const HEADLESS_DPI: f32 = 1.0;
+
 /// The scripted editor session as a replay.
 ///
 /// The frames are `gg_editor::session`'s — authored beside the panels they
 /// click, so a panel that moves moves the script rather than missing it (§6
 /// M15) — and the ids come out of the augmented verb list, because `ui_click`
 /// is action 1 over demo 05 and action 0 over a game that declared it first.
+///
+/// The script is aimed at [`HEADLESS_EXTENT`] because that is what the shell
+/// lays the editor out at with no renderer to ask (`Stages::surface`). Since
+/// §6 M15.1 the panes fill their surface, so a script aimed at one extent and
+/// replayed at another clicks somewhere else — which is exactly the residual
+/// M15.1 names, and here it is closed by the two agreeing on one constant.
 pub fn editor_replay() -> anyhow::Result<Replay> {
+    editor_replay_at(HEADLESS_EXTENT)
+}
+
+/// The same session authored for a different surface — what `--editor-extent`
+/// is replayed against, so the flag that closes M15.1's residual is exercised
+/// rather than asserted.
+pub fn editor_replay_at(extent: (u32, u32)) -> anyhow::Result<Replay> {
     let verbs = editor_verbs();
     let find = |names: &[&str], want: &str| {
         names
@@ -310,8 +333,10 @@ pub fn editor_replay() -> anyhow::Result<Replay> {
             .position(|n| *n == want)
             .ok_or_else(|| anyhow::anyhow!("the editor did not append `{want}`"))
     };
+    let mut editor = gg_editor::Editor::new(None);
+    editor.place(extent, HEADLESS_DPI);
     let frames = gg_editor::session::frames(
-        &gg_editor::session::script(),
+        &gg_editor::session::script(&editor),
         gg_input::ActionId::new(find(verbs.actions, "ui_click")?),
         gg_input::AxisId::new(find(verbs.axes, "ui_x")?),
         gg_input::AxisId::new(find(verbs.axes, "ui_y")?),
@@ -1462,12 +1487,12 @@ fn play_mode() -> anyhow::Result<()> {
 /// set — which is what makes this the half of the gate a hash comparison cannot
 /// be: two runs that both clicked on nothing agree perfectly.
 const EDITOR_LOG: &[&str] = &[
-    "editor: play state",       // the toolbar paused a running game
+    "editor: play state",       // the title bar paused a running game
     "component=\"demo05.hub\"", // the inspector reached a *game's* own component
     "field=\"angle\"",          // by name, out of a schema this host never compiled
     "editor: play state",       // and played it again
     "editor: play state",       // and stopped it again
-    "save written",             // the save button, not the shell's exit path
+    "save written",             // `file` → `save`, not the shell's exit path
 ];
 
 /// Nudges the script performs. Pinned, because "at least one edit" would pass
@@ -1541,12 +1566,7 @@ fn editor() -> anyhow::Result<()> {
              below landed on nothing:\n{log}"
         );
 
-        let mut at = 0;
-        for line in log.lines() {
-            if at < EDITOR_LOG.len() && line.contains(EDITOR_LOG[at]) {
-                at += 1;
-            }
-        }
+        let at = reaches(&log, EDITOR_LOG);
         anyhow::ensure!(
             at == EDITOR_LOG.len(),
             "[{label}] the replayed editor session reached {at} of {} logged events — expected \
@@ -1574,7 +1594,7 @@ fn editor() -> anyhow::Result<()> {
 
         let bytes = std::fs::read(&out).map_err(|e| {
             anyhow::anyhow!(
-                "[{label}] the save button wrote nothing to {}: {e}",
+                "[{label}] `file` → `save` wrote nothing to {}: {e}",
                 out.display()
             )
         })?;
@@ -1601,6 +1621,40 @@ fn editor() -> anyhow::Result<()> {
          path (§4.7)"
     );
 
+    // §6 M15.1's residual, exercised rather than described. A session authored
+    // for a *window* is replayed by a shell that has none: the panes fill their
+    // surface, so without `--editor-extent` every click below lands on a
+    // different pane — which the second half of this asserts, because an escape
+    // hatch that would pass anyway is not one.
+    let windowed = save_dir()?.join("editor-1080p.ggrp");
+    std::fs::write(&windowed, editor_replay_at(WINDOWED_EXTENT)?.encode())?;
+    let windowed = windowed.display().to_string();
+    let extent = format!("{}x{}", WINDOWED_EXTENT.0, WINDOWED_EXTENT.1);
+    let named = play(
+        &host,
+        &game,
+        &[
+            "--replay",
+            &windowed,
+            "--editor",
+            "--editor-extent",
+            &extent,
+        ],
+        false,
+    )?;
+    anyhow::ensure!(
+        reaches(&named, EDITOR_LOG) == EDITOR_LOG.len(),
+        "§6 M15.1: a session recorded at {extent} did not replay under `--editor-extent {extent}` \
+         — the flag is the whole of how a windowed recording is reproduced headlessly:\n{named}"
+    );
+    let unnamed = play(&host, &game, &["--replay", &windowed, "--editor"], false)?;
+    anyhow::ensure!(
+        reaches(&unnamed, EDITOR_LOG) < EDITOR_LOG.len(),
+        "§6 M15.1: the same session reached every event *without* `--editor-extent`, so this leg \
+         proves nothing — either the layout stopped depending on the extent or the script stopped \
+         aiming at one:\n{unnamed}"
+    );
+
     for pair in worlds.windows(2) {
         anyhow::ensure!(
             (pair[0].1, &pair[0].2) == (pair[1].1, &pair[1].2),
@@ -1623,12 +1677,39 @@ fn editor() -> anyhow::Result<()> {
         "xtask reload: the recorded editor session replayed over demo 05 under dev and \
          instrumented and again under dev — {EDITOR_NUDGES} inspector edits inside the paused \
          window, identical hashes over {} of {total} ticks, and one {}-byte world out of the \
-         save button (§6 M15)",
+         title bar's `file` menu (§6 M15); and a {}x{} session replayed headlessly under --editor-extent \
+         and only under it (§6 M15.1)",
         runs[0].1.len(),
         worlds[0].2.len(),
+        WINDOWED_EXTENT.0,
+        WINDOWED_EXTENT.1,
     );
     Ok(())
 }
+
+/// How many of `wanted`, in order, `log` gets through. A partial count is the
+/// useful answer: it names how far a session got before its clicks stopped
+/// landing where the script meant.
+fn reaches(log: &str, wanted: &[&str]) -> usize {
+    let mut at = 0;
+    for line in log.lines() {
+        if at < wanted.len() && line.contains(wanted[at]) {
+            at += 1;
+        }
+    }
+    at
+}
+
+/// A window for the `--editor-extent` leg, and the choice is not arbitrary.
+///
+/// What the layout depends on is the *logical canvas* — the extent divided by
+/// `gg_editor::ui_scale` — not the pixel count. Every 16:9 window whose scale
+/// comes out whole reduces to the same 640×360 canvas as a headless run, so
+/// 1080p and 1440p recordings replay headlessly with no flag at all, and using
+/// one here would make this leg's negative control fail for the right reason.
+/// 1600×900 scales by 2 to an 800×450 canvas, which is a genuinely different
+/// layout — the case the flag exists for.
+const WINDOWED_EXTENT: (u32, u32) = (1600, 900);
 
 /// How many ticks the canonical hash moved on while the editor had the sim
 /// paused.

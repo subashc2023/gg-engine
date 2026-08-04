@@ -70,6 +70,12 @@ pub struct WindowDesc {
     pub visible: bool,
     /// Whether the window may be resized by the OS/user.
     pub resizable: bool,
+    /// Whether the OS draws a frame and a title bar. `false` hands all of it to
+    /// the application — including the parts nobody thinks of as decoration:
+    /// the resize border, the drag region, double-click to maximize and the
+    /// system snap gestures ([`Window::begin_drag`], [`Window::begin_resize`]
+    /// are what a client-side title bar rebuilds them out of).
+    pub decorated: bool,
 }
 
 impl WindowDesc {
@@ -84,6 +90,7 @@ impl WindowDesc {
             size,
             visible: false,
             resizable: true,
+            decorated: true,
         }
     }
 
@@ -95,6 +102,69 @@ impl WindowDesc {
             ..Self::invisible(title, size)
         }
     }
+
+    /// The same window with or without the OS frame on it (§6 M15.1 item 5).
+    ///
+    /// A caller that turns it off owes the window everything the frame was
+    /// doing: a drag region, a resize border, and a way to minimize, maximize
+    /// and close. A bool rather than a bare `undecorated()` because the host
+    /// that wants it wants it *conditionally* — the same shell draws its own
+    /// bar with the editor open and takes the OS one without.
+    #[must_use]
+    pub fn decorations(self, decorated: bool) -> Self {
+        Self { decorated, ..self }
+    }
+
+    /// [`Self::size`] cut down to what a `monitor` that size can actually show.
+    ///
+    /// The requested size is a *preference*: a shell that asks for 1080p on a
+    /// 1080p screen gets a window whose bottom edge is under the taskbar, and
+    /// the OS then clamps it somewhere less predictable than here. Nine tenths
+    /// because the frame and the taskbar are outside `inner_size` and neither is
+    /// measurable portably. Invisible windows are capped too — they are parked
+    /// off-screen, not off-*monitor*, and a swapchain larger than the display is
+    /// its own set of driver paths.
+    #[must_use]
+    pub fn capped_to(&self, monitor: Option<(u32, u32)>) -> (u32, u32) {
+        match monitor {
+            Some((w, h)) if w > 0 && h > 0 => {
+                (self.size.0.min(w * 9 / 10), self.size.1.min(h * 9 / 10))
+            }
+            _ => self.size,
+        }
+    }
+}
+
+/// What the system cursor should draw, named by meaning rather than by winit's
+/// `CursorIcon` (§2, Windowing row — as for keys, the translation is this
+/// crate's).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorShape {
+    /// The ordinary arrow.
+    #[default]
+    Arrow,
+    /// A resize border, `(x, y)` in `-1..=1` — the pair [`Window::begin_resize`]
+    /// takes, so a caller's hit test names the edge once and both the shape and
+    /// the gesture read it.
+    Resize(i8, i8),
+}
+
+/// `(x, y)` in `-1..=1` as winit names it; `None` for `(0, 0)`, which is not an
+/// edge. One mapping, because a cursor that disagreed with the drag it starts is
+/// worse than no cursor at all.
+fn resize_direction(x: i8, y: i8) -> Option<winit::window::ResizeDirection> {
+    use winit::window::ResizeDirection as R;
+    Some(match (x.signum(), y.signum()) {
+        (0, -1) => R::North,
+        (0, 1) => R::South,
+        (-1, 0) => R::West,
+        (1, 0) => R::East,
+        (-1, -1) => R::NorthWest,
+        (1, -1) => R::NorthEast,
+        (-1, 1) => R::SouthWest,
+        (1, 1) => R::SouthEast,
+        _ => return None,
+    })
 }
 
 /// A live OS window. Wraps winit's so nothing above `gg-platform` ever names
@@ -157,11 +227,13 @@ fn enforce_headless_law(desc: &WindowDesc) {
 impl Window {
     fn create(event_loop: &ActiveEventLoop, desc: &WindowDesc) -> Result<Self, PlatformError> {
         enforce_headless_law(desc); // still checked at the birth site itself
+        let size = desc.capped_to(event_loop.primary_monitor().map(|m| m.size().into()));
         let mut attrs = WindowAttributes::default()
             .with_title(&desc.title)
-            .with_inner_size(PhysicalSize::new(desc.size.0, desc.size.1))
+            .with_inner_size(PhysicalSize::new(size.0, size.1))
             .with_visible(desc.visible)
             .with_resizable(desc.resizable)
+            .with_decorations(desc.decorated)
             .with_active(desc.visible);
         // §1.5, learned the hard way — twice: Win32 SW_MINIMIZE/SW_RESTORE
         // *show* a window even created hidden, and on X11 (incl. WSLg's
@@ -295,9 +367,100 @@ impl Window {
         self.inner.set_minimized(minimized);
     }
 
+    /// Maximize or restore.
+    pub fn set_maximized(&self, maximized: bool) {
+        if self.parked {
+            return; // §1.5: an invisible window is never given the screen
+        }
+        self.inner.set_maximized(maximized);
+    }
+
+    /// Whether the OS considers the window maximized.
+    pub fn is_maximized(&self) -> bool {
+        self.inner.is_maximized()
+    }
+
+    /// Hand the window to the system's own move loop — what pressing a title
+    /// bar does (§6 M15.1 item 5).
+    ///
+    /// Through the OS rather than by repositioning ourselves, because the move
+    /// loop is where snapping, monitor edges and multi-DPI transitions live and
+    /// none of that is worth reimplementing badly. The cost is that the OS also
+    /// **eats the button release**: a caller that does not synthesize one is a
+    /// caller whose UI believes the mouse is still down. `gg-runtime` does it at
+    /// the call site.
+    ///
+    /// Best effort — Wayland refuses without a serial, and a refusal is a window
+    /// that did not move rather than a broken run.
+    pub fn begin_drag(&self) {
+        if self.parked {
+            return; // §1.5: dragging a parked window is dragging it into view
+        }
+        let _ = self.inner.drag_window();
+    }
+
+    /// The same for a border: `(x, y)` in `-1..=1` names which edge, so
+    /// `(-1, 0)` is the left one and `(1, 1)` the bottom-right corner. `(0, 0)`
+    /// is not an edge and does nothing.
+    ///
+    /// The direction is a pair rather than an enum because the caller's hit test
+    /// already *is* one — `gg-editor` compares the pointer against the surface's
+    /// four sides — and translating winit's naming is this crate's job, exactly
+    /// as it is for keys.
+    pub fn begin_resize(&self, x: i8, y: i8) {
+        if self.parked {
+            return; // §1.5, as `begin_drag`
+        }
+        let Some(direction) = resize_direction(x, y) else {
+            return;
+        };
+        let _ = self.inner.drag_resize_window(direction);
+    }
+
+    /// What the system cursor draws over `shape`.
+    ///
+    /// The one feedback an undecorated window's resize border has: it is not
+    /// drawn (§6 M15.1 item 5 — a border you can see is chrome), so without the
+    /// arrows nothing tells the operator the three logical units at the edge are
+    /// a grip. Cheap but not free, so a caller states it on a change.
+    pub fn set_cursor_shape(&self, shape: CursorShape) {
+        let icon = match shape {
+            CursorShape::Arrow => winit::window::CursorIcon::Default,
+            CursorShape::Resize(x, y) => match resize_direction(x, y) {
+                Some(direction) => direction.into(),
+                None => winit::window::CursorIcon::Default,
+            },
+        };
+        self.inner.set_cursor(icon);
+    }
+
     /// Schedule a redraw ([`Event::RedrawRequested`]).
     pub fn request_redraw(&self) {
         self.inner.request_redraw();
+    }
+
+    /// Put the system cursor at a surface-relative position, in physical
+    /// pixels.
+    ///
+    /// Best effort: Wayland refuses outright and every platform refuses while
+    /// the window is not focused. Used at exactly one moment — handing the
+    /// pointer back after a grab (§6 M15.1) — where the failure is that the
+    /// arrow reappears where the OS parked it rather than where the operator
+    /// left it, which is the behaviour of every build before this one.
+    pub fn set_cursor_at(&self, x: f32, y: f32) {
+        let _ = self
+            .inner
+            .set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
+    }
+
+    /// The monitor's scale factor, `1.0` at 96 DPI.
+    ///
+    /// What the desktop already knows about how big a row of text should be,
+    /// and the only honest input to a UI scale (§6 M15.1): a resolution says
+    /// how many pixels there are and says nothing about how far away they are.
+    /// Cheap — winit keeps it, so a caller may ask per frame.
+    pub fn scale_factor(&self) -> f32 {
+        self.inner.scale_factor() as f32
     }
 
     /// Hold the pointer and hide it — what mouse-look needs to be usable.
@@ -386,6 +549,34 @@ pub enum Event {
         /// Vertical delta, down positive.
         dy: f32,
     },
+    /// Where the *cursor* is, in physical pixels from the surface's top-left —
+    /// the other half of the pair [`MouseMotion`](Self::MouseMotion) is one of
+    /// (§6 M15.1). A UI wants this and a camera wants that, and until M15.1
+    /// there was only the camera's.
+    ///
+    /// A position rather than a delta because the OS owns where a free cursor
+    /// is: acceleration, DPI and the desktop's own clamping all happen before
+    /// the number arrives, and differencing positions is the only way to agree
+    /// with the arrow the operator can see. [`feed`] therefore does **not**
+    /// route this — turning a physical position into a surface-space delta
+    /// needs the extent and the pointer the consumer already derived, neither
+    /// of which is this layer's.
+    CursorMoved {
+        /// Distance from the left edge of the surface.
+        x: f32,
+        /// Distance from the top edge of the surface.
+        y: f32,
+    },
+    /// Wheel travel, in notches, positive away from the operator.
+    ///
+    /// A count of detents and not a distance: `gg_input` binds the two
+    /// directions as edges rather than as an axis, for the reason
+    /// [`gg_input::Wheel`] gives. A trackpad's pixels are divided into notches
+    /// here, because this is the layer that knows which unit arrived.
+    MouseWheel {
+        /// Notches this event carried; fractional from a pixel-precise device.
+        notches: f32,
+    },
     /// The user asked the window to close.
     CloseRequested,
     /// The loop is over and the window is about to be destroyed — the last
@@ -402,6 +593,12 @@ pub enum Event {
     /// it after [`run`] returns is too late: the window is already gone.
     Exiting,
 }
+
+/// What one detent is worth to a device that reports pixels: the desktop
+/// convention of three lines of text, a line being `gg_ui::font`'s cell at the
+/// usual UI scale — which this crate may not name, sitting below `gg-ui`, and
+/// so states as a number.
+const PIXELS_PER_NOTCH: f32 = 48.0;
 
 /// Physical key and mouse-button identity live in `gg-input` (§4.7), one layer
 /// *below* this crate: the sim and replay path binds against them and must stay
@@ -420,11 +617,13 @@ pub use gg_input::{Key, MouseButton};
 ///
 /// Keys the *app* owns — Escape, in the shell — must be handled before this is
 /// called: quitting is not simulated state and must not reach the action map.
+/// [`Event::CursorMoved`] is unclaimed for its own documented reason.
 pub fn feed(input: &mut gg_input::Input, event: &Event) -> bool {
     match *event {
         Event::Key { key, pressed, .. } => input.key(key, pressed),
         Event::MouseButton { button, pressed } => input.mouse_button(button, pressed),
         Event::MouseMotion { dx, dy } => input.motion(dx, dy),
+        Event::MouseWheel { notches } => input.wheel(notches),
         _ => return false,
     }
     true
@@ -461,6 +660,7 @@ mod feed_tests {
                 pressed: true,
             },
             Event::MouseMotion { dx: 1.0, dy: -2.0 },
+            Event::MouseWheel { notches: 1.0 },
         ] {
             assert!(feed(&mut input, &event), "unclaimed: {event:?}");
         }
@@ -470,6 +670,11 @@ mod feed_tests {
             Event::Frame,
             Event::CloseRequested,
             Event::Exiting,
+            // Deliberately unclaimed: a cursor position is not a delta, and
+            // what it becomes needs an extent this layer does not have (§6
+            // M15.1). A `feed` that guessed would put the arrow in the wrong
+            // place at every window size but one.
+            Event::CursorMoved { x: 4.0, y: 8.0 },
         ] {
             assert!(!feed(&mut input, &event), "wrongly claimed: {event:?}");
         }
@@ -677,6 +882,24 @@ impl ApplicationHandler for App<'_> {
                 },
                 None => return,
             },
+            WindowEvent::CursorMoved { position, .. } => Event::CursorMoved {
+                x: position.x as f32,
+                y: position.y as f32,
+            },
+            // Both units become notches here, which is the layer that knows
+            // which one arrived: a wheel reports lines and a trackpad reports
+            // pixels, and `gg_input::Wheel` counts detents. The divisor is a
+            // line of text at the fallback cell's height — nothing above has a
+            // font to ask, and the alternative is a `dy` whose meaning depends
+            // on the pointing device.
+            WindowEvent::MouseWheel { delta, .. } => Event::MouseWheel {
+                notches: match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(at) => {
+                        at.y as f32 / PIXELS_PER_NOTCH
+                    }
+                },
+            },
             // §1.5: an invisible window that moved is a window whose parking
             // the OS just undid — re-park it. Not reported upward: nothing
             // above gg-platform has any business knowing where a window that
@@ -692,9 +915,10 @@ impl ApplicationHandler for App<'_> {
         self.dispatch(event_loop, event);
     }
 
-    /// Raw device motion rather than `WindowEvent::CursorMoved`: mouse look
-    /// wants a delta, and a cursor delta stops arriving the moment the pointer
-    /// reaches the edge of the screen.
+    /// Raw device motion, which is a different thing from the cursor position
+    /// `window_event` reports and not a substitute for it: mouse look wants a
+    /// delta that keeps arriving once the pointer is against the edge of the
+    /// screen, and a UI wants the arrow the operator can see.
     fn device_event(
         &mut self,
         event_loop: &ActiveEventLoop,

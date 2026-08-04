@@ -37,7 +37,9 @@ mod upload;
 pub use bindless::{StorageImageIndex, TextureIndex};
 pub use device::{Candidate, DeviceReport};
 pub use frame::FRAMES_IN_FLIGHT;
-pub use graph::{Access, ColorAttachment, DepthAttachment, Pass, PassKind, Target, Transition};
+pub use graph::{
+    Access, ColorAttachment, DepthAttachment, Pass, PassKind, Target, Transition, Viewport,
+};
 use instance::validation_message_count;
 pub use offscreen::OffscreenRhi;
 pub use pipeline::{Blend, ColorTarget, DepthMode, PipelineDesc, PipelineHandle};

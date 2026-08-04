@@ -32,12 +32,27 @@ use gg_ui::boundary::verb;
 const DEFAULTS: &[(&str, &str, bool)] = &[
     (verb::CLICK, "Mouse1", true),
     (verb::FOCUS, "Tab", true),
-    (verb::X, "MouseX", false),
-    (verb::Y, "MouseY", false),
+    // `PointerX`, not `MouseX`: the editor wants the arrow the operator can
+    // see, and a camera wants raw device deltas. They were one source through
+    // M15, so every editor click also aimed the game (§6 M15.1). Note what the
+    // split does *not* fix: raw deltas arrive whatever the pointer is over, so
+    // a pointer crossing the viewport still swung the camera until the host
+    // stopped feeding the game at all while the editor holds the mouse.
+    (verb::X, "PointerX", false),
+    (verb::Y, "PointerY", false),
+    // Actions and not axes, which is `gg_input::Wheel`'s decision rather than
+    // this table's: `MAX_AXES` is 8, and a game declaring six axes of its own
+    // would otherwise have no slot left for the editor's pointer — losing the
+    // cursor because the wheel wanted a seat.
+    (verb::SCROLL_UP, "WheelUp", true),
+    (verb::SCROLL_DOWN, "WheelDown", true),
 ];
 
 /// The verb lists a shell should bind against with the editor open, and the
 /// bindings text to append to the game's own.
+///
+/// Six now rather than M15.1's four; a game that declares some of them keeps
+/// its own, as it always did.
 ///
 /// The lists are leaked because [`Verbs`] is `&'static` by construction — the
 /// dylib's own arrays are, and there must be one type for both. It is a few
@@ -86,13 +101,26 @@ mod tests {
             axes: &["move_right", "aim_x"],
         };
         let (verbs, bindings) = open(&game);
-        assert_eq!(verbs.actions, &["freeze", verb::CLICK, verb::FOCUS]);
+        assert_eq!(
+            verbs.actions,
+            &[
+                "freeze",
+                verb::CLICK,
+                verb::FOCUS,
+                verb::SCROLL_UP,
+                verb::SCROLL_DOWN
+            ]
+        );
         assert_eq!(verbs.axes, &["move_right", "aim_x", verb::X, verb::Y]);
         // Appended, so every id the game already had still means what it did —
         // which is what keeps a plain replay valid (§4.7).
         assert_eq!(verbs.actions[0], game.actions[0]);
         assert!(bindings.contains("ui_click = [\"Mouse1\"]"));
-        assert!(bindings.contains("ui_y = [\"MouseY\"]"));
+        assert!(bindings.contains("ui_scroll_up = [\"WheelUp\"]"));
+        // Cursor motion, not look motion — the two sources exist so this line
+        // and a camera's `aim_y` are different numbers (§6 M15.1).
+        assert!(bindings.contains("ui_y = [\"PointerY\"]"));
+        assert!(!bindings.contains("MouseY"));
         assert!(
             gg_ui::boundary::binding(&verbs).is_some(),
             "all four resolve"
@@ -104,7 +132,7 @@ mod tests {
     #[test]
     fn a_game_that_declares_them_is_left_alone() {
         let game = Verbs {
-            actions: &[verb::CLICK, verb::FOCUS],
+            actions: &[verb::CLICK, verb::FOCUS, verb::SCROLL_UP, verb::SCROLL_DOWN],
             axes: &[verb::X, verb::Y],
         };
         let (verbs, bindings) = open(&game);
@@ -122,7 +150,10 @@ mod tests {
             axes: &["aim_x"],
         };
         let (verbs, bindings) = open(&game);
-        assert_eq!(verbs.actions, &[verb::CLICK, verb::FOCUS]);
+        assert_eq!(
+            verbs.actions,
+            &[verb::CLICK, verb::FOCUS, verb::SCROLL_UP, verb::SCROLL_DOWN]
+        );
         assert_eq!(verbs.axes, &["aim_x", verb::X, verb::Y]);
         assert!(!bindings.contains("ui_click"), "already the game's");
         assert!(bindings.contains("ui_focus"));

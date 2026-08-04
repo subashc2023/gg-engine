@@ -183,25 +183,112 @@ impl MouseButton {
     }
 }
 
-/// A pointer axis. The two the mouse produces, kept separate from buttons
-/// because they are continuous and get quantized on the way into the sim
-/// ([`crate::AXIS_SCALE`]).
+/// A wheel notch, by direction.
+///
+/// **An edge and not an axis**, which is a decision worth its sentence. The
+/// obvious shape is a third motion pair beside [`MouseAxis`], and it does not
+/// fit: `MAX_AXES` is 8, the replay format writes that number into every file's
+/// header, and a game declaring six axes of its own would have no slot left for
+/// the editor's — so an editor opened over it would lose its pointer entirely
+/// rather than lose its wheel. A notch is discrete anyway, and X11 has numbered
+/// the two of them among its buttons since before this engine existed.
+///
+/// What it costs is magnitude: a tick either notched or it did not, so a flick
+/// of five notches inside one tick scrolls once. At 60 Hz that ceiling is above
+/// what a hand does. P2: a pixel-precise trackpad wants the axis, and wants
+/// `MAX_AXES` raised first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Wheel {
+    /// Away from the operator — content moves *up* the screen by convention.
+    Up,
+    /// Toward the operator.
+    Down,
+}
+
+impl Wheel {
+    /// Both, in a fixed order.
+    pub const ALL: [Wheel; 2] = [Wheel::Up, Wheel::Down];
+
+    /// Parse the config spelling.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "WheelUp" => Some(Wheel::Up),
+            "WheelDown" => Some(Wheel::Down),
+            _ => None,
+        }
+    }
+
+    /// The config spelling.
+    pub fn name(self) -> &'static str {
+        match self {
+            Wheel::Up => "WheelUp",
+            Wheel::Down => "WheelDown",
+        }
+    }
+}
+
+/// A pointer axis: continuous, so it is kept apart from buttons and quantized
+/// on the way into the sim ([`crate::AXIS_SCALE`]).
+///
+/// **Four, not two, because one mouse does two jobs.** [`X`](Self::X) and
+/// [`Y`](Self::Y) are raw *device* deltas — what a fly camera wants, what keeps
+/// arriving when the cursor is against the edge of the screen, and what only a
+/// host holding the pointer can deliver sensibly. [`PointerX`](Self::PointerX)
+/// and [`PointerY`](Self::PointerY) are *cursor* motion: where the operator's
+/// visible arrow went, in the surface's own units. A UI binds the second pair
+/// and a camera the first, and a build that binds one verb to each gets both
+/// behaviours from one mouse (§6 M15.1).
+///
+/// They were one pair through M15 and the fusion was the bug: an editor's
+/// `ui_x` and a game's `aim_x` were then literally the same number, so a
+/// pointer crossing the viewport swung the camera and the cursor had to be
+/// captured before anything could be clicked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MouseAxis {
-    /// Horizontal motion, right positive.
+    /// Raw device motion, horizontal, right positive.
     X,
-    /// Vertical motion, down positive.
+    /// Raw device motion, vertical, down positive.
     Y,
+    /// Cursor motion, horizontal, right positive.
+    PointerX,
+    /// Cursor motion, vertical, down positive.
+    PointerY,
 }
 
 impl MouseAxis {
-    /// Parse the `MouseX` / `MouseY` config spelling.
+    /// Every axis, in the order [`crate::Input`] accumulates them.
+    pub const ALL: [MouseAxis; 4] = [
+        MouseAxis::X,
+        MouseAxis::Y,
+        MouseAxis::PointerX,
+        MouseAxis::PointerY,
+    ];
+
+    /// Parse the config spelling.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "MouseX" => Some(MouseAxis::X),
             "MouseY" => Some(MouseAxis::Y),
+            "PointerX" => Some(MouseAxis::PointerX),
+            "PointerY" => Some(MouseAxis::PointerY),
             _ => None,
         }
+    }
+
+    /// The config spelling, for an error message that has to name it back.
+    pub fn name(self) -> &'static str {
+        match self {
+            MouseAxis::X => "MouseX",
+            MouseAxis::Y => "MouseY",
+            MouseAxis::PointerX => "PointerX",
+            MouseAxis::PointerY => "PointerY",
+        }
+    }
+
+    /// Whether this axis is cursor motion rather than raw device motion — the
+    /// question a host asks to decide which accumulator an event feeds.
+    pub fn is_cursor(self) -> bool {
+        matches!(self, MouseAxis::PointerX | MouseAxis::PointerY)
     }
 }
 
@@ -218,6 +305,29 @@ mod tests {
         }
         assert_eq!(Key::from_name("w"), None, "spellings are case-sensitive");
         assert_eq!(Key::from_name("KeyW"), None, "winit's spelling is not ours");
+    }
+
+    /// The two pairs are distinct sources and spell differently: a config that
+    /// says `MouseX` must not silently get cursor motion, which is the whole of
+    /// what §6 M15.1 separated.
+    #[test]
+    fn every_pointer_axis_round_trips_and_knows_which_pair_it_is_in() {
+        for axis in MouseAxis::ALL {
+            assert_eq!(MouseAxis::from_name(axis.name()), Some(axis), "{axis:?}");
+        }
+        assert_eq!(MouseAxis::from_name("Pointer"), None);
+        assert_eq!(MouseAxis::from_name("mousex"), None, "case-sensitive");
+        assert!(!MouseAxis::X.is_cursor() && !MouseAxis::Y.is_cursor());
+        assert!(MouseAxis::PointerX.is_cursor() && MouseAxis::PointerY.is_cursor());
+    }
+
+    #[test]
+    fn every_wheel_direction_round_trips_through_its_config_spelling() {
+        for wheel in Wheel::ALL {
+            assert_eq!(Wheel::from_name(wheel.name()), Some(wheel), "{wheel:?}");
+        }
+        assert_eq!(Wheel::from_name("Wheel"), None);
+        assert_eq!(Wheel::from_name("wheelup"), None, "case-sensitive");
     }
 
     #[test]

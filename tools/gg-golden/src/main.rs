@@ -1011,6 +1011,11 @@ const UI_CLEAR: [f32; 4] = [0.10, 0.13, 0.17, 1.0];
 /// of the panels. 1280×720 is exactly ×2.
 const EDITOR_EXTENT: (u32, u32) = (1280, 720);
 
+/// The monitor this scene is rendered on, which is none: a golden render has no
+/// window, so it reports what every headless host reports and the reference is
+/// therefore independent of whatever desk blessed it (§6 M15.1).
+const GOLDEN_DPI: f32 = 1.0;
+
 /// Render a UI-only frame: no world, one atlas, one draw.
 fn render_ui(atlas: &gg_render::ui::Coverage<'_>, vertices: &[gg_render::ui::UiVertex]) -> Render {
     render_ui_at(UI_EXTENT, atlas, vertices)
@@ -1070,7 +1075,11 @@ fn render_editor() -> Render {
     // Three archetypes, so the tree has variety and the mask column has
     // something to say. Which one lands on which row is archetype order and
     // therefore the ECS's business, not this scene's (`gg_editor::scan`).
-    for (spinners, models) in [(3u32, false), (24, true), (2, false)] {
+    //
+    // More than the tree pane holds, which is deliberate since §6 M15.1: the
+    // scrollbar is part of the editor's face now, and a reference world that
+    // fitted would gate every pane except the one that scrolls.
+    for (spinners, models) in [(3u32, false), (40, true), (2, false)] {
         for i in 0..spinners {
             let entity = world.spawn();
             world.insert(
@@ -1095,19 +1104,27 @@ fn render_editor() -> Render {
         }
     }
 
-    // Select an entity, pick a field lane, switch the dock, and leave the
-    // pointer hovering `+` — one frame that has every panel in a live state.
+    // Select an entity, pick a field lane, bring up the perf pane, and leave
+    // the pointer hovering `+` — one frame that has every pane in a live state.
+    //
+    // Aimed off a *placed* editor, because since §6 M15.1 the layout is the
+    // operator's and a pane's rectangle is not a constant to look up.
+    let mut editor = gg_editor::Editor::new(None);
+    editor.place(EDITOR_EXTENT, GOLDEN_DPI);
+    let at = |what: &'static str, aimed: Option<(f32, f32)>| {
+        aimed.ok_or_else(|| anyhow::anyhow!("the editor's default layout has no {what}"))
+    };
     let acts = [
-        Act::To(aim::tree_row(1)),
+        Act::To(at("tree", aim::tree_row(&editor, 1))?),
         Act::Settle(3),
         Act::Click,
-        Act::To(aim::lane(1, 0)),
+        Act::To(at("inspector", aim::lane(&editor, 1, 0))?),
         Act::Settle(3),
         Act::Click,
-        Act::To(aim::tab(2)),
+        Act::To(at("perf tab", aim::tab(&editor, gg_editor::Pane::Perf))?),
         Act::Settle(3),
         Act::Click,
-        Act::To(aim::plus()),
+        Act::To(at("nudge bar", aim::plus(&editor))?),
         Act::Settle(4),
     ];
     let (click, x, y) = (ActionId::new(0), AxisId::new(0), AxisId::new(1));
@@ -1123,7 +1140,6 @@ fn render_editor() -> Render {
             })
             .collect();
 
-    let mut editor = gg_editor::Editor::new(None);
     for (tick, frame) in frames(&acts, click, x, y).iter().enumerate() {
         editor.tick(
             &mut world,
@@ -1131,9 +1147,11 @@ fn render_editor() -> Render {
                 motion: (frame.axes[x.index()], frame.axes[y.index()]),
                 primary: frame.pressed(click),
                 advance_focus: false,
+                scroll: 0,
             },
             &gg_editor::Frame {
                 extent: EDITOR_EXTENT,
+                dpi: GOLDEN_DPI,
                 tick: 41_337 + tick as u64,
                 playing: false,
                 passes: &passes,
@@ -1144,10 +1162,20 @@ fn render_editor() -> Render {
                     image_bytes: 132 << 20,
                 },
                 save_path: "target/editor/demo-05.ggsv",
+                title: "gg — demo_05_many",
+                // No window at all here, so not maximized: the scene gates the
+                // maximize glyph and the restore one is the windowed state.
+                maximized: false,
+                // The one host with no OS cursor to borrow, which is what
+                // `draw_cursor` is for (§6 M15.1).
+                draw_cursor: true,
             },
         );
     }
-    render_ui_at(EDITOR_EXTENT, &gg_ui::atlas::fallback(), editor.vertices())
+    // The editor's own atlas and not the fallback band: its panels are set in
+    // the rented face, and against `atlas::fallback()` every label here would
+    // sample blank texels and the scene would gate a set of empty plates.
+    render_ui_at(EDITOR_EXTENT, &editor.coverage(), editor.vertices())
 }
 
 /// A component no engine crate declares, so the inspector has to reach it
@@ -1240,7 +1268,7 @@ fn render_ui_text() -> Render {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
-        .map(|root| root.join("tests/fonts/FiraMono-Regular.ttf"));
+        .map(|root| root.join("assets/fonts/FiraMono-Regular.ttf"));
     let path = path.ok_or_else(|| anyhow::anyhow!("tools/gg-golden is two below the root"))?;
     let mut fonts = gg_ui::Fonts::default();
     let face = fonts.load(std::fs::read(&path)?, 0)?;

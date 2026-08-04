@@ -475,6 +475,14 @@ impl GameLib {
         &self.path
     }
 
+    /// What to call this game: the artifact's file stem, which is the only name
+    /// a host has for it — a dylib declares components and systems and never a
+    /// title. Lossy on a non-UTF-8 path rather than absent, the caller being a
+    /// window caption or a file beside it (§6 M15.1).
+    pub fn name(&self) -> std::borrow::Cow<'_, str> {
+        self.path.file_stem().unwrap_or_default().to_string_lossy()
+    }
+
     /// Size of the artifact, which is what retiring it costs (§4.2.2).
     pub fn bytes(&self) -> u64 {
         self.bytes
