@@ -52,6 +52,12 @@ pub mod rejuvenate;
 #[cfg(feature = "hot-reload")]
 pub mod watch;
 
+/// The path [`GameLib::absent`] reports, and what the window is titled before a
+/// project is picked. A path-shaped name for the same reason `<statically
+/// linked>` is one: `GameLib::path` answers for every variant, and the angle
+/// brackets are what say this one names no file.
+pub const NO_PROJECT: &str = "<no project>";
+
 /// Leaked dylib bytes a session tolerates before rejuvenation (§4.2.2).
 ///
 /// A dev-profile game dylib is a few megabytes, so this is hundreds of reloads —
@@ -405,6 +411,65 @@ impl GameLib {
         unsafe { Self::adopt(None, entries, abi, host_api, path, 0, 0) }
     }
 
+    /// No game at all — what a host holds before a project has been picked (§6
+    /// M15.1 item 4).
+    ///
+    /// The third way the five tables arrive, and the only one where they are
+    /// empty: nothing was mapped, nothing declares a component, a verb or a
+    /// system, and the host's own §4.5 protocol types are the whole registry. A
+    /// variant here rather than an `Option<GameLib>` in the shell because every
+    /// property a host reads off a game has a true answer with no game in it, and
+    /// §3 caps the shell at wiring — a launcher's empty world is the loader's
+    /// concept, not a branch in every method that touches one.
+    ///
+    /// The ABI it reports is this build's own. It is not a claim that some game
+    /// agreed with the boundary; it is the absence of a game to disagree, and
+    /// [`verify`] has nothing to do because nothing was loaded.
+    #[must_use]
+    pub fn absent() -> Self {
+        Self {
+            _lib: None,
+            abi: AbiInfo {
+                host_api_version: gg_abi::HOST_API_VERSION,
+                fingerprint: gg_abi::BOUNDARY_FINGERPRINT,
+            },
+            // Null and zero-length rather than a static empty slice: `len` is what
+            // every reader walks, and a null it never dereferences is the honest
+            // spelling of "there are none".
+            components: ComponentsTable {
+                entries: std::ptr::null(),
+                len: 0,
+                reserved: 0,
+            },
+            verbs: VerbsTable {
+                actions: std::ptr::null(),
+                axes: std::ptr::null(),
+                action_len: 0,
+                axis_len: 0,
+            },
+            systems: SystemsTable {
+                entries: std::ptr::null(),
+                len: 0,
+                reserved: 0,
+            },
+            // Named rather than empty: it is what the window is titled and what a
+            // layout file is keyed by, and an empty stem would make both blank.
+            path: PathBuf::from(NO_PROJECT),
+            // Nothing mapped, so nothing to retire and nothing to hash — the same
+            // two zeros [`linked`](Self::linked) reports, for the same reason.
+            bytes: 0,
+            code_hash: 0,
+        }
+    }
+
+    /// Whether this is [`absent`](Self::absent) — no game, rather than a game
+    /// that declares nothing. A dylib *may* declare no systems; a host asking
+    /// "is there a project" must not have to guess from an empty table.
+    #[must_use]
+    pub fn is_absent(&self) -> bool {
+        self.path == Path::new(NO_PROJECT)
+    }
+
     /// Hand over the host table and read the three tables — the half of the load
     /// sequence that is the same whether the symbols came from a library or from
     /// the linker.
@@ -707,6 +772,34 @@ mod tests {
             budget.exhausted(),
             "a dylib refused after loading is still a leaked dylib"
         );
+    }
+
+    #[test]
+    fn no_project_declares_nothing_and_says_which_kind_of_nothing_it_is() {
+        // The distinction the launcher rests on (§6 M15.1 item 4): a game that
+        // declares no systems and *no game at all* have identical tables, so a
+        // host reading emptiness cannot tell them apart and must be told.
+        let none = GameLib::absent();
+        assert!(none.is_absent());
+        assert!(
+            !mapped(4_000).is_absent(),
+            "a real dylib is not the absence"
+        );
+        assert_eq!(none.components().len, 0);
+        assert_eq!(none.verbs().action_len, 0);
+        assert_eq!(none.verbs().axis_len, 0);
+        assert_eq!(none.systems().len, 0);
+        // Nothing mapped: nothing to retire, and no artifact to name a replay
+        // segment by — the two zeros `linked` reports for the same reason.
+        assert_eq!(none.bytes(), 0);
+        assert_eq!(none.code_hash(), 0);
+        assert_eq!(none.refuse("nothing to refuse").leaked_bytes(), 0);
+        // The window's caption before a project is picked, so it is a name and
+        // not a blank strip.
+        assert_eq!(none.name(), NO_PROJECT);
+        // It passes the boundary check it was never subject to: nothing loaded,
+        // so there is nothing that could disagree with this build.
+        assert!(verify(none.abi(), Path::new(NO_PROJECT)).is_ok());
     }
 
     #[test]

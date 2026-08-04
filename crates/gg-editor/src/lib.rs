@@ -66,6 +66,7 @@ mod marker;
 pub mod panels;
 pub mod persist;
 mod pick;
+pub mod project;
 pub mod scan;
 pub mod session;
 pub mod value;
@@ -104,6 +105,13 @@ pub struct Commands {
     pub stop: bool,
     /// Write a save where the operator named (§6 M14).
     pub save: bool,
+    /// Open the `n`th of [`Frame::projects`] (§6 M15.1 item 4) — which ends this
+    /// session and starts one over that game, because a shell is built around
+    /// the dylib it was pointed at.
+    ///
+    /// An index and not a path, so [`Commands`] stays `Copy` and so the editor
+    /// never holds a path it did not read from the host in the first place.
+    pub open: Option<usize>,
 }
 
 /// What the transport is showing, and what a tick does (§6 M15.2).
@@ -227,6 +235,17 @@ pub struct Frame<'a> {
     /// A host with no window (a headless replay, a golden render) says `false`
     /// and gets the maximize glyph, which is the truth there.
     pub maximized: bool,
+    /// The project this session is open over, or `None` for a launcher that has
+    /// not been given one (§6 M15.1 item 4).
+    ///
+    /// `None` is a real mode and not an error path: the panels are all there,
+    /// the tree is empty because the world is, and the game pane shows
+    /// [`Frame::projects`] instead of a hole with nothing behind it.
+    pub project: Option<&'a str>,
+    /// What could be opened, in the order the picker lists them. Empty for every
+    /// host that is not a launcher — including a session already over a game,
+    /// which is why the picker is not a way to switch projects mid-session.
+    pub projects: &'a [project::Project],
     /// Draw the pointer.
     ///
     /// `false` whenever something else is already showing one — a windowed
@@ -665,6 +684,10 @@ pub struct Editor {
     /// every other target in this editor a handle's position is a property of
     /// the world and the camera rather than of the layout.
     arms: [Option<(f32, f32)>; 3],
+    /// [`Frame::project`] was `None` this tick — the launcher's state (§6 M15.1
+    /// item 4). Held because [`Editor::over_panels`] is asked between ticks, by a
+    /// host that has the answer and no frame in its hand.
+    launching: bool,
     /// Saves issued this session — the status line, and what a gate greps for.
     saves: u32,
     /// Edits applied this session, for the same reason.
@@ -727,6 +750,7 @@ impl Editor {
             history: history::History::default(),
             play_was: Play::default(),
             arms: [None; 3],
+            launching: false,
             saves: 0,
             edits: 0,
             commands: Commands::default(),
@@ -834,6 +858,7 @@ impl Editor {
         // `take_window_command` is the reset.
         self.wheel = tick.scroll;
         self.maximized = frame.maximized;
+        self.launching = frame.project.is_none();
         // A step recorded on one side of the transport cannot be restored on the
         // other: it would put a play-mode world back into a stopped scene, or a
         // stopped one on top of a running sim (§6 M15.4 item 4).
@@ -1212,7 +1237,11 @@ impl Editor {
         let (x, y) = self.router.pointer().position();
         // A dropped-down menu and a resize grip both sit *over* the game when
         // the game is under them, and a press on either is the editor's.
-        if self.menus.contains(x, y) || self.resize_edge().is_some() {
+        // And the picker, which *is* panels: with no project the game pane holds
+        // a list of them (§6 M15.1 item 4), so a press there is the editor's and
+        // handing the pointer to a game that does not exist would leave the
+        // launcher unclickable for the rest of the session.
+        if self.menus.contains(x, y) || self.resize_edge().is_some() || self.launching {
             return true;
         }
         !self
@@ -1692,6 +1721,8 @@ mod tests {
             memory: gg_rhi::MemoryUse::default(),
             save_path: "target/editor/test.ggsv",
             title: "gg — test",
+            project: Some("test"),
+            projects: &[],
             maximized: false,
             draw_cursor: false,
         }

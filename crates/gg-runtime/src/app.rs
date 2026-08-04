@@ -138,8 +138,15 @@ impl App {
         replay: Option<Box<Replay>>,
     ) -> anyhow::Result<Self> {
         let (game, _) = (args.game.as_path(), staging);
+        // No game is the launcher (§6 M15.1 item 4), and the absence is the
+        // loader's own variant rather than an `Option` here: everything below
+        // reads a `GameLib` and every one of those reads has a true answer with
+        // nothing loaded.
+        let none = game.as_os_str().is_empty();
         #[cfg(feature = "hot-reload")]
-        let (watch, lib) = {
+        let (watch, lib) = if none {
+            (gg_core::reload::watch::Watch::absent(), GameLib::absent())
+        } else {
             let mut watch = gg_core::reload::watch::Watch::new(game, staging)?;
             // SAFETY: `game` is the artifact the operator named — the only
             // provenance any host can establish (§4.2.2) — and `host_api()` is
@@ -148,10 +155,13 @@ impl App {
             let lib = unsafe { watch.block_until_ready(host_api()) }?.lib;
             (watch, lib)
         };
+        #[cfg(not(feature = "hot-reload"))]
         // SAFETY: `game` is the artifact the operator named, which is the only
         // provenance any host can establish (§4.2.2); `host_api()` is `&'static`.
-        #[cfg(not(feature = "hot-reload"))]
-        let lib = unsafe { GameLib::load(game, host_api())? };
+        let lib = match none {
+            true => GameLib::absent(),
+            false => unsafe { GameLib::load(game, host_api())? },
+        };
 
         let mut world = World::new();
         let declared = adopt(&mut world, &lib)?;
@@ -522,6 +532,7 @@ impl App {
         // Before the borrow below, which takes the editor mutably while this
         // reads the dylib beside it.
         let title = self.title();
+        let project = (!self.lib.is_absent()).then(|| self.lib.name());
         let Some(editing) = self.editor.as_mut() else {
             return Ok(None);
         };
@@ -545,6 +556,8 @@ impl App {
                 memory: self.gpu.as_ref().map(Renderer::memory).unwrap_or_default(),
                 save_path: &path,
                 title: &title,
+                project: project.as_deref(),
+                projects: &editing.projects,
                 maximized: editing.maximized,
                 // Never: a windowed session has the system cursor on the same
                 // pixel, and a headless one has no frame to draw into (§6
@@ -574,6 +587,7 @@ impl App {
             editing.stash.enter(tick, &self.world);
         }
         editing.step = commands.step;
+        editing.open = commands.open.or(editing.open);
         if commands.stop {
             // Paused rather than left advancing: `Stopped` is where edits stick,
             // and a stop that kept running would discard the next one too.
@@ -584,6 +598,14 @@ impl App {
             editing.stash.stop(tick, &mut self.world)?;
         }
         Ok(commands.save.then(|| editing.save.clone()))
+    }
+
+    /// The project a click in the picker asked for (§6 M15.1 item 4) — read
+    /// after the loop, because the session that answers it is the next one.
+    #[cfg(feature = "editor")]
+    pub fn opening(&self) -> Option<&gg_editor::project::Project> {
+        let editing = self.editor.as_ref()?;
+        editing.projects.get(editing.open?)
     }
 
     /// What the title bar asked of the window (§6 M15.1 item 5). Applied by the
@@ -767,7 +789,9 @@ struct Editing {
     stash: Stash,
     /// False until the first tick has captured. The editor opens *playing* for
     /// `paused`'s reason, one level further out — and a capture needs a world,
-    /// which exists at the first tick and not at construction.
+    /// which exists at the *end* of the first tick and not at construction.
+    /// Read by [`advance`](Editing::advance) too: the tick that fills the stash
+    /// is the one tick that must run without it.
     opened: bool,
     /// Advance one tick, then pause again. Consumed by [`Editing::advance`].
     step: bool,
@@ -783,6 +807,11 @@ struct Editing {
     /// Stated by the windowed loop, so a headless session leaves it false and
     /// draws the maximize glyph — which is the truth with no window (§1.5).
     maximized: bool,
+    /// What the picker offers, empty in a session already over a game (§6 M15.1
+    /// item 4) — so the picker is not a way to switch projects mid-session.
+    projects: Vec<gg_editor::project::Project>,
+    /// Which of them a click asked for. Read after the loop by [`App::opening`].
+    open: Option<usize>,
 }
 
 #[cfg(feature = "editor")]
@@ -804,6 +833,13 @@ impl Editing {
             persist::restore(&mut ui, path);
         }
         Editing {
+            // The working directory, for `gg.cfg`'s reason: a launcher is
+            // started *in* a workspace, and a flag pointing elsewhere would be a
+            // second answer to where a project is. Scanned in every editor
+            // session and drawn in none that has a game — the picker's condition
+            // is `Frame::project`, not this list being empty.
+            projects: gg_editor::project::scan(Path::new(".")),
+            open: None,
             ui,
             paused: false,
             stash: Stash::default(),
@@ -828,9 +864,16 @@ impl Editing {
     /// A stopped session does not advance whatever the step says: `Commands`
     /// turns a step from `Stopped` into a play first, so a step that reached
     /// here with nothing captured would be one the editor never asked for.
+    ///
+    /// The `!opened` arm is the first tick, which advances with nothing
+    /// captured yet — the capture is taken at the *end* of it, in `editor_tick`,
+    /// because the world a stop returns to is the bootstrapped one and bootstrap
+    /// has not run before the first tick. Without it the editor opens playing in
+    /// name only: tick 0 runs no systems, the play edge captures the empty
+    /// pre-bootstrap world, and the first stop hands that back (§6 M15.2).
     fn advance(&mut self) -> bool {
         let step = core::mem::take(&mut self.step);
-        self.stash.held() && (!self.paused || step)
+        (!self.opened || self.stash.held()) && (!self.paused || step)
     }
 
     /// What the transport draws, derived rather than stored — two bits already

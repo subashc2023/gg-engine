@@ -1,0 +1,26 @@
+[package]
+name = "gg-editor-app"
+version = "0.1.0"
+description = "The editor as an application — the shell, opened with no game (PLAN.md §6 M15.1 item 4)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# The binary someone types, in a package that cannot be called `gg-editor`
+# because the library is. §3's deny pin and `xtask dist`'s ban list key off the
+# *crate* name, which is why the library did not move to make room for this.
+[[bin]]
+name = "gg-editor"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The shell, driven rather than reimplemented: an application holding a second
+# copy of the loop would be a second host, and §2 has one (§6 M15.1 item 4).
+# `tier-dev` and not a feature of its own — the editor is dev-only by §3's deny
+# pin, so there is no combination of this application that ships.
+gg-runtime = { path = "../../crates/gg-runtime", features = ["tier-dev"] }
+anyhow.workspace = true

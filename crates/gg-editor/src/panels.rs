@@ -61,6 +61,7 @@ pub(crate) fn head_button(head: Rect, i: usize) -> Rect {
 /// it always was, which is what keeps a press there the player's rather than
 /// something the editor and the game both answer.
 const VIEWPORT: WidgetId = WidgetId::new("editor.viewport");
+const OPEN: WidgetId = WidgetId::new("editor.project");
 
 /// Transport cells, in declaration order: play, step, stop — offset and width,
 /// from the start of the set. Square-ish because they are drawn and not set:
@@ -591,6 +592,14 @@ impl Editor {
         // the picture and the rectangle a click is measured against have to be
         // the same rectangle or a pick near an edge lands off by the border.
         let view = body.inset(1.0);
+        // Before the lens, and it returns: with no project there is nothing to
+        // pick, nothing to outline and no game drawing behind the pane — so the
+        // hole the viewport normally leaves is the picker's rectangle (§6 M15.1
+        // item 4).
+        if frame.project.is_none() {
+            self.launcher(frame, view);
+            return;
+        }
         let lens = self.lens(world);
         // In this order, and it is the order that arbitrates a click: the pick
         // declares the pane, the marker draws over it, and the gizmo's handles
@@ -619,6 +628,60 @@ impl Editor {
             &format!("viewport {tag}"),
             ACCENT,
         );
+    }
+
+    /// The project picker, in the game pane, with no game behind it (§6 M15.1
+    /// item 4).
+    ///
+    /// A list in the one pane that is otherwise a hole, rather than a screen of
+    /// its own: the whole claim of item 4 is that opening with no project is an
+    /// ordinary mode of the editor, and an editor that showed a launcher instead
+    /// of itself would be a second application arguing the opposite.
+    ///
+    /// A project that has not been built is drawn and refuses the click. Running
+    /// `cargo` is a decision about what an editor is, and this is not the line to
+    /// take it on.
+    fn launcher(&mut self, frame: &Frame, view: Rect) {
+        // Filled, unlike every other tick of this pane: there is no game drawing
+        // behind it, so leaving the hole would show the last frame or nothing.
+        self.list.rect(view, CHROME);
+        let head = Rect::new(view.x + 3.0, view.y + 3.0, (view.w - 6.0).max(0.0), ROW);
+        self.label(head, "no project — pick one", DIM);
+        let list = picker_list(view);
+        if frame.projects.is_empty() {
+            self.label(list, "no game crates under demos/ (§3)", DIM);
+            return;
+        }
+        let rows = frame.projects.len();
+        let scroll = self.scrollable(Pane::Viewport, list, rows as f32 * PITCH);
+        self.list.push_clip(scroll.view);
+        for (i, project) in frame.projects.iter().enumerate() {
+            let Some(rect) = cell(&scroll, 1, rows, i) else {
+                continue;
+            };
+            if !project.built {
+                // Not a button: a control that looks clickable and is not is
+                // worse than a row that says why. The name of the thing to run is
+                // in the row, because the reader's next move is to run it.
+                self.label(
+                    rect,
+                    &format!("{} — cargo build -p demo-{}", project.name, project.name),
+                    DIM,
+                );
+                continue;
+            }
+            if self.button(OPEN.indexed(i as u64), rect, &project.name, false) {
+                self.commands.open = Some(i);
+                // The session ends here and the next one is over that game: a
+                // shell is built around the dylib it was pointed at, and the
+                // window closing is what a host already knows how to act on.
+                // Two channels rather than one because they are two facts —
+                // *that* this session is over, and *which* project follows it.
+                self.window = Some(crate::WindowCommand::Close);
+                tracing::info!(project = project.name, "editor: project picked");
+            }
+        }
+        self.list.pop_clip();
     }
 
     /// The camera the viewport was drawn through this tick — the one both the
@@ -1045,6 +1108,19 @@ pub(crate) fn nudge_rect(body: Rect) -> Rect {
 /// Rows a pane has room for — what an unscrolled panel truncates to.
 fn rows_in(body: Rect) -> usize {
     ((body.h / PITCH) as usize).max(1)
+}
+
+/// Where the launcher's project rows are laid, given the game pane's *interior*
+/// — the same rectangle [`crate::session::aim::project`] aims into, so a click
+/// authored blind and the row it lands on cannot be two different tables (§6
+/// M15.1 item 4). A header row above it says what the pane is.
+pub(crate) fn picker_list(view: Rect) -> Rect {
+    Rect::new(
+        view.x + 3.0,
+        view.y + 3.0 + PITCH,
+        (view.w - 6.0).max(0.0),
+        (view.h - 6.0 - PITCH).max(0.0),
+    )
 }
 
 /// Columns a list pane shows: two when it is wide enough for two readable ones,

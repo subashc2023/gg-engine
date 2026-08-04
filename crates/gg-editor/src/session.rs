@@ -155,6 +155,25 @@ pub mod aim {
         head(editor, 2)
     }
 
+    /// The `i`-th project row in the launcher's picker (§6 M15.1 item 4), which
+    /// occupies the game pane while there is no game.
+    ///
+    /// Aimable blind, unlike a gizmo handle: the rows are a table this crate lays
+    /// out, and which project is `i` is `project::scan`'s sorted order rather
+    /// than anything about a world.
+    #[must_use]
+    pub fn project(editor: &Editor, i: usize) -> Option<(f32, f32)> {
+        // `inset(1.0)` is the pane's border, which is what `viewport` draws into
+        // and what `viewport_rect` hands the renderer — the interior, not the body.
+        let list = panels::picker_list(editor.pane_body(Pane::Viewport)?.inset(1.0));
+        Some(centre(Rect::new(
+            list.x,
+            list.y + i as f32 * crate::PITCH,
+            (list.w - gg_ui::scroll::BAR).max(0.0),
+            crate::ROW,
+        )))
+    }
+
     /// `edit → undo`, as the pair of clicks a menu item takes.
     #[must_use]
     pub fn undo(editor: &Editor) -> Option<((f32, f32), (f32, f32))> {

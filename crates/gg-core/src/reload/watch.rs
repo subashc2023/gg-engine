@@ -105,8 +105,9 @@ pub struct Watch {
     generation: u32,
     pending: Option<Pending>,
     rx: mpsc::Receiver<Instant>,
-    // Held for its Drop: dropping the watcher stops the OS watch.
-    _watcher: notify::RecommendedWatcher,
+    // Held for its Drop: dropping the watcher stops the OS watch. `None` is
+    // `absent` — there is no artifact, so there is no directory to watch.
+    _watcher: Option<notify::RecommendedWatcher>,
 }
 
 impl Watch {
@@ -162,8 +163,31 @@ impl Watch {
             generation: 0,
             pending: None,
             rx,
-            _watcher: watcher,
+            _watcher: Some(watcher),
         })
+    }
+
+    /// A watcher over no artifact — [`GameLib::absent`]'s companion (§6 M15.1
+    /// item 4).
+    ///
+    /// [`poll`](Self::poll) returns `None` forever: the sender is dropped here,
+    /// so the channel is closed and `try_recv` never yields. Infallible, unlike
+    /// [`new`](Self::new), because there is nothing to stage and no directory to
+    /// fail to watch — which is what lets a launcher hold the same field a
+    /// session over a game does.
+    ///
+    /// [`GameLib::absent`]: crate::reload::GameLib::absent
+    #[must_use]
+    pub fn absent() -> Self {
+        let (_, rx) = mpsc::channel();
+        Self {
+            source: PathBuf::from(crate::reload::NO_PROJECT),
+            staging_dir: PathBuf::new(),
+            generation: 0,
+            pending: None,
+            rx,
+            _watcher: None,
+        }
     }
 
     /// The artifact being watched.
@@ -206,6 +230,11 @@ impl Watch {
     /// Act as though the artifact had just been rebuilt — a manual reload key,
     /// and the first load at startup.
     pub fn request(&mut self) {
+        // Nothing to load: an absent watcher that took a request would stat a
+        // path that is not a path and refuse it once `STAGING_PATIENCE` ran out.
+        if self._watcher.is_none() {
+            return;
+        }
         self.pending.get_or_insert(Pending {
             saved_at: Instant::now(),
             settled_at: None,
@@ -347,5 +376,24 @@ impl std::fmt::Debug for Watch {
             .field("generation", &self.generation)
             .field("pending", &self.pending.is_some())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_watcher_over_no_artifact_has_nothing_to_wait_for() {
+        // The launcher's field (§6 M15.1 item 4). A request here would put the
+        // watcher into a wait that only `STAGING_PATIENCE` ends, and it would end
+        // it with a refusal naming a path that is not a path.
+        let mut watch = Watch::absent();
+        assert_eq!(watch.source(), Path::new(crate::reload::NO_PROJECT));
+        watch.request();
+        assert!(
+            !watch.is_pending(),
+            "an absent watcher took a reload request"
+        );
     }
 }

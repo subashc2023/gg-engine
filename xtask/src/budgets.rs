@@ -49,7 +49,26 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 /// therefore the host's, and the shell still *implements* neither the snapshot
 /// nor the restore — it calls two `World` methods, which is the same shape
 /// every raise above it has.
-const SHELL_BUDGET: usize = 1100;
+///
+/// 1100 → 1150 at M15.1 item 4, and this is the raise least like the others,
+/// so it is argued twice. Roughly half of it is not new behaviour at all: the
+/// shell became a **library** as well as a binary, because the editor can be
+/// opened with no game and the thing that opens it is an application rather than
+/// a command line. That costs an entry point with its own contract, a `session`
+/// that *returns* a value where `main` used to fall off the end, and a public
+/// argument parser — the same code, spent on being callable. §6 M15.1 item 4
+/// predicted the launcher's lines would be the application's, and they are: the
+/// application is under forty.
+///
+/// The other half is "no project" as a mode. The absence itself is the loader's
+/// (`GameLib::absent`, `Watch::absent`) precisely so it is not a branch in every
+/// method here; what is left is the branch that reaches for it, the project list
+/// the picker draws, and the pick coming back out. The loop that acts on that
+/// pick is deliberately *here* and not in the application: an application that
+/// knew to boot, then loop, then map a project onto arguments would be
+/// reimplementing the shell's outer sequence, which is the second host §2 has
+/// exactly one of.
+const SHELL_BUDGET: usize = 1150;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

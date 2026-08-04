@@ -111,7 +111,11 @@ fn run(target: (u32, u32), input: &[InputFrame]) -> Run {
     let (mut playing, mut steps, mut saves) = (Vec::new(), 0, 0);
     let (mut stops, mut before_stop) = (Vec::new(), None);
     // The editor opens playing, so the capture is taken at the first tick and
-    // not at a button — `App::editor_tick`'s `opened` branch.
+    // not at a button — `App::editor_tick`'s `opened` branch. Taken *before* the
+    // loop rather than inside it because this harness runs no systems: there is
+    // nothing the first tick could add, so the shell's rule that the first tick
+    // advances with nothing captured has no analogue here and is gated in
+    // `xtask reload --editor` instead, over a game that bootstraps.
     let mut stash = Some(world.snapshot().encode());
     let mut paused = false;
     for (tick, frame) in input.iter().enumerate() {
@@ -144,6 +148,8 @@ fn run(target: (u32, u32), input: &[InputFrame]) -> Run {
                 draw_cursor: true,
                 save_path: "target/editor/test.ggsv",
                 title: "gg — test",
+                project: Some("test"),
+                projects: &[],
                 maximized: false,
             },
         );
@@ -426,6 +432,8 @@ fn stopped(world: &mut World, editor: &mut Editor, input: &[InputFrame]) {
                 draw_cursor: true,
                 save_path: "target/editor/test.ggsv",
                 title: "gg — test",
+                project: Some("test"),
+                projects: &[],
                 maximized: false,
             },
         );
@@ -898,6 +906,8 @@ fn a_click_in_a_playing_viewport_picks_nothing() {
                 draw_cursor: true,
                 save_path: "target/editor/test.ggsv",
                 title: "gg — test",
+                project: Some("test"),
+                projects: &[],
                 maximized: false,
             },
         );
@@ -969,4 +979,72 @@ fn a_wheel_notch_scrolls_the_tree_under_the_pointer() {
     let mut back = notches(4, DOWN);
     back.extend(notches(12, UP));
     assert_eq!(session(back), unscrolled, "scrolling up past zero drifted");
+}
+
+/// The launcher (§6 M15.1 item 4): with no project, the game pane is the picker,
+/// and a click on a row asks the host to open that project and to close the
+/// window this session is in.
+///
+/// The whole of item 4's Exit row that can be proven in process — what a shell
+/// does with the answer is `xtask reload --launcher`'s, because it needs two
+/// sessions and a real dylib.
+#[test]
+fn with_no_project_the_game_pane_is_a_picker_and_a_click_on_a_row_opens_one() {
+    let projects: Vec<gg_editor::project::Project> = ["03-reload", "05-many"]
+        .iter()
+        .map(|name| gg_editor::project::Project {
+            name: (*name).to_string(),
+            game: std::path::PathBuf::from(format!("target/debug/demo_{name}.dll")),
+            input: None,
+            pack: None,
+            built: true,
+        })
+        .collect();
+    let mut world = World::new();
+    let mut editor = placed(TARGET);
+    // Aimed at the second row, so a picker that always reported the first would
+    // fail by name rather than by luck.
+    let at = aim::project(&editor, 1).expect("the game pane is up");
+    let mut opened = None;
+    for frame in frames(&[Act::To(at), Act::Settle(3), Act::Click], CLICK, X, Y) {
+        let ui = Tick {
+            motion: (frame.axes[X.index()], frame.axes[Y.index()]),
+            primary: frame.pressed(CLICK),
+            advance_focus: false,
+            scroll: 0,
+        };
+        let commands: Commands = editor.tick(
+            &mut world,
+            &ui,
+            &Frame {
+                extent: TARGET,
+                dpi: 1.0,
+                tick: 0,
+                play: gg_editor::Play::Stopped,
+                input: None,
+                passes: &[],
+                memory: MemoryUse::default(),
+                draw_cursor: true,
+                save_path: "target/editor/test.ggsv",
+                title: "gg — <no project>",
+                // The mode under test, and the only field that decides it.
+                project: None,
+                projects: &projects,
+                maximized: false,
+            },
+        );
+        opened = commands.open.or(opened);
+    }
+    assert_eq!(opened, Some(1), "the picker did not report the row clicked");
+    // The session is over as well: a shell is built around the dylib it was
+    // pointed at, so the next project is the next session.
+    assert_eq!(
+        editor.take_window_command(),
+        Some(gg_editor::WindowCommand::Close),
+        "a pick left the session running"
+    );
+    // And the world is untouched — the picker is host UI over an empty world,
+    // and picking is not an edit.
+    assert_eq!(world.len(), 0);
+    assert_eq!(editor.tally(), (0, 0));
 }

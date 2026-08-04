@@ -969,6 +969,10 @@ fn greps() -> anyhow::Result<()> {
 /// Returns the violations and how many files were read.
 fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
     let mut files = Vec::new();
+    // Applications (§6 M15.1 item 4). Under every §3 grep from its first line:
+    // an application is host code, and the one rule an editor launcher could
+    // plausibly break — `vk::` outside `gg-rhi` — is the one this catches.
+    walk_rs(&root.join("apps"), &mut files);
     walk_rs(&root.join("crates"), &mut files);
     walk_rs(&root.join("demos"), &mut files);
     // The harness and CI's own source sat outside every §3 grep on no stated

@@ -204,6 +204,8 @@ mod tests {
             memory: gg_rhi::MemoryUse::default(),
             save_path: "",
             title: "",
+            project: Some("test"),
+            projects: &[],
             maximized: false,
             draw_cursor: false,
         }

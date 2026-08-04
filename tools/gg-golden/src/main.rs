@@ -1197,6 +1197,15 @@ fn render_editor() -> Render {
                 },
                 save_path: "target/editor/demo-05.ggsv",
                 title: "gg — demo_05_many",
+                // A project, so the reference keeps gating the *game* pane and
+                // not the launcher's picker (§6 M15.1 item 4) — this scene is
+                // what an editor over a game looks like. A second scene for the
+                // picker would be cheap and is deliberately not spent: its rows
+                // are a table `session::aim::project` already aims into and
+                // `xtask reload --launcher` already clicks, so a reference image
+                // would gate the one part of it that is a plain list of buttons.
+                project: Some("demo_05_many"),
+                projects: &[],
                 // No window at all here, so not maximized: the scene gates the
                 // maximize glyph and the restore one is the windowed state.
                 maximized: false,

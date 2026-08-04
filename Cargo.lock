@@ -883,6 +883,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gg-editor-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gg-runtime",
+]
+
+[[package]]
 name = "gg-extract"
 version = "0.1.0"
 dependencies = [

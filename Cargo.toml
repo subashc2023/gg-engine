@@ -4,6 +4,9 @@
 [workspace]
 resolver = "3"
 members = [
+    # An application, which §3's tree had no drawer for: not an engine crate,
+    # not a demo, not a harness (§6 M15.1 item 4).
+    "apps/gg-editor",
     "crates/gg-abi",
     "crates/gg-assets",
     "crates/gg-core",

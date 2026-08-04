@@ -1,6 +1,7 @@
 //! The M5 gates that can only be proven by *running the shell over a game
 //! dylib* — §5.6c across tiers, replay segments across a reload, and the reload
-//! chaos cases (§5.11).
+//! chaos cases (§5.11). And one that proves the opposite: `--launcher` runs the
+//! editor **application** over no dylib at all (§6 M15.1 item 4).
 //!
 //! Everything here is windowless (§1.5): `GG_HEADLESS=1`, so the shell opens no
 //! window and its extract and render stages return immediately. The sim, the
@@ -697,6 +698,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     }
     if only("--editor") {
         editor()?;
+    }
+    if only("--launcher") {
+        launcher()?;
     }
     println!("xtask reload: green");
     Ok(())
@@ -1482,8 +1486,10 @@ fn play_mode() -> anyhow::Result<()> {
             false,
         )?;
         anyhow::ensure!(
-            log.contains("play mode entered"),
-            "[{}] play mode never started:\n{log}",
+            captured_entities(&log)? > 0,
+            "[{}] the play edge captured an empty world, so the stop below gives back nothing \
+             — `changed` and `identical` are both true of that and neither is worth reading:\n\
+             {log}",
             tier.name
         );
         // Both halves, or the gate passes on a session in which nothing
@@ -1621,6 +1627,17 @@ fn editor() -> anyhow::Result<()> {
             "[{label}] the inspector applied {nudges} edits, not {EDITOR_NUDGES}:\n{log}"
         );
 
+        // The editor opens *playing*, so the play edge is the first tick and
+        // nothing clicked it — which is exactly the edge that had no world
+        // behind it until §6 M15.2's `advance` learned about its own first
+        // tick. Ahead of the pair below because both are true of an empty
+        // capture.
+        anyhow::ensure!(
+            captured_entities(&log)? > 0,
+            "[{label}] the editor's play edge captured an empty world — the first tick ran no \
+             systems, so a stop hands back a scene the game never bootstrapped:\n{log}"
+        );
+
         // §6 M15.2 item 3, and it is M14's comparison pointed at a button: the
         // stop restored the world play began at. Both halves together, for
         // `play_mode`'s reason — `identical` over a session that changed
@@ -1744,6 +1761,206 @@ fn editor() -> anyhow::Result<()> {
 /// How many of `wanted`, in order, `log` gets through. A partial count is the
 /// useful answer: it names how far a session got before its clicks stopped
 /// landing where the script meant.
+/// The project the launcher gate opens, and the crate that builds it.
+const LAUNCHER_PROJECT: &str = "05-many";
+
+/// What a launcher session that picked a project says, in order (§6 M15.1 item
+/// 4). Every row is a different claim and the *order* is most of the gate:
+/// nothing was loaded, a click landed on a project row, the shell acted on it,
+/// and the session that followed was over that game's dylib.
+const LAUNCHER_LOG: &[&str] = &[
+    // `App::new`'s load line, over the loader's absent variant.
+    "<no project>",
+    "editor: project picked",
+    "opening project",
+    // The second session's load line — the dylib, by name.
+    "demo_05_many",
+    "golden runtime clean exit",
+];
+
+/// `cargo xtask reload --launcher` — §6 M15.1 item 4's Exit row: the editor
+/// opens with no game, and picking a project from inside it loads one.
+///
+/// The one gate here that drives an **application** rather than the shell, and
+/// it drives it exactly as every other editor gate drives the shell: a recorded
+/// click stream, replayed with no window anywhere (§1.5). The stream stops at the
+/// pick and cannot do otherwise — its id space is the editor's appended verbs
+/// over *no* game, and the session that follows is over demo 05, whose verb list
+/// is not that one (§4.7). So `--frames` bounds the second session and the log is
+/// what says it happened.
+fn launcher() -> anyhow::Result<()> {
+    let root = workspace_root();
+    // The dylib the *scan* looks for — `target/debug`, not a staged copy: the
+    // launcher finds projects by `xtask run`'s own convention and this gate must
+    // exercise that convention rather than route around it.
+    exec(
+        cargo().args(["build", "-p", "demo-05-many"]),
+        "cargo build (launcher's project)",
+    )?;
+    exec(
+        cargo().args(["build", "-p", "gg-editor-app"]),
+        "cargo build (the launcher)",
+    )?;
+
+    // Authored against the same scan the run will do, so "row `i`" means the same
+    // project in both. A hard-coded index would drift the day a demo is added.
+    let projects = gg_editor::project::scan(&root);
+    let row = projects
+        .iter()
+        .position(|p| p.name == LAUNCHER_PROJECT)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the scan found no `{LAUNCHER_PROJECT}` under {}",
+                root.display()
+            )
+        })?;
+    anyhow::ensure!(
+        projects[row].built,
+        "`{LAUNCHER_PROJECT}` is not built, so the picker will refuse the click this gate makes"
+    );
+
+    let (verbs, _) = gg_editor::host::open(&gg_ecs::boundary::Verbs {
+        actions: &[],
+        axes: &[],
+    });
+    let id = |names: &[&str], want: &str| {
+        names
+            .iter()
+            .position(|n| *n == want)
+            .ok_or_else(|| anyhow::anyhow!("the editor did not append `{want}`"))
+    };
+    let mut editor = gg_editor::Editor::new(None);
+    editor.place(HEADLESS_EXTENT, HEADLESS_DPI);
+    let at = gg_editor::session::aim::project(&editor, row)
+        .ok_or_else(|| anyhow::anyhow!("the game pane is not up, so there is nothing to aim at"))?;
+    let frames = gg_editor::session::frames(
+        &[
+            gg_editor::session::Act::To(at),
+            gg_editor::session::Act::Settle(3),
+            gg_editor::session::Act::Click,
+            gg_editor::session::Act::Settle(3),
+        ],
+        gg_input::ActionId::new(id(verbs.actions, "ui_click")?),
+        gg_input::AxisId::new(id(verbs.axes, "ui_x")?),
+        gg_input::AxisId::new(id(verbs.axes, "ui_y")?),
+    );
+    let mut meta = ReplayMeta::new(
+        gg_math::DETERMINISM_CONTRACT,
+        "curated",
+        gg_core::DEFAULT_TICK_HZ,
+        verbs.actions,
+        verbs.axes,
+    );
+    meta.engine_commit = "generated".to_owned();
+    let mut recorder = Recorder::new(meta);
+    let ticks = frames.len();
+    for (tick, frame) in frames.into_iter().enumerate() {
+        recorder.record(tick as u64, frame);
+    }
+    // Not checked in: this stream is derived from a scan of *this* tree, so a
+    // blessed copy would be a baseline of which demos exist (§4.7's curated
+    // streams are the ones whose content is the claim).
+    let stream = save_dir()?.join("launcher.ggrp");
+    std::fs::write(&stream, recorder.finish().encode())?;
+
+    let app = root.join("target/debug").join(if cfg!(windows) {
+        "gg-editor.exe"
+    } else {
+        "gg-editor"
+    });
+    let bound = ticks.to_string();
+    let run = |args: &[&str]| -> anyhow::Result<String> {
+        let out = Command::new(&app)
+            .args(args)
+            // The scan's root, and the reason it is the working directory: a
+            // launcher is started *in* a workspace (`Editing::new`).
+            .current_dir(&root)
+            .env("GG_HEADLESS", "1")
+            .env("RUST_LOG", "info")
+            .output()
+            .map_err(|e| anyhow::anyhow!("failed to spawn {}: {e}", app.display()))?;
+        let log = format!("{}{}", plain(&out.stdout), plain(&out.stderr));
+        anyhow::ensure!(
+            out.status.success(),
+            "the launcher exited {}\n{log}",
+            out.status
+        );
+        Ok(log)
+    };
+
+    let picked = run(&[
+        "--replay",
+        &stream.display().to_string(),
+        "--frames",
+        &bound,
+    ])?;
+    let reached = reaches(&picked, LAUNCHER_LOG);
+    anyhow::ensure!(
+        reached == LAUNCHER_LOG.len(),
+        "§6 M15.1 item 4: the launcher reached {reached} of {} logged events — expected \
+         {LAUNCHER_LOG:?} in order. A click that landed beside the project row is what this \
+         looks like:\n{picked}",
+        LAUNCHER_LOG.len()
+    );
+    // The clean-exit line and not the startup one: boot happens once per process
+    // — one logger, one config read — and it is the *session* that repeats.
+    let sessions = picked
+        .lines()
+        .filter(|l| l.contains("golden runtime clean exit"))
+        .count();
+    anyhow::ensure!(
+        sessions == 2,
+        "§6 M15.1 item 4: {sessions} session(s), not two — picking a project ends the session it \
+         was picked in and starts one over that dylib:\n{picked}"
+    );
+
+    // The falsification, and it is the reason the rows above mean anything: the
+    // same launcher with nothing driving it opens, finds the same projects, and
+    // opens none of them. A gate whose markers appeared without the click would
+    // be grading the shell's startup and calling it a picker.
+    let idle = run(&["--frames", &bound])?;
+    anyhow::ensure!(
+        !idle.contains("opening project"),
+        "§6 M15.1 item 4: a launcher nobody clicked opened a project anyway:\n{idle}"
+    );
+    anyhow::ensure!(
+        idle.contains("<no project>"),
+        "§6 M15.1 item 4: the launcher loaded *something* with no `--game`:\n{idle}"
+    );
+
+    println!(
+        "xtask reload: launcher — opened with no project, listed {} of them, and a replayed click \
+         on `{LAUNCHER_PROJECT}` started a second session over its dylib",
+        projects.len()
+    );
+    Ok(())
+}
+
+/// How many entities the play edge captured — the number a stop hands back.
+///
+/// `changed`/`identical` are both satisfied by a capture of *nothing*: a world
+/// emptied by the restore differs from the one that entered play and equals the
+/// bytes stashed, so the pair reads green over a stop that deleted the scene.
+/// That is not a hypothetical — it is what an editor whose first tick ran no
+/// systems did, and neither gate below noticed until this line existed.
+fn captured_entities(log: &str) -> anyhow::Result<u64> {
+    let line = log
+        .lines()
+        .find(|l| l.contains("play mode entered"))
+        .ok_or_else(|| anyhow::anyhow!("play mode never started:\n{log}"))?;
+    let count = line
+        .split("entities=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| {
+            n.trim_end_matches(|c: char| !c.is_ascii_digit())
+                .parse()
+                .ok()
+        })
+        .ok_or_else(|| anyhow::anyhow!("no entity count on the play edge: {line}"))?;
+    Ok(count)
+}
+
 fn reaches(log: &str, wanted: &[&str]) -> usize {
     let mut at = 0;
     for line in log.lines() {
