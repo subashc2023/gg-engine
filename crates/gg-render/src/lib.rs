@@ -55,7 +55,7 @@ use gg_extract::{Extracted, Frustum, Instance, Scenes};
 use gg_math::render;
 pub use gg_rhi::Viewport;
 use gg_rhi::{
-    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthBias, DepthMode, DeviceAddress,
+    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthMode, DeviceAddress,
     DeviceReport, DrawSpec, FrameOutcome, FrameStart, GpuClock, GraphContext, ImageDesc,
     ImageFormat, ImageHandle, MemoryUse, PassTiming, PipelineDesc, PipelineHandle, Rhi, RhiError,
     Sampler, ShutdownReport, TextureIndex,
@@ -416,14 +416,19 @@ impl Renderer {
         // the shadow map's bindless index does not exist until the graph has
         // acquired it, and acquiring it holds the borrow the write would need.
         let frame_address = self.lighting.slot_address(slot);
-        let sun = self.lighting.plan(&extracted.lights);
         // Everything the game is composed for is this, not the window: the
         // projection, the culling frustum the shell already built from
         // `view_extent`, and both attachments below. The window's own extent is
         // left to the two things that really are the window's — the UI layer,
         // and where the post pass puts the result.
         let view_extent = view_extent(self.viewport, extent);
+        // After `view_extent`, because a cascade is fitted to the frustum the
+        // game is composed for and the window's aspect is not that frustum.
+        let sun = self.lighting.plan(extracted, view, view_extent);
+        let cascades = sun.map_or(0, |s| s.cascades().len());
         self.pass.build(extracted, frame_address);
+        self.pass
+            .build_shadow(extracted, frame_address, sun.as_ref());
         let content = self.content.as_ref();
         self.scene.build(
             &mut self.rhi,
@@ -433,6 +438,7 @@ impl Renderer {
             view,
             content,
             frame_address,
+            cascades,
         )?;
         report_draws(&self.scene, extracted);
         self.ui.write(&mut self.rhi, slot, ui)?;
@@ -442,30 +448,32 @@ impl Renderer {
         let backbuffer = frame.backbuffer();
         let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT)?;
         let depth = frame.depth_at("scene.depth", view_extent)?;
-        let shadow = sun
-            .map(|sun| frame.shadow("scene.shadow", (sun.size, sun.size)))
-            .transpose()?;
-        let shadow_texture = shadow.and_then(|id| frame.texture(id));
+        let shadows = shadow_maps(&mut frame, sun)?;
+        let shadow_textures: Vec<TextureIndex> =
+            shadows.iter().filter_map(|id| frame.texture(*id)).collect();
         let grid = histogram
             .then(|| frame.color_at("luminance.grid", luminance::GRID, SCENE_FORMAT))
             .transpose()?;
         let post_push = self.pass.post_push(&frame, scene)?;
 
         let prepass_draws = prepass_draws(&self.pass, &self.scene);
-        let shadow_draws = shadow_draws(&self.pass, &self.scene);
+        let shadow_draws: Vec<Vec<DrawSpec<'_>>> = (0..shadows.len())
+            .map(|cascade| shadow_draws(&self.pass, &self.scene, cascade))
+            .collect();
+        let shadow_slices: Vec<&[DrawSpec<'_>]> = shadow_draws.iter().map(Vec::as_slice).collect();
         let forward_draws = forward_draws(&self.pass, &self.scene);
         let post_draws = [self.pass.post_draw(&post_push)];
         let samples = [scene];
-        let forward_samples: Vec<graph::ResourceId> = shadow.into_iter().collect();
+        let forward_samples: Vec<graph::ResourceId> = shadows.clone();
         let mut declared = scene_graph(&SceneFrame {
             backbuffer,
             scene,
             depth,
-            shadow,
+            shadows: &shadows,
             clear: color,
             viewport: self.viewport,
             prepass_draws: &prepass_draws,
-            shadow_draws: &shadow_draws,
+            shadow_draws: &shadow_slices,
             forward_draws: &forward_draws,
             post_draws: &post_draws,
             samples: &samples,
@@ -489,7 +497,7 @@ impl Renderer {
             slot,
             view.view_projection(view_extent),
             &extracted.lights,
-            shadow_texture,
+            &shadow_textures,
         )?;
         self.rhi.execute(token, &compiled.passes())
     }
@@ -511,25 +519,26 @@ impl Renderer {
         let backbuffer = frame.backbuffer();
         let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT)?;
         let depth = frame.depth_at("scene.depth", view_extent)?;
-        let shadow = sun
-            .map(|sun| frame.shadow("scene.shadow", (sun.size, sun.size)))
-            .transpose()?;
+        let shadows = shadow_maps(&mut frame, sun)?;
         let post_push = self.pass.post_push(&frame, scene)?;
         let prepass_draws = prepass_draws(&self.pass, &self.scene);
-        let shadow_draws = shadow_draws(&self.pass, &self.scene);
+        let shadow_draws: Vec<Vec<DrawSpec<'_>>> = (0..shadows.len())
+            .map(|cascade| shadow_draws(&self.pass, &self.scene, cascade))
+            .collect();
+        let shadow_slices: Vec<&[DrawSpec<'_>]> = shadow_draws.iter().map(Vec::as_slice).collect();
         let forward_draws = forward_draws(&self.pass, &self.scene);
         let post_draws = [self.pass.post_draw(&post_push)];
         let samples = [scene];
-        let forward_samples: Vec<graph::ResourceId> = shadow.into_iter().collect();
+        let forward_samples: Vec<graph::ResourceId> = shadows.clone();
         let mut declared = scene_graph(&SceneFrame {
             backbuffer,
             scene,
             depth,
-            shadow,
+            shadows: &shadows,
             clear: [0.0; 4],
             viewport: self.viewport,
             prepass_draws: &prepass_draws,
-            shadow_draws: &shadow_draws,
+            shadow_draws: &shadow_slices,
             forward_draws: &forward_draws,
             post_draws: &post_draws,
             samples: &samples,
@@ -741,11 +750,14 @@ impl OffscreenRenderer {
         // One slot and a blocking submit per frame here, so nothing is in
         // flight to race either write.
         let frame_address = self.lighting.slot_address(0);
-        let sun = self.lighting.plan(&extracted.lights);
-        let histogram = luminance::Luminance::enabled();
-        self.pass.build(extracted, frame_address);
-        let content = self.content.as_ref();
         let view_extent = view_extent(self.viewport, self.extent);
+        let sun = self.lighting.plan(extracted, view, view_extent);
+        let histogram = luminance::Luminance::enabled();
+        let cascades = sun.map_or(0, |s| s.cascades().len());
+        self.pass.build(extracted, frame_address);
+        self.pass
+            .build_shadow(extracted, frame_address, sun.as_ref());
+        let content = self.content.as_ref();
         self.scene.build(
             &mut self.rhi,
             0,
@@ -754,6 +766,7 @@ impl OffscreenRenderer {
             view,
             content,
             frame_address,
+            cascades,
         )?;
         report_draws(&self.scene, extracted);
         self.ui.write(&mut self.rhi, 0, ui)?;
@@ -762,10 +775,9 @@ impl OffscreenRenderer {
         let backbuffer = frame.backbuffer();
         let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT)?;
         let depth = frame.depth_at("scene.depth", view_extent)?;
-        let shadow = sun
-            .map(|sun| frame.shadow("scene.shadow", (sun.size, sun.size)))
-            .transpose()?;
-        let shadow_texture = shadow.and_then(|id| frame.texture(id));
+        let shadows = shadow_maps(&mut frame, sun)?;
+        let shadow_textures: Vec<TextureIndex> =
+            shadows.iter().filter_map(|id| frame.texture(*id)).collect();
         let grid = histogram
             .then(|| frame.color_at("luminance.grid", luminance::GRID, SCENE_FORMAT))
             .transpose()?;
@@ -773,20 +785,23 @@ impl OffscreenRenderer {
         let post_push = self.pass.post_push(&frame, scene)?;
 
         let prepass_draws = prepass_draws(&self.pass, &self.scene);
-        let shadow_draws = shadow_draws(&self.pass, &self.scene);
+        let shadow_draws: Vec<Vec<DrawSpec<'_>>> = (0..shadows.len())
+            .map(|cascade| shadow_draws(&self.pass, &self.scene, cascade))
+            .collect();
+        let shadow_slices: Vec<&[DrawSpec<'_>]> = shadow_draws.iter().map(Vec::as_slice).collect();
         let forward_draws = forward_draws(&self.pass, &self.scene);
         let post_draws = [self.pass.post_draw(&post_push)];
         let samples = [scene];
-        let forward_samples: Vec<graph::ResourceId> = shadow.into_iter().collect();
+        let forward_samples: Vec<graph::ResourceId> = shadows.clone();
         let mut declared = scene_graph(&SceneFrame {
             backbuffer,
             scene,
             depth,
-            shadow,
+            shadows: &shadows,
             clear: color,
             viewport: self.viewport,
             prepass_draws: &prepass_draws,
-            shadow_draws: &shadow_draws,
+            shadow_draws: &shadow_slices,
             forward_draws: &forward_draws,
             post_draws: &post_draws,
             samples: &samples,
@@ -820,7 +835,7 @@ impl OffscreenRenderer {
             0,
             view.view_projection(self.extent),
             &extracted.lights,
-            shadow_texture,
+            &shadow_textures,
         )?;
         self.rhi.execute(&passes)?;
         // A blocking submit, so unlike the windowed path this is current rather
@@ -910,24 +925,77 @@ fn report_draws(scene: &ScenePass, extracted: &Extracted) {
 }
 
 fn prepass_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass) -> Vec<DrawSpec<'a>> {
-    let mut draws = pass.draws(pass.prepass, None);
-    draws.extend(scene.draws(scene.prepass(), None));
+    let mut draws = pass.draws(pass.prepass);
+    draws.extend(scene.draws(scene.prepass()));
     draws
 }
 
 fn forward_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass) -> Vec<DrawSpec<'a>> {
-    let mut draws = pass.draws(pass.forward, None);
-    draws.extend(scene.draws(scene.forward(), None));
+    let mut draws = pass.draws(pass.forward);
+    draws.extend(scene.draws(scene.forward()));
     draws
 }
 
-/// The same geometry through the sun's projection, biased. Both pipelines, one
-/// pass: a second shadow pass per pass-that-casts would be a second set of
-/// derived barriers around one attachment.
-fn shadow_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass) -> Vec<DrawSpec<'a>> {
-    let bias = Some(lighting::Lighting::shadow_bias());
-    let mut draws = pass.draws(pass.shadow, bias);
-    draws.extend(scene.draws(scene.shadow(), bias));
+/// The same geometry through the sun's projection. Both pipelines, one pass: a
+/// second shadow pass per pass-that-casts would be a second set of derived
+/// barriers around one attachment.
+///
+/// **Unbiased**, and that is the fix rather than an omission (§6 M11's exit
+/// row). Rasterizer depth bias corrects the wrong end — it moves the depth the
+/// map *records*, so one receiver's bias follows the caster onto every other
+/// receiver behind it — and it is not portable: for a float depth attachment the
+/// constant term is scaled by an implementation-dependent `r`, which would make
+/// a blessed reference (§4.10) a property of the driver. Both jobs are done at
+/// the lookup instead, in `include/pbr.slang`.
+/// Whether `instance` can cast into `cascade`, for a sun travelling `direction`.
+///
+/// A **cylinder** test, not a sphere one, and the difference is the whole point:
+/// a caster outside the slab but between it and the sun still shadows into it.
+/// So what is tested is the distance from the slab's axis — the light direction
+/// through its centre — with the along-light extent checked separately against
+/// the depth range `lighting::fit` built the projection with.
+fn casts_into(instance: &Instance, cascade: &lighting::Cascade, direction: render::Vec3) -> bool {
+    let to = instance.offset - cascade.centre;
+    let along = to.dot(direction);
+    let reach = cascade.radius + instance.radius;
+    // `radius * 2` each way: the eye sits two radii up-light of the centre and
+    // the far plane four, so that is exactly the depth the map records.
+    (to - direction * along).length() <= reach && along.abs() <= cascade.radius * 2.0 + reach
+}
+
+/// One depth attachment per cascade, or none when nothing casts (§6 M15.3).
+///
+/// Separate images rather than one array texture, and that is a deliberate line
+/// held: a layered attachment would need array layers in `ImageDesc`, per-layer
+/// views, and a layer index on the graph's depth binding — RHI surface added for
+/// a saving the shadow pass does not get, since the geometry has to be recorded
+/// per cascade either way. Four images cost four bindless slots and nothing else.
+fn shadow_maps(
+    frame: &mut graph::Frame<'_>,
+    sun: Option<lighting::Sun>,
+) -> Result<Vec<graph::ResourceId>, RhiError> {
+    let Some(sun) = sun else {
+        return Ok(Vec::new());
+    };
+    // Named per cascade so a graph dump names what it allocated rather than the
+    // same string four times — the dump is read to find out what a frame did.
+    const NAMES: [&str; lighting::MAX_CASCADES] = [
+        "scene.shadow.0",
+        "scene.shadow.1",
+        "scene.shadow.2",
+        "scene.shadow.3",
+    ];
+    let extent = (sun.size, sun.size);
+    sun.cascades()
+        .iter()
+        .zip(NAMES)
+        .map(|(_, name)| frame.shadow(name, extent))
+        .collect()
+}
+
+fn shadow_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass, cascade: usize) -> Vec<DrawSpec<'a>> {
+    let mut draws = pass.shadow_draws(cascade);
+    draws.extend(scene.shadow_draws(cascade));
     draws
 }
 
@@ -949,6 +1017,8 @@ struct BoxPass {
     /// that borrow them, and extract already refuses to allocate per frame — a
     /// buffer beside it that did would undo that.
     pushes: Vec<shader::UglyPush>,
+    /// One list per cascade, culled — see [`BoxPass::build_shadow`].
+    shadow_pushes: Vec<Vec<shader::UglyPush>>,
 }
 
 /// The slice of an RHI a pass — or a resident asset — needs to put itself on
@@ -1097,6 +1167,7 @@ impl BoxPass {
             vertex_address: rhi.buffer_address(vertex_buffer)?,
             index_count: indices.len() as u32,
             pushes: Vec::new(),
+            shadow_pushes: Vec::new(),
         })
     }
 
@@ -1112,13 +1183,65 @@ impl BoxPass {
         );
     }
 
+    /// This frame's shadow pushes: one list per cascade, each holding only the
+    /// boxes that can cast *into* that cascade (§6 M15.3).
+    ///
+    /// The cull is what keeps four cascades from being four times the shadow
+    /// pass. It is a cylinder test, not a sphere one: a caster outside the slab
+    /// but between it and the sun still shadows into it, so what is tested is
+    /// the distance from the slab's axis, with the along-light extent checked
+    /// separately against the depth range `Cascade` was built with.
+    fn build_shadow(
+        &mut self,
+        extracted: &Extracted,
+        frame: DeviceAddress,
+        sun: Option<&lighting::Sun>,
+    ) {
+        let address = self.vertex_address;
+        let cascades = sun.map_or(&[][..], |s| s.cascades());
+        self.shadow_pushes.resize_with(cascades.len(), Vec::new);
+        self.shadow_pushes.truncate(cascades.len());
+        for (index, (pushes, cascade)) in self.shadow_pushes.iter_mut().zip(cascades).enumerate() {
+            let direction = sun.map_or(render::Vec3::NEG_Y, |s| s.direction);
+            pushes.clear();
+            pushes.extend(
+                extracted
+                    .instances
+                    .iter()
+                    .filter(|instance| casts_into(instance, cascade, direction))
+                    .map(|instance| {
+                        let mut push = push_for(address, frame, instance);
+                        push.cascade = index as u32;
+                        push
+                    }),
+            );
+        }
+    }
+
+    /// The boxes that reach cascade `cascade`, through the shadow pipeline.
+    fn shadow_draws(&self, cascade: usize) -> Vec<DrawSpec<'_>> {
+        let pushes = self
+            .shadow_pushes
+            .get(cascade)
+            .map_or(&[][..], Vec::as_slice);
+        self.draws_of(self.shadow, pushes)
+    }
+
     /// The frame's boxes, drawn by `pipeline`.
     ///
     /// A draw call per box, which is the honest cost while the Ugly Game draws
     /// a few hundred; instancing is a §4.6 vertex-format question rather than a
     /// graph one, and it belongs with real meshes.
-    fn draws(&self, pipeline: PipelineHandle, depth_bias: Option<DepthBias>) -> Vec<DrawSpec<'_>> {
-        self.pushes
+    fn draws(&self, pipeline: PipelineHandle) -> Vec<DrawSpec<'_>> {
+        self.draws_of(pipeline, &self.pushes)
+    }
+
+    fn draws_of<'a>(
+        &'a self,
+        pipeline: PipelineHandle,
+        pushes: &'a [shader::UglyPush],
+    ) -> Vec<DrawSpec<'a>> {
+        pushes
             .iter()
             .map(|push| DrawSpec {
                 pipeline,
@@ -1126,7 +1249,7 @@ impl BoxPass {
                 count: self.index_count,
                 index_buffer: Some(self.indices),
                 indirect: None,
-                depth_bias,
+                depth_bias: None,
             })
             .collect()
     }
@@ -1247,8 +1370,9 @@ pub struct SceneFrame<'a> {
     pub scene: graph::ResourceId,
     /// The camera's depth buffer.
     pub depth: graph::ResourceId,
-    /// The sun's depth buffer, when one casts (§6 M11).
-    pub shadow: Option<graph::ResourceId>,
+    /// One depth buffer per cascade, nearest first, empty when nothing casts
+    /// (§6 M15.3).
+    pub shadows: &'a [graph::ResourceId],
     /// Linear clear for the scene attachment.
     pub clear: [f32; 4],
     /// Where the post pass lands the scene in the backbuffer. `None` is all of
@@ -1259,8 +1383,10 @@ pub struct SceneFrame<'a> {
     pub viewport: Option<Viewport>,
     /// Depth-prepass draws.
     pub prepass_draws: &'a [DrawSpec<'a>],
-    /// Shadow-pass draws. Unread when `shadow` is `None`.
-    pub shadow_draws: &'a [DrawSpec<'a>],
+    /// Shadow-pass draws, one list per entry in `shadows` and in the same
+    /// order. Shorter than `shadows` is a cascade drawn empty, which is a black
+    /// map and therefore a fully lit one — not a crash, and not a shadow.
+    pub shadow_draws: &'a [&'a [DrawSpec<'a>]],
     /// Forward-pass draws.
     pub forward_draws: &'a [DrawSpec<'a>],
     /// The one fullscreen resolve.
@@ -1285,17 +1411,22 @@ pub struct SceneFrame<'a> {
 /// frame, and an unlit scene pays nothing for a feature it is not using.
 #[must_use]
 pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
-    let mut declared = Vec::with_capacity(4);
-    if let Some(shadow) = frame.shadow {
+    let mut declared = Vec::with_capacity(4 + frame.shadows.len());
+    // One pass per cascade, nearest first. They are independent — different
+    // attachment, different draw list, no read of each other — so the graph's
+    // derived barriers put nothing between them.
+    const SHADOW_NAMES: [&str; lighting::MAX_CASCADES] =
+        ["shadow.0", "shadow.1", "shadow.2", "shadow.3"];
+    for ((index, shadow), name) in frame.shadows.iter().enumerate().zip(SHADOW_NAMES) {
         declared.push(Declared {
-            name: "shadow",
+            name,
             body: Body::Draw {
                 color: None,
                 // Stored, unlike the prepass's: the forward pass samples it.
-                depth: Some((shadow, DepthUse::WriteStore)),
+                depth: Some((*shadow, DepthUse::WriteStore)),
                 viewport: None,
                 samples: &[],
-                draws: frame.shadow_draws,
+                draws: frame.shadow_draws.get(index).copied().unwrap_or(&[]),
             },
         });
     }
@@ -1405,8 +1536,8 @@ fn forward_desc() -> PipelineDesc<'static> {
     }
 }
 
-/// The shadow pass: the same boxes through the sun's projection, depth only,
-/// biased. Dynamic bias, so §6 M11's CVars move without a pipeline rebuild.
+/// The shadow pass: the same boxes through the sun's projection, depth only and
+/// **unbiased** — see [`shadow_draws`] for why the rasterizer does not do it.
 fn shadow_desc() -> PipelineDesc<'static> {
     PipelineDesc {
         name: "ugly.shadow",
@@ -1418,7 +1549,7 @@ fn shadow_desc() -> PipelineDesc<'static> {
         color: ColorTarget::None,
         blend: Blend::Off,
         depth: DepthMode::Write,
-        depth_bias: true,
+        depth_bias: false,
     }
 }
 
@@ -1486,6 +1617,9 @@ fn push_for(
         instance.rotation.to_array(),
         instance.offset.extend(0.0).to_array(),
         instance.half_extent.extend(0.0).to_array(),
+        // Cascade 0 unless `build_shadow` overwrites it; the forward and prepass
+        // pipelines never read the field.
+        0,
     )
 }
 
@@ -1706,10 +1840,14 @@ mod tests {
         // order the dump prints — §6 M6's "matches the executed order", as a
         // machine rather than as a claim about a text file. `order` is read off
         // the executed list, so this is the submission itself.
+        // One shadow pass per cascade (§6 M15.3), nearest first, then the rest.
         assert_eq!(
             frame.order,
             [
-                "shadow",
+                "shadow.0",
+                "shadow.1",
+                "shadow.2",
+                "shadow.3",
                 "depth-prepass",
                 "forward-opaque",
                 "post",

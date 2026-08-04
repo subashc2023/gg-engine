@@ -304,7 +304,7 @@ fn add_a_component() -> anyhow::Result<Measured> {
         &source,
         &[
             (
-                "/// Cube, sun, camera — once.",
+                "/// Cube, floor, sun, camera — once.",
                 "/// Added by `xtask dx`: one more hashed component.\n\
                  #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]\n\
                  #[component(id = \"template.health\")]\n\
@@ -313,7 +313,7 @@ fn add_a_component() -> anyhow::Result<Measured> {
                  \x20   /// Hit points.\n\
                  \x20   pub points: u64,\n\
                  }\n\n\
-                 /// Cube, sun, camera — once.",
+                 /// Cube, floor, sun, camera — once.",
             ),
             (
                 "components: [Spinner, Renderable, Light, Eye],",

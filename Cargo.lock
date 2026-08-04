@@ -563,6 +563,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "demo-09-orbit"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "gg-ecs",
+ "gg-math",
+]
+
+[[package]]
 name = "demo-99-template"
 version = "0.1.0"
 dependencies = [
@@ -1015,6 +1024,19 @@ dependencies = [
  "demo-03-reload",
  "gg-core",
  "gg-ecs",
+]
+
+[[package]]
+name = "gg-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gg-ecs",
+ "gg-extract",
+ "gg-math",
+ "gg-render",
+ "png",
+ "tracing-subscriber",
 ]
 
 [[package]]

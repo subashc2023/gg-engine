@@ -758,8 +758,11 @@ fn render_atrium_at(phase: u64) -> Render {
     // a frame with a casting sun runs the shadow pass, and one without does not
     // (§6 M11). A reference blessed from a frame that skipped it would be a
     // reference of an unlit room that happened to look plausible.
+    // One pass per cascade since §6 M15.3, so the check is on the prefix — an
+    // exact name would have to be kept in step with `r.shadow_cascades`, which
+    // is a CVar and therefore not this test's to know.
     anyhow::ensure!(
-        frame.order.iter().any(|name| name == "shadow"),
+        frame.order.iter().any(|name| name.starts_with("shadow")),
         "the atrium's sun casts, so the graph must have run a shadow pass: {:?}",
         frame.order
     );

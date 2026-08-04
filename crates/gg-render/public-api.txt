@@ -39,11 +39,13 @@ pub static gg_render::cvars::EXPOSURE: gg_core::cvar::CVar
 pub static gg_render::cvars::FOV: gg_core::cvar::CVar
 pub static gg_render::cvars::HISTOGRAM: gg_core::cvar::CVar
 pub static gg_render::cvars::NEAR: gg_core::cvar::CVar
-pub static gg_render::cvars::SHADOW_BIAS: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_BLEND: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_CASCADES: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_DEPTH_BIAS: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_DISTANCE: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_NORMAL_BIAS: gg_core::cvar::CVar
-pub static gg_render::cvars::SHADOW_RADIUS: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_SIZE: gg_core::cvar::CVar
-pub static gg_render::cvars::SHADOW_SLOPE_BIAS: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_SPLIT_LAMBDA: gg_core::cvar::CVar
 pub static gg_render::cvars::UPLOAD_BUDGET: gg_core::cvar::CVar
 pub fn gg_render::cvars::register() -> core::result::Result<(), gg_core::cvar::CVarError>
 pub mod gg_render::graph
@@ -156,8 +158,8 @@ pub gg_render::SceneFrame::post_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::prepass_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::samples: &'a [gg_render::graph::ResourceId]
 pub gg_render::SceneFrame::scene: gg_render::graph::ResourceId
-pub gg_render::SceneFrame::shadow: core::option::Option<gg_render::graph::ResourceId>
-pub gg_render::SceneFrame::shadow_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::shadow_draws: &'a [&'a [gg_rhi::DrawSpec<'a>]]
+pub gg_render::SceneFrame::shadows: &'a [gg_render::graph::ResourceId]
 pub gg_render::SceneFrame::viewport: core::option::Option<gg_rhi::graph::Viewport>
 pub struct gg_render::View
 pub gg_render::View::fov_y: f32

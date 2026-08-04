@@ -31,6 +31,7 @@ struct UglyPush
     float4 rotation;   // the instance's orientation, xyzw
     float4 offset;     // xyz camera-relative centre; w unused
     float4 scale;      // xyz half-extent, applied before the rotation; w unused
+    uint cascade;      // which cascade `vs_shadow` projects through; unread elsewhere
 }
 
 [[vk::push_constant]]
@@ -72,7 +73,6 @@ struct VOut
     float4 pos : SV_Position;
     float3 world : TEXCOORD1;
     float3 normal : NORMAL0;
-    float3 light_clip : TEXCOORD2;
 }
 
 [shader("vertex")]
@@ -90,10 +90,8 @@ VOut vs_main(uint vid: SV_VertexID)
     o.pos = mul(frame.view_projection, float4(world, 1.0));
     o.world = world;
     o.normal = normal;
-    // The normal offset is the half of the acne fix a depth bias cannot do —
-    // see `scene.slang`'s `to_light_clip` for the whole argument.
-    o.light_clip =
-        mul(frame.sun_view_projection, float4(world + normal * frame.shadow_normal_bias, 1.0)).xyz;
+    // No light_clip: which cascade a point belongs to is a per-fragment
+    // question, so the projection happens in `sun_shadow` (§6 M15.3).
     return o;
 }
 
@@ -104,8 +102,7 @@ float4 fs_main(VOut i) : SV_Target
     // No normal map and no occlusion map: a box has neither, so the tangent
     // frame this pass would need does not exist and is not invented.
     Surface s = make_surface(normalize(i.normal), push.tint.rgb, BOX_METALLIC, BOX_ROUGHNESS, 1.0);
-    return float4(shade_all(push.frame, frame, s, i.world, i.light_clip, g_textures, g_samplers),
-                  1.0);
+    return float4(shade_all(push.frame, frame, s, i.world, g_textures, g_samplers), 1.0);
 }
 
 // The depth prepass (§4.5 v1). It shares `UglyPush` and `world_of` with the pass
@@ -119,13 +116,15 @@ float4 vs_depth(uint vid: SV_VertexID) : SV_Position
     return mul(load_frame(push.frame).view_projection, float4(world_of(vid), 1.0));
 }
 
-// The shadow pass: the same geometry through the sun's projection. No normal
-// offset here — the bias belongs on the lookup, so the depth this records stays
-// the geometry's own.
+// The shadow pass: the same geometry through one cascade's projection, chosen by
+// the push rather than by the frame, because the pass is recorded once per
+// cascade. No normal offset here — the bias belongs on the lookup, so the depth
+// this records stays the geometry's own.
 [shader("vertex")]
 float4 vs_shadow(uint vid: SV_VertexID) : SV_Position
 {
-    return mul(load_frame(push.frame).sun_view_projection, float4(world_of(vid), 1.0));
+    Cascade cascade = load_cascade(push.frame, push.cascade);
+    return mul(cascade.view_projection, float4(world_of(vid), 1.0));
 }
 
 [shader("fragment")]

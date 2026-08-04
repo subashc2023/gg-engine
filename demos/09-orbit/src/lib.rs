@@ -1,17 +1,10 @@
-//! **The template** (§6 M12): a spinning lit cube on a floor, and the shortest
-//! complete game crate there is. Copy this directory, rename it, start deleting.
+//! `09-orbit` — a game crate, copied from the template (§6 M12) by `cargo xtask new`.
 //!
 //! Everything below the `gg_game!` block is yours. Everything in it is the
 //! contract: `components` is what the host registers, `systems` is the tick
 //! order (§4.1), and `actions`/`axes` are the id space this crate's
 //! `input.toml` binds to (§4.7). There is no framework here — a system is a
 //! plain `fn` taking `&mut GameWorld`.
-//!
-//! # Why this is a demo and not a document
-//!
-//! `cargo xtask ci` builds it and runs its tests beside every other crate's. A
-//! guide written as prose rots the first time an API moves; this one stops
-//! compiling instead, which is the entire reason the template *is* the guide.
 //!
 //! # Three things worth knowing before you delete anything
 //!
@@ -27,7 +20,7 @@
 //!   machines must agree on tick 900's exact orientation, and `dt` cannot
 //!   promise that.
 //!
-//! Run it: `cargo xtask run 99-template`.
+//! Run it: `cargo xtask run 09-orbit`.
 
 use gg_ecs::Component;
 use gg_ecs::boundary::{Eye, GameWorld, Light, Renderable, log_level};
@@ -54,7 +47,7 @@ pub const FLOOR_HALF: sim::Vec3 = sim::Vec3::new(6.0, 0.1, 6.0);
 /// Mutable globals and thread-locals in a game crate are a grep gate besides
 /// (§3), and this comment is deliberately worded so as not to trip it.
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
-#[component(id = "template.spinner")]
+#[component(id = "orbit.spinner")]
 #[repr(C)]
 pub struct Spinner {
     /// Ticks since spawn. Integer time (§2) — never a float clock.

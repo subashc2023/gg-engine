@@ -7,7 +7,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use demo_99_template::{CUBE_HALF, EYE_AT, FLOOR_HALF, SUN, Spinner, TICKS_PER_TURN};
+use demo_09_orbit::{CUBE_HALF, EYE_AT, FLOOR_HALF, SUN, Spinner, TICKS_PER_TURN};
 use gg_ecs::boundary::{
     self, AbiInfo, ComponentsTable, Eye, HostApiV1, InputFrame, Light, Renderable, SystemsTable,
     TickCtx, light,

@@ -40,9 +40,9 @@
 use gg_extract::Extracted;
 use gg_math::render;
 use gg_rhi::{
-    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthBias, DepthMode, DeviceAddress,
-    DrawSpec, FRAMES_IN_FLIGHT, ImageDesc, ImageFormat, ImageHandle, ImageUse, Indirect,
-    IndirectCommand, PipelineDesc, PipelineHandle, RhiError, Sampler, TextureIndex,
+    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthMode, DeviceAddress, DrawSpec,
+    FRAMES_IN_FLIGHT, ImageDesc, ImageFormat, ImageHandle, ImageUse, Indirect, IndirectCommand,
+    PipelineDesc, PipelineHandle, RhiError, Sampler, TextureIndex,
 };
 
 use crate::content::Content;
@@ -137,6 +137,11 @@ pub(crate) struct ScenePass {
     keyed: Vec<Keyed>,
     staged: Vec<GpuInstance>,
     batches: Vec<Batch>,
+    /// One push per batch per cascade, parallel to `batches` (§6 M15.3). Held
+    /// beside the batch's own rather than replacing it: the forward and prepass
+    /// draws borrow that one, and rewriting it per cascade would rewrite what
+    /// they are still pointing at.
+    shadow_pushes: Vec<Vec<shader::ScenePush>>,
     written: Vec<IndirectCommand>,
     /// This frame's lighting block, patched into every batch's push.
     frame: DeviceAddress,
@@ -190,6 +195,7 @@ impl ScenePass {
             staged: Vec::new(),
             batches: Vec::new(),
             written: Vec::new(),
+            shadow_pushes: Vec::new(),
             frame: 0,
         })
     }
@@ -214,8 +220,11 @@ impl ScenePass {
         view: &View,
         content: Option<&Content>,
         frame: DeviceAddress,
+        cascades: usize,
     ) -> Result<(), RhiError> {
         self.frame = frame;
+        self.shadow_pushes.resize_with(cascades, Vec::new);
+        self.shadow_pushes.truncate(cascades);
         self.keyed.clear();
         self.staged.clear();
         self.batches.clear();
@@ -323,6 +332,9 @@ impl ScenePass {
                     Sampler::LinearRepeat.index(),
                     material.metallic,
                     material.roughness,
+                    // Overwritten per cascade in `stage`; the forward and
+                    // prepass pipelines never read the field.
+                    0,
                 ),
                 indices,
                 command_offset: (self.written.len() * core::mem::size_of::<IndirectCommand>())
@@ -363,25 +375,57 @@ impl ScenePass {
             batch.push.instances = base;
             batch.command_offset += command_offset;
         }
+        // After the patch above, never before it: a cascade copy taken while
+        // `instances` was still the placeholder would draw the shadow pass
+        // through address zero.
+        for (index, pushes) in self.shadow_pushes.iter_mut().enumerate() {
+            pushes.clear();
+            pushes.extend(self.batches.iter().map(|batch| {
+                let mut push = batch.push;
+                push.cascade = index as u32;
+                push
+            }));
+        }
         Ok(())
     }
 
     /// This frame's mesh draws through `pipeline`.
     ///
-    /// `depth_bias` is required exactly where the pipeline declared it, which is
-    /// the shadow one and nowhere else — the RHI refuses the mismatch in both
-    /// directions rather than drawing with whatever the command buffer held.
-    pub(crate) fn draws(
-        &self,
+    /// No `depth_bias` on any of them, the shadow one included: the RHI refuses
+    /// a bias the pipeline did not declare, and none of these declare one
+    /// (`crate::shadow_draws` has the argument).
+    pub(crate) fn draws(&self, pipeline: PipelineHandle) -> Vec<DrawSpec<'_>> {
+        self.draws_with(
+            pipeline,
+            &self.batches.iter().map(|b| &b.push).collect::<Vec<_>>(),
+        )
+    }
+
+    /// The same batches through one cascade's projection (§6 M15.3).
+    ///
+    /// A parallel push array rather than a mutated one: the batch's own push is
+    /// what the forward and prepass draws borrow, and a frame that rewrote it per
+    /// cascade would be rewriting what those two are still pointing at.
+    pub(crate) fn shadow_draws(&self, cascade: usize) -> Vec<DrawSpec<'_>> {
+        let pushes = self
+            .shadow_pushes
+            .get(cascade)
+            .map_or(&[][..], Vec::as_slice);
+        self.draws_with(self.shadow, &pushes.iter().collect::<Vec<_>>())
+    }
+
+    fn draws_with<'a>(
+        &'a self,
         pipeline: PipelineHandle,
-        depth_bias: Option<DepthBias>,
-    ) -> Vec<DrawSpec<'_>> {
+        pushes: &[&'a shader::ScenePush],
+    ) -> Vec<DrawSpec<'a>> {
         self.batches
             .iter()
-            .map(|batch| DrawSpec {
+            .zip(pushes)
+            .map(|(batch, push)| DrawSpec {
                 pipeline,
-                depth_bias,
-                push_constants: bytemuck::bytes_of(&batch.push),
+                depth_bias: None,
+                push_constants: bytemuck::bytes_of(*push),
                 // Unread: the indirect command carries the counts (§6 M10).
                 count: 0,
                 index_buffer: Some(batch.indices),
@@ -407,11 +451,6 @@ impl ScenePass {
     /// The forward pipeline.
     pub(crate) fn forward(&self) -> PipelineHandle {
         self.forward
-    }
-
-    /// The shadow pipeline (§6 M11).
-    pub(crate) fn shadow(&self) -> PipelineHandle {
-        self.shadow
     }
 
     /// Release the pipelines, both fallback texels and the per-frame streams.
@@ -498,7 +537,7 @@ fn shadow_desc() -> PipelineDesc<'static> {
         color: ColorTarget::None,
         blend: Blend::Off,
         depth: DepthMode::Write,
-        depth_bias: true,
+        depth_bias: false,
     }
 }
 

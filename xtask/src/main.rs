@@ -12,6 +12,7 @@ mod dist;
 mod dx;
 mod fresh;
 mod gpuav;
+mod new;
 mod probe;
 mod public_api;
 mod replay;
@@ -37,6 +38,7 @@ fn main() {
         Some("replay") => replay::run(&rest),
         Some("reload") => shell::gates(&rest),
         Some("run") => run::run(&rest),
+        Some("new") => new::run(&rest),
         Some("timers") => timers::run(&rest),
         Some("assets") => assets::run(&rest),
         Some("bench") => bench::run(&rest),
@@ -61,6 +63,7 @@ fn usage() -> anyhow::Result<()> {
          ci [--fast|--push|--nightly|--weekly] [--hook]   local-first CI tiers (§5) — windowless by construction (§1.5)\n\
          interactive                                      manual WSI suite: storms + demo runs; two legs present visibly\n\
          run <demo> [shell flags]                         manual: build the game dylib, play it under gg-runtime (creates a window)\n\
+         new <name>                                       a new game crate from the template: copy, rename, register, build (§6 M12)\n\
          probe [--system]                                 capability table vs pinned lavapipe (spike 2)\n\
          shaders [--check]                                offline shader build + codegen (in-process Slang)\n\
          dist                                             dist gate: build+run tier-dist, symbol absence, crash symbolization (§5.8)\n\

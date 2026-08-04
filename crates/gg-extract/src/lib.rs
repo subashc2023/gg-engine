@@ -291,6 +291,50 @@ impl Extracted {
         self.lights_dropped = 0;
     }
 
+    /// How far the point `camera-relative `at`` sits along `axis`, in units of
+    /// `period`, wrapped to one cell.
+    ///
+    /// A grid built in camera-relative space slides with the camera, so anything
+    /// quantized to it crawls across world geometry as the eye moves — which is
+    /// what a shadow map's texel boundaries do (§6 M11). Subtracting this phase
+    /// back out locks the grid to absolute world space.
+    ///
+    /// It lives here because the quantity it is a phase *of* is
+    /// `dot(camera_origin + at, axis)` on an un-narrowed position, and the
+    /// fractional part of a planetary coordinate is precisely what `f32`
+    /// destroys (§1.4). The two terms are summed *before* the wrap and in `f64`,
+    /// which is the whole of why this cannot be written on the render side: the
+    /// camera term is enormous, `at` is metres, and their sum's fraction is the
+    /// answer.
+    ///
+    /// `axis` is a direction in the grid's space and `period` one cell's width
+    /// along it, both in the caller's own units, so the quotient counts cells
+    /// whatever those are. A `period` of zero or a non-finite one yields zero: a
+    /// grid with no spacing has no phase.
+    ///
+    /// In `[0, 1]` rather than `[0, 1)` — a phase just under one narrows to
+    /// exactly one, and nothing may depend on the difference, because a whole
+    /// cell of shift is the same aligned grid.
+    #[must_use]
+    pub fn grid_phase(&self, axis: render::Vec3, at: render::Vec3, period: f32) -> f32 {
+        let period = f64::from(period);
+        if period == 0.0 || !period.is_finite() {
+            return 0.0;
+        }
+        let axis64 = sim::DVec3::new(f64::from(axis.x), f64::from(axis.y), f64::from(axis.z));
+        // Widening, never narrowing: the origin is the one position that must not
+        // be rounded before it is used, and `at` is small enough that its own
+        // narrowing already happened when extract built it.
+        let at64 = sim::DVec3::new(f64::from(at.x), f64::from(at.y), f64::from(at.z));
+        let along = self.camera_origin.dot(axis64) + at64.dot(axis64);
+        let cells = along / period;
+        // `floor`, not `%`: the remainder keeps the dividend's sign, so a camera
+        // on the negative side of the origin would get a phase in `(-1, 0]` and
+        // shift the grid the wrong way across the world's midpoint.
+        let phase = cells - cells.floor();
+        if phase.is_finite() { phase as f32 } else { 0.0 }
+    }
+
     /// Append every entity carrying `T`, narrowed through `camera_origin` and
     /// culled against `frustum`.
     ///
@@ -1152,6 +1196,82 @@ mod tests {
         out.clear(sim::DVec3::ZERO, Frustum::UNBOUNDED);
         out.append_lights(&world).unwrap();
         assert_eq!(out.lights.len(), 1, "appended twice, not accumulated");
+    }
+
+    fn eye_at(origin: sim::DVec3) -> Extracted {
+        let mut out = Extracted::default();
+        out.clear(origin, Frustum::UNBOUNDED);
+        out
+    }
+
+    #[test]
+    fn a_grid_phase_is_a_fraction_of_a_cell_and_repeats_every_cell() {
+        // The property the whole thing rests on: two eyes a whole number of
+        // cells apart see the same grid, and one a fraction apart does not.
+        let axis = render::Vec3::X;
+        let period = 0.25;
+        let base =
+            eye_at(sim::DVec3::new(1.1, 0.0, 0.0)).grid_phase(axis, render::Vec3::ZERO, period);
+        assert!((0.0..=1.0).contains(&base), "{base}");
+        for cells in [-8.0, -1.0, 3.0, 400.0] {
+            let moved = eye_at(sim::DVec3::new(1.1 + cells * 0.25, 0.0, 0.0));
+            assert!(
+                (moved.grid_phase(axis, render::Vec3::ZERO, period) - base).abs() < 1e-5,
+                "{cells} cells along moved the grid"
+            );
+        }
+        let between = eye_at(sim::DVec3::new(1.1 + 0.125, 0.0, 0.0));
+        assert!((between.grid_phase(axis, render::Vec3::ZERO, period) - base).abs() > 0.4);
+    }
+
+    #[test]
+    fn the_phase_wraps_forward_on_both_sides_of_the_origin() {
+        // `%` would hand back a negative phase here, and a grid shifted the
+        // wrong way is worse than an unshifted one: it crawls at twice the rate.
+        let phase = eye_at(sim::DVec3::new(-0.75, 0.0, 0.0)).grid_phase(
+            render::Vec3::X,
+            render::Vec3::ZERO,
+            1.0,
+        );
+        assert!((phase - 0.25).abs() < 1e-6, "{phase}");
+        let none = eye_at(sim::DVec3::new(-4.0, 0.0, 0.0)).grid_phase(
+            render::Vec3::X,
+            render::Vec3::ZERO,
+            1.0,
+        );
+        assert_eq!(none, 0.0, "a whole number of cells out is no phase at all");
+    }
+
+    #[test]
+    fn a_planetary_eye_still_resolves_a_fraction_of_a_shadow_texel() {
+        // Why this is `f64` and why it is in this crate. At 10^12 m an absolute
+        // `f32` has ~65 km of resolution, so a 39 mm texel's phase would be pure
+        // noise — and noise in a snap is the crawl it was meant to remove.
+        let far = 1.0e12;
+        let texel = 0.039_062_5;
+        let here = eye_at(sim::DVec3::new(far, 0.0, 0.0)).grid_phase(
+            render::Vec3::X,
+            render::Vec3::ZERO,
+            texel,
+        );
+        let step = eye_at(sim::DVec3::new(far + f64::from(texel) * 8.0, 0.0, 0.0)).grid_phase(
+            render::Vec3::X,
+            render::Vec3::ZERO,
+            texel,
+        );
+        assert!((step - here).abs() < 0.01, "{here} vs {step}");
+    }
+
+    #[test]
+    fn a_grid_with_no_spacing_has_no_phase() {
+        let eye = eye_at(sim::DVec3::new(3.7, 0.0, 0.0));
+        for period in [0.0, f32::INFINITY, f32::NAN] {
+            assert_eq!(
+                eye.grid_phase(render::Vec3::X, render::Vec3::ZERO, period),
+                0.0,
+                "{period}"
+            );
+        }
     }
 
     #[test]

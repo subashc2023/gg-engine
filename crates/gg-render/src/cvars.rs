@@ -55,44 +55,109 @@ pub static HISTOGRAM: CVar = CVar::new_bool(
 /// memory one at once: 2048² of `D32_SFLOAT` is 16 MiB.
 pub static SHADOW_SIZE: CVar = CVar::new_int("r.shadow_size", 2048, "shadow map edge, texels");
 
-/// Metres the single cascade covers around the camera. The whole quality/extent
-/// trade of one cascade lives here: half the radius is twice the texel density
-/// and half the range beyond which nothing is shadowed at all.
-pub static SHADOW_RADIUS: CVar =
-    CVar::new_float("r.shadow_radius", 40.0, "shadow cascade radius, metres");
+/// Metres from the eye out to which anything is shadowed at all — the *whole*
+/// range, which the cascades then divide between them.
+///
+/// This replaced `r.shadow_radius`, and the rename is the point: a radius was a
+/// single slab's half-width, and with cascades no one slab has authority over
+/// the range. What a session turns now is how far shadows reach, and
+/// [`SHADOW_CASCADES`] is what decides how much resolution that range gets.
+pub static SHADOW_DISTANCE: CVar = CVar::new_float(
+    "r.shadow_distance",
+    80.0,
+    "shadow range from the eye, metres",
+);
 
-/// Constant depth bias for the shadow pass, in units of the smallest resolvable
-/// depth difference (§6 M11's exit row).
+/// How many cascades the range is split into, clamped to `[1, MAX_CASCADES]`.
+///
+/// Each is a full [`SHADOW_SIZE`]² map, so this multiplies both shadow memory
+/// and the shadow pass's draw count — the second is why the fitter culls each
+/// cascade's draw list against its own slab rather than redrawing the world four
+/// times. 1 is the pre-cascade behaviour and is kept reachable because it is the
+/// control a measurement wants.
+pub static SHADOW_CASCADES: CVar =
+    CVar::new_int("r.shadow_cascades", 4, "shadow cascades over the range");
+
+/// How the range is divided, `0` uniform to `1` logarithmic.
+///
+/// The practical split scheme [ZSXL06]: a logarithmic division gives every
+/// cascade the same *relative* texel density, which is what perspective wants,
+/// but it spends almost the whole range on the first few metres. A uniform one
+/// does the opposite. The blend between them is the knob, and 0.85 is the value
+/// that paper and everyone since lands on.
+pub static SHADOW_SPLIT_LAMBDA: CVar = CVar::new_float(
+    "r.shadow_split_lambda",
+    0.85,
+    "cascade split blend, 0 uniform to 1 logarithmic",
+);
+
+/// Fraction of a cascade's extent over which it cross-fades into the next.
+///
+/// Without it the split is a visible line where texel density changes — most
+/// obvious as a step in a shadow's softness, since the kernel is a fixed three
+/// texels and those texels are a different size either side. Costs a second PCF
+/// lookup for fragments inside the band, and nothing outside it.
+pub static SHADOW_BLEND: CVar = CVar::new_float(
+    "r.shadow_blend",
+    0.1,
+    "cascade cross-fade band, fraction of a cascade",
+);
+
+/// Normal-offset reach, in **shadow texels** — the acne knob (§6 M11's exit
+/// row).
 ///
 /// Too little is **acne** — a surface shadowing itself in stripes. Too much is
 /// **peter-panning** — a shadow detached from the foot of the thing casting it.
-/// The two failures pull in opposite directions, which is why this is a knob and
-/// not a constant somebody picked once on one scene.
+/// The two pull in opposite directions, which is why this is a knob and not a
+/// constant somebody picked once on one scene; `gg-tools shadow-bias` sweeps it
+/// and prints the plateau where neither happens.
 ///
-/// **Negative, because the engine is reverse-Z** (§2, Math row). In an ordinary
-/// depth buffer a positive bias pushes a caster *away* from the light; here
-/// greater depth means *nearer*, so a positive bias pulls every caster toward
-/// the light and shadows the whole scene. That failure looks like a room lit
-/// only by the ambient term rather than like acne, which is why it is worth a
-/// paragraph: it does not read as a bias problem at all.
-pub static SHADOW_BIAS: CVar = CVar::new_float("r.shadow_bias", -2.0, "shadow constant depth bias");
-
-/// Depth bias proportional to the fragment's depth slope. The term that covers a
-/// surface seen edge-on by the light, where a constant bias has almost no depth
-/// gradient to act through.
-pub static SHADOW_SLOPE_BIAS: CVar = CVar::new_float(
-    "r.shadow_slope_bias",
-    -3.0,
-    "shadow slope-scaled depth bias",
-);
-
-/// Metres the shadow *lookup* is pushed along the surface normal. The half of
-/// the acne fix a depth bias cannot do — it works at any angle, and overdoing it
-/// produces the same peter-panning the constant bias does.
+/// Texels rather than metres because that is the unit the error is in: the map's
+/// sampling footprint is one texel wide whatever the cascade covers, so a value
+/// in metres stops being right the moment `r.shadow_radius` or `r.shadow_size`
+/// moves. The shader scales it by the texel's world size *and* by
+/// sin(incidence), so a face-on surface — which needs none — pays none.
+///
+/// 1.0 clears one texel; the 3x3 kernel's corner tap sits sqrt(2) out. The
+/// default is *below* that on purpose — the shader's receiver-plane term already
+/// corrects each tap for the receiver's own slope, so what is left for this to
+/// cover is the footprint error at a silhouette, where that term is clamped. The
+/// sweep measures the plateau at 0.75 to 1.25 texels of total offset and this is
+/// the low end of it, because everything above the plateau is peter-panning.
 pub static SHADOW_NORMAL_BIAS: CVar = CVar::new_float(
     "r.shadow_normal_bias",
-    0.03,
-    "shadow lookup offset along the normal, metres",
+    0.5,
+    "shadow normal-offset reach, in shadow texels",
+);
+
+/// Constant part of the same offset, in **shadow texels**, angle-free.
+///
+/// [`SHADOW_NORMAL_BIAS`] vanishes where the light meets a surface head-on,
+/// which is correct — there is no footprint error there — but it leaves the one
+/// error that does not vanish: the shadow pass and the forward pass compute the
+/// same surface's depth through two different rasterizations, and at zero
+/// incidence a coin-flip between them shadows the whole floor. This covers that.
+///
+/// Pushed along the normal like the other term, which at head-on incidence *is*
+/// a push toward the light — so the reverse-Z sign trap the old rasterizer bias
+/// carried does not exist here: more is always less shadow.
+///
+/// Replaces `r.shadow_bias`, which drove the rasterizer's constant term. That
+/// one was worth about 19 um against a 39 mm texel (Vulkan scales it by an
+/// implementation-dependent `r` for a float depth attachment) and was a
+/// different distance on every driver — not something a blessed reference
+/// (§4.10) may depend on. `r.shadow_slope_bias` is gone with it: unbounded
+/// without the optional `depthBiasClamp` feature, and superseded by the shader's
+/// receiver-plane term, which corrects per fragment and per tap.
+/// 0.75 is twice the measured head-on failure boundary: `gg-tools shadow-bias`
+/// puts the cliff between 0.375 and 0.5 texels, and it is a cliff — 0.375 acnes
+/// over 9% of the frame and 0.5 over none of it. A default sitting on that edge
+/// would be one scene away from failing, and the margin costs 0.2% of pixels in
+/// peter-panning.
+pub static SHADOW_DEPTH_BIAS: CVar = CVar::new_float(
+    "r.shadow_depth_bias",
+    0.75,
+    "shadow constant normal offset, in shadow texels",
 );
 
 /// Make them settable by name. Reads work without this — a read is a load off
@@ -107,9 +172,11 @@ pub fn register() -> Result<(), CVarError> {
         &AMBIENT,
         &HISTOGRAM,
         &SHADOW_SIZE,
-        &SHADOW_RADIUS,
-        &SHADOW_BIAS,
-        &SHADOW_SLOPE_BIAS,
+        &SHADOW_DISTANCE,
+        &SHADOW_CASCADES,
+        &SHADOW_SPLIT_LAMBDA,
+        &SHADOW_BLEND,
         &SHADOW_NORMAL_BIAS,
+        &SHADOW_DEPTH_BIAS,
     ])
 }

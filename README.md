@@ -34,6 +34,7 @@ tier creates an OS window (§1.5) or binds a non-loopback socket.
 | Command | What it does |
 |---|---|
 | `cargo xtask run <demo> [flags]` | **Manual, creates a window.** Build the game dylib and launch `gg-runtime` over it. Flags forward to the shell (`--frames`, `--record`, `--replay`) |
+| `cargo xtask new <name>` | **Manual, writes to the tree.** A new game crate from the template: copy, rename, register in `[workspace] members`, build and test it. `cargo xtask new 09-orbit` then `cargo xtask run 09-orbit` is the whole of starting a game |
 | `cargo xtask probe [--system]` | Capability table against the pinned lavapipe (or the system driver); nonzero exit on any missing capability |
 | `cargo xtask gpuav [--adapter <name>]` | GPU-assisted validation: instrumented shaders over the offscreen suite and the real pass list, failing on any message. Catches what the layer alone cannot see — an out-of-range bindless index, a read off the end of a device address |
 | `cargo xtask shaders [--check]` | Slang → SPIR-V plus reflected push-constant layouts frozen into generated Rust. `--check` verifies the checked-in artifacts without rewriting them |

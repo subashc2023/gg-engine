@@ -41,6 +41,7 @@ struct ScenePush
     uint sampler_index;   // LinearRepeat: a mip chain exists and uvs may leave [0,1]
     float metallic;       // factor, multiplied with the map
     float roughness;      // factor, multiplied with the map
+    uint cascade;         // which cascade `vs_shadow` projects through; unread elsewhere
 }
 
 [[vk::push_constant]]
@@ -109,20 +110,6 @@ struct VOut
     float4 tangent : TANGENT0;    // xyz plus the handedness bit
     float2 uv : TEXCOORD0;
     float3 tint : COLOR0;
-    float3 light_clip : TEXCOORD2; // already NDC: the sun's projection is orthographic
-}
-
-// Where the shadow map is sampled from, offset along the normal.
-//
-// The normal offset is the half of the acne fix a depth bias cannot do: bias
-// moves a fragment along the light's depth axis, and a surface lit edge-on has
-// almost no depth gradient to move it through. Pushing the *lookup* off the
-// surface instead works at any angle, and the cost of overdoing it is the same
-// peter-panning the constant bias produces — which is why both are CVars.
-float3 to_light_clip(Frame frame, float3 world, float3 normal)
-{
-    float4 biased = float4(world + normal * frame.shadow_normal_bias, 1.0);
-    return mul(frame.sun_view_projection, biased).xyz;
 }
 
 [shader("vertex")]
@@ -155,7 +142,8 @@ VOut vs_main(uint vid: SV_VertexID, uint iid: SV_InstanceID)
     o.tangent = float4(normalize(tangent), v[11]);
     o.uv = float2(v[6], v[7]);
     o.tint = inst.tint.rgb;
-    o.light_clip = to_light_clip(frame, o.world, normalize(normal));
+    // No light_clip: which cascade a point belongs to is a per-fragment
+    // question, so the projection happens in `sun_shadow` (§6 M15.3).
     return o;
 }
 
@@ -180,8 +168,7 @@ float4 fs_main(VOut i) : SV_Target
                              mr.g * push.metallic, mr.r * push.roughness, occlusion);
     // Radiance, unbounded above — the scene attachment is `Rgba16F` and the
     // tonemapper is what brings this into [0, 1] (§6 M11).
-    return float4(shade_all(push.frame, frame, s, i.world, i.light_clip, g_textures, g_samplers),
-                  1.0);
+    return float4(shade_all(push.frame, frame, s, i.world, g_textures, g_samplers), 1.0);
 }
 
 // The depth prepass (§4.5 v1) and the shadow pass. Both are position-only, and
@@ -194,10 +181,11 @@ float4 vs_depth(uint vid: SV_VertexID, uint iid: SV_InstanceID) : SV_Position
     return mul(load_instance(iid).mvp, float4(v[0], v[1], v[2], 1.0));
 }
 
-// The shadow pass reprojects through the sun rather than the camera, which is
-// why it cannot reuse `mvp` and rebuilds the world position the way `vs_main`
-// does. No normal offset here: the bias belongs on the *lookup*, so that the
-// depth this records stays the geometry's own.
+// The shadow pass reprojects through one cascade rather than the camera, which
+// is why it cannot reuse `mvp` and rebuilds the world position the way `vs_main`
+// does. The cascade comes from the push because the pass is recorded once per
+// cascade. No normal offset here: the bias belongs on the *lookup*
+// (`to_light_clip`), so that the depth this records stays the geometry's own.
 [shader("vertex")]
 float4 vs_shadow(uint vid: SV_VertexID, uint iid: SV_InstanceID) : SV_Position
 {
@@ -205,7 +193,7 @@ float4 vs_shadow(uint vid: SV_VertexID, uint iid: SV_InstanceID) : SV_Position
     Instance inst = load_instance(iid);
     Frame frame = load_frame(push.frame);
     float3 world = inst.offset + rotate_by(inst.rotation, float3(v[0], v[1], v[2]) * inst.scale);
-    return mul(frame.sun_view_projection, float4(world, 1.0));
+    return mul(load_cascade(push.frame, push.cascade).view_projection, float4(world, 1.0));
 }
 
 [shader("fragment")]
