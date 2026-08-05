@@ -46,6 +46,13 @@ demo-07-ui = { path = "../demos/07-ui", default-features = false }
 # M14 (§6), same arrangement and the same reason: demo 08's scripted walk is the
 # source of both the checked-in replay and the demo's own tests.
 demo-08-save = { path = "../demos/08-save", default-features = false }
+# M18 (§6): the recorded Tetris session. Unlike its neighbours this one keeps
+# the `game` feature, because `session::hash_sequence` authors the checked-in
+# baseline by driving the *declared* systems table — the same path the demo's
+# own test and `gg-runtime` take, so one file stands behind the qemu leg and the
+# three tier legs. That makes it the only `gg_game!` in this binary's graph, and
+# a second one linked the same way would collide on its fixed extern names.
+demo-10-tetris = { path = "../demos/10-tetris" }
 # M5 (§5.6c): the curated demo-03 stream is authored here and driven through the
 # real shell, so xtask needs the two constants the shell's replay header is
 # built from — the tick rate and the Determinism Contract version. Nothing else

@@ -47,6 +47,8 @@ use gg_ecs::Component;
 use gg_ecs::boundary::{ActionId, GameWorld, Sound, TEXT, Widget, log_level, wave};
 use gg_math::sim;
 
+pub mod session;
+
 /// Columns.
 pub const WIDTH: usize = 10;
 /// Rows *including* the two hidden ones a piece spawns into. Row 0 is the top:
@@ -552,6 +554,23 @@ impl Text {
         text
     }
 
+    /// `tetris: level N` — the one log line a whole game produces in its middle,
+    /// built here so the log path allocates nothing either.
+    fn level(value: u32) -> Text {
+        let mut text = Text {
+            buf: [0; TEXT],
+            len: 0,
+        };
+        for byte in b"tetris: level " {
+            text.push(*byte);
+        }
+        let digits = Text::number(value);
+        for byte in &digits.buf[..digits.len] {
+            text.push(*byte);
+        }
+        text
+    }
+
     fn push(&mut self, byte: u8) {
         if self.len < TEXT {
             self.buf[self.len] = byte;
@@ -711,6 +730,10 @@ pub fn gravity_for(rules: &Rules, level: u32) -> u32 {
     ticks.max(MIN_GRAVITY_TICKS)
 }
 
+/// What `bootstrap` seeds the first game with. A constant, and named so
+/// [`session`] can open its mirror on the same board the shell will.
+pub const SEED: u64 = 0x5445_5452_4953_0001;
+
 /// A fresh game, seeded. The seed is an argument rather than a clock read: a
 /// wall-clock seed is a game that cannot be replayed (§4.7).
 #[must_use]
@@ -748,7 +771,7 @@ pub fn bootstrap(world: &mut GameWorld) {
         return;
     }
 
-    let mut play = new_play(0x5445_5452_4953_0001);
+    let mut play = new_play(SEED);
     let first = draw(&mut play);
     let piece = spawn_piece(first);
     let board = world.spawn_with(play);
@@ -930,6 +953,8 @@ pub fn step(world: &mut GameWorld) {
     let restart = world.just_pressed(RESTART);
 
     let mut topped_out = false;
+    // 0 means "no level change this tick": [`Play::level`] is one-based.
+    let mut leveled_to = 0;
     // Collected here and played after the pass, because the cue entities are
     // outside this query and a system cannot hold two aliasing views of the
     // world. `cleared` doubles as the clear cue's pitch.
@@ -1081,7 +1106,10 @@ pub fn step(world: &mut GameWorld) {
                 play.level = play.lines / rules.lines_per_level.max(1) + 1;
                 fired[CUE_CLEAR as usize] = true;
                 cleared_rows = cleared;
-                fired[CUE_LEVEL as usize] = play.level > was;
+                if play.level > was {
+                    fired[CUE_LEVEL as usize] = true;
+                    leveled_to = play.level;
+                }
             }
             play.lock_accum = 0;
             play.fall_accum = 0;
@@ -1114,6 +1142,12 @@ pub fn step(world: &mut GameWorld) {
         sound.play();
     });
 
+    // The two events a log reader wants out of a whole game, and the two a
+    // replayed session is checked by (§6 M18): a level is the only sign from
+    // outside that the middle of a game happened at all.
+    if leveled_to != 0 {
+        world.log(log_level::INFO, Text::level(leveled_to).as_str());
+    }
     if topped_out {
         world.log(log_level::INFO, "tetris: topped out");
     }

@@ -836,6 +836,27 @@ fn aarch64_leg() -> anyhow::Result<()> {
             ]),
             &format!("hierarchy determinism on aarch64 under qemu ({profile} profile)"),
         )?;
+        // demo-10-tetris joins at M18, and it is what §6 M18's exit row means by
+        // "and on aarch64 under qemu": the recorded full game, replayed against
+        // the same checked-in per-tick baseline the two x86 hosts compare
+        // against. Its own invocation because it has no `gate` feature to select
+        // and its tests need the `game` one that `--no-default-features` above
+        // would take away. Integer sim throughout — the bag is SplitMix64 and
+        // the only floats are widget rectangles — so a divergence here is a real
+        // architecture claim rather than a transcendental.
+        exec(
+            cargo().args([
+                "nextest",
+                "run",
+                "-p",
+                "demo-10-tetris",
+                "--target",
+                "aarch64-unknown-linux-gnu",
+                "--cargo-profile",
+                profile,
+            ]),
+            &format!("the recorded Tetris game on aarch64 under qemu ({profile} profile)"),
+        )?;
     }
     Ok(())
 }

@@ -69,6 +69,10 @@ fn check() -> anyhow::Result<()> {
     // the tiers are compared against each other rather than against a file.
     // What can be checked cheaply here is that the stream is still readable.
     crate::shell::describe()?;
+    // Demo 10's per-tick baseline is checked by the demo's own test, where it
+    // also runs under qemu (§6 M18). What only this side can check is that the
+    // checked-in stream is still the script that baseline was taken from.
+    crate::shell::check_tetris()?;
     println!("xtask replay: baselines live in {}", dir.display());
     Ok(())
 }

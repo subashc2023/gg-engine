@@ -3539,6 +3539,7 @@ dependencies = [
  "demo-02-mesh",
  "demo-07-ui",
  "demo-08-save",
+ "demo-10-tetris",
  "gg-core",
  "gg-ecs",
  "gg-editor",

@@ -213,6 +213,99 @@ pub fn bless(commit: &str) -> anyhow::Result<()> {
         editor.ticks(),
         editor.change_count()
     );
+    let mut tetris = tetris_replay();
+    tetris.set_engine_commit(commit);
+    std::fs::write(tetris_path(), tetris.encode())?;
+    // And the per-tick baseline beside it, driven through demo 10's own
+    // declared systems table. This is the file the aarch64 leg compares
+    // against, so it is authored by the same code the leg reads it with.
+    let sequence = demo_10_tetris::session::hash_sequence(&demo_10_tetris::session::frames())?;
+    std::fs::write(
+        demo_10_tetris::session::baseline_path(),
+        demo_10_tetris::session::encode_baseline(&sequence),
+    )?;
+    println!(
+        "xtask replay: blessed {} ({} ticks, {} change records) and its {}-tick baseline at \
+         {commit}",
+        demo_10_tetris::session::NAME,
+        tetris.ticks(),
+        tetris.change_count(),
+        sequence.len(),
+    );
+    Ok(())
+}
+
+/// Demo 10's verbs, in the id order `gg_game!` declares them (§4.7). No axes:
+/// Tetris is eight buttons, and a replay with an axis list the game does not
+/// have is refused at load by name.
+const TETRIS_ACTIONS: &[&str] = &[
+    "left",
+    "right",
+    "soft_drop",
+    "hard_drop",
+    "rotate_cw",
+    "rotate_ccw",
+    "hold",
+    "restart",
+];
+
+/// The recorded full game as a replay file — `demo_10_tetris::session`'s frames,
+/// so this file, the demo's own tests and the baseline are one script.
+pub fn tetris_replay() -> Replay {
+    let mut meta = ReplayMeta::new(
+        gg_math::DETERMINISM_CONTRACT,
+        "curated",
+        gg_core::DEFAULT_TICK_HZ,
+        TETRIS_ACTIONS,
+        &[],
+    );
+    meta.engine_commit = "generated".to_owned();
+    let mut recorder = Recorder::new(meta);
+    for (tick, frame) in demo_10_tetris::session::frames().into_iter().enumerate() {
+        recorder.record(tick as u64, frame);
+    }
+    recorder.finish()
+}
+
+pub fn tetris_path() -> PathBuf {
+    workspace_root()
+        .join("tests/replays")
+        .join(format!("{}.ggrp", demo_10_tetris::session::NAME))
+}
+
+/// The checked-in Tetris stream is still the script, byte for byte.
+///
+/// This closes the hole the demo's own tests leave open by design: they drive
+/// `session::frames()` rather than decoding the `.ggrp`, because `gg-input` is
+/// not a dependency a game crate may take (§3), and a harness that regenerates
+/// its own input passes happily the day the generator changes. So the artifact
+/// is checked from the side that *can* read it — here, in the push tier.
+///
+/// The blessed commit is copied off the file before the compare rather than
+/// compared: that field is the one thing `--bless` owns, and a stream is not
+/// stale for having been blessed at an older commit (§4.7).
+pub fn check_tetris() -> anyhow::Result<()> {
+    let path = tetris_path();
+    let on_disk = std::fs::read(&path)
+        .map_err(|e| anyhow::anyhow!("no Tetris stream at {} ({e})", path.display()))?;
+    let decoded = Replay::decode(&on_disk)?;
+    let mut fresh = tetris_replay();
+    fresh.set_engine_commit(&decoded.meta().engine_commit);
+    anyhow::ensure!(
+        fresh.encode() == on_disk,
+        "{} is not what `demo_10_tetris::session::frames()` produces today ({} ticks on disk, {} \
+         from the script) — the recording and the script have come apart, and `cargo xtask replay \
+         --bless` is the reviewed act that re-joins them",
+        path.display(),
+        decoded.ticks(),
+        fresh.ticks(),
+    );
+    println!(
+        "xtask replay: {} matches its script ({} ticks, blessed at {})",
+        demo_10_tetris::session::NAME,
+        decoded.ticks(),
+        decoded.meta().engine_commit,
+    );
     Ok(())
 }
 
@@ -713,6 +806,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     }
     if only("--launcher") {
         launcher()?;
+    }
+    if only("--tetris") {
+        tetris()?;
     }
     println!("xtask reload: green");
     Ok(())
@@ -1307,6 +1403,122 @@ fn ui() -> anyhow::Result<()> {
         runs[0].1.len(),
     );
     Ok(())
+}
+
+/// §6 M18's exit row through the shell: **a recorded full game — first spawn to
+/// top-out — replays bit-identically under dev, instrumented and dist-verify.**
+///
+/// The demo's own tests drive the same script in one process and hold the
+/// checked-in baseline, which is what the aarch64 leg compares against. Three
+/// things only this can add, and each fails differently:
+///
+/// - **the game was played.** [`session::LOG`](demo_10_tetris::session::LOG) in
+///   order, and the top-out exactly once — a shell that replayed onto the wrong
+///   verb ids would still hash consistently across three tiers while the board
+///   sat untouched, and a stream that restarted would say "ready" twice.
+/// - **and it was the recorded game.** The shell's hash *values* are not the
+///   baseline's and cannot be: the shell's world also carries what `gg_ui` wrote
+///   into `Widget::state`, and demo 10 puts ~250 widgets through it every tick.
+///   What does cross the two harnesses is the **shape** of the sequence — the
+///   ticks on which nothing moved. A shell replaying onto the wrong verb ids, or
+///   an input path that stopped delivering, is quiet on different ticks. Weaker
+///   than value equality, and the honest tie available: making it value equality
+///   would mean linking `gg-ui` into the qemu leg to reproduce the host's writes,
+///   which is the one thing §3 says a game crate's graph must not contain.
+/// - **and codegen did not touch it.** dev, instrumented and dist-verify, tick
+///   for tick (§5.6c).
+fn tetris() -> anyhow::Result<()> {
+    let replay = tetris_path();
+    anyhow::ensure!(
+        replay.is_file(),
+        "no Tetris stream at {} — `cargo xtask replay --bless` authors it",
+        replay.display()
+    );
+    let replay = replay.display().to_string();
+    let baseline = demo_10_tetris::session::parse_baseline(&std::fs::read_to_string(
+        demo_10_tetris::session::baseline_path(),
+    )?)
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let wanted = demo_10_tetris::session::LOG;
+
+    let mut runs: Vec<(&str, Vec<(u64, String)>)> = Vec::new();
+    for tier in HASHED_TIERS {
+        let (host, game) = stage_game(tier, "demo-10-tetris", "demo_10_tetris")?;
+        let log = play(&host, &game, &["--replay", &replay], true)?;
+        let at = reaches(&log, wanted);
+        anyhow::ensure!(
+            at == wanted.len(),
+            "[{}] the replayed game reached {at} of {} milestones — expected {wanted:?} in order; \
+             a session that spawned and died without being played looks exactly like this:\n{log}",
+            tier.name,
+            wanted.len(),
+        );
+        for (once, what) in [
+            ("tetris: ready", "started"),
+            ("tetris: topped out", "ended"),
+        ] {
+            let count = log.lines().filter(|l| l.contains(once)).count();
+            anyhow::ensure!(
+                count == 1,
+                "[{}] the session {what} {count} times — one recorded game, one of each",
+                tier.name
+            );
+        }
+
+        let seq = sequence(&log)?;
+        anyhow::ensure!(
+            seq.len() == baseline.len(),
+            "[{}] the shell ran {} ticks and the baseline holds {}",
+            tier.name,
+            seq.len(),
+            baseline.len()
+        );
+        let (here, there) = (
+            quiet_ticks(seq.iter().map(|(_, h)| h.as_str())),
+            quiet(&baseline),
+        );
+        anyhow::ensure!(
+            here == there,
+            "[{}] the shell's world stood still on {here:?} and the in-process baseline's on \
+             {there:?} — the two harnesses did not play the same game",
+            tier.name,
+        );
+        runs.push((tier.name, seq));
+    }
+
+    for pair in runs.windows(2) {
+        if let Some(found) = divergence(&pair[0], &pair[1]) {
+            anyhow::bail!("§6 M18: {found}");
+        }
+    }
+    println!(
+        "xtask reload: demo 10's recorded game — spawn to top-out over {} ticks — replayed \
+         identically under dev, instrumented and dist-verify, standing still on the same ticks \
+         as the baseline the aarch64 leg compares against (§6 M18)",
+        runs[0].1.len(),
+    );
+    Ok(())
+}
+
+/// The ticks on which the hash did not move — a run's shape, with its values
+/// taken away. Tick 0 is never quiet: there is nothing before it to equal.
+fn quiet_ticks<'a>(hashes: impl Iterator<Item = &'a str>) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut previous: Option<&str> = None;
+    for (tick, hash) in hashes.enumerate() {
+        if previous == Some(hash) {
+            out.push(tick);
+        }
+        previous = Some(hash);
+    }
+    out
+}
+
+/// [`quiet_ticks`] over a parsed baseline.
+fn quiet(baseline: &[(u64, u128)]) -> Vec<usize> {
+    let text: Vec<String> = baseline.iter().map(|(_, h)| format!("{h:032x}")).collect();
+    quiet_ticks(text.iter().map(String::as_str))
 }
 
 /// The tier `HASHED_TIERS` cannot contain and this gate cannot do without: the

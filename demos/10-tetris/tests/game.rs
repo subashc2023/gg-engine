@@ -14,15 +14,16 @@
 use demo_10_tetris::{
     Banner, Bay, COLORS, CUE_CLEAR, CUE_HOLD, CUE_LEVEL, CUE_LOCK, CUE_MOVE, CUE_OVER, CUE_ROTATE,
     CUES, Cell, Cue, HARD_DROP, HEIGHT, HIDDEN, HOLD, HOLD_BAY, HudLine, LEFT, MIN_GRAVITY_TICKS,
-    NEXT_BAY, NO_PIECE, Piece, Play, RESTART, ROTATE_CW, Rules, SHAPES, WIDTH, Well, cells_of,
-    clear_rows, collides, color_of, draw, gravity_for, landing_row, new_play, spawn_piece,
-    voice_of,
+    NEXT_BAY, NO_PIECE, Piece, Play, RESTART, ROTATE_CW, Rules, SEED, SHAPES, WIDTH, Well,
+    cells_of, clear_rows, collides, color_of, draw, gravity_for, landing_row, new_play, session,
+    spawn_piece, voice_of,
 };
 use gg_ecs::boundary::{
     self, AbiInfo, ActionId, ComponentsTable, HostApiV1, InputFrame, Sound, SystemsTable, TickCtx,
     Widget, wave,
 };
 use gg_ecs::{Query, World};
+use gg_math::sim;
 
 // The symbols `gg_game!` exported into this crate's rlib.
 unsafe extern "C" {
@@ -157,6 +158,20 @@ impl Game {
     fn put_piece(&mut self, piece: Piece) {
         let query = Query::<&mut Piece>::new().unwrap();
         self.world.each(&query, |_, p: &mut Piece| *p = piece);
+    }
+
+    /// Overwrite the state machine. Used by one test, to reseed the bag and
+    /// nothing else — see `a_reseeded_bag_diverges_by_name_and_plays_a_different_game`.
+    fn put_play(&mut self, play: Play) {
+        let query = Query::<&mut Play>::new().unwrap();
+        self.world.each(&query, |_, p: &mut Play| *p = play);
+    }
+
+    /// Play one *recorded* frame. Every other driver here names an action; the
+    /// session names a bit pattern, because that is what a replay carries.
+    fn frame(&mut self, frame: InputFrame) {
+        self.held = frame.buttons;
+        self.step();
     }
 
     /// Every cue's sequence, so a test can say what a tick played by diffing.
@@ -788,4 +803,164 @@ fn a_top_out_plays_its_cue_exactly_once() {
     let before = game.cues();
     game.steps(60);
     assert_eq!(played(before, game.cues()), Vec::<u8>::new());
+}
+
+// ---------------------------------------------------------- the recorded game
+
+/// §6 M18's exit row, in process: **the recorded session is a whole game.**
+///
+/// The numbers are pinned rather than bounded because this is a *recording*.
+/// "At least one line cleared" would stay green over a session that stopped
+/// being the one the shell replays, which is the failure the whole gate exists
+/// to catch — and the tick count is what makes a stale `.ggrp` visible from
+/// here as well as from the push tier's byte compare.
+#[test]
+fn the_recorded_session_plays_a_whole_game() {
+    let frames = session::frames();
+    assert_eq!(frames.len(), 600, "the session changed length");
+
+    let mut game = Game::load();
+    let mut over_at = None;
+    let mut levels = Vec::new();
+    let mut level = 1;
+    for (tick, frame) in frames.iter().enumerate() {
+        game.frame(*frame);
+        let play = game.one::<Play>();
+        if play.level != level {
+            levels.push(play.level);
+            level = play.level;
+        }
+        if play.over != 0 && over_at.is_none() {
+            over_at = Some(tick);
+        }
+    }
+
+    let play = game.one::<Play>();
+    assert_eq!(
+        over_at,
+        Some(568),
+        "the game did not end where it was recorded"
+    );
+    assert_eq!(
+        levels,
+        vec![2, 3],
+        "the session must cross a level boundary twice"
+    );
+    assert_eq!(
+        (play.lines, play.level, play.score),
+        (24, 3, 7032),
+        "the recorded game came out differently"
+    );
+    // Every cue the game has, sounded at least once — a session that never
+    // held, never rotated and never cleared would be a drop-and-die script.
+    for (kind, seq) in game.cues().iter().enumerate() {
+        assert_ne!(*seq, 0, "cue {kind} never played in a whole game");
+    }
+    // And the tail is quiet: a dead board that kept sounding would mean `over`
+    // is not a state.
+    assert_ne!(play.over, 0);
+    let before = game.cues();
+    game.steps(60);
+    assert_eq!(played(before, game.cues()), Vec::<u8>::new());
+}
+
+/// §5.6b on whatever architecture this is running on. The aarch64-under-qemu
+/// leg is this same test against this same file, which is the whole of "and on
+/// aarch64" in §6 M18's exit row.
+#[test]
+fn the_recorded_session_reproduces_its_checked_in_hash_sequence() {
+    let sequence = session::hash_sequence(&session::frames()).unwrap();
+    let path = session::baseline_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "no baseline at {} ({e}) — `cargo xtask replay --bless` writes it, and its absence \
+             means this gate is checking nothing",
+            path.display()
+        )
+    });
+    let baseline = session::parse_baseline(&text).unwrap();
+
+    if let Some(found) = session::divergence(&sequence, &baseline) {
+        // Written *beside* the baseline, never over it: a gate that repairs
+        // itself on failure is a rubber stamp (§6 M0A spike 3).
+        let fresh = std::env::temp_dir().join("demo10-tetris.hashes.actual");
+        let _ = std::fs::write(&fresh, session::encode_baseline(&sequence));
+        panic!(
+            "{found}\nfresh sequence written to {}\nIf this diff is intended, \
+             `cargo xtask replay --bless` — and the diff belongs in the review.",
+            fresh.display()
+        );
+    }
+}
+
+/// §5.6a: two runs on one runner. A single run compared against a file cannot
+/// see a stable-but-wrong iteration order — it would match its own baseline
+/// forever.
+#[test]
+fn one_recorded_session_run_twice_on_this_runner_agrees() {
+    let frames = session::frames();
+    let first = session::hash_sequence(&frames).unwrap();
+    let second = session::hash_sequence(&frames).unwrap();
+    assert_eq!(first, second, "two runs of one session disagreed");
+}
+
+/// The other half of §6 M18's exit row: **the bag is world state, and a replay
+/// fails by name when it diverges.**
+///
+/// The only edit is `Play::rng`, made on the first tick and touching nothing
+/// else — same board, same script, same everything a replay carries. Two
+/// separate claims come out of it, and a bag living *beside* the world instead
+/// of in it would fail a different one of them:
+///
+/// - **the generator is hashed state.** The divergence is named at tick 0, the
+///   tick the new seed lands, because `sim::Rng` reaches the canonical hash
+///   through an encoding written for it (§6 M18 item 1). A generator the world
+///   did not hold would leave this tick identical and the gate silent.
+/// - **and the generator decides the game.** Hashing a field nothing reads
+///   would satisfy the first claim on its own, so the run is played out: a
+///   different bag tops out at a different tick with a different score.
+#[test]
+fn a_reseeded_bag_diverges_by_name_and_plays_a_different_game() {
+    let frames = session::frames();
+    let baseline = session::hash_sequence(&frames)
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(tick, hash)| (tick as u64, hash.get()))
+        .collect::<Vec<_>>();
+
+    let mut game = Game::load();
+    let mut sequence = Vec::new();
+    let mut over_at = None;
+    for (tick, frame) in frames.iter().enumerate() {
+        game.frame(*frame);
+        if tick == 0 {
+            let play = Play {
+                rng: sim::Rng::from_seed(SEED ^ 1),
+                ..game.one::<Play>()
+            };
+            game.put_play(play);
+        }
+        sequence.push(game.world.canonical_hash());
+        if game.one::<Play>().over != 0 && over_at.is_none() {
+            over_at = Some(tick);
+        }
+    }
+
+    let found = session::divergence(&sequence, &baseline)
+        .expect("a reseeded bag hashed identically — the generator is not in the world");
+    assert!(
+        found.starts_with("tick 0:"),
+        "the reseed should be visible on the tick it lands: {found}"
+    );
+
+    // The consequence, not the write. The bot's placements were recorded against
+    // the *other* bag, so this run plays badly and dies early — which is the
+    // point: the pieces it was handed were different ones.
+    let play = game.one::<Play>();
+    assert_ne!(
+        (over_at, play.lines, play.score),
+        (Some(568), 24, 7032),
+        "a different bag played the same game"
+    );
 }
