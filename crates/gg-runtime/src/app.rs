@@ -82,6 +82,15 @@ pub struct App {
     /// rather than a new kind of proof — and a headless run must therefore
     /// route clicks exactly as a windowed one does.
     ui: gg_ui::Ui,
+    /// The game's declared audio (§6 M18 item 2). Driven on the tick beside the
+    /// UI and for half the same reason — a cue fires on the tick a row cleared,
+    /// and a frame that covered two ticks would drop one of them.
+    ///
+    /// The other half is the opposite of the UI's: this stage writes *nothing*.
+    /// A silent run and a loud one are the same run, which is what keeps §5.6c
+    /// comparing sims rather than speakers. Silent under `GG_HEADLESS=1` and on
+    /// a machine with no device, both without failing (§1.5).
+    audio: gg_audio::Audio,
     /// Which verbs feed it, resolved against *this build's* verb list and
     /// re-resolved at every swap for the reason [`bind`] gives. `None` is a
     /// game that declared none: its UI draws and cannot be clicked.
@@ -212,6 +221,7 @@ impl App {
             extracted: Extracted::default(),
             view: View::default(),
             ui: gg_ui::Ui::new()?,
+            audio: gg_audio::Audio::device_unless_headless()?,
             ui_binding,
             cursor: Cursor::new(args.editor),
             #[cfg(feature = "editor")]
@@ -596,6 +606,10 @@ impl App {
             // `identical`, which is the pair the gate reads, and a second line
             // beside it would be a second thing to keep true.
             editing.stash.stop(tick, &mut self.world)?;
+            // Unconditional: a stop that restored nothing costs one re-registered
+            // cue bank and no sound, where a stop that *did* restore rewound
+            // every `seq` — and a rewind is a difference like any other.
+            self.audio.forget();
         }
         Ok(commands.save.then(|| editing.save.clone()))
     }
@@ -700,6 +714,12 @@ impl App {
             .open_segment(self.next_tick, self.lib.code_hash());
         self.world = world;
         self.halted = false;
+        // The world on the other side of a migration is one the audio observer
+        // has not seen: a `Sound` the new build declares afresh comes back with
+        // `seq` at zero, and a difference is a trigger. Forgotten rather than
+        // carried, so a reload is silent at the seam instead of playing whatever
+        // the retired build's cue bank happened to end on (§6 M18 item 2).
+        self.audio.forget();
         // Staged after the swap, so a successor inherits the *migrated* world
         // rather than the one the retired dylib understood.
         if self.rejuvenate.due() {
@@ -980,13 +1000,15 @@ impl PlayMode {
     /// Called at the top of every tick, so the world compared at `stop` is the
     /// world captured at `enter` — the same point in the frame, with nothing
     /// half-advanced between the two readings.
-    fn edge(&mut self, tick: u64, world: &mut World) -> anyhow::Result<()> {
+    /// `true` when this tick restored the world — the caller's cue to forget
+    /// what its observers knew about it.
+    fn edge(&mut self, tick: u64, world: &mut World) -> anyhow::Result<bool> {
         if tick == self.enter {
             self.stash.enter(tick, world);
         } else if tick == self.stop {
-            self.stash.stop(tick, world)?;
+            return self.stash.stop(tick, world);
         }
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -1135,8 +1157,13 @@ impl Stages for App {
         // Before the halt check: play mode is the *editor's* clock, not the
         // sim's, and stopping a session that a panicking system halted is
         // exactly when someone wants their world back.
-        if let Some(play) = &mut self.play {
-            play.edge(tick, &mut self.world)?;
+        if let Some(play) = &mut self.play
+            && play.edge(tick, &mut self.world)?
+        {
+            // A stop rewinds every `Sound`'s `seq` to what it was at enter, and
+            // a rewind is a difference like any other — without this, stopping
+            // plays the whole session's cue bank at once (§6 M18 item 2).
+            self.audio.forget();
         }
         if self.halted {
             return Ok(());
@@ -1252,6 +1279,12 @@ impl Stages for App {
             .map(|binding| UiTick::from_input(&self.input, &binding))
             .unwrap_or_default();
         self.ui.frame(&mut self.world, &ui_tick, surface);
+        // The audio tick (§6 M18 item 2). After the UI so a cue a game fires in
+        // response to a click lands in the same tick as the click, and *outside*
+        // the hash entirely — it takes `&World` and the compiler is what proves
+        // it. A halt stops it with everything else: the early return above is
+        // the sim's clock, and a world nothing is advancing has no new cues.
+        self.audio.tick(&self.world);
         // The editor tick (§6 M15), after the game's UI and before the hash for
         // the same reason: an inspector edit is ordinary world state and belongs
         // in the tick that took the click.

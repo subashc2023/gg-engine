@@ -317,12 +317,37 @@ pub fn interactive() -> anyhow::Result<()> {
         &mut cmd,
         "windowed suite: swapchain torture + resize/minimize storms (§4.3, §1.5)",
     )?;
+    audio_device_suite()?;
     demo_runs()?;
     shell_run()?;
     replay_run()?;
     crate::dist::demo_runs()?;
     println!("xtask interactive: green (manual windowed suite — not part of any automated tier)");
     Ok(())
+}
+
+/// The legs that open a sound card (§1.5's audio analogue, §6 M18 item 2).
+///
+/// Here for the same reason the windowed suite is: the dev machine is the user's
+/// gaming PC, and a tier that made a noise at 02:00 is the same violation as one
+/// that put a window on the screen. `gg-audio`'s claims about *what a cue sounds
+/// like* are pure arithmetic and run in the fast tier — what is left for this
+/// suite is the part only a driver can answer.
+fn audio_device_suite() -> anyhow::Result<()> {
+    let mut cmd = cargo();
+    cmd.args([
+        "nextest",
+        "run",
+        "-p",
+        "gg-audio",
+        "--run-ignored",
+        "ignored-only",
+    ]);
+    // Belt and braces: the law reads this variable, and inheriting a `1` from
+    // whatever shell invoked `interactive` would turn the suite into two tests
+    // that panic by design.
+    cmd.env_remove("GG_HEADLESS");
+    exec(&mut cmd, "audio suite: a real device takes a note (§1.5)")
 }
 
 /// The end-to-end half of §5.6, and the only place it can live: the *windowed*
@@ -1151,6 +1176,28 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
             }
         }
 
+        // §1.5's audio law (§6 M18 item 2): opening a sound card is spelled
+        // `Audio::device`, and `gg-audio` is the only crate that may spell it.
+        // Everything else — the shell included — takes
+        // `Audio::device_unless_headless`, which is silent under `GG_HEADLESS=1`
+        // and on a machine with no device.
+        //
+        // The same shape as the `vk::` containment above and for the same
+        // reason: the dev machine is the user's, so "no automated tier makes a
+        // noise" has to be a property of what the tree *can* call rather than of
+        // what CI happens to run. `gg-audio`'s own uses are the definition and
+        // two `#[ignore]`d tests naming `xtask interactive`.
+        if !rel_str.starts_with("crates/gg-audio/")
+            && !spells_the_bans
+            && contains_path(&text, "Audio::device(")
+        {
+            violations.push(format!(
+                "{rel_str}: `Audio::device(` outside gg-audio (§1.5) — use \
+                 `Audio::device_unless_headless`, or mark the test `#[ignore]` and run it under \
+                 `cargo xtask interactive`"
+            ));
+        }
+
         // Hand-written barriers (§4.5, §6 M6): every `synchronization2` barrier
         // in the engine is *derived* by the render graph, so the tokens that
         // spell one live in the graph's execution layer and in the staging
@@ -1543,6 +1590,55 @@ mod tests {
             &[("crates/gg-x/src/lib.rs", "static mut COUNT: u32 = 0;")],
         );
         assert!(violations(&root).is_empty());
+    }
+
+    /// §1.5's audio law, proven in both directions (§6 M18's exit row asks for
+    /// exactly this: a gate that can fail). The window law's equivalent is
+    /// `gg-platform`'s panic on a visible window under `GG_HEADLESS=1`; this is
+    /// the containment half — no crate but `gg-audio` can even name the call
+    /// that opens a sound card.
+    #[test]
+    fn opening_an_audio_device_outside_gg_audio_is_rejected() {
+        for (file, source) in [
+            (
+                "crates/gg-runtime/src/app.rs",
+                "let a = gg_audio::Audio::device()?;",
+            ),
+            ("demos/10-tetris/src/lib.rs", "Audio::device().unwrap();"),
+            ("tools/gg-golden/src/main.rs", "let _ = Audio::device();"),
+            ("apps/gg-editor/src/main.rs", "Audio::device( )"),
+        ] {
+            let root = plant("audio-device", &[(file, source)]);
+            let found = violations(&root);
+            assert_eq!(found.len(), 1, "planted in {file}, got {found:?}");
+            assert!(found[0].contains("(§1.5)"), "{found:?}");
+        }
+        // And the forgiving direction, which is the half that makes the gate
+        // usable: the crate that owns the device may open one, and the shell's
+        // own constructor is not this call.
+        let root = plant(
+            "audio-device-allowed",
+            &[
+                (
+                    "crates/gg-audio/src/lib.rs",
+                    "pub fn device() -> R { Audio::device() }",
+                ),
+                (
+                    "crates/gg-runtime/src/app.rs",
+                    "Audio::device_unless_headless()?",
+                ),
+                (
+                    "demos/10-tetris/src/lib.rs",
+                    "// never call Audio::device( here",
+                ),
+            ],
+        );
+        let found = violations(&root);
+        // The comment in a demo is the one deliberate miss: `contains_path` is a
+        // token scan, not a parse, and a rule that made prose fail would be
+        // reworded rather than obeyed (the `vk::` gate's own lesson, §3).
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].starts_with("demos/"), "{found:?}");
     }
 
     /// The walk reaches the harness and CI's own source (§3). `tools/` answers

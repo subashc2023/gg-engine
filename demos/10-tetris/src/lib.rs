@@ -44,7 +44,7 @@
 //! Run it: `cargo xtask run 10-tetris`.
 
 use gg_ecs::Component;
-use gg_ecs::boundary::{ActionId, GameWorld, TEXT, Widget, log_level};
+use gg_ecs::boundary::{ActionId, GameWorld, Sound, TEXT, Widget, log_level, wave};
 use gg_math::sim;
 
 /// Columns.
@@ -444,6 +444,81 @@ pub struct Banner {
     pub rect: [f32; 4],
 }
 
+// ------------------------------------------------------------------ the sound
+
+/// Which cue an entity's [`Sound`] is. One entity per cue rather than one
+/// shared: the host treats an entity as a voice, so a lock landing on the same
+/// tick as a line clear needs two of them or the second cuts the first off
+/// (§6 M18 item 2).
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "tetris.cue")]
+#[repr(C)]
+pub struct Cue {
+    /// An index into [`voice_of`]'s match — `CUE_*` below.
+    pub kind: u8,
+    /// `Pod` refuses padding and `kind` is one byte in a four-byte struct, so
+    /// the tail is explicit. Zero, always, because a component is hashed whole.
+    pub pad: [u8; 3],
+}
+
+/// A piece slid sideways one cell.
+pub const CUE_MOVE: u8 = 0;
+/// A rotation was accepted — a refused one is silent, which is the feedback.
+pub const CUE_ROTATE: u8 = 1;
+/// A piece came to rest.
+pub const CUE_LOCK: u8 = 2;
+/// Rows went away. Pitched and lengthened by how many (§6 M18 item 2).
+pub const CUE_CLEAR: u8 = 3;
+/// The hold bay swapped.
+pub const CUE_HOLD: u8 = 4;
+/// The level went up.
+pub const CUE_LEVEL: u8 = 5;
+/// Top-out.
+pub const CUE_OVER: u8 = 6;
+/// How many there are.
+pub const CUES: usize = 7;
+
+/// The voice each cue speaks with.
+///
+/// Every number here is the game's, which is the protocol's whole point: a host
+/// that resolved `"line_clear.wav"` would hold this taste, and changing how a
+/// lock feels would not be a reloadable edit (§4.2.2). These are — the tuning
+/// below is inside the dylib, so it changes while someone is playing.
+#[must_use]
+pub fn voice_of(kind: u8) -> Sound {
+    match kind {
+        // Short, quiet and low: it fires on every DAS repeat, so anything
+        // longer than a tick or two at this rate is a buzz rather than a click.
+        CUE_MOVE => Sound::tone(wave::SQUARE, 220.0, 16, 0.10),
+        CUE_ROTATE => Sound::tone(wave::SQUARE, 330.0, 22, 0.16),
+        // Downward, so a lock reads as something settling.
+        CUE_LOCK => Sound::sweep(wave::TRIANGLE, 180.0, 90.0, 60, 0.30),
+        // Overwritten per clear by `step` — one row and four rows are the same
+        // cue at different pitches and lengths.
+        CUE_CLEAR => Sound::sweep(wave::SQUARE, 440.0, 660.0, 90, 0.28),
+        CUE_HOLD => Sound::sweep(wave::SINE, 520.0, 780.0, 70, 0.22),
+        CUE_LEVEL => Sound::sweep(wave::SQUARE, 523.0, 1_046.0, 180, 0.26),
+        // The one long note in the game, and the only one that falls a whole
+        // register: the run is over and nothing else is going to play.
+        _ => Sound::sweep(wave::TRIANGLE, 440.0, 55.0, 900, 0.34),
+    }
+}
+
+/// The clear cue, tuned to `lines`: higher, longer and louder with each row, so
+/// a tetris is audibly a different event from a single rather than the same
+/// blip four times.
+#[must_use]
+pub fn clear_voice(lines: u32) -> Sound {
+    let rows = lines.clamp(1, 4);
+    Sound::sweep(
+        wave::SQUARE,
+        440.0,
+        440.0 * (1.0 + rows as f32 * 0.5),
+        70 + 50 * rows,
+        0.26 + 0.05 * rows as f32,
+    )
+}
+
 /// A short string built without allocating — the HUD rewrites three numbers
 /// every tick, and `format!` there would be a heap allocation per tick per
 /// label for text that is almost always the same (§4.9's steady-state rule,
@@ -697,6 +772,16 @@ pub fn bootstrap(world: &mut GameWorld) {
         }
     });
 
+    // One entity per cue, so overlapping events overlap audibly (§6 M18 item
+    // 2). Spawned here and never again: the host registers a `Sound` on first
+    // sight without playing it, so a reload that re-ran `bootstrap` over a fresh
+    // world would be silent anyway — but the early return above means it does
+    // not, and the cue bank survives a reload with the stack.
+    for kind in 0..CUES as u8 {
+        let cue = world.spawn_with(Cue { kind, pad: [0; 3] });
+        world.put(cue, voice_of(kind));
+    }
+
     world.log(log_level::INFO, "tetris: ready");
 }
 
@@ -845,6 +930,11 @@ pub fn step(world: &mut GameWorld) {
     let restart = world.just_pressed(RESTART);
 
     let mut topped_out = false;
+    // Collected here and played after the pass, because the cue entities are
+    // outside this query and a system cannot hold two aliasing views of the
+    // world. `cleared` doubles as the clear cue's pitch.
+    let mut fired = [false; CUES];
+    let mut cleared_rows = 0;
     let _ = world.each::<(&mut Well, &mut Play, &mut Piece, &Rules)>(
         |_, (well, play, piece, rules)| {
             if play.over != 0 {
@@ -900,11 +990,16 @@ pub fn step(world: &mut GameWorld) {
                     piece.col -= step_x;
                 } else {
                     play.lock_accum = 0;
+                    fired[CUE_MOVE as usize] = true;
                 }
             }
 
+            // The refused rotation is silent on purpose: "nothing happened" is
+            // the feedback, and a click on a kick that did not fit would say the
+            // opposite of what the board shows.
             if (cw || ccw) && rotate(well, piece, cw) {
                 play.lock_accum = 0;
+                fired[CUE_ROTATE as usize] = true;
             }
 
             if hold && play.hold_used == 0 {
@@ -920,8 +1015,10 @@ pub fn step(world: &mut GameWorld) {
                 *piece = spawn_piece(swapped);
                 play.lock_accum = 0;
                 play.fall_accum = 0;
+                fired[CUE_HOLD as usize] = true;
                 if collides(well, piece) {
                     play.over = 1;
+                    fired[CUE_OVER as usize] = true;
                     return;
                 }
             }
@@ -972,6 +1069,7 @@ pub fn step(world: &mut GameWorld) {
             }
 
             lock_piece(well, piece);
+            fired[CUE_LOCK as usize] = true;
             let cleared = clear_rows(well);
             if cleared > 0 {
                 play.lines = play.lines.saturating_add(cleared);
@@ -979,7 +1077,11 @@ pub fn step(world: &mut GameWorld) {
                 play.score = play
                     .score
                     .saturating_add(LINE_SCORE[index].saturating_mul(play.level));
+                let was = play.level;
                 play.level = play.lines / rules.lines_per_level.max(1) + 1;
+                fired[CUE_CLEAR as usize] = true;
+                cleared_rows = cleared;
+                fired[CUE_LEVEL as usize] = play.level > was;
             }
             play.lock_accum = 0;
             play.fall_accum = 0;
@@ -990,9 +1092,27 @@ pub fn step(world: &mut GameWorld) {
             if collides(well, piece) {
                 play.over = 1;
                 topped_out = true;
+                fired[CUE_OVER as usize] = true;
             }
         },
     );
+
+    // The second pass: bump `seq` on whatever happened. The host plays a `Sound`
+    // whose sequence moved and writes nothing back, so this is the entire audio
+    // path from the game's side (§6 M18 item 2).
+    let _ = world.each::<(&Cue, &mut Sound)>(|_, (cue, sound)| {
+        if !fired[cue.kind as usize % CUES] {
+            return;
+        }
+        if cue.kind == CUE_CLEAR {
+            // Retuned before the bump, not after: the host reads the whole
+            // component on the tick the sequence moved.
+            let seq = sound.seq;
+            *sound = clear_voice(cleared_rows);
+            sound.seq = seq;
+        }
+        sound.play();
+    });
 
     if topped_out {
         world.log(log_level::INFO, "tetris: topped out");
@@ -1132,7 +1252,7 @@ pub fn hud(world: &mut GameWorld) {
 // id space a replay records (§4.7). Neither is alphabetical, neither may drift.
 #[cfg(feature = "game")]
 gg_ecs::gg_game! {
-    components: [Well, Piece, Rules, Play, Cell, Bay, HudLine, Banner, Widget],
+    components: [Well, Piece, Rules, Play, Cell, Bay, HudLine, Banner, Widget, Cue, Sound],
     actions: [
         "left",
         "right",

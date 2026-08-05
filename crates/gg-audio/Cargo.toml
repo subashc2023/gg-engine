@@ -1,0 +1,45 @@
+# gg-audio (§3, §6 M18 item 2) — the only crate that speaks to an audio device,
+# on the same terms `gg-rhi` is the only one that speaks raw Vulkan.
+#
+# Complexity budget (§3): <= 6 dependencies. The composition is the argument —
+# one rented device backend (`cpal`), the boundary type the protocol is written
+# in (`gg-ecs`), the transcendentals the synthesizer needs (`gg-math`), and the
+# workspace's usual two. Standing non-goals: no asset format before a milestone
+# asks for one, no spatialization before there is a listener pose, no second
+# mixer graph — a game that needs a bus structure is a game that has outgrown v0
+# and should say so in the plan rather than here.
+[package]
+name = "gg-audio"
+version = "0.1.0"
+description = "The mixer and the audio device (PLAN.md §6 M18 item 2)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "gg_audio"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `Sound` protocol a game declares its audio in (§4.2.2's boundary module).
+# A game crate may not link *this* crate (§3's deny pin), so the type both sides
+# name lives in `gg_ecs::boundary` beside `Renderable` — the same arrow `gg-ui`
+# points, for the same reason.
+gg-ecs = { path = "../gg-ecs" }
+# `sim::sin` for the sine partial and `sim::Rng` for noise. libm rather than the
+# CRT is not a determinism requirement here — nothing audio does reaches the
+# state hash — but the workspace bans std transcendentals everywhere (clippy.toml)
+# and a second implementation of the same call for the sake of the speaker would
+# be a worse trade than the nanoseconds.
+gg-math = { path = "../gg-math" }
+# The rental, and the seam this crate exists to contain: WASAPI on Windows, ALSA
+# on Linux, CoreAudio on macOS. Chosen for being device enumeration and a
+# callback and *nothing else* — `rodio` sits one layer up and owns mixing and
+# decoding, which are on the "we own" side of the same line `gg-ui` draws
+# against `cosmic-text` (§4.9).
+cpal = "0.16"
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -29,6 +29,7 @@
 //! stride disagrees with its component is a host bug, and the assertion that
 //! catches it is a panic the shim converts into a status.
 
+mod audio;
 mod declare;
 mod game;
 mod host;
@@ -38,6 +39,7 @@ mod present;
 mod scene;
 mod ui;
 
+pub use audio::{MAX_MS, Sound, wave};
 pub use declare::{Table, entry, init, layout_of, run, verbs};
 pub use game::{Access, BoundaryData, BoundaryError, Columns, GameWorld};
 pub use host::{SystemZone, host_api, set_logger, set_system_zone};

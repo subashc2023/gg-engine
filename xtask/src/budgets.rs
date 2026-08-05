@@ -68,7 +68,17 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 /// knew to boot, then loop, then map a project onto arguments would be
 /// reimplementing the shell's outer sequence, which is the second host §2 has
 /// exactly one of.
-const SHELL_BUDGET: usize = 1150;
+/// 1150 → 1160 at §6 M18 item 2, for audio — the smallest raise on this list and
+/// the plainest instance of its one argument. The shell holds a
+/// `gg_audio::Audio`, builds it with the constructor that is silent under §1.5,
+/// calls `tick` once beside the UI's frame, and tells it to forget on the three
+/// places a world discontinues under it: a reload's migrated world, and play
+/// mode's two stops. It implements no audio and knows no cue.
+///
+/// The alternative home is closed the same way play mode's was. `gg-audio` reads
+/// `&World` and cannot see a reload or a stop; the shell is the only thing that
+/// has heard of both, which is what it is for.
+const SHELL_BUDGET: usize = 1160;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.
@@ -81,6 +91,10 @@ const DEPENDENCY_BUDGETS: &[(&str, usize)] = &[
     // own dependencies would be a second engine, which is what §6 M15 says it
     // must not be.
     ("gg-editor", 10),
+    // §6 M18 item 2. The one place in this tree where the convenient dependency
+    // is a *decoder* — and a decoder is what would make `cpal` stop being a
+    // rental and start being a stack we did not choose.
+    ("gg-audio", 6),
 ];
 
 /// §3's `gg-ui` acceptance rule, as a machine: the M13 overlay reimplementation

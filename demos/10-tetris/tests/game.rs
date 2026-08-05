@@ -12,13 +12,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use demo_10_tetris::{
-    Banner, Bay, COLORS, Cell, HARD_DROP, HEIGHT, HIDDEN, HOLD, HOLD_BAY, HudLine, LEFT,
-    MIN_GRAVITY_TICKS, NEXT_BAY, NO_PIECE, Piece, Play, RESTART, ROTATE_CW, Rules, SHAPES, WIDTH,
-    Well, cells_of, clear_rows, collides, color_of, draw, gravity_for, landing_row, new_play,
-    spawn_piece,
+    Banner, Bay, COLORS, CUE_CLEAR, CUE_HOLD, CUE_LEVEL, CUE_LOCK, CUE_MOVE, CUE_OVER, CUE_ROTATE,
+    CUES, Cell, Cue, HARD_DROP, HEIGHT, HIDDEN, HOLD, HOLD_BAY, HudLine, LEFT, MIN_GRAVITY_TICKS,
+    NEXT_BAY, NO_PIECE, Piece, Play, RESTART, ROTATE_CW, Rules, SHAPES, WIDTH, Well, cells_of,
+    clear_rows, collides, color_of, draw, gravity_for, landing_row, new_play, spawn_piece,
+    voice_of,
 };
 use gg_ecs::boundary::{
-    self, AbiInfo, ActionId, ComponentsTable, HostApiV1, InputFrame, SystemsTable, TickCtx, Widget,
+    self, AbiInfo, ActionId, ComponentsTable, HostApiV1, InputFrame, Sound, SystemsTable, TickCtx,
+    Widget, wave,
 };
 use gg_ecs::{Query, World};
 
@@ -54,7 +56,7 @@ impl Game {
             let declared = world.adopt(&gg_game_components()).unwrap();
             (gg_game_systems(), declared)
         };
-        assert_eq!(declared, 9, "eight of ours and the protocol's one");
+        assert_eq!(declared, 11, "nine of ours and the protocol's two");
         Game {
             world,
             table,
@@ -126,6 +128,53 @@ impl Game {
             .each_ref(&marked, |_, (t, w): (&T, &Widget)| out.push((*t, *w)));
         out
     }
+
+    /// The `Sound` on the cue entity for `kind`, as the host's observer finds
+    /// it (`gg_audio::Audio::tick`'s own walk). Reading the *component* rather
+    /// than a device is the point: every claim below about what this game
+    /// sounds like is checked on a machine with no sound card, in the fast tier
+    /// (§1.5's audio law, §6 M18 item 2).
+    fn cue(&self, kind: u8) -> Sound {
+        let query = Query::<(&Cue, &Sound)>::new().unwrap();
+        let mut found = None;
+        self.world.each_ref(&query, |_, (c, s): (&Cue, &Sound)| {
+            if c.kind == kind {
+                found = Some(*s);
+            }
+        });
+        found.expect("every cue kind has an entity")
+    }
+
+    /// Overwrite the board. The only way to ask for a *four*-row clear without
+    /// playing well enough to earn one; every other test drives through input.
+    fn put_well(&mut self, well: Well) {
+        let query = Query::<&mut Well>::new().unwrap();
+        self.world.each(&query, |_, w: &mut Well| *w = well);
+    }
+
+    /// Place the falling piece. As [`put_well`](Self::put_well): asking for a
+    /// specific clear means choosing the piece, and the bag will not be told.
+    fn put_piece(&mut self, piece: Piece) {
+        let query = Query::<&mut Piece>::new().unwrap();
+        self.world.each(&query, |_, p: &mut Piece| *p = piece);
+    }
+
+    /// Every cue's sequence, so a test can say what a tick played by diffing.
+    fn cues(&self) -> [u32; CUES] {
+        let mut out = [0; CUES];
+        for (kind, seq) in out.iter_mut().enumerate() {
+            *seq = self.cue(kind as u8).seq;
+        }
+        out
+    }
+}
+
+/// The cue kinds whose sequence moved between `before` and `after`.
+fn played(before: [u32; CUES], after: [u32; CUES]) -> Vec<u8> {
+    (0..CUES)
+        .filter(|k| before[*k] != after[*k])
+        .map(|k| k as u8)
+        .collect()
 }
 
 #[test]
@@ -529,4 +578,214 @@ fn restart_clears_the_well_and_deals_again() {
             .all(|r| r.iter().all(|&c| c == 0)),
         "restart left the old stack on the board"
     );
+}
+
+// ------------------------------------------------------------------- the cues
+//
+// Every claim below is about `Sound` components in the world, which is the whole
+// of what this game says about audio (§6 M18 item 2). No device is opened, no
+// tier makes a noise, and the assertions still cover the thing that actually
+// breaks: a cue wired to the wrong event, or to none.
+
+/// A cue bank exists, and it is silent until something happens. The second half
+/// is the one worth gating — a bank that fired on spawn would make every load
+/// and every reload a chord.
+#[test]
+fn a_new_game_declares_a_cue_bank_that_has_not_played() {
+    let game = Game::load();
+    assert_eq!(
+        game.count::<Cue>(),
+        0,
+        "the bank exists before the first tick"
+    );
+
+    let mut game = Game::load();
+    game.step();
+    assert_eq!(game.count::<Cue>(), CUES);
+    assert_eq!(game.cues(), [0; CUES], "a fresh board played something");
+    // And every one of them is a voice that would make a sound if triggered —
+    // a cue wired to `wave::SILENT` is a cue that is quietly not there.
+    for kind in 0..CUES as u8 {
+        let voice = game.cue(kind);
+        assert_ne!(voice.wave, wave::SILENT, "cue {kind} is silent");
+        assert!(
+            voice.gain > 0.0 && voice.ms > 0,
+            "cue {kind} cannot be heard"
+        );
+        assert_eq!(
+            voice,
+            voice_of(kind),
+            "cue {kind} is not the voice it declares"
+        );
+    }
+}
+
+/// The ordinary moves, each on the tick it happened and not before.
+#[test]
+fn moving_rotating_and_holding_each_play_their_own_cue() {
+    let mut game = Game::load();
+    game.step();
+
+    let before = game.cues();
+    game.hold(LEFT);
+    game.step();
+    assert_eq!(played(before, game.cues()), vec![CUE_MOVE]);
+
+    let before = game.cues();
+    game.hold(ROTATE_CW);
+    game.step();
+    assert_eq!(played(before, game.cues()), vec![CUE_ROTATE]);
+
+    let before = game.cues();
+    game.hold(HOLD);
+    game.step();
+    assert_eq!(played(before, game.cues()), vec![CUE_HOLD]);
+
+    // A tick where nothing happened plays nothing. The trigger is the event,
+    // never the passage of time — which is what makes a paused game quiet.
+    let before = game.cues();
+    game.step();
+    assert_eq!(played(before, game.cues()), Vec::<u8>::new());
+}
+
+/// A rotation the walls refuse is silent. "Nothing happened" is the feedback,
+/// and a click there would say the opposite of what the board shows.
+#[test]
+fn a_refused_rotation_makes_no_sound() {
+    let mut game = Game::load();
+    game.step();
+    // Wedge the piece against the left wall, then try to turn into it. Some
+    // pieces still fit, so this asserts the correspondence rather than a
+    // refusal: rotated or not, the cue and the piece agree.
+    for _ in 0..8 {
+        game.hold(LEFT);
+        game.step();
+    }
+    let before_piece = game.one::<Piece>();
+    let before = game.cues();
+    game.hold(ROTATE_CW);
+    game.step();
+    let turned = game.one::<Piece>().rot != before_piece.rot;
+    let sounded = played(before, game.cues()).contains(&CUE_ROTATE);
+    assert_eq!(turned, sounded, "the rotate cue and the piece disagree");
+}
+
+/// A lock plays the lock cue; a lock that cleared rows plays the clear cue too,
+/// retuned by how many went. The retune is the claim: a tetris and a single are
+/// audibly different events rather than the same blip four times.
+#[test]
+fn a_lock_and_a_clear_are_separate_cues_and_the_clear_is_tuned_by_its_rows() {
+    let mut game = Game::load();
+    game.step();
+
+    // Hard-drop until something locks. The first drop always does.
+    let before = game.cues();
+    game.hold(HARD_DROP);
+    game.step();
+    assert!(
+        played(before, game.cues()).contains(&CUE_LOCK),
+        "a hard drop that locked did not play the lock cue"
+    );
+
+    // Fill the floor but for one column, then drop into it: one row, then four.
+    for rows in [1u32, 4] {
+        let mut game = Game::load();
+        game.step();
+        let one = game.cue(CUE_CLEAR);
+        let four = single_clear(&mut game, rows);
+        assert!(
+            four.seq > one.seq,
+            "clearing {rows} row(s) played no clear cue"
+        );
+        assert_eq!(
+            four.hz_to,
+            440.0 * (1.0 + rows as f32 * 0.5),
+            "the clear cue was not tuned to {rows} row(s)"
+        );
+        assert!(four.ms >= 70 + 50 * rows);
+        // Ten lines to a level, so neither of these crossed one. A level cue
+        // that fired on every clear would be the same sound as the clear.
+        assert_eq!(
+            game.cue(CUE_LEVEL).seq,
+            0,
+            "{rows} row(s) announced a level"
+        );
+    }
+}
+
+/// Clear exactly `rows` rows at once, and return the cue that played.
+///
+/// The board and the piece are both written: a four-row clear is not something
+/// a test can reach by holding a key, and hard-dropping whatever the bag deals
+/// stacks in the middle and tops out long before it fills a column. So the well
+/// gets `rows` full rows with the last column open, and the piece becomes a
+/// vertical I over that column — which is the only tetromino that fits a
+/// one-wide well four deep, and the reason a tetris is called one.
+fn single_clear(game: &mut Game, rows: u32) -> Sound {
+    let mut well = game.one::<Well>();
+    for row in 0..rows as usize {
+        for (col, cell) in well.cells[HEIGHT - 1 - row].iter_mut().enumerate() {
+            *cell = u8::from(col != WIDTH - 1);
+        }
+    }
+    game.put_well(well);
+
+    // Found rather than written down: a shape table edit that renumbered the
+    // pieces would silently make this test drop something else.
+    let (kind, rot) = vertical_i();
+    let mut piece = spawn_piece(kind);
+    piece.rot = rot;
+    piece.row = 0;
+    piece.col = (WIDTH - 1) as i32 - cells_of(kind, rot)[0].1;
+    game.put_piece(piece);
+
+    let before = game.cue(CUE_CLEAR);
+    game.hold(HARD_DROP);
+    game.step();
+    let now = game.cue(CUE_CLEAR);
+    assert_ne!(
+        now.seq, before.seq,
+        "dropping the I did not clear {rows} row(s)"
+    );
+    now
+}
+
+/// The `(kind, rotation)` whose four cells stand in one column — the vertical I.
+fn vertical_i() -> (u8, u8) {
+    for kind in 0..SHAPES.len() as u8 {
+        for rot in 0..4u8 {
+            let cells = cells_of(kind, rot);
+            let columns: std::collections::BTreeSet<_> = cells.iter().map(|c| c.1).collect();
+            let rows: std::collections::BTreeSet<_> = cells.iter().map(|c| c.0).collect();
+            if columns.len() == 1 && rows.len() == 4 {
+                return (kind, rot);
+            }
+        }
+    }
+    panic!("no vertical I in the shape table");
+}
+
+/// Topping out plays the one long note in the game, and plays it once.
+#[test]
+fn a_top_out_plays_its_cue_exactly_once() {
+    let mut game = Game::load();
+    game.step();
+    for tick in 0..2_000 {
+        if tick % 2 == 0 {
+            game.hold(HARD_DROP);
+        }
+        game.step();
+        if game.one::<Play>().over != 0 {
+            break;
+        }
+    }
+    assert_ne!(game.one::<Play>().over, 0, "the well never filled");
+    let at_death = game.cue(CUE_OVER);
+    assert_ne!(at_death.seq, 0, "topping out was silent");
+
+    // A finished game keeps ticking and stays quiet — `over` is a state, and a
+    // cue that re-fired every tick after it would be a siren.
+    let before = game.cues();
+    game.steps(60);
+    assert_eq!(played(before, game.cues()), Vec::<u8>::new());
 }

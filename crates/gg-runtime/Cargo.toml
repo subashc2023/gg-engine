@@ -42,6 +42,12 @@ gg-debug = { path = "../gg-debug", optional = true }
 # ship a game whose UI silently does not exist. The *overlay* stays lab
 # equipment — that is `gg-debug` below, which is what the absence checks name.
 gg-ui = { path = "../gg-ui" }
+# Audio (§6 M18 item 2). Unconditional for the same reason `gg-ui` is: a game
+# declares `Sound` components and a shell without this crate would ship a game
+# that is silent with no way to tell. Not lab equipment — an automated tier gets
+# a silent run out of `GG_HEADLESS`, not out of a missing dependency, so the code
+# that opens a device is the code the dist gate builds.
+gg-audio = { path = "../gg-audio" }
 # The editor (§6 M15). Lab equipment like `gg-debug`: optional here, banned from
 # the dist graph in `deny.toml`, and absent from `tier-dist` and
 # `tier-dist-verify` — the latter deliberately, because dist-verify exists to be

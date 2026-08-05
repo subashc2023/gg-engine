@@ -9,6 +9,7 @@ members = [
     "apps/gg-editor",
     "crates/gg-abi",
     "crates/gg-assets",
+    "crates/gg-audio",
     "crates/gg-core",
     "crates/gg-debug",
     "crates/gg-editor",

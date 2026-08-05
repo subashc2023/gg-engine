@@ -36,6 +36,12 @@ pub const gg_ecs::boundary::state::CLICKED: u32
 pub const gg_ecs::boundary::state::FOCUSED: u32
 pub const gg_ecs::boundary::state::HELD: u32
 pub const gg_ecs::boundary::state::HOVERED: u32
+pub mod gg_ecs::boundary::wave
+pub const gg_ecs::boundary::wave::NOISE: u32
+pub const gg_ecs::boundary::wave::SILENT: u32
+pub const gg_ecs::boundary::wave::SINE: u32
+pub const gg_ecs::boundary::wave::SQUARE: u32
+pub const gg_ecs::boundary::wave::TRIANGLE: u32
 pub mod gg_ecs::boundary::widget
 pub const gg_ecs::boundary::widget::BUTTON: u32
 pub const gg_ecs::boundary::widget::LABEL: u32
@@ -158,6 +164,27 @@ pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::Fie
 pub const gg_ecs::boundary::Renderable::TYPE_NAME: &'static str
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+#[repr(C)] pub struct gg_ecs::boundary::Sound
+pub gg_ecs::boundary::Sound::attack_ms: u32
+pub gg_ecs::boundary::Sound::gain: f32
+pub gg_ecs::boundary::Sound::hz: f32
+pub gg_ecs::boundary::Sound::hz_to: f32
+pub gg_ecs::boundary::Sound::ms: u32
+pub gg_ecs::boundary::Sound::release_ms: u32
+pub gg_ecs::boundary::Sound::seq: u32
+pub gg_ecs::boundary::Sound::wave: u32
+impl gg_ecs::boundary::Sound
+pub fn gg_ecs::boundary::Sound::play(&mut self)
+pub fn gg_ecs::boundary::Sound::sweep(u32, f32, f32, u32, f32) -> Self
+pub fn gg_ecs::boundary::Sound::tone(u32, f32, u32, f32) -> Self
+impl bytemuck::pod::Pod for gg_ecs::boundary::Sound
+impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Sound
+impl gg_ecs::component::Component for gg_ecs::boundary::Sound
+pub const gg_ecs::boundary::Sound::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Sound::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Sound::TYPE_NAME: &'static str
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Sound
+pub fn gg_ecs::boundary::Sound::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 pub struct gg_ecs::boundary::SystemPanic
 pub gg_ecs::boundary::SystemPanic::message: alloc::string::String
 pub gg_ecs::boundary::SystemPanic::system: alloc::string::String
@@ -204,6 +231,7 @@ pub const gg_ecs::boundary::Widget::TYPE_NAME: &'static str
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Widget
 pub fn gg_ecs::boundary::Widget::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 pub const gg_ecs::boundary::CANVAS: (u32, u32)
+pub const gg_ecs::boundary::MAX_MS: u32
 pub const gg_ecs::boundary::TEXT: usize
 pub trait gg_ecs::boundary::BoundaryData
 pub type gg_ecs::boundary::BoundaryData::Columns<'w>
@@ -324,6 +352,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
 pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Renderable::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Sound
+pub const gg_ecs::boundary::Sound::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Sound::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Sound::TYPE_NAME: &'static str
 impl gg_ecs::component::Component for gg_ecs::boundary::Widget
 pub const gg_ecs::boundary::Widget::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Widget::FIELDS: &'static [gg_ecs::component::FieldDesc]
@@ -593,6 +625,8 @@ impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
 pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Sound
+pub fn gg_ecs::boundary::Sound::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Widget
 pub fn gg_ecs::boundary::Widget::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
@@ -1123,6 +1157,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
 pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Renderable::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Sound
+pub const gg_ecs::boundary::Sound::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Sound::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Sound::TYPE_NAME: &'static str
 impl gg_ecs::component::Component for gg_ecs::boundary::Widget
 pub const gg_ecs::boundary::Widget::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Widget::FIELDS: &'static [gg_ecs::component::FieldDesc]
@@ -1228,6 +1266,8 @@ impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
 pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Sound
+pub fn gg_ecs::boundary::Sound::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Widget
 pub fn gg_ecs::boundary::Widget::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::hash::ComponentId
