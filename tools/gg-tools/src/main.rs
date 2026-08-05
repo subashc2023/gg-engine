@@ -11,12 +11,20 @@
 //!                                   8x-denser reference and print the plateau
 //!   gg-tools shadow-fit             what the single cascade's radius costs the
 //!                                   picture, per radius, against a tight leg
+//!   gg-tools mcp                    serve a running session's reload record to
+//!                                   an agent over MCP on stdio (§6 M16)
 
+mod mcp;
 mod shadow_bias;
 mod shadow_fit;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        // stderr, not the default stdout: `mcp` speaks line-delimited JSON-RPC
+        // on stdout, and one stray log line is a parse error at the client. The
+        // other instruments are unaffected — they report with `println!`, and a
+        // log on stderr is where a log belongs anyway.
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
@@ -30,9 +38,10 @@ fn main() -> anyhow::Result<()> {
     match command {
         "shadow-bias" => shadow_bias::run(rest),
         "shadow-fit" => shadow_fit::run(rest),
+        "mcp" => mcp::run(rest),
         other => {
             anyhow::bail!(
-                "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit. \
+                "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, mcp. \
                  A new instrument is a new subcommand here, not a new crate"
             )
         }

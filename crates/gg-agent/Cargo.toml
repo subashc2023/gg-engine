@@ -1,0 +1,29 @@
+# gg-agent (§6 M16) — the context only a running editor has, as a value: the
+# reload seam's outcome, the state hash either side of it, and the recording of
+# what the human just did.
+#
+# Lab equipment (§3): absent from every dist graph, named in the dist gate's
+# absent list beside gg-debug and gg-editor. A shipped game has no reload seam.
+#
+# The one crate in this tree with no dependencies at all — see below for why
+# that is the point and not a stage it is passing through.
+
+[package]
+name = "gg-agent"
+version = "0.1.0"
+description = "The reload seam's outcome as a record an agent can read (PLAN.md §6 M16)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# None, and that is the design rather than an accident of scope. This crate is
+# the *shape* of what the seam produces, not a consumer of any engine type: a
+# `gg-agent` that depended on `gg-ecs` would make the reader of a published
+# record link the ECS to read a number, and the reader is an out-of-process tool.
+# Nothing here logs either — the shell already logs the seam, and a second
+# opinion about it from inside the record would be the same fact twice.
+[dependencies]

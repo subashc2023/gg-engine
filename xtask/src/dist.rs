@@ -49,6 +49,11 @@ const BANNED_DIST_CRATES: &[&str] = &[
     // separate crate: a tier could want instruments without an editor, and the
     // absence proof has to say which one it checked.
     "gg-editor",
+    // §6 M16's seam record. A third name for the same reason the second one
+    // exists: a shipped game has no reload seam, so a binary that could still
+    // publish one would be carrying a machine with nothing to report on — and
+    // the file it writes names the player's paths.
+    "gg-agent",
 ];
 
 /// Byte needles no shipped binary may contain (§1.13, §5.8). The validation

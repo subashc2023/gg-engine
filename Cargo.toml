@@ -8,6 +8,7 @@ members = [
     # not a demo, not a harness (§6 M15.1 item 4).
     "apps/gg-editor",
     "crates/gg-abi",
+    "crates/gg-agent",
     "crates/gg-assets",
     "crates/gg-audio",
     "crates/gg-core",

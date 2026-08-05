@@ -195,6 +195,29 @@ pub enum ReloadError {
 }
 
 impl ReloadError {
+    /// This refusal's variant name — `HostApiMismatch`, `Adoption`, `FpEnv`, …
+    ///
+    /// A stable token to branch on, where `Display` is prose that names paths
+    /// and numbers and is not. §6 M16's exit row asks that a refusal reach the
+    /// panel *by name*, and a reader that had to match on the message would be
+    /// parsing a log line with extra steps. Exhaustive rather than a catch-all,
+    /// so a new variant is a compile error here and not a silent `"Other"`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Open { .. } => "Open",
+            Self::Unreadable { .. } => "Unreadable",
+            Self::MissingSymbol { .. } => "MissingSymbol",
+            Self::HostApiMismatch { .. } => "HostApiMismatch",
+            Self::Fingerprint { .. } => "Fingerprint",
+            Self::Adoption { .. } => "Adoption",
+            Self::FpEnv { .. } => "FpEnv",
+            Self::Rejuvenate { .. } => "Rejuvenate",
+            Self::Handoff { .. } => "Handoff",
+            Self::Staging { .. } => "Staging",
+        }
+    }
+
     /// Bytes of dylib this refusal left resident, for the caller to charge to a
     /// [`LeakBudget`].
     ///

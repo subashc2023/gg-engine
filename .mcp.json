@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gg-engine": {
+      "command": "cargo",
+      "args": ["run", "-q", "-p", "gg-tools", "--", "mcp"]
+    }
+  }
+}

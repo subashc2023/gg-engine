@@ -33,3 +33,9 @@ gg-math = { path = "../../crates/gg-math" }
 # An instrument reports by writing an image under `target/gg-tools/`; it never
 # opens a viewer (§1.5).
 png.workspace = true
+# `mcp`'s wire format (§6 M16). JSON is the protocol an external client speaks,
+# not a format we chose, and hand-rolling a parser for someone else's protocol is
+# the wrong place to save a dependency. §2's "the runtime never parses JSON" is
+# untouched: `xtask dist` bans this crate from the shipping graph by name, and an
+# instrument is not the runtime.
+serde_json = "1"

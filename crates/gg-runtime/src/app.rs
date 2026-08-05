@@ -58,6 +58,10 @@ pub struct App {
     /// (§4.2.2); a reload is what clears this, which is the "agent broke it,
     /// agent fixes it, nobody restarts" loop.
     halted: bool,
+    /// §6 M16's record of that loop. Written at the seam and at nothing else, so
+    /// a session with no reloads publishes once and never again.
+    #[cfg(feature = "agent")]
+    journal: gg_agent::Journal,
     #[cfg(feature = "hot-reload")]
     watch: gg_core::reload::watch::Watch,
     /// The bindings text, kept because a reload can move the verb list and the
@@ -202,6 +206,9 @@ impl App {
         // for the button to write.
         #[cfg(feature = "editor")]
         let editing = args.editor.then(|| Editing::new(args, &lib));
+        // Same reason, one line later: the record names the game it is about.
+        #[cfg(feature = "agent")]
+        let lib_name = lib.name().to_string();
         Ok(Self {
             world,
             lib,
@@ -209,6 +216,8 @@ impl App {
             extent: gg_ecs::boundary::CANVAS,
             hz,
             halted: false,
+            #[cfg(feature = "agent")]
+            journal: journal(args, &lib_name),
             #[cfg(feature = "hot-reload")]
             watch,
             #[cfg(feature = "hot-reload")]
@@ -675,7 +684,10 @@ impl App {
     /// its column rebuilt, and rebuilding under live rows is what
     /// snapshot/restore exists to avoid.
     #[cfg(feature = "hot-reload")]
-    fn swap(&mut self, reloaded: gg_core::reload::watch::Reloaded) -> anyhow::Result<()> {
+    fn swap(
+        &mut self,
+        reloaded: gg_core::reload::watch::Reloaded,
+    ) -> anyhow::Result<gg_ecs::MigrationReport> {
         let snapshot = self.world.snapshot();
         let mut world = World::new();
         // Every failure from here to the swap is charged to the leak budget: the
@@ -738,8 +750,153 @@ impl App {
             save_to_swap_ms = reloaded.saved_at.elapsed().as_millis(),
             "game reloaded"
         );
-        Ok(())
+        Ok(report)
     }
+}
+
+/// What [`App::open_seam`] takes before the swap destroys it (§6 M16).
+#[cfg(all(feature = "agent", feature = "hot-reload"))]
+struct Opened {
+    code_before: String,
+    code_after: String,
+    state_before: String,
+    load_ms: u64,
+    /// Held rather than elapsed here: §9's bar is file event to the tick the new
+    /// code first runs at, and that tick is on the far side of the swap.
+    saved_at: std::time::Instant,
+}
+
+#[cfg(all(feature = "agent", feature = "hot-reload"))]
+impl App {
+    fn open_seam(&self, reloaded: &gg_core::reload::watch::Reloaded) -> Opened {
+        Opened {
+            code_before: format!("{:032x}", self.lib.code_hash()),
+            code_after: format!("{:032x}", reloaded.lib.code_hash()),
+            state_before: self.world.canonical_hash().to_string(),
+            load_ms: reloaded.load_time.as_millis().min(u128::from(u64::MAX)) as u64,
+            saved_at: reloaded.saved_at,
+        }
+    }
+
+    /// Record the crossing and republish. Both outcomes, because a refusal is
+    /// the case the record exists for — an accepted reload is already visible in
+    /// the game.
+    fn close_seam(
+        &mut self,
+        opened: Option<Opened>,
+        result: Result<&gg_ecs::MigrationReport, &anyhow::Error>,
+    ) {
+        let outcome = match result {
+            Ok(_) => gg_agent::Outcome::Accepted,
+            Err(refused) => gg_agent::Outcome::Refused {
+                kind: refused
+                    .downcast_ref::<gg_core::ReloadError>()
+                    .map_or("Other", gg_core::ReloadError::kind),
+                detail: refused.to_string(),
+            },
+        };
+        // Only the components that moved, for §4.2.2's reason: a clean reload is
+        // the majority of every session, and listing it would bury the one line
+        // the reader came for.
+        let changes = result.map_or_else(
+            |_| Vec::new(),
+            |report| {
+                report
+                    .components
+                    .iter()
+                    .filter(|(_, o)| !matches!(o, ComponentOutcome::Reused))
+                    .map(|(component, outcome)| {
+                        let (kind, defaulted, retyped) = match outcome {
+                            ComponentOutcome::Reused => ("reused", Vec::new(), Vec::new()),
+                            ComponentOutcome::Dropped => ("dropped", Vec::new(), Vec::new()),
+                            ComponentOutcome::Migrated {
+                                defaulted, retyped, ..
+                            } => ("migrated", defaulted.clone(), retyped.clone()),
+                        };
+                        gg_agent::Change {
+                            component: component.clone(),
+                            kind,
+                            defaulted,
+                            retyped,
+                        }
+                    })
+                    .collect()
+            },
+        );
+        // Read again rather than carried: on a refusal nothing was swapped, so
+        // this is `state_before` — and a record that said otherwise would be
+        // claiming a migration that did not happen.
+        let state_after = self.world.canonical_hash().to_string();
+        let code_before = opened.as_ref().map_or_else(
+            || format!("{:032x}", self.lib.code_hash()),
+            |o| o.code_before.clone(),
+        );
+        self.journal.record(gg_agent::Seam {
+            tick: self.next_tick,
+            outcome,
+            code_before,
+            // `None` and not a default, throughout: verification can refuse an
+            // artifact before it is opened, and there is then no second build to
+            // name and nothing that was timed. A zero here would be the fastest
+            // reload of the session (§6 M16).
+            code_after: opened.as_ref().map(|o| o.code_after.clone()),
+            state_before: opened
+                .as_ref()
+                .map_or_else(|| state_after.clone(), |o| o.state_before.clone()),
+            state_after,
+            entities: result.map_or(0, |report| report.entities),
+            changes,
+            load_ms: opened.as_ref().map(|o| o.load_ms),
+            save_to_swap_ms: opened
+                .as_ref()
+                .map(|o| o.saved_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+        });
+        self.publish_journal();
+    }
+}
+
+#[cfg(feature = "agent")]
+impl App {
+    /// Publish, and say so once if the write fails. A record that cannot be
+    /// written is not worth halting a play session over — the game is the thing
+    /// running, and the record is what an agent reads *about* it (§6 M16).
+    fn publish_journal(&mut self) {
+        self.journal.at_tick(self.next_tick);
+        if let Err(e) = self.journal.publish(&agent_dir()) {
+            warn!(error = %e, "could not publish the agent record");
+        }
+    }
+}
+
+/// The tier this shell was built as. An agent reading a record needs it: half
+/// the advice worth giving names machinery that a dist build does not have.
+#[cfg(feature = "agent")]
+const TIER: &str = if cfg!(feature = "tracy") {
+    "tier-instrumented"
+} else {
+    "tier-dev"
+};
+
+/// Where the record is published. Overridable so two sessions on one tree do not
+/// overwrite each other's — see [`gg_agent::Journal::publish`], which keys the
+/// temp file by pid but writes one final path per directory.
+#[cfg(feature = "agent")]
+fn agent_dir() -> std::path::PathBuf {
+    std::env::var_os("GG_AGENT_DIR").map_or_else(
+        || std::path::PathBuf::from("target/gg-agent"),
+        std::path::PathBuf::from,
+    )
+}
+
+#[cfg(feature = "agent")]
+fn journal(args: &crate::Args, game: &str) -> gg_agent::Journal {
+    let mut journal = gg_agent::Journal::new(game, TIER);
+    // The third thing the record hands an agent: what the human just did, as
+    // something replayable rather than described (§4.7).
+    if let Some(path) = &args.record {
+        journal.recording(path);
+    }
+    journal
 }
 
 /// The OS cursor, and which of the two things a mouse does is happening (§6
@@ -1122,11 +1279,30 @@ impl Stages for App {
         // the terminal and not in the player's session (§6 M0X).
         // Bound, not matched in place: the closure is a scrutinee temporary and
         // would hold the `&mut self` borrow across the arms.
-        let outcome = ready
-            .map_err(anyhow::Error::from)
-            .and_then(|r| self.swap(r));
+        //
+        // Opened before the swap because half the record is state the swap
+        // destroys — the retired build's code hash and the pre-migration state
+        // hash. `None` is the arm where verification failed before a `Reloaded`
+        // existed at all, which is where `HostApiMismatch` lands: there is a
+        // refusal to record and no timings to record it with (§6 M16).
+        #[cfg(feature = "agent")]
+        let mut opened = None;
+        let outcome = match ready {
+            Err(e) => Err(anyhow::Error::from(e)),
+            Ok(r) => {
+                #[cfg(feature = "agent")]
+                {
+                    opened = Some(self.open_seam(&r));
+                }
+                self.swap(r)
+            }
+        };
         match outcome {
-            Ok(()) => Ok(()),
+            Ok(_report) => {
+                #[cfg(feature = "agent")]
+                self.close_seam(opened, Ok(&_report));
+                Ok(())
+            }
             Err(refused) => {
                 // A refused dylib was mapped and ran its initializers before any
                 // check could, and is never unloaded (§4.2.2) — so its bytes are
@@ -1136,6 +1312,8 @@ impl Stages for App {
                 if let Some(reload) = refused.downcast_ref::<gg_core::ReloadError>() {
                     self.rejuvenate.retire(reload.leaked_bytes());
                 }
+                #[cfg(feature = "agent")]
+                self.close_seam(opened, Err(&refused));
                 error!(error = %refused, "reload refused — still running the last good build");
                 Ok(())
             }
@@ -1154,6 +1332,15 @@ impl Stages for App {
         #[cfg(all(feature = "fp-assert", debug_assertions))]
         gg_math::fpenv::assert_fp_env();
         self.next_tick = tick + 1;
+        // A second's cadence, not a tick's: the record's readers poll on a human
+        // clock, and a file write inside the sim loop is jitter charged to every
+        // frame to keep a number nobody reads that fast. Tick zero publishes on
+        // its own, so a tier with the record and no watcher — instrumented — has
+        // one from the start instead of only after a reload it will never see.
+        #[cfg(feature = "agent")]
+        if tick.is_multiple_of(u64::from(self.hz.max(1))) {
+            self.publish_journal();
+        }
         // Before the halt check: play mode is the *editor's* clock, not the
         // sim's, and stopping a session that a panicking system halted is
         // exactly when someone wants their world back.

@@ -893,6 +893,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gg-agent"
+version = "0.1.0"
+
+[[package]]
 name = "gg-assets"
 version = "0.1.0"
 dependencies = [
@@ -1097,6 +1101,7 @@ name = "gg-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "gg-agent",
  "gg-audio",
  "gg-core",
  "gg-debug",
@@ -1150,6 +1155,7 @@ dependencies = [
  "gg-math",
  "gg-render",
  "png",
+ "serde_json",
  "tracing-subscriber",
 ]
 

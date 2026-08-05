@@ -883,6 +883,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--best") {
         best()?;
     }
+    if only("--agent") {
+        agent()?;
+    }
     println!("xtask reload: green");
     Ok(())
 }
@@ -1249,6 +1252,158 @@ fn reload_after(
         "the rewrite did not produce a reload:\n{log}"
     );
     Ok(log)
+}
+
+/// §6 M16: **the seam's outcome is a record, and a refusal names itself in it.**
+///
+/// The outcome has always been a log line — legible to a human watching a
+/// terminal and to nothing else. Two legs, failing in opposite directions.
+///
+/// The **migration** proves the record moves. An added field is in the canonical
+/// hash (§4.5), so `state_before` and `state_after` must differ; a gate that
+/// only checked "a seam was recorded" would pass against a record that wrote one
+/// hash twice, which is the shape this would rot into.
+///
+/// The **refusal** proves it survives the path with nothing to describe. Garbage
+/// over the artifact is refused before a `Reloaded` exists at all — no timings,
+/// no second code hash — and it must still arrive named `Open` rather than as an
+/// empty seam or no seam. That is the branch M16's exit row is actually about: a
+/// refusal in a log file is the thing being replaced.
+fn agent() -> anyhow::Result<()> {
+    let source = game_source(DEMO_03)?;
+    let before = variant(DEMO_03, "agent-baseline", &source)?;
+    let after = variant(DEMO_03, "agent-migrated", &with_an_extra_field(&source)?)?;
+
+    let dir = workspace_root().join("target/agent-gate");
+    std::fs::create_dir_all(&dir)?;
+    let game = dir.join(dylib_name(DEMO_03));
+    let records = dir.join("record");
+
+    std::fs::copy(&before, &game)?;
+    let (log, record) = agent_session(&game, &after, &records)?;
+    anyhow::ensure!(
+        log.contains("game reloaded"),
+        "the rewrite did not produce a reload:\n{log}"
+    );
+    for expected in [
+        "\"outcome\": \"accepted\"",
+        "\"within_budget\": true",
+        "\"kind\": \"migrated\"",
+        "\"wobble\"",
+        "demo03.cube",
+    ] {
+        anyhow::ensure!(
+            record.contains(expected),
+            "the accepted seam is missing {expected}:\n{record}"
+        );
+    }
+    let (state_before, state_after) = (
+        json_field(&record, "state_before")?,
+        json_field(&record, "state_after")?,
+    );
+    anyhow::ensure!(
+        state_before != state_after,
+        "the migration left the state hash where it found it ({state_before}) — a field the \
+         running world has never seen is *in* the canonical hash (§4.5), so a record that reports \
+         it unmoved is reporting a migration that did not happen:\n{record}"
+    );
+    anyhow::ensure!(
+        json_field(&record, "code_before")? != json_field(&record, "code_after")?,
+        "the record names one build on both sides of the seam:\n{record}"
+    );
+    println!("xtask reload --agent: the accepted seam moved the state hash and named both builds");
+
+    // Not a build at all. The watcher stages it, `libloading` refuses it, and
+    // the refusal reaches the record through the arm that has no `Reloaded` to
+    // read timings off — which is the arm worth a gate.
+    std::fs::copy(&before, &game)?;
+    let garbage = dir.join("not-a-dylib.bin");
+    std::fs::write(&garbage, b"this is not a dynamic library")?;
+    let (log, record) = agent_session(&game, &garbage, &records)?;
+    anyhow::ensure!(
+        log.contains("reload refused") && log.contains("still running the last good build"),
+        "garbage over the artifact did not produce a refusal:\n{log}"
+    );
+    anyhow::ensure!(
+        record.contains("\"outcome\": \"refused\"") && record.contains("\"refusal\": \"Open\""),
+        "the refusal did not reach the record by name:\n{record}"
+    );
+    anyhow::ensure!(
+        json_field(&record, "state_before")? == json_field(&record, "state_after")?,
+        "a refused swap moved the state hash — nothing was adopted, so nothing may have \
+         moved:\n{record}"
+    );
+    // Zero is a measurement and `null` is the absence of one. A record that
+    // reported `0 ms` here would make the fastest reload of the session the one
+    // that did not happen, and `within_budget: true` would grade §9's bar
+    // against it.
+    for unknown in [
+        "\"code_after\": null",
+        "\"load_ms\": null",
+        "\"save_to_swap_ms\": null",
+        "\"within_budget\": null",
+    ] {
+        anyhow::ensure!(
+            record.contains(unknown),
+            "the refusal reported a value where it measured nothing — expected {unknown}:\n{record}"
+        );
+    }
+    println!("xtask reload --agent: the refusal reached the record as `Open`, hash unmoved");
+    Ok(())
+}
+
+/// A dev shell over `game` with `replacement` written under it partway through,
+/// publishing its record into `dir`. Returns `(log, record)`.
+///
+/// Deliberately does not assert a reload happened: half this gate's point is the
+/// run where one does *not*.
+fn agent_session(game: &Path, replacement: &Path, dir: &Path) -> anyhow::Result<(String, String)> {
+    use std::process::Stdio;
+
+    exec(
+        cargo().args(["build", "-p", "gg-runtime"]),
+        "build the shell [dev]",
+    )?;
+    let _ = std::fs::remove_dir_all(dir);
+    let mut cmd = Command::new(exe("debug", "gg-runtime"));
+    cmd.arg("--game")
+        .arg(game)
+        // Frame count set by wall time, not by ticks needed: the watcher's
+        // debounce alone is 120 ms (see `segments`).
+        .args(["--frames", "60000"])
+        .env("GG_HEADLESS", "1")
+        .env("GG_AGENT_DIR", dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = cmd.spawn()?;
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    std::fs::copy(replacement, game)?;
+    let out = child.wait_with_output()?;
+    let log = format!("{}{}", plain(&out.stdout), plain(&out.stderr));
+    anyhow::ensure!(
+        out.status.success(),
+        "the shell exited {}\n{log}",
+        out.status
+    );
+    let record = std::fs::read_to_string(dir.join("session.json"))?;
+    Ok((log, record))
+}
+
+/// One `"key": "value"` out of the record, unquoted.
+///
+/// A reader rather than a parser: the record's shape is this tree's own and the
+/// gate wants two strings out of it. A gate that pulled in a JSON stack to
+/// compare two hashes would be renting a dependency to read its own file.
+fn json_field(record: &str, key: &str) -> anyhow::Result<String> {
+    let needle = format!("\"{key}\": \"");
+    let at = record
+        .find(&needle)
+        .ok_or_else(|| anyhow::anyhow!("the record has no `{key}`:\n{record}"))?;
+    let rest = &record[at + needle.len()..];
+    let end = rest
+        .find('"')
+        .ok_or_else(|| anyhow::anyhow!("`{key}` is unterminated:\n{record}"))?;
+    Ok(rest[..end].to_owned())
 }
 
 /// §6 M5: **replay segments close and open across a reload, and the pre-reload

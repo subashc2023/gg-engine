@@ -78,7 +78,23 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 /// The alternative home is closed the same way play mode's was. `gg-audio` reads
 /// `&World` and cannot see a reload or a stop; the shell is the only thing that
 /// has heard of both, which is what it is for.
-const SHELL_BUDGET: usize = 1160;
+///
+/// 1160 → 1300 at §6 M16, the largest raise on this list and the one most owed an
+/// argument, because M16 is the milestone where §3's thinness is easiest to
+/// spend. What it buys is the seam *record*: the shell holds both sides of a
+/// reload and nothing else does — the retired build's code hash and the
+/// pre-migration state hash on one side, the migration report and the tick the
+/// new code first runs at on the other — so an observation that needs both has to
+/// be taken where the swap happens. `gg-agent` owns the shape and the file; this
+/// is the conversion into it, which is the same "calls two methods and says what
+/// happened" as the raise above.
+///
+/// What it deliberately does not buy is the panel. That is `gg-editor`'s, which
+/// is host UI with its own crate and its own dependency budget, and a raise spent
+/// here on drawing would be the shell becoming the thing §3 forbids. The number
+/// is expected to come *down* at the refactor §6 M17's headroom paragraph
+/// defers — a budget that only ever rises is a ratchet, not a budget.
+const SHELL_BUDGET: usize = 1300;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

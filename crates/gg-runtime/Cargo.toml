@@ -54,6 +54,11 @@ gg-audio = { path = "../gg-audio" }
 # dist's codegen with a hash bolted on and a whole extra crate would stop it
 # being that.
 gg-editor = { path = "../gg-editor", optional = true }
+# §6 M16's record. Lab equipment on the same terms as the two above, and the
+# reason it is a crate rather than a module here: the *reader* is out of
+# process, so the shape has to exist somewhere a tool can link without linking
+# the shell.
+gg-agent = { path = "../gg-agent", optional = true }
 anyhow.workspace = true
 tracing.workspace = true
 # The dist subscriber. In every other tier `gg-debug` installs a richer one, but
@@ -88,6 +93,11 @@ overlay = ["debug-tools"]
 # The editor. Not implied by `debug-tools`: it is its own crate and its own
 # absence proof, and a tier wanting instruments does not thereby want an editor.
 editor = ["dep:gg-editor"]
+# §6 M16's seam record. Rides with the editor rather than with `hot-reload`,
+# because the panel that reads it is the editor's — a tier with the editor and
+# no watcher still publishes the tick and the recording, which is two of the
+# three things the record hands an agent, and says so by having no seams.
+agent = ["dep:gg-agent"]
 
 # Tier meta-features (§2 Build tiers row, §3).
 # `tracy` is deliberately **not** here, though `tier-instrumented` keeps it.
@@ -114,7 +124,8 @@ tier-dev = [
     "cvar-console",
     "overlay",
     "editor",
+    "agent",
 ]
-tier-instrumented = ["tracy", "gpu-timings", "state-hash", "editor"]
+tier-instrumented = ["tracy", "gpu-timings", "state-hash", "editor", "agent"]
 tier-dist = []                      # input recorder is unconditional, never a feature (§2)
 tier-dist-verify = ["state-hash"]   # dist codegen + the hash, CI-only, gates §5.6c
