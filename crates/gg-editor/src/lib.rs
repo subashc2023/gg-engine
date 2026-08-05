@@ -60,6 +60,7 @@
 #![warn(missing_docs)]
 
 mod camera;
+mod chat;
 mod history;
 pub mod host;
 mod marker;
@@ -234,6 +235,17 @@ pub struct Frame<'a> {
     /// routes no input at all — a golden render — which is exactly the host
     /// whose reference image must keep showing the game's own view.
     pub input: Option<&'a gg_input::Input>,
+    /// Characters typed this tick, in order (§6 M16).
+    ///
+    /// Not in [`InputFrame`](gg_input::InputFrame) and never in the world: text
+    /// is not an action, and a `[u8; N]` of it crossing the ABI would make a
+    /// keyboard layout part of a cross-artifact contract (§4.2.2). It arrives
+    /// through `gg_input::replay`'s own channel, so a typed prompt records and
+    /// replays like every other input this editor takes — see [`crate::chat`].
+    ///
+    /// Empty on all but the ticks somebody typed on, which is almost all of
+    /// them. A host that routes no input at all says `""`.
+    pub typed: &'a str,
     /// This frame's per-pass GPU readings, empty in a headless run.
     pub passes: &'a [gg_rhi::PassTiming],
     /// Device memory in use.
@@ -262,6 +274,14 @@ pub struct Frame<'a> {
     /// host that is not a launcher — including a session already over a game,
     /// which is why the picker is not a way to switch projects mid-session.
     pub projects: &'a [project::Project],
+    /// The last crossing of the reload seam, or `None` in a session that has not
+    /// had one (§6 M16).
+    ///
+    /// The host's to know and emphatically not in the world: it is a fact about
+    /// two *builds*, and a component holding it would put the last refusal in
+    /// the canonical hash. Borrowed from the shell's own journal, so the panel
+    /// and the record `gg-tools mcp` serves cannot disagree.
+    pub reload: Option<&'a gg_agent::Seam>,
     /// Draw the pointer.
     ///
     /// `false` whenever something else is already showing one — a windowed
@@ -305,19 +325,23 @@ pub enum Pane {
     Perf,
     /// The selected entity's components, and the nudge bar.
     Inspector,
+    /// §6 M16: what the last reload did, and the questions worth asking about
+    /// it. Last in [`Pane::ALL`] because the position is the persisted id.
+    Agent,
 }
 
 impl Pane {
     /// Every pane, in a fixed order — the order [`PaneId`]s are assigned in, so
     /// a persisted layout keeps meaning across a rebuild that added one at the
     /// end.
-    pub const ALL: [Pane; 6] = [
+    pub const ALL: [Pane; 7] = [
         Pane::Tree,
         Pane::Viewport,
         Pane::Cvars,
         Pane::Assets,
         Pane::Perf,
         Pane::Inspector,
+        Pane::Agent,
     ];
 
     /// Its dock identity.
@@ -343,6 +367,7 @@ impl Pane {
             Pane::Assets => "assets",
             Pane::Perf => "perf",
             Pane::Inspector => "inspect",
+            Pane::Agent => "agent",
         }
     }
 }
@@ -368,7 +393,12 @@ pub fn default_layout() -> Node {
                 0.75,
                 Node::pane(Pane::Viewport.id()),
                 Node::Tabs {
-                    panes: vec![Pane::Cvars.id(), Pane::Assets.id(), Pane::Perf.id()],
+                    panes: vec![
+                        Pane::Cvars.id(),
+                        Pane::Assets.id(),
+                        Pane::Perf.id(),
+                        Pane::Agent.id(),
+                    ],
                     active: 0,
                 },
             ),
@@ -708,6 +738,14 @@ pub struct Editor {
     saves: u32,
     /// Edits applied this session, for the same reason.
     edits: u32,
+    /// §6 M16's question in flight. Owned rather than routed through
+    /// [`Commands`]: the answer is text and `Commands` is `Copy`, and the panel
+    /// is the only thing that draws it.
+    ask: gg_agent::Ask,
+    /// The conversation around it — transcript and the line being typed. Host
+    /// state, so no prompt is ever in the world or the canonical hash, and a
+    /// pure function of the replayed input stream (§6 M16, [`chat`]).
+    chat: chat::Chat,
     commands: Commands,
 }
 
@@ -743,6 +781,8 @@ impl Editor {
             pack,
             selected: None,
             lane: None,
+            ask: gg_agent::Ask::idle(),
+            chat: chat::Chat::default(),
             step: 1,
             first_row: 0,
             per_page: 1,
@@ -1142,6 +1182,7 @@ impl Editor {
                 Pane::Assets => self.assets(body),
                 Pane::Perf => self.perf(body, frame),
                 Pane::Inspector => self.inspector(world, body),
+                Pane::Agent => self.agent(body, frame),
             }
         }
     }
@@ -1238,6 +1279,25 @@ impl Editor {
     #[must_use]
     pub fn eye(&self, game: gg_ecs::boundary::Eye) -> gg_ecs::boundary::Eye {
         self.camera.eye(game)
+    }
+
+    /// What the agent panel's prompt field holds, unsent (§6 M16). Empty is
+    /// both "nothing typed" and "just sent", which is the same thing to look at.
+    #[must_use]
+    pub fn prompt(&self) -> &str {
+        &self.chat.prompt
+    }
+
+    /// Whether keystrokes are wanted — the agent panel's prompt has focus.
+    ///
+    /// Asked by the host *between* ticks, which is where a keystroke arrives, so
+    /// it answers about the layout the operator can currently see. A `false`
+    /// keeps the character out of the recording entirely (§6 M16): a replay
+    /// carrying every `W` pressed while playing would be a text channel full of
+    /// input that already has verbs.
+    #[must_use]
+    pub fn wants_text(&self) -> bool {
+        self.router.focused() == Some(panels::PROMPT)
     }
 
     /// Whether the pointer is over a panel rather than over the viewport.
@@ -1754,6 +1814,7 @@ mod tests {
             tick,
             play: Play::Paused,
             input: None,
+            typed: "",
             passes: &[],
             memory: gg_rhi::MemoryUse::default(),
             save_path: "target/editor/test.ggsv",
@@ -1761,6 +1822,7 @@ mod tests {
             project: Some("test"),
             projects: &[],
             maximized: false,
+            reload: None,
             draw_cursor: false,
         }
     }

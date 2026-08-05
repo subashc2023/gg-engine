@@ -92,7 +92,13 @@ cvar-console = ["debug-tools"]
 overlay = ["debug-tools"]
 # The editor. Not implied by `debug-tools`: it is its own crate and its own
 # absence proof, and a tier wanting instruments does not thereby want an editor.
-editor = ["dep:gg-editor"]
+#
+# It *implies* `agent`, which is the direction the comment below already argued:
+# the panel that reads the seam record is the editor's, so an editor without one
+# is a combination no tier builds (§3: named combinations only) defended by a
+# branch in the shell. Removing the branch is what pays for §6 M16 item 6's
+# lines against the budget in `xtask::budgets`.
+editor = ["dep:gg-editor", "agent"]
 # §6 M16's seam record. Rides with the editor rather than with `hot-reload`,
 # because the panel that reads it is the editor's — a tier with the editor and
 # no watcher still publishes the tick and the recording, which is two of the

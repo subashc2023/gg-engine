@@ -61,6 +61,16 @@ pub mod verb {
     pub const LOOK_X: &str = "editor_look_x";
     /// See [`LOOK_X`].
     pub const LOOK_Y: &str = "editor_look_y";
+    /// Delete the character before the caret in the focused text field.
+    ///
+    /// A *verb* and not a character, which is the split the text channel rests
+    /// on (§6 M16): printable input is text and has no meaning as an action,
+    /// while editing keys are actions and therefore already in the recorded
+    /// [`InputFrame`](gg_input::InputFrame) — so the replay carries them with no
+    /// new machinery at all.
+    pub const TEXT_BACK: &str = "editor_text_back";
+    /// Submit the focused text field. See [`TEXT_BACK`] for why it is a verb.
+    pub const TEXT_SEND: &str = "editor_text_send";
 }
 
 /// The default binding for each verb this host appends. A build that declared
@@ -101,6 +111,12 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // both verbs, harmlessly and for the same reason `W` above is shared.
     (verb::LOOK_X, "MouseX", false),
     (verb::LOOK_Y, "MouseY", false),
+    // Last, for the same reason the camera verbs were appended after the `ui_*`
+    // six: a build predating these resolves every earlier id to what it always
+    // did. `Backspace` and `Enter` are bound unconditionally because no demo
+    // binds either — and if one ever does it keeps its own, like `W` above.
+    (verb::TEXT_BACK, "Backspace", true),
+    (verb::TEXT_SEND, "Enter", true),
 ];
 
 /// The verb lists a shell should bind against with the editor open, and the
@@ -172,6 +188,8 @@ mod tests {
                 verb::UP,
                 verb::DOWN,
                 verb::LOOK,
+                verb::TEXT_BACK,
+                verb::TEXT_SEND,
             ]
         );
         assert_eq!(
@@ -245,6 +263,8 @@ mod tests {
                 verb::UP,
                 verb::DOWN,
                 verb::LOOK,
+                verb::TEXT_BACK,
+                verb::TEXT_SEND,
             ],
             axes: &[ui::X, ui::Y, verb::LOOK_X, verb::LOOK_Y],
         };

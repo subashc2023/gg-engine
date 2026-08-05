@@ -524,13 +524,20 @@ pub enum Event {
         /// `true` on press, `false` on release.
         pressed: bool,
         /// The character this press produced under the user's layout, when it
-        /// produced one — the debug console's input, and nothing else's (§4.8).
+        /// produced one — the debug console's input (§4.8) and, since §6 M16,
+        /// the editor's prompt.
         ///
         /// Carried *on* the key event rather than sent as a second one: they
         /// arrive from the OS together, and splitting them would invent an
-        /// ordering question every consumer has to answer the same way. The
-        /// sim never reads it; [`feed`] drops it, so no character can reach an
-        /// action map or a replay.
+        /// ordering question every consumer has to answer the same way.
+        ///
+        /// The sim never reads it. [`feed`] routes it to
+        /// [`gg_input::Input::type_char`], which is *beside* the action map and
+        /// not in it: a character has no verb id and reaches no [`InputFrame`],
+        /// so it can be recorded (`gg_input::replay`'s text channel) without
+        /// being an action.
+        ///
+        /// [`InputFrame`]: gg_input::InputFrame
         text: Option<char>,
     },
     /// A mouse button changed state.
@@ -620,7 +627,18 @@ pub use gg_input::{Key, MouseButton};
 /// [`Event::CursorMoved`] is unclaimed for its own documented reason.
 pub fn feed(input: &mut gg_input::Input, event: &Event) -> bool {
     match *event {
-        Event::Key { key, pressed, .. } => input.key(key, pressed),
+        Event::Key { key, pressed, text } => {
+            // Both, not one or the other (§6 M16). The key is a verb and goes to
+            // the action map; the character goes to a buffer no verb can reach,
+            // for a host with somewhere to put text. A key that is both — every
+            // letter, once the editor's prompt has focus — feeds both, which is
+            // why `Input::type_char` and `Input::key` are separate calls rather
+            // than a branch.
+            if let Some(c) = text.filter(|_| pressed) {
+                input.type_char(c);
+            }
+            input.key(key, pressed);
+        }
         Event::MouseButton { button, pressed } => input.mouse_button(button, pressed),
         Event::MouseMotion { dx, dy } => input.motion(dx, dy),
         Event::MouseWheel { notches } => input.wheel(notches),
@@ -647,9 +665,6 @@ mod feed_tests {
         let map = gg_input::ActionMap::parse("", &[], &[]).unwrap();
         let mut input = gg_input::Input::new(map);
         for event in [
-            // With a character on it, which `feed` must ignore: a keystroke
-            // that reached the action map as text would be a replay recording
-            // what the console typed.
             Event::Key {
                 key: Key::W,
                 pressed: true,
@@ -678,6 +693,41 @@ mod feed_tests {
         ] {
             assert!(!feed(&mut input, &event), "wrongly claimed: {event:?}");
         }
+    }
+
+    /// §6 M16: the character and the key both, and the character only where
+    /// something asked for it.
+    ///
+    /// The release half is the one worth a test: a character is produced by
+    /// *pressing*, and a `text` on a release would double every keystroke in a
+    /// prompt — which is exactly the kind of thing that looks like a stuck key
+    /// and is actually a routing bug two crates away.
+    #[test]
+    fn a_press_feeds_its_character_and_its_key_and_a_release_feeds_only_the_key() {
+        let map = gg_input::ActionMap::parse("", &[], &[]).unwrap();
+        let mut input = gg_input::Input::new(map);
+        for (pressed, text) in [(true, Some('h')), (false, Some('h')), (true, Some('i'))] {
+            feed(
+                &mut input,
+                &Event::Key {
+                    key: Key::W,
+                    pressed,
+                    text,
+                },
+            );
+        }
+        assert_eq!(input.take_typed(true), "hi");
+        // And a drain with nothing listening keeps nothing for later.
+        feed(
+            &mut input,
+            &Event::Key {
+                key: Key::W,
+                pressed: true,
+                text: Some('x'),
+            },
+        );
+        assert_eq!(input.take_typed(false), "");
+        assert_eq!(input.take_typed(true), "", "a dropped tick is not deferred");
     }
 }
 

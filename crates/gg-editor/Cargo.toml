@@ -60,6 +60,11 @@ gg-input = { path = "../gg-input" }
 # or not, a camera whose sine came out of a libm the two hosts disagree about
 # would put a golden scene's viewpoint on the driver (§1.4).
 gg-math = { path = "../gg-math" }
+# §6 M16's seam record and the `claude` rental. Zero dependencies of its own, so
+# what this adds to the editor's graph is a shape and a `Command` — the panel
+# reads a record the *shell* produced, and the crate that owns that record is
+# the one place its fields are named.
+gg-agent = { path = "../gg-agent" }
 tracing = { workspace = true }
 
 [dev-dependencies]

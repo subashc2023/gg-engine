@@ -27,11 +27,22 @@ pub const MAGIC: [u8; 4] = *b"GGRP";
 /// Contract version in the header is a separate axis and answers a different
 /// question (can these bits still be reproduced, versus can they still be read).
 ///
-/// Still 1 after [`MAX_AXES`] doubled, which is the point of the slot count
+/// Stayed 1 after [`MAX_AXES`] doubled, which is the point of the slot count
 /// being in the header: the encoding did not change, only how many slots a
 /// given file happens to carry, and a bump would have made every replay
 /// recorded before the widening unreadable to buy nothing.
-pub const FORMAT: u32 = 1;
+///
+/// 2 adds the text channel (§6 M16). That *is* an encoding change — a record
+/// the reader would otherwise walk straight past into the wrong bytes — so it
+/// is the bump the doubling was not.
+pub const FORMAT: u32 = 2;
+
+/// The oldest format this build still reads. A v1 file has no text channel,
+/// which decodes as the empty one rather than as a refusal: every replay in
+/// `tests/replays/` was recorded before this existed, and a determinism
+/// baseline that had to be re-blessed to survive a *reader* change would make
+/// the bless a formality instead of a reviewed act (§5.6).
+pub const FORMAT_MIN: u32 = 1;
 
 /// The engine commit this binary was built from, stamped by `build.rs`, or
 /// `"unknown"` where git could not be consulted.
@@ -99,6 +110,20 @@ pub struct Replay {
     /// `(tick, frame)` at every tick whose frame differs from the one before —
     /// a held key across 600 ticks is two records, not 600.
     changes: Vec<(u64, InputFrame)>,
+    /// `(tick, text)` for every tick that produced characters (§6 M16), in tick
+    /// order, at most one entry per tick.
+    ///
+    /// Not delta-encoded and not held, unlike [`Replay::changes`]: typing is an
+    /// *impulse* like a wheel notch — it belongs to the tick it happened in and
+    /// to no later one — so the query is an exact match rather than "the most
+    /// recent at or before". A held-forward text channel would retype the last
+    /// character on every tick after it.
+    ///
+    /// This is deliberately **not** in [`InputFrame`]. That type crosses into
+    /// the game dylib by value and its layout is a cross-artifact contract
+    /// (§4.2.2); text is host-UI input that no game reads, and widening the ABI
+    /// to carry it would put a string in the sim's boundary to feed a panel.
+    text: Vec<(u64, String)>,
 }
 
 /// Why a replay could not be read, or could not be trusted once read.
@@ -110,8 +135,8 @@ pub enum ReplayError {
         /// The first four bytes.
         found: [u8; 4],
     },
-    /// Written by a different version of this code.
-    #[error("replay format {found}, this build reads {FORMAT}")]
+    /// Written by a version of this code whose encoding this one cannot walk.
+    #[error("replay format {found}, this build reads {FORMAT_MIN}..={FORMAT}")]
     Format {
         /// The version in the file.
         found: u32,
@@ -209,6 +234,22 @@ impl Replay {
         }
     }
 
+    /// Characters typed *at* `tick`, or `""` — an exact match, for the reason
+    /// [`Replay::text`] gives.
+    pub fn text_at(&self, tick: u64) -> &str {
+        let at = self.text.partition_point(|&(t, _)| t < tick);
+        match self.text.get(at) {
+            Some((t, s)) if *t == tick => s,
+            _ => "",
+        }
+    }
+
+    /// How many ticks carried text — what a test asserts on to know the channel
+    /// survived a round trip rather than being silently empty.
+    pub fn typed_count(&self) -> usize {
+        self.text.len()
+    }
+
     /// The game-code hash covering `tick` (§4.2.2).
     pub fn segment_at(&self, tick: u64) -> Option<Segment> {
         let at = self.segments.partition_point(|s| s.first_tick <= tick);
@@ -267,6 +308,13 @@ impl Replay {
                 out.extend_from_slice(&axis.to_le_bytes());
             }
         }
+        // Last, so a v1 reader's failure is the format check and not a walk off
+        // the end of a record it did know how to read.
+        out.extend_from_slice(&(self.text.len() as u32).to_le_bytes());
+        for (tick, typed) in &self.text {
+            out.extend_from_slice(&tick.to_le_bytes());
+            put_str(&mut out, typed);
+        }
         out
     }
 
@@ -278,7 +326,7 @@ impl Replay {
             return Err(ReplayError::Magic { found: magic });
         }
         let format = r.u32()?;
-        if format != FORMAT {
+        if !(FORMAT_MIN..=FORMAT).contains(&format) {
             return Err(ReplayError::Format { found: format });
         }
         let contract = r.u32()?;
@@ -317,6 +365,14 @@ impl Replay {
             }
             changes.push((tick, frame));
         }
+        // Absent in v1, which is the whole reason the channel is last and the
+        // count is read only when the header says there is one.
+        let mut text = Vec::new();
+        if format >= 2 {
+            for _ in 0..r.u32()? {
+                text.push((r.u64()?, r.string()?));
+            }
+        }
 
         Ok(Replay {
             meta: ReplayMeta {
@@ -331,6 +387,7 @@ impl Replay {
             segments,
             ticks,
             changes,
+            text,
         })
     }
 }
@@ -354,6 +411,7 @@ impl Recorder {
                 }],
                 ticks: 0,
                 changes: Vec::new(),
+                text: Vec::new(),
             },
         }
     }
@@ -364,6 +422,24 @@ impl Recorder {
         self.replay.ticks = self.replay.ticks.max(tick + 1);
         if self.replay.changes.last().map(|&(_, f)| f) != Some(frame) {
             self.replay.changes.push((tick, frame));
+        }
+    }
+
+    /// Record characters typed at `tick` (§6 M16), appending if the tick
+    /// already has some — a tick can deliver several key events, and the panel
+    /// reads them as one string in arrival order.
+    ///
+    /// Empty text is not recorded: the channel is sparse, and a run of empty
+    /// entries would be the held-forward semantics [`Replay::text`] rejects,
+    /// written out longhand.
+    pub fn record_text(&mut self, tick: u64, typed: &str) {
+        if typed.is_empty() {
+            return;
+        }
+        self.replay.ticks = self.replay.ticks.max(tick + 1);
+        match self.replay.text.last_mut() {
+            Some((t, existing)) if *t == tick => existing.push_str(typed),
+            _ => self.replay.text.push((tick, typed.to_owned())),
         }
     }
 
@@ -627,6 +703,62 @@ mod tests {
         let err = Replay::decode(&wider).unwrap_err();
         assert!(
             matches!(err, ReplayError::AxisSlots { found } if found == MAX_AXES + 1),
+            "{err}"
+        );
+    }
+
+    /// Typing is an impulse, not a held state. The whole channel exists so a
+    /// recorded editor session replays the prompt someone typed (§4.7, §6 M16);
+    /// held-forward semantics would retype its last character on every tick
+    /// after it, which is a session that types forever.
+    #[test]
+    fn text_belongs_to_the_tick_it_was_typed_in_and_to_no_later_one() {
+        let mut rec = Recorder::new(meta());
+        rec.record_text(4, "he");
+        // Two key events inside one tick are one string in arrival order.
+        rec.record_text(4, "llo");
+        rec.record_text(9, "!");
+        // Empty is not a record, or the sparse channel would be a dense one.
+        rec.record_text(5, "");
+        let replay = Replay::decode(&rec.finish().encode()).unwrap();
+
+        assert_eq!(replay.typed_count(), 2);
+        assert_eq!(replay.text_at(4), "hello");
+        assert_eq!(replay.text_at(9), "!");
+        for quiet in [0, 3, 5, 8, 10, 999] {
+            assert_eq!(replay.text_at(quiet), "", "tick {quiet}");
+        }
+        // The recorder still counts the tick it typed in.
+        assert_eq!(replay.ticks(), 10);
+    }
+
+    /// Every replay in `tests/replays/` predates the channel, and re-blessing a
+    /// determinism baseline to survive a reader change would make the bless a
+    /// formality rather than a reviewed act (§5.6). So v1 reads, with no text.
+    #[test]
+    fn a_recording_from_before_the_text_channel_still_reads() {
+        let mut rec = Recorder::new(meta());
+        rec.record(0, frame(1, 0));
+        let v2 = rec.finish().encode();
+
+        // A v1 file is this one without the trailing text record — the channel
+        // is last precisely so the older layout is a prefix of the newer.
+        const FORMAT_AT: usize = 4;
+        let mut v1 = v2.clone();
+        v1.truncate(v2.len() - size_of::<u32>());
+        v1[FORMAT_AT..FORMAT_AT + 4].copy_from_slice(&1u32.to_le_bytes());
+
+        let replay = Replay::decode(&v1).unwrap();
+        assert_eq!(replay.typed_count(), 0);
+        assert_eq!(replay.text_at(0), "");
+        assert_eq!(replay.frame(0), frame(1, 0));
+
+        // A format this build has never heard of is still refused by number.
+        let mut future = v2;
+        future[FORMAT_AT..FORMAT_AT + 4].copy_from_slice(&(FORMAT + 1).to_le_bytes());
+        let err = Replay::decode(&future).unwrap_err();
+        assert!(
+            matches!(err, ReplayError::Format { found } if found == FORMAT + 1),
             "{err}"
         );
     }

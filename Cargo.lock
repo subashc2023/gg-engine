@@ -979,6 +979,7 @@ name = "gg-editor"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "gg-agent",
  "gg-assets",
  "gg-core",
  "gg-ecs",

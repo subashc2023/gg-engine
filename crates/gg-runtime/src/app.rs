@@ -552,6 +552,13 @@ impl App {
         // reads the dylib beside it.
         let title = self.title();
         let project = (!self.lib.is_absent()).then(|| self.lib.name());
+        // Through the recording and not around it (§6 M16): live keystrokes go
+        // to the replay's text channel here and a replayed tick reads its own
+        // back, so the panel cannot tell which run it is in. Gated on focus, or
+        // every `W` a player pressed would be written down twice — once as text
+        // and once as the verb it already is. `take_typed` drains either way.
+        let wants = self.editor.as_ref().is_some_and(|e| e.ui.wants_text());
+        let typed = self.drive.text(tick, &self.input.take_typed(wants));
         let Some(editing) = self.editor.as_mut() else {
             return Ok(None);
         };
@@ -571,6 +578,7 @@ impl App {
                 tick,
                 play: editing.play(),
                 input: Some(&self.input),
+                typed: &typed,
                 passes: self.gpu.as_ref().map_or(&[][..], Renderer::pass_timings),
                 memory: self.gpu.as_ref().map(Renderer::memory).unwrap_or_default(),
                 save_path: &path,
@@ -578,6 +586,11 @@ impl App {
                 project: project.as_deref(),
                 projects: &editing.projects,
                 maximized: editing.maximized,
+                // The panel is a reader of the same record `gg-tools mcp`
+                // serves, so the window and the terminal cannot tell an operator
+                // two different stories about one reload (§6 M16). Unconditional
+                // because `editor` implies `agent`, which is this arm's cfg.
+                reload: self.journal.last(),
                 // Never: a windowed session has the system cursor on the same
                 // pixel, and a headless one has no frame to draw into (§6
                 // M15.1). What draws its own is `gg-golden`.

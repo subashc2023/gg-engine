@@ -203,9 +203,12 @@ mod tests {
     fn a_rearranged_layout_round_trips() {
         let mut editor = crate::Editor::new(None);
         editor.place((1280, 720), 1.0);
-        assert!(editor.set_layout(
-            decode("split v 0.5 tabs 1 3 world game cvars tabs 0 3 assets perf inspect").unwrap()
-        ));
+        assert!(
+            editor.set_layout(
+                decode("split v 0.5 tabs 1 3 world game cvars tabs 0 4 assets perf inspect agent")
+                    .unwrap()
+            )
+        );
         let text = encode(editor.layout());
         assert_eq!(decode(&text).as_ref(), Some(editor.layout()));
     }
@@ -240,9 +243,12 @@ mod tests {
         let path = std::path::Path::new("target/gg-editor-tests/survives.layout");
         let mut first = Editor::new(None);
         first.place((1280, 720), 1.0);
-        assert!(first.set_layout(
-            decode("split v 0.5 tabs 1 3 world game cvars tabs 0 3 assets perf inspect").unwrap()
-        ));
+        assert!(
+            first.set_layout(
+                decode("split v 0.5 tabs 1 3 world game cvars tabs 0 4 assets perf inspect agent")
+                    .unwrap()
+            )
+        );
         remember(&first, path);
 
         let mut second = Editor::new(None);

@@ -297,6 +297,18 @@ pub fn check_tetris() -> anyhow::Result<()> {
     let decoded = Replay::decode(&on_disk)?;
     let mut fresh = tetris_replay();
     fresh.set_engine_commit(&decoded.meta().engine_commit);
+    // Re-encoding what was read separates the two ways this can differ. Equal
+    // here means the *stream* is still the script and only the file's encoding
+    // version is behind, which is what a `FORMAT` bump does to every generated
+    // artifact at once — a failure that blames the script for it sends the next
+    // reader after a divergence that is not there.
+    anyhow::ensure!(
+        fresh.encode() != decoded.encode() || fresh.encode() == on_disk,
+        "{} is the stream `demo_10_tetris::session::frames()` still produces, written in an older \
+         encoding — `cargo xtask replay --bless` re-authors it at the current `gg_input::replay::\
+         FORMAT`",
+        path.display(),
+    );
     anyhow::ensure!(
         fresh.encode() == on_disk,
         "{} is not what `demo_10_tetris::session::frames()` produces today ({} ticks on disk, {} \

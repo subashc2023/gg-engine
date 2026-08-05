@@ -1205,6 +1205,10 @@ fn render_editor() -> Render {
                 // camera verbs to resolve against and the reference keeps
                 // showing the game's declared eye (§6 M15.2 item 2).
                 input: None,
+                // Nothing typed, for the same reason: the reference gates the
+                // panel's empty field and its hint, which is what an operator
+                // who has not clicked into it sees.
+                typed: "",
                 passes: &passes,
                 memory: gg_rhi::MemoryUse {
                     buffers: 41,
@@ -1228,6 +1232,7 @@ fn render_editor() -> Render {
                 maximized: false,
                 // The one host with no OS cursor to borrow, which is what
                 // `draw_cursor` is for (§6 M15.1).
+                reload: None,
                 draw_cursor: true,
             },
         );

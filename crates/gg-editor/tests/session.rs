@@ -143,8 +143,10 @@ fn run(target: (u32, u32), input: &[InputFrame]) -> Run {
                 // drives authored frames and holds none, which is also what
                 // keeps every assertion below about the world and not the view.
                 input: None,
+                typed: "",
                 passes: &[],
                 memory: MemoryUse::default(),
+                reload: None,
                 draw_cursor: true,
                 save_path: "target/editor/test.ggsv",
                 title: "gg — test",
@@ -335,7 +337,21 @@ fn one_stream_at_one_extent_reproduces_itself() {
 fn the_session_drags_a_seam_and_re_docks_a_pane() {
     let before = placed(TARGET);
     let seam = before.seams()[0].rect;
-    let perf_group = before.pane_body(Pane::Perf);
+    // Which strip each pane sits in, keyed by the strip's own line. Named this
+    // way rather than by asserting a *particular* pane moved: the script aims
+    // its tab drag from the pre-drag layout, so the seam gesture that runs first
+    // shifts the strip under that point and decides which tab the drag grabs.
+    // That is a property of the layout, not of what this test means — which is
+    // that the gesture re-docked something.
+    let strips = |editor: &Editor| {
+        let mut rows: Vec<(i32, &str)> = Pane::ALL
+            .iter()
+            .filter_map(|p| editor.tab_rect(*p).map(|r| (r.y as i32, p.title())))
+            .collect();
+        rows.sort_unstable();
+        rows
+    };
+    let before_strips = strips(&before);
     let input = frames(&script(&before), CLICK, X, Y);
     let mut run = run(TARGET, &input);
     run.editor.place(TARGET, 1.0);
@@ -346,9 +362,9 @@ fn the_session_drags_a_seam_and_re_docks_a_pane() {
         "the seam drag moved nothing"
     );
     assert_ne!(
-        run.editor.pane_body(Pane::Perf),
-        perf_group,
-        "perf did not re-dock"
+        strips(&run.editor),
+        before_strips,
+        "no pane changed strips — the tab drag re-docked nothing"
     );
     // Every pane is still reachable — a docking gesture that loses one is worse
     // than one that does nothing.
@@ -427,8 +443,10 @@ fn stopped(world: &mut World, editor: &mut Editor, input: &[InputFrame]) {
                 tick: tick as u64,
                 play: gg_editor::Play::Stopped,
                 input: None,
+                typed: "",
                 passes: &[],
                 memory: MemoryUse::default(),
+                reload: None,
                 draw_cursor: true,
                 save_path: "target/editor/test.ggsv",
                 title: "gg — test",
@@ -901,8 +919,10 @@ fn a_click_in_a_playing_viewport_picks_nothing() {
                 tick: tick as u64,
                 play: gg_editor::Play::Running,
                 input: None,
+                typed: "",
                 passes: &[],
                 memory: MemoryUse::default(),
+                reload: None,
                 draw_cursor: true,
                 save_path: "target/editor/test.ggsv",
                 title: "gg — test",
@@ -1022,8 +1042,10 @@ fn with_no_project_the_game_pane_is_a_picker_and_a_click_on_a_row_opens_one() {
                 tick: 0,
                 play: gg_editor::Play::Stopped,
                 input: None,
+                typed: "",
                 passes: &[],
                 memory: MemoryUse::default(),
+                reload: None,
                 draw_cursor: true,
                 save_path: "target/editor/test.ggsv",
                 title: "gg — <no project>",
@@ -1047,4 +1069,94 @@ fn with_no_project_the_game_pane_is_a_picker_and_a_click_on_a_row_opens_one() {
     // and picking is not an edit.
     assert_eq!(world.len(), 0);
     assert_eq!(editor.tally(), (0, 0));
+}
+
+/// §6 M16 item 5: the panel takes typed text, and only once something asked for
+/// it.
+///
+/// The focus half is the load-bearing one. `Editor::wants_text` is what a host
+/// asks between ticks to decide whether a character is worth recording at all,
+/// so a field that took keystrokes it was never given would put every `W` a
+/// player pressed into the replay's text channel — beside the `move_forward`
+/// the same key already recorded as a verb.
+#[test]
+fn the_prompt_takes_typed_text_only_once_a_click_has_focused_it() {
+    let mut world = World::new();
+    let mut editor = placed(TARGET);
+    // The agent pane is the fourth tab of the group under the viewport, so it
+    // has no body until its tab is up — and no prompt field to aim at.
+    let tab = aim::tab(&editor, Pane::Agent).expect("the agent pane has a tab");
+    let mut script = frames(&[Act::To(tab), Act::Settle(3), Act::Click], CLICK, X, Y);
+    let mut focus = Vec::new();
+    // Typed throughout, including every tick before the click lands: the
+    // characters are offered and the field must refuse them until it is the
+    // thing keys are going to.
+    let step = |editor: &mut Editor, world: &mut World, frame: &InputFrame, typed: &str| {
+        let ui = Tick {
+            motion: (frame.axes[X.index()], frame.axes[Y.index()]),
+            primary: frame.pressed(CLICK),
+            advance_focus: false,
+            scroll: 0,
+        };
+        editor.tick(world, &ui, &typing(typed));
+    };
+    for frame in &script {
+        step(&mut editor, &mut world, frame, "no");
+        focus.push(editor.wants_text());
+    }
+    assert!(
+        focus.iter().all(|f| !f),
+        "nothing was focused, yet keys were wanted"
+    );
+    assert_eq!(
+        editor.prompt(),
+        "",
+        "the field took characters while the game had the keyboard"
+    );
+
+    // Aimed only now: `prompt_field` is a function of a body that did not exist
+    // a moment ago, which is the same reason a gizmo is aimed mid-script.
+    let target = aim::prompt(&editor).expect("the agent pane is up");
+    script = gg_editor::session::frames_from(
+        tab,
+        &[Act::To(target), Act::Settle(3), Act::Click],
+        CLICK,
+        X,
+        Y,
+    );
+    for frame in &script {
+        step(&mut editor, &mut world, frame, "");
+    }
+    assert!(editor.wants_text(), "a click on the field did not focus it");
+
+    // And now it does take them, in the order they were typed and across ticks.
+    for typed in ["why ", "so ", "slow?"] {
+        step(&mut editor, &mut world, &InputFrame::default(), typed);
+    }
+    assert_eq!(editor.prompt(), "why so slow?");
+    // Host state to the end: a prompt is not an edit, and nothing about it is in
+    // the world or in the canonical hash (§4.2.1).
+    assert_eq!(world.len(), 0);
+    assert_eq!(editor.tally(), (0, 0));
+}
+
+/// A frame carrying `typed`, for the test above.
+fn typing(typed: &str) -> Frame<'_> {
+    Frame {
+        extent: TARGET,
+        dpi: 1.0,
+        tick: 0,
+        play: gg_editor::Play::Stopped,
+        input: None,
+        typed,
+        passes: &[],
+        memory: MemoryUse::default(),
+        reload: None,
+        draw_cursor: true,
+        save_path: "target/editor/test.ggsv",
+        title: "gg — test",
+        project: Some("test"),
+        projects: &[],
+        maximized: false,
+    }
 }

@@ -135,7 +135,7 @@ impl Camera {
 /// Resolved per tick rather than cached, and that is correctness rather than
 /// laziness: the map is re-parsed at every reload (§4.2.2) and an id cached
 /// across one would name whatever verb an edit moved into that slot.
-fn id(input: &Input, name: &str) -> Option<ActionId> {
+pub(crate) fn id(input: &Input, name: &str) -> Option<ActionId> {
     input
         .map()
         .action_names()
@@ -225,6 +225,7 @@ mod tests {
             tick: 7,
             play,
             input,
+            typed: "",
             passes: &[],
             memory: gg_rhi::MemoryUse::default(),
             save_path: "",
@@ -232,6 +233,7 @@ mod tests {
             project: Some("test"),
             projects: &[],
             maximized: false,
+            reload: None,
             draw_cursor: false,
         }
     }

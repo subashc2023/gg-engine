@@ -26,4 +26,9 @@ workspace = true
 # record link the ECS to read a number, and the reader is an out-of-process tool.
 # Nothing here logs either — the shell already logs the seam, and a second
 # opinion about it from inside the record would be the same fact twice.
+#
+# The bill this claim ran up is `src/json.rs`: reading `claude`'s event stream
+# needs a JSON reader, and it is written here rather than pulled in. It is paid
+# rather than merely argued — the reader parses this crate's own writer's output
+# in a round-trip test, which a dependency would not have given us.
 [dependencies]

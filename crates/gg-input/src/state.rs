@@ -44,6 +44,14 @@ pub struct Input {
     /// impulse rather than a held state: [`Input::tick`] spends it and clears
     /// it, so a notch is down for exactly the tick it arrived in ([`Wheel`]).
     wheel: f32,
+    /// Printable characters accumulated since the last tick (§6 M16), for a
+    /// host that has somewhere to put text. An impulse like [`Input::wheel`],
+    /// and for the same reason: typing belongs to the tick it happened on.
+    ///
+    /// Beside the action map rather than in it. A character is not a verb — it
+    /// has no id, no binding and no meaning to a game — so it reaches
+    /// [`InputFrame`] never and `gg_input::replay`'s text channel only.
+    typed: String,
     current: InputFrame,
     previous: InputFrame,
 }
@@ -62,6 +70,7 @@ impl Input {
             motion: [0.0; 2],
             cursor: [0; 2],
             wheel: 0.0,
+            typed: String::new(),
             current: InputFrame::default(),
             previous: InputFrame::default(),
         }
@@ -155,6 +164,32 @@ impl Input {
     pub fn wheel(&mut self, notches: f32) {
         if notches.is_finite() {
             self.wheel += notches;
+        }
+    }
+
+    /// Accumulate a character this tick produced (§6 M16).
+    ///
+    /// Printable only: control codes are the *keys* Backspace and Enter, which
+    /// are ordinary verbs in the action map, and a field that took both would
+    /// act on one keystroke twice.
+    pub fn type_char(&mut self, c: char) {
+        if !c.is_control() {
+            self.typed.push(c);
+        }
+    }
+
+    /// Take this tick's characters, or drop them where `wanted` is `false`.
+    ///
+    /// Drains either way, and that is the interesting half: a `false` means
+    /// nothing is focused, and keeping the buffer would deliver these
+    /// keystrokes to whatever *is* focused three seconds from now. The caller
+    /// answers `wanted` because focus is a UI's fact, not this crate's.
+    #[must_use]
+    pub fn take_typed(&mut self, wanted: bool) -> String {
+        let typed = core::mem::take(&mut self.typed);
+        match wanted {
+            true => typed,
+            false => String::new(),
         }
     }
 

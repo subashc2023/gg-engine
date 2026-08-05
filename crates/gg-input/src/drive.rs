@@ -42,6 +42,26 @@ impl Drive {
         }
     }
 
+    /// This tick's typed characters, through the same seam (§6 M16): live
+    /// keystrokes are written down, a replay's are read back out. Call once per
+    /// tick, beside [`Drive::frame`] and at the same `tick`.
+    ///
+    /// Owned rather than borrowed because a caller mid-tick holds the whole
+    /// host, and a `&str` out of the replay would keep this borrowed across it.
+    /// The empty case allocates nothing, which is every tick nobody typed on.
+    #[must_use]
+    pub fn text(&mut self, tick: u64, typed: &str) -> String {
+        match self {
+            Drive::Live(recorder) => {
+                if let Some(recorder) = recorder {
+                    recorder.record_text(tick, typed);
+                }
+                typed.to_owned()
+            }
+            Drive::Replay(replay) => replay.text_at(tick).to_owned(),
+        }
+    }
+
     /// Open a replay segment at `tick`, naming the game build that produces the
     /// ticks from here on (§4.2.2). A no-op when nothing is being recorded,
     /// which is what lets the host call it at every load and every swap without

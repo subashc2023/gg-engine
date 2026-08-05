@@ -22,6 +22,11 @@
 //! gate's absent list beside `gg-debug` and `gg-editor`. A shipped game has no
 //! reload seam to report on.
 
+pub mod ask;
+mod json;
+
+pub use ask::{Ask, Event, Status};
+
 use std::path::{Path, PathBuf};
 
 /// Seams kept before the oldest is dropped.

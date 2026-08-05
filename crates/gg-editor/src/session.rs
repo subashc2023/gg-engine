@@ -174,6 +174,26 @@ pub mod aim {
         )))
     }
 
+    /// The agent panel's prompt field (§6 M16). Clicking it takes focus, which
+    /// is what makes typed characters land there and what `Editor::wants_text`
+    /// reports back to a host deciding whether to record them.
+    #[must_use]
+    pub fn prompt(editor: &Editor) -> Option<(f32, f32)> {
+        Some(centre(
+            panels::prompt_field(editor.pane_body(Pane::Agent)?).0,
+        ))
+    }
+
+    /// Send whatever is in the field. Enter does the same thing and is the one a
+    /// human uses; a script aims here because a verb needs a bound key and a
+    /// click needs only a pixel.
+    #[must_use]
+    pub fn send(editor: &Editor) -> Option<(f32, f32)> {
+        Some(centre(
+            panels::prompt_field(editor.pane_body(Pane::Agent)?).1,
+        ))
+    }
+
     /// `edit → undo`, as the pair of clicks a menu item takes.
     #[must_use]
     pub fn undo(editor: &Editor) -> Option<((f32, f32), (f32, f32))> {
