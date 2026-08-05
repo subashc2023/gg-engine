@@ -108,6 +108,13 @@ impl Frustum {
     ///
     /// A non-finite radius keeps the instance: an asset whose bounds are not
     /// known yet must not vanish while it streams in (§4.6).
+    ///
+    /// P1: the short-circuiting `all` looks cheaper than it is. A variant that
+    /// evaluated all five distances up front — *and* a needless `sqrt` on each —
+    /// ran the extract bench's serial narrow leg at 8.2 ns/entity against 9.5,
+    /// because a world spread across the frustum mispredicts the early exit
+    /// every few rows. Found by accident while falsifying that bench's gates,
+    /// and not yet measured without the `sqrt`, which is what would settle it.
     #[must_use]
     pub fn contains(&self, center: render::Vec3, radius: f32) -> bool {
         if self.unbounded || !radius.is_finite() {

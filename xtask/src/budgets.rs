@@ -83,6 +83,20 @@ const DEPENDENCY_BUDGETS: &[(&str, usize)] = &[
     ("gg-editor", 10),
 ];
 
+/// §3's `gg-ui` acceptance rule, as a machine: the M13 overlay reimplementation
+/// "may not exceed the M8 overlay's line count by more than 2×". §3 says the
+/// machine-checkable budgets are CI and this one never was — found by M17's read
+/// of the tree against the document, which is the one budget §3 states in lines
+/// and left to review.
+///
+/// 510 is the M8 overlay, recorded in §6 M13's status, so the cap is 1020. A
+/// constant and not a re-measurement: the crate it was measured against is gone,
+/// and a gate that recomputed its own baseline would forgive any drift it was
+/// standing next to. What it protects is not the overlay — it is `gg-ui`, whose
+/// exit test was that a UI library which cannot cheaply do what 510 lines of
+/// immediate-mode drawing did is overbuilt.
+const OVERLAY_BUDGET: usize = 1020;
+
 /// §6 M12's exit row: the template reaches a spinning lit mesh in under 50
 /// lines. A budget rather than a claim, because the number is the whole point —
 /// it is what caps the ceremony a game pays, and the first time it was measured
@@ -112,6 +126,7 @@ const USED_INVISIBLY: &[(&str, &str, &str)] = &[];
 pub fn check() -> anyhow::Result<()> {
     shell_lines()?;
     template_lines()?;
+    overlay_lines()?;
     dependencies()?;
     unused_dependencies()?;
     game_crate_pin()?;
@@ -136,6 +151,23 @@ fn template_lines() -> anyhow::Result<()> {
          not to raise the number"
     );
     println!("xtask: template budget {code}/{TEMPLATE_BUDGET} code lines ({total} total)");
+    Ok(())
+}
+
+/// `gg-ui`'s acceptance test, counted (§3, §6 M13).
+fn overlay_lines() -> anyhow::Result<()> {
+    let path = workspace_root().join("crates/gg-debug/src/overlay.rs");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("no overlay at {}: {e}", path.display()))?;
+    let (code, total) = count_code(&text);
+    anyhow::ensure!(
+        code <= OVERLAY_BUDGET,
+        "the overlay is {code} code lines against a {OVERLAY_BUDGET}-line budget (§3) — that cap \
+         is 2x the M8 overlay it replaced, and exceeding it is a statement about `gg-ui` rather \
+         than about the overlay: a UI library the same screen costs twice as much to draw on is \
+         overbuilt (§6 M13's acceptance test)"
+    );
+    println!("xtask: overlay budget {code}/{OVERLAY_BUDGET} code lines ({total} total, §3)");
     Ok(())
 }
 
