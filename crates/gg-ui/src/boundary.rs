@@ -170,6 +170,7 @@ impl Ui {
         list.clear();
         let fit = crate::layout::Fit::new(target);
         list.push_transform(fit.offset, fit.scale);
+        let mut hit_tested = false;
         for index in order.iter() {
             let w = &mut widgets[*index as usize];
             let rect = Rect::new(w.rect[0], w.rect[1], w.rect[2], w.rect[3]);
@@ -184,6 +185,7 @@ impl Ui {
                     list.pop_clip();
                 }
                 widget::BUTTON => {
+                    hit_tested = true;
                     let response = router.hit(WidgetId::from_hash(w.id), rect);
                     w.state = flags(&response);
                     let fill = if response.hovered || response.held {
@@ -213,10 +215,14 @@ impl Ui {
                 _ => {}
             }
         }
-        // Only over a UI that exists: every demo before this milestone drives a
-        // camera with the same mouse, and a cursor floating over one would be
-        // this crate deciding what an unrelated game looks like.
-        if !widgets.is_empty() {
+        // Only over a UI something can point *at*: a cursor is the pointer's
+        // report of where it is, and a declaration with no hit-tested widget in
+        // it has no pointer — either the build resolved no binding (§4.9's
+        // all-or-nothing `binding`) or the game's UI is a HUD. Demo 10's board
+        // is the case that found this: 262 widgets, none of them a button, and a
+        // white arrow parked in the corner of every frame because "a UI exists"
+        // was standing in for "a UI is pointed at".
+        if hit_tested {
             cursor(list, router.pointer().position());
         }
         list.pop_transform();
@@ -397,12 +403,13 @@ mod tests {
     }
 
     /// The cursor alone: two passes of `CURSOR_HEIGHT` rows, six vertices a
-    /// quad. What "drew nothing" means once there is a host-drawn pointer.
+    /// quad. What "drew nothing but the pointer" means.
     const CURSOR_ONLY: usize = 2 * CURSOR_HEIGHT as usize * 6;
 
     /// A widget whose kind this host does not know draws nothing rather than
     /// drawing something wrong — the game may be built against a newer
-    /// boundary than the host that loaded it (§4.2.2).
+    /// boundary than the host that loaded it (§4.2.2). And an unknown kind is
+    /// not hit-tested, so it does not bring a cursor with it either.
     #[test]
     fn an_unknown_kind_draws_nothing() {
         let mut ui = Ui::new().expect("query");
@@ -412,8 +419,7 @@ mod tests {
         let mut w = Widget::panel([0.0, 0.0, 100.0, 100.0], 0xffff_ffff);
         w.kind = 9999;
         world.insert(entity, w).expect("insert");
-        let drawn = ui.frame(&mut world, &Tick::default(), TARGET).len();
-        assert_eq!(drawn, CURSOR_ONLY, "the cursor, and nothing of the widget");
+        assert!(ui.frame(&mut world, &Tick::default(), TARGET).is_empty());
     }
 
     /// A game with no UI at all gets no pointer drawn over its camera.
@@ -423,6 +429,40 @@ mod tests {
         let mut world = World::new();
         world.register::<Widget>().expect("register");
         assert!(ui.frame(&mut world, &Tick::default(), TARGET).is_empty());
+    }
+
+    /// The cursor follows what can be *pointed at*, not what is declared. A HUD
+    /// of panels and labels is read, never clicked — and a build that resolved
+    /// no pointer binding at all would otherwise park an arrow in the corner of
+    /// every frame, which is what demo 10's board found (§6 M18).
+    #[test]
+    fn a_cursor_is_drawn_only_over_a_ui_with_something_to_hit() {
+        let mut ui = Ui::new().expect("query");
+        let mut world = World::new();
+        world.register::<Widget>().expect("register");
+        let hud = world.spawn();
+        world
+            .insert(
+                hud,
+                Widget::label([4.0, 4.0, 60.0, 10.0], 0xffff_ffff, "hp"),
+            )
+            .expect("insert");
+        let text = ui.frame(&mut world, &Tick::default(), TARGET).len();
+        assert!(text > 0, "the label drew nothing");
+
+        let button = world.spawn();
+        world
+            .insert(
+                button,
+                Widget::button(WidgetId::new("ok").get(), [0.0; 4], 0, 0, ""),
+            )
+            .expect("insert");
+        let with_button = ui.frame(&mut world, &Tick::default(), TARGET).len();
+        assert_eq!(
+            with_button - text,
+            CURSOR_ONLY,
+            "one hit-tested widget is what brings the pointer"
+        );
     }
 
     /// The four names are one protocol, and a build declaring three of them

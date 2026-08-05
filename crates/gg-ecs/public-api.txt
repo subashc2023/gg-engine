@@ -615,6 +615,8 @@ impl gg_ecs::state_hash::StateHash for gg_math::sim::Mat4
 pub fn gg_math::sim::Mat4::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_math::sim::Quat
 pub fn gg_math::sim::Quat::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Rng
+pub fn gg_math::sim::Rng::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_math::sim::Vec2
 pub fn gg_math::sim::Vec2::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_math::sim::Vec3
@@ -1248,6 +1250,8 @@ impl gg_ecs::state_hash::StateHash for gg_math::sim::Mat4
 pub fn gg_math::sim::Mat4::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_math::sim::Quat
 pub fn gg_math::sim::Quat::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_math::sim::Rng
+pub fn gg_math::sim::Rng::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_math::sim::Vec2
 pub fn gg_math::sim::Vec2::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_math::sim::Vec3

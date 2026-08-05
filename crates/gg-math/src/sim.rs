@@ -766,11 +766,231 @@ macro_rules! sim_vec_ops {
 sim_types!(f32, Vec2, Vec3, Vec4, Quat, Mat3, Mat4);
 sim_types!(f64, DVec2, DVec3, DVec4, DQuat, DMat3, DMat4);
 
+/// A deterministic random source, sized and shaped to live *in* the world
+/// (§6 M18).
+///
+/// Integer operations only, so it is bit-identical on every target this engine
+/// claims — the aarch64 leg covers it for free and no `libm` question arises.
+/// `Pod`, so a game keeps it in a component and it is hashed, snapshotted,
+/// replayed and migrated like any other state. An RNG that lives *beside* the
+/// world instead of in it is one the replay gate silently stops covering.
+///
+/// # Why SplitMix64 and not PCG
+///
+/// `World::restore` zeroes a field whose type changed and reports it (§4.3), and
+/// `Zeroable` means all-zero must be a *valid* value. PCG's increment has to be
+/// odd, so a zeroed PCG is a generator stuck on one output — a migration would
+/// silently produce a game whose randomness stopped. SplitMix64 is a counter
+/// plus a mix, so zero is an ordinary seed and [`Rng::default`] is a real
+/// stream. The degenerate case is designed out rather than asserted against.
+///
+/// Quality is BigCrush-passing, which is far past what shuffling seven pieces
+/// asks. There is deliberately **no float output**: nothing needs one yet, and
+/// §3's rule about widgets applies to this crate too.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct Rng {
+    /// The counter. Public bits are the mix's, never this.
+    state: u64,
+}
+
+/// SplitMix64's additive constant — the 64-bit golden ratio, odd, so the
+/// counter visits every state before repeating.
+const GOLDEN_GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
+
+impl Rng {
+    /// A stream from `seed`. Every seed is valid, zero included.
+    #[must_use]
+    pub const fn from_seed(seed: u64) -> Rng {
+        Rng { state: seed }
+    }
+
+    /// The stream position — the whole of the state, and what the canonical
+    /// state hash absorbs. `from_bits(rng.to_bits())` is the identity.
+    ///
+    /// Public because a generator the world holds is a generator the world must
+    /// be able to *say*; the bits are still not an output — draw with
+    /// [`Rng::next_u64`], which mixes them.
+    #[must_use]
+    pub const fn to_bits(self) -> u64 {
+        self.state
+    }
+
+    /// The inverse of [`Rng::to_bits`].
+    #[must_use]
+    pub const fn from_bits(bits: u64) -> Rng {
+        Rng { state: bits }
+    }
+
+    /// The next 64 bits, advancing the stream.
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(GOLDEN_GAMMA);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// The next 32 bits. The *high* half, because SplitMix64's low bits are the
+    /// weakest part of its output and a `% n` on them is the classic way to
+    /// find that out.
+    pub fn next_u32(&mut self) -> u32 {
+        (self.next_u64() >> 32) as u32
+    }
+
+    /// A uniform value in `0..bound`, or `None` for an empty range.
+    ///
+    /// Lemire's multiply-and-reject: unbiased, and the rejection is *itself*
+    /// deterministic — the same stream rejects at the same draws on every
+    /// machine, so a replay crosses it unchanged. A plain `% bound` would be
+    /// biased toward the low values, which over a 7-bag is a piece that comes
+    /// up more often than the rules say.
+    pub fn below(&mut self, bound: u32) -> Option<u32> {
+        if bound == 0 {
+            return None;
+        }
+        let threshold = (bound.wrapping_neg()) % bound; // 2^32 mod bound
+        loop {
+            let product = u64::from(self.next_u32()) * u64::from(bound);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the low half is the fractional part Lemire tests"
+            )]
+            let low = product as u32;
+            if low >= threshold {
+                return Some((product >> 32) as u32); // < bound by construction
+            }
+        }
+    }
+
+    /// Fisher–Yates, in place — what a 7-bag is.
+    ///
+    /// Descending, drawing from `0..=i`: the ascending variant with `0..len` is
+    /// the one that is subtly *not* uniform, and the two are one character
+    /// apart.
+    pub fn shuffle<T>(&mut self, items: &mut [T]) {
+        for i in (1..items.len()).rev() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a slice this long cannot exist in a world that hashes"
+            )]
+            let bound = (i + 1) as u32;
+            if let Some(j) = self.below(bound) {
+                items.swap(i, j as usize);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     fn assert_pod<T: Pod>() {}
+
+    /// The anchor. These four are SplitMix64's *published* reference outputs for
+    /// seed 0, so this pins the implementation to the algorithm rather than to
+    /// itself — a self-consistent generator that drifted would still pass a test
+    /// written from its own output. Every replay baseline in the tree stands on
+    /// this sequence; changing it is re-blessing every one of them.
+    #[test]
+    fn the_stream_is_splitmix64_and_matches_its_published_vectors() {
+        let mut rng = Rng::from_seed(0);
+        assert_eq!(rng.next_u64(), 0xe220_a839_7b1d_cdaf);
+        assert_eq!(rng.next_u64(), 0x6e78_9e6a_a1b9_65f4);
+        assert_eq!(rng.next_u64(), 0x06c4_5d18_8009_454f);
+        assert_eq!(rng.next_u64(), 0xf88b_b8a8_724c_81ec);
+    }
+
+    #[test]
+    fn a_zeroed_rng_is_a_working_rng() {
+        // The whole reason this is SplitMix64: `World::restore` zeroes a retyped
+        // field, and a generator that stopped there would be a game whose
+        // randomness quietly died at a schema change.
+        let (mut zeroed, mut seeded) = (Rng::zeroed(), Rng::from_seed(0));
+        assert_eq!(zeroed, Rng::default());
+        let drawn: Vec<u64> = (0..8).map(|_| zeroed.next_u64()).collect();
+        assert_eq!(drawn, (0..8).map(|_| seeded.next_u64()).collect::<Vec<_>>());
+        assert!(
+            drawn.windows(2).any(|w| w[0] != w[1]),
+            "a zeroed generator repeated itself: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn the_same_seed_replays_and_a_different_one_diverges() {
+        let draw = |seed| {
+            let mut rng = Rng::from_seed(seed);
+            (0..32).map(|_| rng.next_u64()).collect::<Vec<_>>()
+        };
+        assert_eq!(draw(12345), draw(12345));
+        assert_ne!(draw(12345), draw(12346));
+    }
+
+    #[test]
+    fn below_stays_in_range_and_rejects_an_empty_one() {
+        let mut rng = Rng::from_seed(7);
+        assert_eq!(rng.below(0), None);
+        assert_eq!(rng.below(1), Some(0));
+        for bound in [2u32, 7, 10, 255, 256, 1000] {
+            for _ in 0..2000 {
+                let v = rng.below(bound).expect("non-empty range");
+                assert!(v < bound, "{v} is not below {bound}");
+            }
+        }
+    }
+
+    /// Lemire's rejection buys uniformity, so it is worth proving it is there:
+    /// a bound that does not divide 2^32 is exactly where `%` would skew. Seven
+    /// is the bag size, which makes this the case the game depends on.
+    #[test]
+    fn below_is_flat_over_a_bound_that_does_not_divide_the_word() {
+        let mut rng = Rng::from_seed(99);
+        let mut counts = [0u32; 7];
+        const DRAWS: u32 = 700_000;
+        for _ in 0..DRAWS {
+            counts[rng.below(7).expect("non-empty range") as usize] += 1;
+        }
+        let expected = DRAWS / 7;
+        for (face, count) in counts.iter().enumerate() {
+            let drift = count.abs_diff(expected);
+            assert!(
+                drift * 100 < expected,
+                "face {face} came up {count} times against {expected} expected — over 1% off, \
+                 which is where a biased reduction shows"
+            );
+        }
+    }
+
+    #[test]
+    fn shuffle_is_a_permutation_and_actually_moves_things() {
+        let mut rng = Rng::from_seed(2024);
+        let mut moved = 0;
+        for _ in 0..64 {
+            let mut bag: [u8; 7] = [0, 1, 2, 3, 4, 5, 6];
+            rng.shuffle(&mut bag);
+            let mut sorted = bag;
+            sorted.sort_unstable();
+            assert_eq!(sorted, [0, 1, 2, 3, 4, 5, 6], "shuffle lost or duplicated");
+            if bag != [0, 1, 2, 3, 4, 5, 6] {
+                moved += 1;
+            }
+        }
+        // 1/5040 of shuffles are the identity, so 64 all-identity is not chance.
+        assert!(moved > 55, "only {moved}/64 shuffles reordered the bag");
+    }
+
+    #[test]
+    fn shuffle_handles_the_degenerate_lengths() {
+        let mut rng = Rng::from_seed(1);
+        let mut empty: [u8; 0] = [];
+        rng.shuffle(&mut empty);
+        let mut one = [42u8];
+        rng.shuffle(&mut one);
+        assert_eq!(one, [42]);
+    }
 
     #[test]
     fn every_type_is_pod_with_expected_layout() {
@@ -786,6 +1006,10 @@ mod tests {
         assert_pod::<DQuat>();
         assert_pod::<DMat3>();
         assert_pod::<DMat4>();
+        // §6 M18: an RNG a game keeps in a component is hashed state like the
+        // rest, which is exactly what `Pod` is the entry fee for.
+        assert_pod::<Rng>();
+        assert_eq!(size_of::<Rng>(), 8);
         assert_eq!(size_of::<Vec2>(), 8);
         assert_eq!(size_of::<Vec3>(), 12);
         assert_eq!(size_of::<Vec4>(), 16);

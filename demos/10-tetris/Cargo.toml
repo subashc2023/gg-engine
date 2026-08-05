@@ -1,0 +1,33 @@
+# demo 10-tetris, from `cargo xtask new`: the template (§6 M12) renamed.
+# Three engine dependencies and no fourth, like every game crate — §3's
+# deny pin is a gate, and `xtask ci --push` is where it fails.
+
+[package]
+name = "demo-10-tetris"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "demo_10_tetris"
+path = "src/lib.rs"
+# cdylib is what the host loads; rlib is what the tests link. Both from one
+# build, so the artifact under test is the artifact that ships.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `gg_game!` exports fixed `extern "C"` symbol names, so two game rlibs cannot
+# link into one binary. Default-on: the cdylib and this crate's own tests are
+# unaffected, and a harness that wants the pure functions takes it off.
+default = ["game"]
+game = []
+
+[dependencies]
+bytemuck.workspace = true
+gg-ecs = { path = "../../crates/gg-ecs" }
+gg-math = { path = "../../crates/gg-math" }

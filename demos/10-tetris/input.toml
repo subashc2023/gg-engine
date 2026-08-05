@@ -1,0 +1,23 @@
+# Demo 10's bindings (§4.7). By *physical* key position, so this file means the
+# same thing on AZERTY as on QWERTY.
+#
+# Verb names resolve against the two lists in `gg_game!`, and their order there
+# is the id space a replay records — so renaming a verb here without renaming it
+# there is refused at load, not silently dead.
+#
+# One hand on the left cluster: WASD moves and drops, Q/E rotate, and the thumb
+# key is hold. The arrow cluster doubles the four WASD verbs — including Up as
+# *hard drop* rather than rotate, because a scheme where W and Up disagree is
+# worse than one that departs from the arcade default.
+
+[game.actions]
+left = ["A", "Left"]
+right = ["D", "Right"]
+soft_drop = ["S", "Down"]
+hard_drop = ["W", "Up"]
+rotate_cw = ["E"]
+rotate_ccw = ["Q"]
+hold = ["Space"]
+restart = ["R"]
+
+[game.axes]

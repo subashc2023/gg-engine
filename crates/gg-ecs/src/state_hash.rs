@@ -172,6 +172,19 @@ impl_sim! {
     sim::DMat4 { x_axis, y_axis, z_axis, w_axis }
 }
 
+/// The generator's stream position, which is the whole of its state (§6 M18).
+///
+/// Not in [`impl_sim`] because the field is private: an `Rng` says its state
+/// through `to_bits` rather than exposing a counter that is not an output. It
+/// is in the protocol at all because a game that draws pieces from a generator
+/// the hash does not cover is a game whose replay diverges on the first draw
+/// with nothing to report it.
+impl StateHash for sim::Rng {
+    fn state_hash(&self, h: &mut StateHasher) {
+        h.u64(self.to_bits());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

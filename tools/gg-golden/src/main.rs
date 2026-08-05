@@ -307,6 +307,23 @@ const SCENES: &[Scene] = &[
         },
         render: render_ui_text,
     },
+    Scene {
+        name: "tetris",
+        // §6 M18's playfield. Flat fills and the bitmap font at an exact ×1 fit
+        // — the whole game is UI (§4.9), so there is nothing in this frame a
+        // driver may round and it is judged as strictly as `ui-overlay`. What it
+        // catches is the class of thing no unit test can: a board off centre, a
+        // panel over the well, a cell colour that stopped being its piece's, and
+        // a label clipped by a rectangle that was wide enough yesterday.
+        policy: Policy {
+            tolerance: 1,
+            max_diff_pixels: 16,
+            benign_delta: 2,
+            max_dssim: 0.02,
+            max_bias: 0.25,
+        },
+        render: render_tetris,
+    },
 ];
 
 /// Render demo 02's scene — the same buffers, the same upload path through
@@ -1362,6 +1379,90 @@ fn render_ui_text() -> Render {
     list.pop_clip();
 
     render_ui(&fonts.coverage(), list.vertices())
+}
+
+/// Demo 10's board mid-game (§6 M18) — the whole game, because the whole game
+/// is UI.
+///
+/// The state is built here rather than played to, for the reason
+/// [`render_hall`] gives: a reference that was tick 137 of a session would move
+/// every time the rules changed, and what this scene judges is the *picture*.
+/// Everything about how that picture is composed is the demo's own — the widget
+/// list comes from `declare`, the colours from `compose_well`/`cell_color`, so
+/// a layout edit moves this reference instead of quietly disagreeing with it
+/// (§4.10).
+///
+/// Rendered at exactly [`CANVAS`](gg_ecs::boundary::CANVAS): the fit is ×1, so
+/// the nearest-sampled bitmap font lands on whole texels and the reference
+/// gates the layout rather than a resampler.
+fn render_tetris() -> Render {
+    use demo_10_tetris as tetris;
+    use gg_ecs::World;
+    use gg_ecs::boundary::{CANVAS, Widget};
+
+    // A board with something to read: a stack with a hole under an overhang,
+    // one row nearly closed, a piece falling with its ghost below it, and a
+    // held piece — every part of the layout carrying a value at once.
+    let mut well = tetris::Well {
+        cells: [[0; tetris::WIDTH]; tetris::HEIGHT],
+    };
+    for (row, filled) in [
+        (tetris::HEIGHT - 1, 0b11_0111_1111u16),
+        (tetris::HEIGHT - 2, 0b11_0011_0011),
+        (tetris::HEIGHT - 3, 0b10_0011_0001),
+        (tetris::HEIGHT - 4, 0b10_0000_0001),
+    ] {
+        for col in 0..tetris::WIDTH {
+            if filled & (1 << col) != 0 {
+                // The kind is what colours a locked cell, so vary it: a stack in
+                // one colour would pass a reference that lost the mapping.
+                well.cells[row][col] = (row + col) as u8 % 7 + 1;
+            }
+        }
+    }
+
+    let mut play = tetris::new_play(0x5445_5452_4953_0001);
+    play.score = 128_400;
+    play.lines = 37;
+    play.level = 4;
+    play.hold = 2; // T, so the hold bay is not the empty case
+    let piece = tetris::Piece {
+        col: 4,
+        row: 6,
+        kind: 5, // J, which is asymmetric in every rotation
+        rot: 1,
+        pad: [0; 2],
+    };
+
+    let grid = tetris::compose_well(&well, &play, &piece);
+    let bays = tetris::compose_bays(&play);
+    let mut declared = Vec::new();
+    tetris::declare(|part, mut widget| {
+        match part {
+            // The banner belongs to a dead board and this one is alive; a
+            // `Banner` widget is declared at a zero rect, which draws nothing.
+            tetris::Part::Chrome | tetris::Part::Banner(_) => {}
+            tetris::Part::Cell(cell) => widget.color = tetris::cell_color(&grid, &cell),
+            tetris::Part::Bay(bay) => widget.color = tetris::bay_color(&bays, &bay),
+            tetris::Part::Value(line) => {
+                widget.set_text(&tetris::value_of(&play, &line).to_string());
+            }
+        }
+        declared.push(widget);
+    });
+
+    let mut world = World::new();
+    world.register::<Widget>()?;
+    for widget in declared {
+        let entity = world.spawn();
+        world.insert(entity, widget)?;
+    }
+
+    let mut ui = gg_ui::boundary::Ui::new()?;
+    let vertices = ui
+        .frame(&mut world, &gg_ui::router::Tick::default(), CANVAS)
+        .to_vec();
+    render_ui_at(CANVAS, &gg_ui::atlas::fallback(), &vertices)
 }
 
 /// Heading rows: sizes that share no ppem, and characters chosen for what they

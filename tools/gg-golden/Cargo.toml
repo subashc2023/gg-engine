@@ -45,6 +45,11 @@ demo-05-many = { path = "../../demos/05-many", default-features = false }
 # stands. Same reason as demo 04's: the lit reference moves with the demo rather
 # than beside it.
 demo-06-lit = { path = "../../demos/06-lit", default-features = false }
+# Demo 10 supplies its whole UI as `declare`, plus the pure composition its own
+# `present` uses. Without `game`, because demo 04's `gg_game!` already occupies
+# this binary's `extern "C"` names — which is precisely why demo 10's widget
+# list is a function and not a system's private loop.
+demo-10-tetris = { path = "../../demos/10-tetris", default-features = false }
 gg-scene = { path = "../../crates/gg-scene" }
 gg-input = { path = "../../crates/gg-input" }
 # The capture trigger (§4.8). `gg-debug` is winit-free by its own dependency

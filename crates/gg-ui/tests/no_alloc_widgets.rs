@@ -26,15 +26,42 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use gg_ecs::World;
 use gg_ecs::boundary::{Widget, widget_id};
 use gg_ui::Ui;
 use gg_ui::router::{AXIS_SCALE, Tick};
 
-/// Allocation calls since the process started. Relaxed: a count, not a lock.
-static CALLS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Allocation calls made **by this thread**.
+    ///
+    /// It was a process-global `AtomicUsize`, which counted the test harness's
+    /// own threads as well: the measured window is 128 frames of a few
+    /// microseconds, so one allocation from libtest's reporter landing inside
+    /// it read as a UI regression. That is a gate failing on what the thread
+    /// next to it did rather than on its claim (§5) — it went red once on the
+    /// WSL lane and passed 30 runs in a row afterwards, which is the signature.
+    ///
+    /// Per-thread is the claim exactly: `Ui::frame` runs on the caller's
+    /// thread. A path that handed work to a pool would need the global counter
+    /// back, and none of the three `no_alloc` gates is on one.
+    ///
+    /// `const`-initialised and `Copy`: reaching it allocates nothing and
+    /// registers no destructor, where a lazily-initialised TLS would recurse
+    /// through the very allocator it counts.
+    static CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Count one call, unless TLS is already torn down — which is not a window
+/// anything measures, so the miss is free.
+fn charge() {
+    let _ = CALLS.try_with(|calls| calls.set(calls.get() + 1));
+}
+
+fn calls() -> usize {
+    CALLS.try_with(Cell::get).unwrap_or(0)
+}
 
 struct Counting;
 
@@ -44,20 +71,20 @@ struct Counting;
 // memory the allocator owns.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        CALLS.fetch_add(1, Ordering::Relaxed);
+        charge();
         // SAFETY: `layout` is the caller's, forwarded unchanged.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        CALLS.fetch_add(1, Ordering::Relaxed);
+        charge();
         // SAFETY: as above.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // Counted: a buffer that grows every frame reaches the allocator here.
-        CALLS.fetch_add(1, Ordering::Relaxed);
+        charge();
         // SAFETY: `ptr` came from `System` with `layout`, forwarded unchanged.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -120,17 +147,17 @@ fn a_settled_widget_frame_allocates_nothing_of_its_own() {
     let mut ui = Ui::new().unwrap();
     let mut world = world();
 
-    let cold = CALLS.load(Ordering::Relaxed);
+    let cold = calls();
     for tick in 0..512 {
         ui.frame(&mut world, &tick_of(tick), EXTENT);
     }
     let vertices = ui.vertices().len();
 
-    let before = CALLS.load(Ordering::Relaxed);
+    let before = calls();
     for tick in 512..512 + MEASURED {
         ui.frame(&mut world, &tick_of(tick), EXTENT);
     }
-    let allocations = CALLS.load(Ordering::Relaxed) - before;
+    let allocations = calls() - before;
 
     // Asserted after the window closes, because the assertion machinery itself
     // formats and would be counted. The first is the gate's own gate: a counter
