@@ -12,11 +12,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use demo_10_tetris::{
-    Banner, Bay, COLORS, CUE_CLEAR, CUE_HOLD, CUE_LEVEL, CUE_LOCK, CUE_MOVE, CUE_OVER, CUE_ROTATE,
-    CUES, Cell, Cue, HARD_DROP, HEIGHT, HIDDEN, HOLD, HOLD_BAY, HudLine, LEFT, MIN_GRAVITY_TICKS,
-    NEXT_BAY, NO_PIECE, Piece, Play, RESTART, ROTATE_CW, Rules, SEED, SHAPES, WIDTH, Well,
-    cells_of, clear_rows, collides, color_of, draw, gravity_for, landing_row, new_play, session,
-    spawn_piece, voice_of,
+    Banner, Bay, Best, COLORS, CUE_CLEAR, CUE_HOLD, CUE_LEVEL, CUE_LOCK, CUE_MOVE, CUE_OVER,
+    CUE_ROTATE, CUES, Cell, Cue, HARD_DROP, HEIGHT, HIDDEN, HOLD, HOLD_BAY, HudLine, LEFT,
+    MIN_GRAVITY_TICKS, NEXT_BAY, NO_PIECE, Piece, Play, RESTART, ROTATE_CW, Rules, SEED, SHAPES,
+    WIDTH, Well, cells_of, clear_rows, collides, color_of, draw, gravity_for, landing_row,
+    new_play, session, spawn_piece, voice_of,
 };
 use gg_ecs::boundary::{
     self, AbiInfo, ActionId, ComponentsTable, HostApiV1, InputFrame, Sound, SystemsTable, TickCtx,
@@ -57,7 +57,7 @@ impl Game {
             let declared = world.adopt(&gg_game_components()).unwrap();
             (gg_game_systems(), declared)
         };
-        assert_eq!(declared, 11, "nine of ours and the protocol's two");
+        assert_eq!(declared, 12, "ten of ours and the protocol's two");
         Game {
             world,
             table,
@@ -222,7 +222,7 @@ fn the_shape_table_is_seven_tetrominoes() {
 /// so adding a legend row does not fail a number nobody can place.
 fn expected_widgets() -> usize {
     let chrome = 4 + 1; // four panels and the well's surround
-    let text = demo_10_tetris::KEYS.len() * 2 + 7 + 3 + 3; // legend, captions, values, banner
+    let text = demo_10_tetris::KEYS.len() * 2 + 8 + 4 + 3; // legend, captions, values, banner
     (HEIGHT - HIDDEN) * WIDTH + 32 + chrome + text
 }
 
@@ -238,7 +238,7 @@ fn one_tick_leaves_a_board_two_bays_a_hud_and_no_scene_at_all() {
         "one widget per visible cell"
     );
     assert_eq!(game.count::<Bay>(), 32, "two four-by-four boxes");
-    assert_eq!(game.count::<HudLine>(), 3);
+    assert_eq!(game.count::<HudLine>(), 4, "score, lines, level, best");
     assert_eq!(game.count::<Banner>(), 3);
     assert_eq!(game.count::<Widget>(), expected_widgets());
 }
@@ -963,4 +963,115 @@ fn a_reseeded_bag_diverges_by_name_and_plays_a_different_game() {
         (Some(568), 24, 7032),
         "a different bag played the same game"
     );
+}
+
+/// The gate stream (§6 M18): **the same bot, never giving up.**
+///
+/// `xtask reload --rules` swaps a rebuilt dylib under a *running* game, so it
+/// needs a session that is still being played several thousand ticks in with a
+/// stack on the board — the opposite of what `frames` is for. Pinned here as
+/// numbers rather than bounds for `frames`'s reason: "it cleared some lines"
+/// stays green over a script that has stopped being the one the shell replays.
+///
+/// The bot survives all four thousand of them, which is why `endless` mirrors a
+/// restart it never performs here: the length is the caller's to choose, and a
+/// generator that silently stopped playing at the top-out would hand a reload
+/// gate a dead board and a swap that proved nothing.
+#[test]
+fn the_endless_session_keeps_playing_with_a_stack_on_the_board() {
+    const TICKS: usize = 4000;
+    let frames = session::endless(TICKS);
+    assert_eq!(frames.len(), TICKS, "trimmed to exactly what was asked for");
+
+    let progress = session::progress(&frames).unwrap();
+    let last = progress[TICKS - 1];
+    assert_eq!(
+        (last.lines, last.level, last.score),
+        (176, 18, 186_546),
+        "the endless bot played a different game than the one this gate is pinned to"
+    );
+    assert!(
+        progress.iter().all(|p| !p.over),
+        "the bot topped out — playing on is the whole requirement"
+    );
+
+    // The board a swap would land on. Empty only in the six ticks between a
+    // clear that took everything and the next lock, so a gate that asserts a
+    // non-empty well is asserting something that is true nearly always and
+    // checked exactly.
+    let empty = progress.iter().filter(|p| p.occupied == 0).count();
+    let deepest = progress.iter().map(|p| p.occupied).max().unwrap();
+    assert_eq!((empty, deepest), (6, 82));
+}
+
+/// §6 M18's save row, from the game's side: **the record outlives the game that
+/// set it.**
+///
+/// Its own component for exactly this reason — a restart replaces `Play`, and a
+/// high score kept inside it would last one game. The number is also written
+/// every tick rather than at the top-out, because a session closed mid-run is
+/// still a score that was reached and `--save` does not wait for a game to end.
+#[test]
+fn the_best_score_survives_the_game_that_set_it() {
+    let mut game = Game::load();
+    game.step();
+    assert_eq!(game.one::<Best>().score, 0, "a new world has no record");
+
+    // Play until the well fills, the way `restart_clears_the_well_and_deals_again`
+    // does: hard drop is an edge, so every other tick.
+    let mut over = false;
+    for tick in 0..2000 {
+        if tick % 2 == 0 {
+            game.hold(HARD_DROP);
+        }
+        game.step();
+        assert_eq!(
+            game.one::<Best>().score,
+            game.one::<Play>().score.max(game.one::<Best>().score),
+            "the record fell behind the run that was setting it"
+        );
+        if game.one::<Play>().over != 0 {
+            over = true;
+            break;
+        }
+    }
+    assert!(over, "hard-dropping every piece never filled the well");
+
+    let reached = game.one::<Play>().score;
+    assert!(
+        reached > 0,
+        "a game that scored nothing proves nothing here"
+    );
+    game.hold(RESTART);
+    game.step();
+    assert_eq!(
+        game.one::<Play>().score,
+        0,
+        "the new game kept the old score"
+    );
+    assert_eq!(
+        game.one::<Best>().score,
+        reached,
+        "the record did not survive the restart"
+    );
+}
+
+/// The record is on screen, and it is its own row.
+#[test]
+fn the_best_score_reaches_the_hud() {
+    let mut game = Game::load();
+    game.step();
+    game.world
+        .each(&Query::<&mut Best>::new().unwrap(), |_, best: &mut Best| {
+            best.score = 204_900;
+        });
+    game.step();
+    let shown: Vec<String> = game
+        .widgets_with::<HudLine>()
+        .into_iter()
+        .map(|(_, widget)| widget.text().to_owned())
+        .collect();
+    assert_eq!(shown.len(), 4);
+    assert_eq!(shown[3], "204900", "the fourth stats row is the record");
+    assert_ne!(shown[0], shown[3], "the score row is not the record row");
 }

@@ -1426,6 +1426,9 @@ fn render_tetris() -> Render {
     play.lines = 37;
     play.level = 4;
     play.hold = 2; // T, so the hold bay is not the empty case
+    // Ahead of the run in progress, so BEST and SCORE are visibly different
+    // numbers rather than one repeated twice.
+    let best = tetris::Best { score: 204_900 };
     let piece = tetris::Piece {
         col: 4,
         row: 6,
@@ -1445,7 +1448,7 @@ fn render_tetris() -> Render {
             tetris::Part::Cell(cell) => widget.color = tetris::cell_color(&grid, &cell),
             tetris::Part::Bay(bay) => widget.color = tetris::bay_color(&bays, &bay),
             tetris::Part::Value(line) => {
-                widget.set_text(&tetris::value_of(&play, &line).to_string());
+                widget.set_text(&tetris::value_of(&play, &best, &line).to_string());
             }
         }
         declared.push(widget);

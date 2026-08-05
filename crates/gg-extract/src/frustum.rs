@@ -14,6 +14,11 @@
 //! plane with a zero normal, which normalizes to `NaN` and quietly rejects
 //! everything. So there are five, and this comment is why.
 //!
+//! That is an assumption about the *caller's* matrix, so it is checked rather
+//! than trusted: a projection with a finite far — an orthographic one — trips a
+//! debug assertion instead of silently producing a culler that keeps everything
+//! past its own far plane (§6 M18).
+//!
 //! # Spheres, not boxes
 //!
 //! A sphere test is rotation-invariant, so an instance that spins costs no
@@ -66,6 +71,16 @@ impl Frustum {
     /// `view_projection` must be the *camera-relative* one — the eye at the
     /// origin — which is the only kind this engine builds (see
     /// [`gg_math::render::perspective_reverse_z`] and `gg-render`'s `View`).
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, if the projection's far plane is **finite** — see the
+    /// module's *Five planes* note. Dropping a real far plane keeps every
+    /// instance behind it, which is a hole no test looks for and no picture
+    /// shows; §6 M18 named it as the third thing a game asked for that the
+    /// engine could not do, and a milestone rather than a field on `Eye` is
+    /// where an orthographic camera arrives (§6 M15.2). Until then the trap is
+    /// loud instead of latent.
     #[must_use]
     pub fn from_view_projection(view_projection: render::Mat4) -> Frustum {
         let m = render::rows(view_projection);
@@ -89,14 +104,26 @@ impl Frustum {
                 a[3] + sign * b[3],
             ]
         };
+        // The far plane, named only to prove it is the degenerate one the
+        // five-plane story requires. Vulkan clips to `0 <= z <= w`, so the far
+        // constraint `z >= 0` is row 2 on its own rather than a combination of
+        // two: `perspective_reverse_z` leaves it `[0, 0, 0, near]` — no normal at
+        // all — while `orthographic_reverse_z` puts `1 / (far - near)` there,
+        // which for any range a camera would use is orders of magnitude above
+        // this.
+        debug_assert!(
+            render::Vec3::new(m[2][0], m[2][1], m[2][2]).length_squared() <= 1e-12,
+            "the far plane is finite, so this is not a projection this culler can \
+             build from — five planes assume the infinite far §2 locks"
+        );
         Frustum {
             planes: [
                 plane(combine(m[3], m[0], true)),  // left
                 plane(combine(m[3], m[0], false)), // right
                 plane(combine(m[3], m[1], true)),  // bottom
                 plane(combine(m[3], m[1], false)), // top
-                // Near. Under reverse-Z this is the `z <= w` plane; the `z >= 0`
-                // one is the far plane, and it is at infinity.
+                // Near: Vulkan's `z <= w`. Its partner `z >= 0` is the far
+                // plane, which is row 2 alone and is at infinity.
                 plane(combine(m[3], m[2], false)),
             ],
             unbounded: false,
@@ -135,6 +162,24 @@ mod tests {
     /// 90° vertical fov, square, near 0.1 — a frustum whose planes sit at 45°.
     fn frustum() -> Frustum {
         Frustum::from_view_projection(render::perspective_reverse_z(FRAC_PI_3, 1.0, 0.1))
+    }
+
+    /// §6 M18's third gap, made loud. The shadow atlas's own projection is the
+    /// nearest finite-far matrix this tree holds, and building a culler from it
+    /// silently kept everything past `far` — a hole that shows in no picture,
+    /// because nothing has ever asked for a second projection.
+    ///
+    /// Compiled out where the assertion is, rather than left passing vacuously:
+    /// the dist profile has no debug assertions and the aarch64 leg runs it, so
+    /// a `should_panic` that survived there would be a test asserting nothing.
+    /// The check is deliberately debug-only — the contract can only be broken by
+    /// new code, and new code is run in a tier that has it.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "the far plane is finite")]
+    fn a_finite_far_plane_is_refused_rather_than_dropped() {
+        let _ =
+            Frustum::from_view_projection(render::orthographic_reverse_z(16.0, 16.0, 0.1, 200.0));
     }
 
     #[test]

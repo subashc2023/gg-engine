@@ -1,11 +1,15 @@
 //! **Demo 10 — Tetris** (§6 M18): the first artifact in this tree whose
 //! requirements were not ours to choose.
 //!
-//! Every rule here is a *field of a component*, not a constant: [`Rules`] holds
+//! The rules a player feels are *fields of a component*: [`Rules`] holds
 //! gravity, DAS, ARR, lock delay and soft-drop rate, so the M15 inspector can
-//! change how the game plays while it is being played, and a reload keeps the
-//! stack that was on the board. That is the loop this engine was built for
-//! (§1), pointed at something worth changing.
+//! change how the game plays while it is being played. The ones that are
+//! constants — [`LINE_SCORE`], [`MIN_GRAVITY_TICKS`] — change the other way, by
+//! rebuilding this file under the running game, which keeps the stack that was
+//! on the board (§6 M18). Two mechanisms, and they are not interchangeable: the
+//! inspector writes the world, and a reload replaces the code that reads it.
+//! That is the loop this engine was built for (§1), pointed at something worth
+//! changing.
 //!
 //! # The whole game is UI
 //!
@@ -147,25 +151,26 @@ pub const COLORS: [u32; 7] = [
 /// The four backdrops: hold, stats, next, controls. `[x, y, w, h]`.
 const PANELS: [[f32; 4]; 4] = [
     [70.0, 37.0, 120.0, 96.0],
-    [70.0, 145.0, 120.0, 118.0],
+    [70.0, 145.0, 120.0, 132.0],
     [450.0, 37.0, 120.0, 96.0],
     [450.0, 145.0, 120.0, 130.0],
 ];
 
-/// The labels that never change: `(x, y, text, colour)`. A table rather than
-/// seven spawn sites, so moving the stats column is one edit.
-const STATIC_TEXT: [(f32, f32, &str, u32); 7] = [
+/// The labels that never change: `(x, y, text, colour)`. A table rather than a
+/// spawn site each, so moving the stats column is one edit.
+const STATIC_TEXT: [(f32, f32, &str, u32); 8] = [
     (302.0, 20.0, "TETRIS", ACCENT),
     (80.0, 45.0, "HOLD", DIM),
     (460.0, 45.0, "NEXT", DIM),
     (80.0, 153.0, "SCORE", DIM),
     (80.0, 185.0, "LINES", DIM),
     (80.0, 217.0, "LEVEL", DIM),
+    (80.0, 249.0, "BEST", DIM),
     (460.0, 153.0, "CONTROLS", DIM),
 ];
 
-/// Where [`HudLine`] 0, 1 and 2 write their number.
-const VALUE_AT: [(f32, f32); 3] = [(80.0, 165.0), (80.0, 197.0), (80.0, 229.0)];
+/// Where each [`HudLine`] writes its number.
+const VALUE_AT: [(f32, f32); 4] = [(80.0, 165.0), (80.0, 197.0), (80.0, 229.0), (80.0, 261.0)];
 
 /// The legend, which is the only documentation a player reads. Keyed by
 /// *physical* position like `input.toml`, so this is honest on AZERTY too.
@@ -392,6 +397,22 @@ pub struct Play {
     pub pad: [u8; 7],
 }
 
+/// The best score this world has seen.
+///
+/// Its own component rather than a field of [`Play`], because a restart replaces
+/// `Play` wholesale — a record kept inside the thing that is cleared every game
+/// is a record that lasts one game. It is also the only state here a *player*
+/// would be angry to lose, which is what makes it the subject of §6 M18's save
+/// row: `World::load` may gain and may not lose (§4.5), and this is the field
+/// the rule is for.
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "tetris.best")]
+#[repr(C)]
+pub struct Best {
+    /// Points, over every game this world has played.
+    pub score: u32,
+}
+
 /// A drawn cell of the well, addressed by where it is rather than by what is in
 /// it. Two hundred of these are spawned once and then only ever recoloured — a
 /// Tetris that spawned and despawned entities per lock would be measuring the
@@ -427,7 +448,7 @@ pub struct Bay {
 #[component(id = "tetris.hudline")]
 #[repr(C)]
 pub struct HudLine {
-    /// 0 score, 1 lines, 2 level — an index into [`VALUE_AT`].
+    /// 0 score, 1 lines, 2 level, 3 best — an index into [`VALUE_AT`].
     pub which: u8,
 }
 
@@ -554,14 +575,24 @@ impl Text {
         text
     }
 
-    /// `tetris: level N` — the one log line a whole game produces in its middle,
-    /// built here so the log path allocates nothing either.
+    /// `tetris: level N` — the one log line a whole game produces in its middle.
     fn level(value: u32) -> Text {
+        Text::labelled(b"tetris: level ", value)
+    }
+
+    /// `tetris: best N`, printed when a game begins.
+    fn best(value: u32) -> Text {
+        Text::labelled(b"tetris: best ", value)
+    }
+
+    /// A prefix and a number, built here so the log path allocates nothing
+    /// either — a game's log lines are as much steady state as its HUD.
+    fn labelled(prefix: &[u8], value: u32) -> Text {
         let mut text = Text {
             buf: [0; TEXT],
             len: 0,
         };
-        for byte in b"tetris: level " {
+        for byte in prefix {
             text.push(*byte);
         }
         let digits = Text::number(value);
@@ -783,6 +814,7 @@ pub fn bootstrap(world: &mut GameWorld) {
     );
     world.put(board, piece);
     world.put(board, Rules::DEFAULT);
+    world.put(board, Best { score: 0 });
 
     declare(|part, widget| {
         let entity = world.spawn_with(widget);
@@ -960,8 +992,11 @@ pub fn step(world: &mut GameWorld) {
     // world. `cleared` doubles as the clear cue's pitch.
     let mut fired = [false; CUES];
     let mut cleared_rows = 0;
-    let _ = world.each::<(&mut Well, &mut Play, &mut Piece, &Rules)>(
-        |_, (well, play, piece, rules)| {
+    // An `Option` and not a zero: a new game always has a record to start
+    // against, and a world that has never scored starts against zero.
+    let mut began_with = None;
+    let _ = world.each::<(&mut Well, &mut Play, &mut Piece, &Rules, &Best)>(
+        |_, (well, play, piece, rules, best)| {
             if play.over != 0 {
                 if restart {
                     // A fresh clock-read seed would make the next game
@@ -973,6 +1008,7 @@ pub fn step(world: &mut GameWorld) {
                     *play = new_play(seed);
                     let first = draw(play);
                     *piece = spawn_piece(first);
+                    began_with = Some(best.score);
                 }
                 return;
             }
@@ -1142,6 +1178,15 @@ pub fn step(world: &mut GameWorld) {
         sound.play();
     });
 
+    // A pass of its own, and after the one above rather than inside it: the
+    // record has to see the score this tick produced, and every tick rather than
+    // at the top-out — a game abandoned mid-run is still a score that was
+    // reached, and a record only written when a game *ends* is one that a close
+    // and reopen loses.
+    let _ = world.each::<(&Play, &mut Best)>(|_, (play, best)| {
+        best.score = best.score.max(play.score);
+    });
+
     // The two events a log reader wants out of a whole game, and the two a
     // replayed session is checked by (§6 M18): a level is the only sign from
     // outside that the middle of a game happened at all.
@@ -1150,6 +1195,12 @@ pub fn step(world: &mut GameWorld) {
     }
     if topped_out {
         world.log(log_level::INFO, "tetris: topped out");
+    }
+    // What a new game starts against. The one line that names a number the world
+    // has been carrying rather than one this tick produced, which is why it is
+    // also what `xtask reload --best` reads a reopened save's high score out of.
+    if let Some(best) = began_with {
+        world.log(log_level::INFO, Text::best(best).as_str());
     }
 }
 
@@ -1225,11 +1276,12 @@ pub fn bay_color(bays: &[[u8; 16]; 2], bay: &Bay) -> u32 {
 
 /// What a [`HudLine`] shows.
 #[must_use]
-pub fn value_of(play: &Play, line: &HudLine) -> u32 {
+pub fn value_of(play: &Play, best: &Best, line: &HudLine) -> u32 {
     match line.which {
         0 => play.score,
         1 => play.lines,
-        _ => play.level,
+        2 => play.level,
+        _ => best.score,
     }
 }
 
@@ -1267,12 +1319,12 @@ pub fn color_of(value: u8) -> u32 {
 /// Rewrite the three numbers, and show or hide the banner.
 pub fn hud(world: &mut GameWorld) {
     let mut snapshot = None;
-    let _ = world.each::<&Play>(|_, play| snapshot = Some(*play));
-    let Some(play) = snapshot else {
+    let _ = world.each::<(&Play, &Best)>(|_, (play, best)| snapshot = Some((*play, *best)));
+    let Some((play, best)) = snapshot else {
         return;
     };
     let _ = world.each::<(&HudLine, &mut Widget)>(|_, (line, widget)| {
-        widget.set_text(Text::number(value_of(&play, line)).as_str());
+        widget.set_text(Text::number(value_of(&play, &best, line)).as_str());
     });
     let _ = world.each::<(&Banner, &mut Widget)>(|_, (banner, widget)| {
         widget.rect = match play.over != 0 {
@@ -1286,7 +1338,7 @@ pub fn hud(world: &mut GameWorld) {
 // id space a replay records (§4.7). Neither is alphabetical, neither may drift.
 #[cfg(feature = "game")]
 gg_ecs::gg_game! {
-    components: [Well, Piece, Rules, Play, Cell, Bay, HudLine, Banner, Widget, Cue, Sound],
+    components: [Well, Piece, Rules, Play, Best, Cell, Bay, HudLine, Banner, Widget, Cue, Sound],
     actions: [
         "left",
         "right",

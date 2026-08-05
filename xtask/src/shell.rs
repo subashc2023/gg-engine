@@ -252,6 +252,12 @@ const TETRIS_ACTIONS: &[&str] = &[
 /// The recorded full game as a replay file — `demo_10_tetris::session`'s frames,
 /// so this file, the demo's own tests and the baseline are one script.
 pub fn tetris_replay() -> Replay {
+    tetris_stream(&demo_10_tetris::session::frames())
+}
+
+/// Any of demo 10's scripts as a stream the shell can replay. The verb list is
+/// the game's declared order (§4.7) and is what the frames' bits index.
+fn tetris_stream(frames: &[InputFrame]) -> Replay {
     let mut meta = ReplayMeta::new(
         gg_math::DETERMINISM_CONTRACT,
         "curated",
@@ -261,8 +267,8 @@ pub fn tetris_replay() -> Replay {
     );
     meta.engine_commit = "generated".to_owned();
     let mut recorder = Recorder::new(meta);
-    for (tick, frame) in demo_10_tetris::session::frames().into_iter().enumerate() {
-        recorder.record(tick as u64, frame);
+    for (tick, frame) in frames.iter().enumerate() {
+        recorder.record(tick as u64, *frame);
     }
     recorder.finish()
 }
@@ -642,10 +648,45 @@ fn divergence(a: &(&str, Vec<(u64, String)>), b: &(&str, Vec<(u64, String)>)) ->
 
 // ---- game variants ------------------------------------------------------
 
-/// Demo 03's source, which every variant below is an edit of.
-fn game_source() -> anyhow::Result<String> {
+/// The crate a generated variant is a copy of.
+///
+/// Two, because the gates below ask different questions of different games:
+/// demo 03 is the migration and latency subject, and demo 10 is the one with a
+/// game in progress to change the rules of.
+struct Kind {
+    /// The demo directory, under the workspace root.
+    dir: &'static str,
+    /// The artifact's name. The host loads a *path*, so this is the game's
+    /// identity as far as the shell is concerned — and why every variant of one
+    /// crate builds a library called the same thing.
+    lib: &'static str,
+    /// Sources beside `lib.rs` that its own `mod` lines name, copied unedited: a
+    /// variant differs from its original by the edit under test and nothing else.
+    beside: &'static [&'static str],
+    /// Features the crate's manifest turns on by default, which the generated
+    /// manifest has to declare too — demo 10's `gg_game!` is behind one, and a
+    /// variant missing it builds a dylib with no entry points at all.
+    features: &'static [&'static str],
+}
+
+const DEMO_03: &Kind = &Kind {
+    dir: "demos/03-reload",
+    lib: "demo_03_reload",
+    beside: &[],
+    features: &[],
+};
+
+const DEMO_10: &Kind = &Kind {
+    dir: "demos/10-tetris",
+    lib: "demo_10_tetris",
+    beside: &["session.rs"],
+    features: &["game"],
+};
+
+/// A demo's `lib.rs`, which every variant below is an edit of.
+fn game_source(kind: &Kind) -> anyhow::Result<String> {
     Ok(std::fs::read_to_string(
-        workspace_root().join("demos/03-reload/src/lib.rs"),
+        workspace_root().join(kind.dir).join("src/lib.rs"),
     )?)
 }
 
@@ -684,11 +725,11 @@ fn with_an_extra_field(source: &str) -> anyhow::Result<String> {
     Ok(out)
 }
 
-fn dylib_name() -> &'static str {
+fn dylib_name(kind: &Kind) -> String {
     if cfg!(windows) {
-        "demo_03_reload.dll"
+        format!("{}.dll", kind.lib)
     } else {
-        "libdemo_03_reload.so"
+        format!("lib{}.so", kind.lib)
     }
 }
 
@@ -706,11 +747,11 @@ fn dylib_name() -> &'static str {
 /// variant. The artifact is copied aside afterwards because they all build a
 /// library called `demo_03_reload` — which is the point: the host's path never
 /// changes, only the bytes behind it.
-fn variant(name: &str, source: &str) -> anyhow::Result<PathBuf> {
-    let dir = write_variant(name, source)?;
-    build_variant(name)?;
-    let kept = dir.join(dylib_name());
-    std::fs::copy(shared_target().join("debug").join(dylib_name()), &kept)?;
+fn variant(kind: &Kind, name: &str, source: &str) -> anyhow::Result<PathBuf> {
+    let dir = write_variant(kind, name, source)?;
+    build_variant(kind, name)?;
+    let kept = dir.join(dylib_name(kind));
+    std::fs::copy(shared_target().join("debug").join(dylib_name(kind)), &kept)?;
     Ok(kept)
 }
 
@@ -721,16 +762,41 @@ fn shared_target() -> PathBuf {
 }
 
 /// Lay a variant's source and manifest down without building it.
-fn write_variant(name: &str, source: &str) -> anyhow::Result<PathBuf> {
+fn write_variant(kind: &Kind, name: &str, source: &str) -> anyhow::Result<PathBuf> {
     let root = workspace_root();
     let dir = root.join("target/variants").join(name);
     std::fs::create_dir_all(dir.join("src"))?;
     std::fs::write(dir.join("src/lib.rs"), source)?;
+    for file in kind.beside {
+        std::fs::copy(
+            root.join(kind.dir).join("src").join(file),
+            dir.join("src").join(file),
+        )?;
+    }
     let crates = root.join("crates").display().to_string().replace('\\', "/");
+    let (lib, demo) = (kind.lib, kind.dir);
+    // Every feature the original turns on by default, and no way to turn one
+    // off: a variant is the crate, edited, not a smaller configuration of it.
+    let features = match kind.features {
+        [] => String::new(),
+        names => format!(
+            "[features]\ndefault = [{}]\n{}\n",
+            names
+                .iter()
+                .map(|f| format!("\"{f}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+            names
+                .iter()
+                .map(|f| format!("{f} = []"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    };
     std::fs::write(
         dir.join("Cargo.toml"),
         format!(
-            "# Generated by `xtask reload` — a variant of demo 03 (§6 M5 gates).\n\
+            "# Generated by `xtask reload` — a variant of {demo} (§6 M5 gates).\n\
              # Not checked in, not a workspace member, and rewritten on every run.\n\
              [workspace]\n\n\
              [package]\n\
@@ -738,9 +804,10 @@ fn write_variant(name: &str, source: &str) -> anyhow::Result<PathBuf> {
              version = \"0.0.0\"\n\
              edition = \"2024\"\n\n\
              [lib]\n\
-             name = \"demo_03_reload\"\n\
+             name = \"{lib}\"\n\
              crate-type = [\"cdylib\"]\n\
              path = \"src/lib.rs\"\n\n\
+             {features}\n\
              [dependencies]\n\
              bytemuck = {{ version = \"1\", features = [\"derive\"] }}\n\
              gg-ecs = {{ path = \"{crates}/gg-ecs\" }}\n\
@@ -758,7 +825,7 @@ fn write_variant(name: &str, source: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// Build a variant already written, and return the artifact cargo produced.
-fn build_variant(name: &str) -> anyhow::Result<PathBuf> {
+fn build_variant(kind: &Kind, name: &str) -> anyhow::Result<PathBuf> {
     let manifest = workspace_root()
         .join("target/variants")
         .join(name)
@@ -771,7 +838,7 @@ fn build_variant(name: &str) -> anyhow::Result<PathBuf> {
         ]),
         &format!("build game variant `{name}`"),
     )?;
-    Ok(shared_target().join("debug").join(dylib_name()))
+    Ok(shared_target().join("debug").join(dylib_name(kind)))
 }
 
 // ---- the gates ----------------------------------------------------------
@@ -809,6 +876,12 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     }
     if only("--tetris") {
         tetris()?;
+    }
+    if only("--rules") {
+        rules()?;
+    }
+    if only("--best") {
+        best()?;
     }
     println!("xtask reload: green");
     Ok(())
@@ -915,7 +988,7 @@ fn latency() -> anyhow::Result<()> {
 /// M5's 2 s beside a number that is not measured against it reads as a gate that
 /// forgives its own failure.
 fn measure_loop(name: &str, systems: usize, budget: u128) -> anyhow::Result<u128> {
-    let source = fat_source(&game_source()?, systems)?;
+    let source = fat_source(&game_source(DEMO_03)?, systems)?;
     let lines = source.lines().count();
     let dir = workspace_root().join("target/latency").join(name);
     std::fs::create_dir_all(&dir)?;
@@ -925,9 +998,9 @@ fn measure_loop(name: &str, systems: usize, budget: u128) -> anyhow::Result<u128
     // measurement: a game crate compiled for the first time is not what a save
     // costs, and timing it would flatter or damn the loop by whichever the
     // machine's cache happened to hold.
-    write_variant(&variant_name, &source)?;
+    write_variant(DEMO_03, &variant_name, &source)?;
     let before = dir.join("before.bin");
-    std::fs::copy(build_variant(&variant_name)?, &before)?;
+    std::fs::copy(build_variant(DEMO_03, &variant_name)?, &before)?;
 
     // The edit: one line inside one system body, which is what M5's exit
     // criterion actually says and the cheapest thing a person types.
@@ -936,7 +1009,7 @@ fn measure_loop(name: &str, systems: usize, budget: u128) -> anyhow::Result<u128
         "pub const MOVE_PER_TICK: f64 = 0.09;",
     );
     anyhow::ensure!(edited != source, "the one-line edit changed nothing");
-    write_variant(&variant_name, &edited)?;
+    write_variant(DEMO_03, &variant_name, &edited)?;
 
     // The rebuild a save triggers, timed on its own. Deliberately *not* measured
     // with the host running underneath: coupling the two would make the run's
@@ -944,7 +1017,7 @@ fn measure_loop(name: &str, systems: usize, budget: u128) -> anyhow::Result<u128
     // goes red because a build was slow in the wrong way is a gate nobody trusts
     // (§5's flake budget).
     let started = std::time::Instant::now();
-    let after = build_variant(&variant_name)?;
+    let after = build_variant(DEMO_03, &variant_name)?;
     let rebuild_ms = started.elapsed().as_millis();
 
     // The swap, measured the way the host measures it: from the file event to
@@ -953,7 +1026,7 @@ fn measure_loop(name: &str, systems: usize, budget: u128) -> anyhow::Result<u128
         cargo().args(["build", "-p", "gg-runtime"]),
         "build the shell [dev]",
     )?;
-    let game = dir.join(dylib_name());
+    let game = dir.join(dylib_name(DEMO_03));
     std::fs::copy(&before, &game)?;
     let log = reload_midway(&game, &after, &["--frames", "60000"])?;
     let reloaded = log
@@ -1037,16 +1110,16 @@ fn chaos_reload() -> anyhow::Result<()> {
     // the watcher's debounce alone is 120 ms.
     const TICKS: u64 = 60_000;
 
-    let source = game_source()?;
-    let before = variant("baseline", &source)?;
-    let after = variant("migrated", &with_an_extra_field(&source)?)?;
+    let source = game_source(DEMO_03)?;
+    let before = variant(DEMO_03, "baseline", &source)?;
+    let after = variant(DEMO_03, "migrated", &with_an_extra_field(&source)?)?;
 
     let dir = workspace_root().join("target/chaos-reload");
     std::fs::create_dir_all(&dir)?;
     let stream = dir.join("chaos.ggrp");
     std::fs::write(&stream, chaos_stream(SEED, TICKS).encode())?;
     let stream = stream.display().to_string();
-    let game = dir.join(dylib_name());
+    let game = dir.join(dylib_name(DEMO_03));
 
     exec(
         cargo().args(["build", "-p", "gg-runtime"]),
@@ -1136,6 +1209,17 @@ fn chaos_reload() -> anyhow::Result<()> {
 /// rejuvenation gate chooses it: a busier machine makes the window wider, never
 /// narrower, which is the direction a timing assumption should fail in.
 fn reload_midway(game: &Path, replacement: &Path, args: &[&str]) -> anyhow::Result<String> {
+    reload_after(game, replacement, args, 400)
+}
+
+/// [`reload_midway`] with the moment named, for a gate that has a reason to want
+/// the swap somewhere other than where 400 ms lands it.
+fn reload_after(
+    game: &Path,
+    replacement: &Path,
+    args: &[&str],
+    delay_ms: u64,
+) -> anyhow::Result<String> {
     use std::process::Stdio;
 
     exec(
@@ -1151,7 +1235,7 @@ fn reload_midway(game: &Path, replacement: &Path, args: &[&str]) -> anyhow::Resu
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let child = cmd.spawn()?;
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
     std::fs::copy(replacement, game)?;
     let out = child.wait_with_output()?;
     let log = format!("{}{}", plain(&out.stdout), plain(&out.stderr));
@@ -1187,16 +1271,16 @@ fn reload_midway(game: &Path, replacement: &Path, args: &[&str]) -> anyhow::Resu
 /// The second is what proves the first is load-bearing. A segment that named the
 /// wrong build would be invisible to the first check alone.
 fn segments() -> anyhow::Result<()> {
-    let source = game_source()?;
-    let before = variant("baseline", &source)?;
-    let after = variant("migrated", &with_an_extra_field(&source)?)?;
+    let source = game_source(DEMO_03)?;
+    let before = variant(DEMO_03, "baseline", &source)?;
+    let after = variant(DEMO_03, "migrated", &with_an_extra_field(&source)?)?;
 
     // Its own directory: the watcher watches a *directory*, so rewriting an
     // artifact under `target/debug` would be a reload event for anything else
     // pointed there.
     let dir = workspace_root().join("target/segments");
     std::fs::create_dir_all(&dir)?;
-    let game = dir.join(dylib_name());
+    let game = dir.join(dylib_name(DEMO_03));
     std::fs::copy(&before, &game)?;
     let recorded = dir.join("across-a-reload.ggrp");
 
@@ -1497,6 +1581,435 @@ fn tetris() -> anyhow::Result<()> {
          identically under dev, instrumented and dist-verify, standing still on the same ticks \
          as the baseline the aarch64 leg compares against (§6 M18)",
         runs[0].1.len(),
+    );
+    Ok(())
+}
+
+/// Ticks of the endless stream the rule change is measured over. The swap is set
+/// by wall time (400 ms), which on this desk lands a few hundred ticks in, so the
+/// margin is bought in ticks: a machine several times faster still swaps inside
+/// the first half, which the gate asserts rather than assumes.
+const RULES_TICKS: usize = 8_000;
+
+/// Sleeps to try the swap at, in milliseconds. More than one because the moment
+/// is the machine's choice and one of the moments is uninformative — see the
+/// loop in [`rules`].
+const RULES_NUDGES: [u64; 3] = [400, 560, 720];
+
+/// The schema edit: `Best` gains a field.
+///
+/// Two edits, because a field is not just a declaration — the literal that
+/// builds one has to name it too, which is exactly what a person types.
+fn with_a_wider_record(source: &str) -> anyhow::Result<String> {
+    let edits = [
+        (
+            "    /// Points, over every game this world has played.\n    pub score: u32,\n}",
+            "    /// Points, over every game this world has played.\n    pub score: u32,\n    \
+             /// Added by the save gate: a field the saved world never had, so\n    /// loading it \
+             is a migration rather than a copy (§4.5).\n    pub lines: u32,\n}",
+        ),
+        (
+            "    world.put(board, Best { score: 0 });",
+            "    world.put(board, Best { score: 0, lines: 0 });",
+        ),
+    ];
+    let mut out = source.to_owned();
+    for (anchor, replacement) in edits {
+        anyhow::ensure!(
+            out.contains(anchor),
+            "demo 10's `Best` no longer contains `{}` — the save gate's migration is a text edit, \
+             so a rename here is a gate to re-point rather than one that quietly stops migrating \
+             anything",
+            anchor.trim()
+        );
+        out = out.replace(anchor, replacement);
+    }
+    Ok(out)
+}
+
+/// The losing edit: the record under a different name, which is what a build
+/// that stopped declaring a component looks like to a save.
+fn with_the_record_renamed(source: &str) -> anyhow::Result<String> {
+    let anchor = "#[component(id = \"tetris.best\")]";
+    anyhow::ensure!(
+        source.contains(anchor),
+        "demo 10's record no longer carries `{anchor}` — this is the gate's *losing* build and a \
+         missed anchor would make it an ordinary one"
+    );
+    Ok(source.replace(anchor, "#[component(id = \"tetris.record\")]"))
+}
+
+/// The rule edit: what clearing a row is worth.
+///
+/// Chosen for what it does **not** do. Gravity, lock delay and DAS all change
+/// the very next tick, and a sequence that moves the instant the swap lands
+/// cannot tell a world that survived the swap from one that was rebuilt around
+/// it — the hashes differ either way. Scoring is inert until the next row goes,
+/// so the swapped run *keeps matching* the unswapped one across the boundary,
+/// and every tick it matches is a tick the whole board — stack, bag, falling
+/// piece, counters — crossed a different build untouched.
+///
+/// It is also the edit that shows why `Rules::DEFAULT` is not the knob here.
+/// That constant is read once, at `bootstrap`; the component it produced is
+/// already in the world, and a build that changes it changes nothing about a
+/// game in progress. What a reload can change is *code that runs every tick* —
+/// and demo 10 has three kinds of constant, which the gate was proven against by
+/// pointing this function at each in turn: `EMPTY` (a colour `present` writes
+/// every tick) parts the runs at the swap tick and trips the *earlier* branch
+/// below, which is the branch a stack that did not survive would trip;
+/// `MIN_GRAVITY_TICKS` does not bite until level 40 and trips the *later* one;
+/// and `CELL` never bites at all, because a cell's rect is written at bootstrap
+/// and only its colour is rewritten after.
+fn with_a_different_score(source: &str) -> anyhow::Result<String> {
+    let anchor = "pub const LINE_SCORE: [u32; 4] = [100, 300, 500, 800];";
+    anyhow::ensure!(
+        source.contains(anchor),
+        "demo 10's scoring table is not where this gate expected it — the rule edit is a text \
+         edit, so a rename here is a gate to re-point rather than one that quietly stops changing \
+         any rule at all"
+    );
+    Ok(source.replace(
+        anchor,
+        "pub const LINE_SCORE: [u32; 4] = [1000, 3000, 5000, 8000];",
+    ))
+}
+
+/// §6 M18's other exit row: **a rule changed mid-game reloads with the stack
+/// intact, inside §9's two seconds.**
+///
+/// The subject is a game actually being played — demo 10's bot, never giving up,
+/// eight thousand ticks of it — and the edit is one line of the scoring table.
+/// Three claims, and the middle one is the milestone's:
+///
+/// - **the rule changed.** The two runs part, and not at some tick a timing
+///   wobble could have chosen: at exactly the first row cleared after the swap,
+///   which the in-process script names independently.
+/// - **with the stack intact.** They are identical *through* the swap and for
+///   every tick between it and that clear. A board that had been rebuilt, reset
+///   or half-migrated would diverge at the swap tick, and the same assertion
+///   catches a shell that quietly restarted the session. The board it crossed
+///   with is a number here, not an assumption: an empty well would make the
+///   claim true and vacuous.
+/// - **and it was a swap, not a migration.** Nothing in demo 10's schema moved,
+///   so the reload reports no component migrated. §5.11's chaos gate covers the
+///   other case; this one is the common edit, where the cost is a pointer.
+///
+/// The budget is M5's `BUDGET_MS`, measured the way `measure_loop` measures it —
+/// the rebuild a save triggers, plus the host's own save-to-swap.
+fn rules() -> anyhow::Result<()> {
+    let source = game_source(DEMO_10)?;
+    let edited = with_a_different_score(&source)?;
+
+    // The stream, and the board at every tick of it, from the same table the
+    // shell is about to run.
+    let frames = demo_10_tetris::session::endless(RULES_TICKS);
+    let progress =
+        demo_10_tetris::session::progress(&frames).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Its own directory: the watcher watches a *directory*, so a game rewritten
+    // under `target/debug` would be a reload event for everything pointed there.
+    let dir = workspace_root().join("target/rules");
+    std::fs::create_dir_all(&dir)?;
+    let stream = dir.join("endless.ggrp");
+    std::fs::write(&stream, tetris_stream(&frames).encode())?;
+    let stream = stream.display().to_string();
+
+    // One variant name written twice, not two: a second package would rebuild
+    // demo 10 from cold, and a cold build is not what a save costs.
+    write_variant(DEMO_10, "rules", &source)?;
+    let before = dir.join("before.bin");
+    std::fs::copy(build_variant(DEMO_10, "rules")?, &before)?;
+
+    write_variant(DEMO_10, "rules", &edited)?;
+    let started = std::time::Instant::now();
+    let built = build_variant(DEMO_10, "rules")?;
+    let rebuild_ms = started.elapsed().as_millis();
+    let after = dir.join("after.bin");
+    std::fs::copy(&built, &after)?;
+
+    exec(
+        cargo().args(["build", "-p", "gg-runtime"]),
+        "build the shell [dev]",
+    )?;
+    let host = exe("debug", "gg-runtime");
+    let game = dir.join(dylib_name(DEMO_10));
+
+    std::fs::copy(&before, &game)?;
+    let untouched = sequence(&play(&host, &game, &["--replay", &stream], true)?)?;
+
+    // The swap is placed by wall time, so *which tick* it lands on is the
+    // machine's to choose. Landing on a clearing tick makes the run
+    // uninformative rather than red: the new rule bites on the same tick the new
+    // build arrives, so every difference — including a world that did not
+    // survive — shows in the same place and the two cannot be told apart. The
+    // gate takes another swing at a different moment instead of asserting
+    // something it did not observe.
+    let mut taken = None;
+    for delay_ms in RULES_NUDGES {
+        std::fs::copy(&before, &game)?;
+        let log = reload_after(&game, &after, &["--replay", &stream], delay_ms)?;
+        let swapped = sequence(&log)?;
+        let reloaded = log
+            .lines()
+            .find(|l| l.contains("game reloaded"))
+            .unwrap_or_default();
+        let swap = usize::try_from(crate::util::field_u64(reloaded, "tick")?).unwrap_or(usize::MAX);
+        let swap_ms = u128::from(crate::util::field_u64(reloaded, "save_to_swap_ms")?);
+
+        anyhow::ensure!(
+            log.matches("migrated").count() == 0,
+            "the reload migrated a component — a scoring table is code, and nothing in demo 10's \
+             schema moved:\n{log}"
+        );
+        anyhow::ensure!(
+            untouched.len() == swapped.len() && untouched.len() == RULES_TICKS,
+            "the two runs are {} and {} ticks of a {RULES_TICKS}-tick stream",
+            untouched.len(),
+            swapped.len()
+        );
+        anyhow::ensure!(
+            swap < RULES_TICKS / 2,
+            "the swap landed at tick {swap} of {RULES_TICKS} — past halfway is a machine this \
+             stream is too short for, and the next failure it caused would be a confusing one"
+        );
+
+        // Where the rule first *can* show: the next row to go, counted from the
+        // swap tick itself, because that is the first tick the new build runs.
+        let clear = (swap..progress.len())
+            .find(|&i| i > 0 && progress[i].lines > progress[i - 1].lines)
+            .ok_or_else(|| anyhow::anyhow!("no row was cleared after the swap at tick {swap}"))?;
+        if clear == swap {
+            println!(
+                "xtask: the swap landed on tick {swap}, which is itself a clearing tick — \
+                 swinging again"
+            );
+            continue;
+        }
+        taken = Some((swap, swap_ms, clear, swapped));
+        break;
+    }
+    let (swap, swap_ms, clear, swapped) = taken.ok_or_else(|| {
+        anyhow::anyhow!(
+            "every one of {} attempts put the swap on a clearing tick, which is a coincidence \
+             worth looking at rather than retrying further",
+            RULES_NUDGES.len()
+        )
+    })?;
+
+    // Mid-game, and on a board worth preserving.
+    let at_swap = progress
+        .get(swap)
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("the swap landed at tick {swap}, past the stream"))?;
+    anyhow::ensure!(
+        !at_swap.over && at_swap.occupied > 0,
+        "the swap landed on a board with {} cells and over={} — a reload onto an empty or dead \
+         well proves nothing about a stack surviving one",
+        at_swap.occupied,
+        at_swap.over
+    );
+
+    let parted = untouched
+        .iter()
+        .zip(&swapped)
+        .find(|(a, b)| a.1 != b.1)
+        .map(|(a, _)| usize::try_from(a.0).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the two runs never parted — a scoring table the reload did not pick up makes \
+                 this gate a comparison of a sequence with itself"
+            )
+        })?;
+    anyhow::ensure!(
+        parted == clear,
+        "the runs parted at tick {parted}; the first row cleared after the swap at {swap} goes at \
+         {clear}. Earlier means the swap itself moved the world — the stack did not cross intact. \
+         Later means the new scoring table never ran."
+    );
+
+    let total = rebuild_ms + swap_ms;
+    anyhow::ensure!(
+        total <= BUDGET_MS,
+        "the rule reached the running game in {total} ms (rebuild {rebuild_ms} + swap {swap_ms}) \
+         against §9's {BUDGET_MS} ms"
+    );
+    println!(
+        "xtask reload: demo 10's scoring rule was rewritten under a game in progress — a new build \
+         swapped in at tick {swap} onto a well of {} cells at {} lines, hashing identically to the \
+         unswapped run through that tick and the {} after it, and differently from the next clear \
+         at {clear} on: {total} ms save to new rule (rebuild {rebuild_ms} + swap {swap_ms}, budget \
+         {BUDGET_MS}) (§6 M18)",
+        at_swap.occupied,
+        at_swap.lines,
+        clear - swap - 1,
+    );
+    Ok(())
+}
+
+/// Ticks appended to the recorded session for the save gate: idle, one press of
+/// `RESTART`, then room for the new game to start. The press is what makes the
+/// reopened build print the record it inherited.
+const BEST_TAIL: usize = 12;
+
+/// §6 M18's last save row: **the high score survives a close and reopen across a
+/// component schema change.**
+///
+/// A whole recorded game is played and closed with `--save` — the world at the
+/// top-out, record and all. Then the file is *reopened by builds that are not
+/// the one that wrote it*, and the number is read back out of the log line a new
+/// game prints. Three of them, and the third is what makes the first two mean
+/// something:
+///
+/// - **the same build** reopens it and starts a new game against the old record.
+///   The control: a failure here is the save path, not the policy.
+/// - **a build whose `Best` gained a field** reopens it too, reports the
+///   migration by the component's name, and the record is the same number. This
+///   is the row: §4.5 says a save may *gain*, and a defaulted field is the
+///   gaining half.
+/// - **a build that renamed the component** is refused, by that name, before
+///   anything is touched. A save policy that could only accept is not a policy —
+///   and a rename is what a build that stopped declaring a component looks like
+///   from the file's side.
+///
+/// The expected number is not written here: it is the highest score the
+/// in-process script reaches, so an edit to the session moves the gate with it.
+fn best() -> anyhow::Result<()> {
+    let source = game_source(DEMO_10)?;
+    let frames = demo_10_tetris::session::frames();
+    let played = frames.len();
+    let progress =
+        demo_10_tetris::session::progress(&frames).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let record = progress.iter().map(|p| p.score).max().unwrap_or(0);
+    anyhow::ensure!(
+        record > 0,
+        "the recorded session scored nothing, so there is no record to lose"
+    );
+    anyhow::ensure!(
+        progress.last().is_some_and(|p| p.over),
+        "the session is saved at its last tick and that tick has to be a dead board — a live one \
+         would ignore the `RESTART` this gate reopens with"
+    );
+
+    // One stream, split by `--frames` the way demo 08's gate splits its own: the
+    // save lands mid-file, and what runs after it runs at the ticks the file
+    // says, because `--load` sets the tick the replay is seeked to.
+    let mut stream = frames;
+    stream.push(InputFrame {
+        buttons: 0,
+        axes: [0; gg_input::MAX_AXES],
+    });
+    stream.push(InputFrame {
+        buttons: 1 << demo_10_tetris::RESTART.index(),
+        axes: [0; gg_input::MAX_AXES],
+    });
+    for _ in 2..BEST_TAIL {
+        stream.push(InputFrame {
+            buttons: 0,
+            axes: [0; gg_input::MAX_AXES],
+        });
+    }
+
+    let dir = workspace_root().join("target/best");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("session.ggrp");
+    std::fs::write(&path, tetris_stream(&stream).encode())?;
+    let replay = path.display().to_string();
+
+    // One variant name rewritten three times, so two of the three builds are
+    // incremental rather than a demo 10 from cold each.
+    let lay = |source: &str, name: &str| -> anyhow::Result<PathBuf> {
+        write_variant(DEMO_10, "best", source)?;
+        let kept = dir.join(name);
+        std::fs::copy(build_variant(DEMO_10, "best")?, &kept)?;
+        Ok(kept)
+    };
+    let same = lay(&source, "same.bin")?;
+    let wider = lay(&with_a_wider_record(&source)?, "wider.bin")?;
+    let renamed = lay(&with_the_record_renamed(&source)?, "renamed.bin")?;
+
+    exec(
+        cargo().args(["build", "-p", "gg-runtime"]),
+        "build the shell [dev]",
+    )?;
+    let host = exe("debug", "gg-runtime");
+    let save = dir.join("best.ggsv");
+    let save_arg = save.display().to_string();
+
+    let closed = play(
+        &host,
+        &same,
+        &[
+            "--replay",
+            &replay,
+            "--frames",
+            &played.to_string(),
+            "--save",
+            &save_arg,
+        ],
+        false,
+    )?;
+    anyhow::ensure!(
+        closed.contains("save written") && save.is_file(),
+        "the played session wrote no save:\n{closed}"
+    );
+    anyhow::ensure!(
+        !closed.contains("tetris: best"),
+        "the closing run already printed a record — this gate reads that line out of the *reopened* \
+         build, and a stream that restarted before the save would be reading its own:\n{closed}"
+    );
+
+    let tail = (stream.len() - played).to_string();
+    for (what, game, migrates) in [
+        ("the same build", &same, false),
+        ("a wider record", &wider, true),
+    ] {
+        let log = play(
+            &host,
+            game,
+            &["--load", &save_arg, "--replay", &replay, "--frames", &tail],
+            false,
+        )?;
+        anyhow::ensure!(
+            log.contains("save loaded"),
+            "[{what}] the shell did not load {save_arg}:\n{log}"
+        );
+        let named = log.contains("migrated") && log.contains("tetris.best");
+        anyhow::ensure!(
+            named == migrates,
+            "[{what}] the load {} a migration of `tetris.best`, and this build {} one:\n{log}",
+            if named { "reported" } else { "reported no" },
+            if migrates { "makes" } else { "makes no" },
+        );
+        let wanted = format!("tetris: best {record}");
+        anyhow::ensure!(
+            log.contains(&wanted),
+            "[{what}] the reopened game did not start against `{wanted}` — the record did not \
+             survive the file:\n{log}"
+        );
+    }
+
+    let out = Command::new(&host)
+        .arg("--game")
+        .arg(&renamed)
+        .args(["--load", &save_arg, "--replay", &replay, "--frames", &tail])
+        .env("GG_HEADLESS", "1")
+        .env("RUST_LOG", "info")
+        .output()?;
+    let log = format!("{}{}", plain(&out.stdout), plain(&out.stderr));
+    anyhow::ensure!(
+        !out.status.success(),
+        "a build that stopped declaring `tetris.best` loaded the save anyway — §4.5's `a save may \
+         gain, never lose` is not being enforced by the shell:\n{log}"
+    );
+    anyhow::ensure!(
+        log.contains("tetris.best"),
+        "the refusal did not name the component that would have been lost:\n{log}"
+    );
+
+    println!(
+        "xtask reload: demo 10's record of {record} crossed a close and reopen — read back by the \
+         same build, by one whose `Best` gained a field (migrated by name), and refused by one \
+         that stopped declaring it (§6 M18)"
     );
     Ok(())
 }

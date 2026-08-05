@@ -44,16 +44,18 @@
 //! `xtask ci --push` byte-compares the checked-in file against [`frames`], so a
 //! script edited without a `--bless` fails the push tier by name.
 
-use gg_ecs::boundary::{
-    self, AbiInfo, ActionId, ComponentsTable, HostApiV1, InputFrame, MAX_AXES, SystemsTable,
-    TickCtx,
-};
+use gg_ecs::boundary::{self, ActionId, InputFrame, MAX_AXES};
 use gg_ecs::hash::CanonicalHash;
-use gg_ecs::{RegistryError, World};
+use gg_ecs::{AliasError, RegistryError};
+// Only what drives a world needs the entry points, and so the feature.
+#[cfg(feature = "game")]
+use gg_ecs::boundary::{AbiInfo, ComponentsTable, HostApiV1, SystemsTable, TickCtx};
+#[cfg(feature = "game")]
+use gg_ecs::{Query, World};
 
 use crate::{
-    HARD_DROP, HEIGHT, HOLD, LEFT, Piece, RIGHT, ROTATE_CW, SEED, WIDTH, Well, clear_rows,
-    collides, draw, landing_row, lock_piece, new_play, rotate, spawn_piece,
+    HARD_DROP, HEIGHT, HOLD, LEFT, Piece, Play, RESTART, RIGHT, ROTATE_CW, SEED, WIDTH, Well,
+    clear_rows, collides, draw, landing_row, lock_piece, new_play, rotate, spawn_piece,
 };
 
 /// What the shell's log must say, in order, when this session is replayed.
@@ -125,40 +127,12 @@ pub fn frames() -> Vec<InputFrame> {
             piece = spawn_piece(taken);
         }
 
-        let (rot, col) = if lines < BUILD_LINES {
-            place(&well, &piece)
-        } else {
-            // Where it spawned, unrotated: no taps at all, so the die phase is
-            // two ticks a piece and cannot outrun the lock delay on a tall stack.
-            (0, piece.col)
-        };
-        for _ in 0..rot {
-            tap(&mut out, ROTATE_CW);
-            // The real kick, so a rotation that shifts the piece shifts the
-            // column the loop below is counting from.
-            let _ = rotate(&well, &mut piece, true);
-        }
-        // One cell per tap: a tap is `just_pressed`, which moves once and does
-        // not charge DAS. The sim clamps a move into a wall and so does this.
-        while piece.col != col {
-            let step = if col < piece.col { -1 } else { 1 };
-            tap(&mut out, if step < 0 { LEFT } else { RIGHT });
-            piece.col += step;
-            if collides(&well, &piece) {
-                piece.col -= step;
-                break;
-            }
-        }
-
-        tap(&mut out, HARD_DROP);
-        piece.row = landing_row(&well, &piece);
-        lock_piece(&mut well, &piece);
-        lines += clear_rows(&mut well);
-        let kind = play.next;
-        play.next = draw(&mut play);
-        piece = spawn_piece(kind);
-        if collides(&well, &piece) {
-            break;
+        // Past `BUILD_LINES` the bot stops choosing: every piece is dropped
+        // where it spawned, which stacks four columns and tops out quickly.
+        let choosing = lines < BUILD_LINES;
+        match carry(&mut out, &mut well, &mut play, &mut piece, choosing) {
+            Some(cleared) => lines += cleared,
+            None => break,
         }
     }
 
@@ -166,6 +140,88 @@ pub fn frames() -> Vec<InputFrame> {
         out.push(idle());
     }
     out
+}
+
+/// The same bot, never giving up, for as long as the caller asks.
+///
+/// [`frames`] stops choosing so it can top out; a reload gate needs the
+/// opposite — a game still in progress with a stack on the board when a rebuilt
+/// dylib lands under it (§6 M18). Playing well is what keeps both true, and the
+/// generated stream is trimmed to exactly `ticks` so a caller's swap tick is a
+/// position in a known-length run rather than a guess.
+///
+/// A well-played game still ends eventually, so this mirrors the *restart* too —
+/// the one path [`frames`] never takes. The reseed is `Play::rng`'s own next
+/// draw, exactly as `step` does it, or the second game would diverge from the
+/// first tick of it.
+#[must_use]
+pub fn endless(ticks: usize) -> Vec<InputFrame> {
+    let mut out = Vec::with_capacity(ticks + 32);
+    let mut well = Well {
+        cells: [[0; WIDTH]; HEIGHT],
+    };
+    let mut play = new_play(SEED);
+    let mut piece = spawn_piece(draw(&mut play));
+
+    while out.len() < ticks {
+        if carry(&mut out, &mut well, &mut play, &mut piece, true).is_none() {
+            tap(&mut out, RESTART);
+            let seed = play.rng.next_u64();
+            well = Well {
+                cells: [[0; WIDTH]; HEIGHT],
+            };
+            play = new_play(seed);
+            piece = spawn_piece(draw(&mut play));
+        }
+    }
+    out.truncate(ticks);
+    out
+}
+
+/// Carry one piece from spawn to lock: the taps that put it where it belongs,
+/// and the mirror's own lock-and-advance. `None` means the next piece could not
+/// spawn — a top-out, on the tick after the taps this returned.
+///
+/// `choosing` off drops it where it spawned, unrotated: no taps at all, so a
+/// piece costs two ticks and cannot outrun the lock delay on a tall stack.
+fn carry(
+    out: &mut Vec<InputFrame>,
+    well: &mut Well,
+    play: &mut Play,
+    piece: &mut Piece,
+    choosing: bool,
+) -> Option<u32> {
+    let (rot, col) = if choosing {
+        place(well, piece)
+    } else {
+        (0, piece.col)
+    };
+    for _ in 0..rot {
+        tap(out, ROTATE_CW);
+        // The real kick, so a rotation that shifts the piece shifts the column
+        // the loop below is counting from.
+        let _ = rotate(well, piece, true);
+    }
+    // One cell per tap: a tap is `just_pressed`, which moves once and does not
+    // charge DAS. The sim clamps a move into a wall and so does this.
+    while piece.col != col {
+        let step = if col < piece.col { -1 } else { 1 };
+        tap(out, if step < 0 { LEFT } else { RIGHT });
+        piece.col += step;
+        if collides(well, piece) {
+            piece.col -= step;
+            break;
+        }
+    }
+
+    tap(out, HARD_DROP);
+    piece.row = landing_row(well, piece);
+    lock_piece(well, piece);
+    let cleared = clear_rows(well);
+    let kind = play.next;
+    play.next = draw(play);
+    *piece = spawn_piece(kind);
+    (!collides(well, piece)).then_some(cleared)
 }
 
 /// Where to put `piece`: the `(rotation, column)` a scoring pass likes best,
@@ -234,6 +290,11 @@ fn idle() -> InputFrame {
 }
 
 // ------------------------------------------------------------ the hash side
+//
+// Behind the `game` feature, because everything below drives the world through
+// the symbols `gg_game!` exports and a build without it has none: `gg-golden`
+// takes this crate with `default-features = false` for its pure layout
+// functions, and an ungated extern block leaves its cdylib unlinkable.
 
 /// What can go wrong driving a world that this crate built out of its own
 /// tables: nothing, and it is still not a place to `unwrap`.
@@ -245,6 +306,8 @@ pub enum SessionError {
     System(boundary::SystemPanic),
     /// The checked-in baseline does not parse, at this one-based line.
     Baseline(usize),
+    /// A reader's query asked for the same component twice.
+    Alias(AliasError),
 }
 
 impl core::fmt::Display for SessionError {
@@ -253,6 +316,7 @@ impl core::fmt::Display for SessionError {
             SessionError::Adopt(e) => write!(f, "demo 10's own components were refused: {e}"),
             SessionError::System(e) => write!(f, "{} panicked: {}", e.system, e.message),
             SessionError::Baseline(line) => write!(f, "malformed baseline at line {line}"),
+            SessionError::Alias(e) => write!(f, "a reader's query does not hold: {e}"),
         }
     }
 }
@@ -330,7 +394,71 @@ pub fn divergence(sequence: &[CanonicalHash], baseline: &[(u64, u128)]) -> Optio
 /// # Errors
 ///
 /// If this crate's own component table is refused, or one of its systems panics.
+#[cfg(feature = "game")]
 pub fn hash_sequence(frames: &[InputFrame]) -> Result<Vec<CanonicalHash>, SessionError> {
+    drive(frames, |world| Ok(world.canonical_hash()))
+}
+
+/// What a gate asks about a tick, read out of the world the systems just ran.
+#[cfg(feature = "game")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    /// Locked cells in the well. Not the falling piece: that is composed into
+    /// the drawn grid and never written back into [`Well`].
+    pub occupied: u32,
+    /// Rows cleared, all game.
+    pub lines: u32,
+    /// One-based, as `Play::level` is.
+    pub level: u32,
+    /// Points.
+    pub score: u32,
+    /// Topped out. Only `RESTART` clears it.
+    pub over: bool,
+}
+
+/// [`Progress`] after each of `frames`, through the same table [`hash_sequence`]
+/// drives.
+///
+/// The counters a hash covers but cannot show. `xtask reload --rules` uses it to
+/// say *which* board crossed a hot reload, and a run whose well happened to be
+/// empty at the swap would prove nothing about a stack surviving one.
+///
+/// # Errors
+///
+/// As [`hash_sequence`].
+#[cfg(feature = "game")]
+pub fn progress(frames: &[InputFrame]) -> Result<Vec<Progress>, SessionError> {
+    let query = Query::<(&Well, &Play)>::new().map_err(SessionError::Alias)?;
+    drive(frames, |world| {
+        let mut out = Progress {
+            occupied: 0,
+            lines: 0,
+            level: 0,
+            score: 0,
+            over: false,
+        };
+        world.each_ref(&query, |_, (well, play): (&Well, &Play)| {
+            for row in &well.cells {
+                for cell in row {
+                    out.occupied += u32::from(*cell != 0);
+                }
+            }
+            out.lines = play.lines;
+            out.level = play.level;
+            out.score = play.score;
+            out.over = play.over != 0;
+        });
+        Ok(out)
+    })
+}
+
+/// Run `frames` through the declared table, reading something out of the world
+/// after each tick.
+#[cfg(feature = "game")]
+fn drive<T>(
+    frames: &[InputFrame],
+    mut read: impl FnMut(&World) -> Result<T, SessionError>,
+) -> Result<Vec<T>, SessionError> {
     // SAFETY: `gg_game_abi` and the tables below are this binary's own symbols,
     // exported by `gg_game!` in this crate and live for the process;
     // `host_api()` returns a `&'static` table (§4.2.2).
@@ -361,7 +489,7 @@ pub fn hash_sequence(frames: &[InputFrame]) -> Result<Vec<CanonicalHash>, Sessio
         // SAFETY: the table is this binary's own, its entries live for the
         // process, and `ctx` outlives the call.
         unsafe { world.run_systems(&table, &ctx) }.map_err(SessionError::System)?;
-        out.push(world.canonical_hash());
+        out.push(read(&world)?);
         previous = *frame;
     }
     Ok(out)
@@ -371,6 +499,7 @@ pub fn hash_sequence(frames: &[InputFrame]) -> Result<Vec<CanonicalHash>, Sessio
 // through the macro because the host reaches them exactly this way, and a
 // harness that called the systems directly would be evidence about these
 // functions rather than about the table (§4.2.2).
+#[cfg(feature = "game")]
 unsafe extern "C" {
     fn gg_game_abi() -> AbiInfo;
     fn gg_game_init(api: *const HostApiV1);
