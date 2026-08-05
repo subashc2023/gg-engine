@@ -111,6 +111,12 @@ const DEPENDENCY_BUDGETS: &[(&str, usize)] = &[
 /// immediate-mode drawing did is overbuilt.
 const OVERLAY_BUDGET: usize = 1020;
 
+/// Where the widget vocabulary is declared, and where it is turned into
+/// geometry. Both are *read* rather than listed, so a kind added to either shows
+/// up in [`widget_provenance`] on its own.
+const WIDGET_PROTOCOL: &str = "crates/gg-ecs/src/boundary/ui.rs";
+const WIDGET_DRAW: &str = "crates/gg-ui/src/boundary.rs";
+
 /// §6 M12's exit row: the template reaches a spinning lit mesh in under 50
 /// lines. A budget rather than a claim, because the number is the whole point —
 /// it is what caps the ceremony a game pays, and the first time it was measured
@@ -141,6 +147,7 @@ pub fn check() -> anyhow::Result<()> {
     shell_lines()?;
     template_lines()?;
     overlay_lines()?;
+    widget_provenance()?;
     dependencies()?;
     unused_dependencies()?;
     game_crate_pin()?;
@@ -183,6 +190,148 @@ fn overlay_lines() -> anyhow::Result<()> {
     );
     println!("xtask: overlay budget {code}/{OVERLAY_BUDGET} code lines ({total} total, §3)");
     Ok(())
+}
+
+/// §3's other `gg-ui` acceptance rule, the one stated in prose: **no widget
+/// without a demo that needs it**. The line-count rule above caps how expensive
+/// the library is to draw with; this one caps its *vocabulary*, which is the
+/// half that grows silently — a kind arrives because the editor wanted it, the
+/// editor is host code, and no game ever asks for it again.
+///
+/// So provenance rather than a count: every kind `gg-ecs`' protocol declares
+/// must be reached by a crate under `demos/` that builds a `cdylib` (§2's
+/// Game-code boundary row, the same definition the deny pin uses), and must have
+/// a `gg-ui` arm that draws it. The second half is not the same claim as the
+/// first: [`widget`](gg_ecs) documents that an *unknown* kind draws nothing,
+/// which is tolerance for a game sending garbage across the boundary, not a
+/// licence for a declared kind to be invisible.
+///
+/// Reached counts the constant *or* the constructor that sets it — `Widget`'s
+/// helpers are how a game names a kind in practice, and a gate that only saw
+/// `widget::LABEL` would report demo 10 as having no labels while it draws
+/// three.
+fn widget_provenance() -> anyhow::Result<()> {
+    let root = workspace_root();
+    let protocol = std::fs::read_to_string(root.join(WIDGET_PROTOCOL))?;
+    let drawn = std::fs::read_to_string(root.join(WIDGET_DRAW))?;
+    let kinds = widget_kinds(&protocol);
+    anyhow::ensure!(
+        !kinds.is_empty(),
+        "no widget kinds found in {WIDGET_PROTOCOL} — a check that finds nothing to check passes \
+         vacuously (§5.8's rule, applied to §3's `gg-ui` rule)"
+    );
+    let games: Vec<(String, String)> = game_crate_dirs()?
+        .into_iter()
+        .map(|(name, dir)| {
+            let mut sources = Vec::new();
+            walk_rs(&dir, &mut sources);
+            let text = sources
+                .iter()
+                .filter_map(|f| std::fs::read_to_string(f).ok())
+                .collect();
+            (name, text)
+        })
+        .collect();
+    let (offenders, provenance) = judge_widgets(&kinds, &drawn, &games);
+    for line in &provenance {
+        println!("xtask: {line}");
+    }
+    anyhow::ensure!(
+        offenders.is_empty(),
+        "widget provenance (§3's `no widget without a demo that needs it`):\n  {}\n\nA kind the \
+         editor alone wants is host code's business and belongs in `gg-ui`'s own draw list, not \
+         in the boundary every game declares against",
+        offenders.join("\n  ")
+    );
+    println!(
+        "xtask: {} widget kind(s), each drawn and each needed by a demo (§3)",
+        kinds.len()
+    );
+    Ok(())
+}
+
+/// `(offenders, one provenance line per covered kind)`.
+///
+/// Split out of the read so `mod tests` can plant both directions — a gate that
+/// has only ever been shown a clean tree is the thing §5 keeps calling a budget
+/// nobody has watched go red.
+fn judge_widgets(
+    kinds: &[(String, Vec<String>)],
+    drawn: &str,
+    games: &[(String, String)],
+) -> (Vec<String>, Vec<String>) {
+    let (mut offenders, mut provenance) = (Vec::new(), Vec::new());
+    for (kind, constructors) in kinds {
+        if !mentions(drawn, &format!("widget::{kind}")) {
+            offenders.push(format!(
+                "`{kind}` is declared and {WIDGET_DRAW} draws no arm for it"
+            ));
+        }
+        // Qualified, so `label` cannot be satisfied by a local of that name.
+        let needs: Vec<&str> = games
+            .iter()
+            .filter(|(_, text)| {
+                mentions(text, &format!("widget::{kind}"))
+                    || constructors
+                        .iter()
+                        .any(|c| text.contains(&format!("Widget::{c}")))
+            })
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if needs.is_empty() {
+            offenders.push(format!(
+                "`{kind}` is declared and no game crate reaches it (constructors: {constructors:?})"
+            ));
+        } else {
+            provenance.push(format!(
+                "widget::{kind} — needed by {} (§3)",
+                needs.join(", ")
+            ));
+        }
+    }
+    (offenders, provenance)
+}
+
+/// `(kind, constructors that set it)` off the protocol's own source.
+///
+/// Comment lines are skipped: the field docs name kinds in prose, and a scan
+/// that read them would credit a kind to whichever function happened to be last.
+fn widget_kinds(text: &str) -> Vec<(String, Vec<String>)> {
+    let mut kinds: Vec<(String, Vec<String>)> = Vec::new();
+    let mut in_mod = false;
+    let mut current_fn: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("pub mod widget {") {
+            in_mod = true;
+        } else if in_mod && line == "}" {
+            in_mod = false;
+        } else if in_mod {
+            if let Some(name) = trimmed
+                .strip_prefix("pub const ")
+                .and_then(|rest| rest.split(':').next())
+            {
+                kinds.push((name.to_owned(), Vec::new()));
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("pub fn ") {
+            current_fn = rest.split('(').next().map(str::to_owned);
+        }
+        if let (Some(func), Some(at)) = (&current_fn, line.find("widget::")) {
+            let name: String = line[at + "widget::".len()..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if let Some((_, ctors)) = kinds.iter_mut().find(|(kind, _)| *kind == name)
+                && !ctors.contains(func)
+            {
+                ctors.push(func.clone());
+            }
+        }
+    }
+    kinds
 }
 
 /// `(code, total)` lines: code is non-blank and not a `//` comment.
@@ -416,6 +565,15 @@ fn game_crate_pin() -> anyhow::Result<()> {
 /// and not the day someone remembers to add it to a constant. Shared with the
 /// dist gate, which has the same question and must not answer it differently.
 pub fn game_crates() -> anyhow::Result<Vec<String>> {
+    Ok(game_crate_dirs()?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect())
+}
+
+/// The same set, with the directory each was found in — what a gate that reads
+/// game *source* needs (see [`widget_provenance`]).
+fn game_crate_dirs() -> anyhow::Result<Vec<(String, std::path::PathBuf)>> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(workspace_root().join("demos"))?.flatten() {
         let manifest = entry.path().join("Cargo.toml");
@@ -431,14 +589,13 @@ pub fn game_crates() -> anyhow::Result<Vec<String>> {
         if !builds_a_cdylib {
             continue;
         }
-        found.push(
-            parsed
-                .get("package")
-                .and_then(|p| p.get("name"))
-                .and_then(toml::Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("{} has no package name", manifest.display()))?
-                .to_owned(),
-        );
+        let name = parsed
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("{} has no package name", manifest.display()))?
+            .to_owned();
+        found.push((name, entry.path()));
     }
     found.sort();
     Ok(found)
@@ -468,4 +625,73 @@ fn check_one_game_crate(name: &str, root: &Path) -> anyhow::Result<()> {
     );
     println!("xtask: {name} links only the pinned boundary crates (§3)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real protocol, parsed. Pins the shape the gate depends on rather than
+    /// a planted imitation of it: a `widget` module reorganized into something
+    /// this scan cannot read would otherwise leave the gate quietly finding
+    /// nothing, and the vacuity check only catches the *empty* case.
+    #[test]
+    fn the_real_protocol_still_parses_into_kinds_and_their_constructors() {
+        let text =
+            std::fs::read_to_string(workspace_root().join(WIDGET_PROTOCOL)).expect("protocol");
+        let kinds = widget_kinds(&text);
+        let names: Vec<&str> = kinds.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(names, ["PANEL", "LABEL", "BUTTON"], "{kinds:?}");
+        for (kind, ctors) in &kinds {
+            assert!(!ctors.is_empty(), "{kind} has no constructor: {kinds:?}");
+        }
+    }
+
+    fn kinds() -> Vec<(String, Vec<String>)> {
+        vec![("LABEL".to_owned(), vec!["label".to_owned()])]
+    }
+
+    #[test]
+    fn a_kind_a_demo_reaches_by_its_constructor_is_covered() {
+        let games = [(
+            "demo-10-tetris".to_owned(),
+            "Widget::label(r, c, s)".to_owned(),
+        )];
+        let (offenders, provenance) = judge_widgets(&kinds(), "widget::LABEL => {}", &games);
+        assert!(offenders.is_empty(), "{offenders:?}");
+        assert_eq!(provenance.len(), 1, "{provenance:?}");
+    }
+
+    #[test]
+    fn a_kind_only_the_editor_wants_is_rejected() {
+        // Host code is not a game crate, so an editor-only kind reaches this
+        // gate as a demo list that mentions it nowhere.
+        let games = [("demo-07-ui".to_owned(), "Widget::panel(r, c)".to_owned())];
+        let (offenders, _) = judge_widgets(&kinds(), "widget::LABEL => {}", &games);
+        assert_eq!(offenders.len(), 1, "{offenders:?}");
+        assert!(
+            offenders[0].contains("no game crate reaches it"),
+            "{offenders:?}"
+        );
+    }
+
+    #[test]
+    fn a_declared_kind_gg_ui_never_draws_is_rejected() {
+        let games = [(
+            "demo-10-tetris".to_owned(),
+            "Widget::label(r, c, s)".to_owned(),
+        )];
+        let (offenders, _) = judge_widgets(&kinds(), "widget::PANEL => {}", &games);
+        assert_eq!(offenders.len(), 1, "{offenders:?}");
+        assert!(offenders[0].contains("draws no arm"), "{offenders:?}");
+    }
+
+    /// A name that merely overlaps must not satisfy either half — the whole
+    /// point of matching whole identifiers.
+    #[test]
+    fn a_longer_name_does_not_stand_in_for_the_kind() {
+        let games = [("demo-07-ui".to_owned(), "widget::LABELLED".to_owned())];
+        let (offenders, _) = judge_widgets(&kinds(), "widget::LABELLED => {}", &games);
+        assert_eq!(offenders.len(), 2, "{offenders:?}");
+    }
 }
