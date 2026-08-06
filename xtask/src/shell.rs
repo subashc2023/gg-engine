@@ -213,6 +213,16 @@ pub fn bless(commit: &str) -> anyhow::Result<()> {
         editor.ticks(),
         editor.change_count()
     );
+    let mut agent = agent_loop_replay()?;
+    agent.set_engine_commit(commit);
+    std::fs::write(agent_replay_path(), agent.encode())?;
+    println!(
+        "xtask replay: blessed {AGENT_CURATED} ({} ticks, {} change records, {} typed) at \
+         {commit}",
+        agent.ticks(),
+        agent.change_count(),
+        agent.typed_count()
+    );
     let mut tetris = tetris_replay();
     tetris.set_engine_commit(commit);
     std::fs::write(tetris_path(), tetris.encode())?;
@@ -516,6 +526,110 @@ pub fn save_replay_path() -> PathBuf {
     workspace_root()
         .join("tests/replays")
         .join(format!("{SAVE_CURATED}.ggrp"))
+}
+
+// ---- the §1 loop over demo 03 (§6 M16 exit row 4) -----------------------
+
+pub const AGENT_CURATED: &str = "demo03-agent";
+
+/// Demo 03's verbs, in `gg_game!`'s declared order — the id space the frames
+/// below index, before the editor appends its own (§4.7).
+const AGENT_ACTIONS: &[&str] = &["fire", "spawn", "restart"];
+const AGENT_AXES: &[&str] = &["move_right", "move_up", "move_forward", "aim_x", "aim_y"];
+
+/// The §1 loop as one session, in the order a replay can hold it
+/// (`gg_editor::session::AgentScript`): ask the panel for the change, hand
+/// the game the pointer, and play across wherever the rebuild lands. The
+/// typed prompt rides the text channel by tick rather than the action map
+/// (§6 M16 item 5), and what it asks for — a wobble — is the field the gate's
+/// rebuilt dylib then delivers, because the reload is the *environment's*
+/// half of the loop: the gate lands it the way an agent's `cargo build`
+/// would, under the watcher, after the ask.
+///
+/// Long for `agent_session`'s reason: the tail is wall time for the watcher's
+/// debounce, so the rebuild lands mid-session rather than after it.
+pub fn agent_loop_replay() -> anyhow::Result<Replay> {
+    const TICKS: u64 = 60_000;
+    let (verbs, _) = gg_editor::host::open(&gg_ecs::boundary::Verbs {
+        actions: AGENT_ACTIONS,
+        axes: AGENT_AXES,
+    });
+    let find = |names: &[&str], want: &str| {
+        names
+            .iter()
+            .position(|n| *n == want)
+            .ok_or_else(|| anyhow::anyhow!("no verb `{want}` to aim the loop at"))
+    };
+    let mut editor = gg_editor::Editor::new(None);
+    editor.place(HEADLESS_EXTENT, HEADLESS_DPI);
+    // Raised for the author only: the replayed editor starts with the pane
+    // down, and the script's own tab click is what brings it up there.
+    editor.raise(gg_editor::Pane::Agent);
+    let script = gg_editor::session::agent_script(&editor).ok_or_else(|| {
+        anyhow::anyhow!("the agent pane is not up, so there is nothing to aim at")
+    })?;
+    let click = gg_input::ActionId::new(find(verbs.actions, "ui_click")?);
+    let (x, y) = (
+        gg_input::AxisId::new(find(verbs.axes, "ui_x")?),
+        gg_input::AxisId::new(find(verbs.axes, "ui_y")?),
+    );
+    let mut frames = gg_editor::session::frames(&script.focus, click, x, y);
+    // Into the settle at the head of the ask piece: focused, click released.
+    let typed_at = frames.len() as u64 + 4;
+    frames.extend(gg_editor::session::frames_from(
+        script.prompt,
+        &script.ask,
+        click,
+        x,
+        y,
+    ));
+    // Then §1's play, in the only order a replay can hold it (see
+    // `AgentScript`): the viewport press hands the game the pointer, and the
+    // held verbs after it are the hands the sim answers to — running from the
+    // ask to the far side of wherever the rebuild lands.
+    frames.extend(gg_editor::session::frames_from(
+        script.send,
+        &script.play,
+        click,
+        x,
+        y,
+    ));
+    let fire = gg_input::ActionId::new(find(verbs.actions, "fire")?);
+    let (right, forward) = (
+        gg_input::AxisId::new(find(verbs.axes, "move_right")?),
+        gg_input::AxisId::new(find(verbs.axes, "move_forward")?),
+    );
+    frames.extend(gg_editor::session::hold(
+        fire,
+        200,
+        (right, forward),
+        (gg_input::AXIS_SCALE, 2 * gg_input::AXIS_SCALE),
+    ));
+    let mut meta = ReplayMeta::new(
+        gg_math::DETERMINISM_CONTRACT,
+        "curated",
+        gg_core::DEFAULT_TICK_HZ,
+        verbs.actions,
+        verbs.axes,
+    );
+    meta.engine_commit = "generated".to_owned();
+    let mut recorder = Recorder::new(meta);
+    let played = frames.len() as u64;
+    for (tick, frame) in frames.into_iter().enumerate() {
+        recorder.record(tick as u64, frame);
+    }
+    recorder.record_text(typed_at, "add a wobble to the cube, then cargo build");
+    // The tail costs one change record: `record` is a delta.
+    for tick in played..TICKS {
+        recorder.record(tick, InputFrame::default());
+    }
+    Ok(recorder.finish())
+}
+
+pub fn agent_replay_path() -> PathBuf {
+    workspace_root()
+        .join("tests/replays")
+        .join(format!("{AGENT_CURATED}.ggrp"))
 }
 
 /// Read it back and say what it claims — the check half.
@@ -1294,6 +1408,19 @@ fn reload_after(
     marker: &str,
     nudge_ms: u64,
 ) -> anyhow::Result<String> {
+    reload_after_env(game, replacement, args, &[], marker, nudge_ms)
+}
+
+/// [`reload_after`] with extra environment for the child — what a leg that
+/// also reads the seam record passes `GG_AGENT_DIR` through.
+fn reload_after_env(
+    game: &Path,
+    replacement: &Path,
+    args: &[&str],
+    envs: &[(&str, &Path)],
+    marker: &str,
+    nudge_ms: u64,
+) -> anyhow::Result<String> {
     use std::process::Stdio;
 
     exec(
@@ -1308,6 +1435,9 @@ fn reload_after(
         .env("RUST_LOG", "info,gg::hash=debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
     let mut child = cmd.spawn()?;
     let (log, status) = rewrite_once_watching(&mut child, replacement, game, marker, nudge_ms)?;
     anyhow::ensure!(status.success(), "the shell exited {status}\n{log}");
@@ -1457,6 +1587,137 @@ fn agent() -> anyhow::Result<()> {
         );
     }
     println!("xtask reload --agent: the refusal reached the record as `Open`, hash unmoved");
+    agent_loop(&before, &after)
+}
+
+/// §6 M16 exit row 4: **§1's loop, demonstrated on demo 03 as a recorded
+/// session that replays.**
+///
+/// The session is the checked-in [`AGENT_CURATED`] stream: play on demo 03's
+/// own verbs, bring the agent pane up, type the ask through the text channel,
+/// click send, keep playing. Under `GG_HEADLESS=1` the send lands and
+/// `gg_agent::Ask::spawn` refuses by design (§6 M16 item 3) — the click is in
+/// the replay, the paid call is not, and the tick hash stays a function of the
+/// world. The rebuild is the gate's to land: anchored on the `editor: agent
+/// asked` line itself, so the swap follows the ask the way §1 orders them.
+///
+/// Three claims, in the order they can fail:
+/// - the recorded session **replays** — two undisturbed runs agree tick for
+///   tick, editor, prompt and all;
+/// - the loop **closes with state intact** — the migrating build swaps in
+///   after the ask, `wobble` arrives by name, every pre-swap tick is
+///   untouched, and the sequence moves at the swap tick and not before;
+/// - the crossing is **graded** — the seam record reports the migration
+///   accepted and inside §9's two-second bar.
+fn agent_loop(before: &Path, after: &Path) -> anyhow::Result<()> {
+    let stream_path = agent_replay_path();
+    let stream = Replay::decode(&std::fs::read(&stream_path)?)?;
+    anyhow::ensure!(
+        stream.typed_count() > 0,
+        "the loop's session carries no typed text — the ask would be a click on an empty field"
+    );
+    let stream = stream_path.display().to_string();
+
+    let dir = workspace_root().join("target/agent-loop");
+    std::fs::create_dir_all(&dir)?;
+    let game = dir.join(dylib_name(DEMO_03));
+
+    exec(
+        cargo().args(["build", "-p", "gg-runtime"]),
+        "build the shell [dev]",
+    )?;
+    let host = exe("debug", "gg-runtime");
+
+    // The replay claim first: same clicks, same prompt, same hashes, twice.
+    std::fs::copy(before, &game)?;
+    let quiet_log = play(&host, &game, &["--replay", &stream, "--editor"], true)?;
+    let asked = quiet_log
+        .lines()
+        .find(|l| l.contains("editor: agent asked"))
+        .ok_or_else(|| anyhow::anyhow!("the session never asked the panel:\n{quiet_log}"))?;
+    let ask_tick = crate::util::field_u64(asked, "tick")?;
+    let quiet = sequence(&quiet_log)?;
+    anyhow::ensure!(
+        quiet.iter().any(|(_, h)| h != &quiet[0].1),
+        "the session never moved the world's hash — the loop below would close over nothing"
+    );
+    std::fs::copy(before, &game)?;
+    let again = sequence(&play(
+        &host,
+        &game,
+        &["--replay", &stream, "--editor"],
+        true,
+    )?)?;
+    if let Some(found) = divergence(&("the session", quiet.clone()), &("its replay", again)) {
+        anyhow::bail!("§6 M16: the recorded session did not replay — {found}");
+    }
+
+    // Then the loop: the rebuild lands after the ask, and the session carries
+    // its world across the seam.
+    std::fs::copy(before, &game)?;
+    let log = reload_after_env(
+        &game,
+        after,
+        &["--replay", &stream, "--editor"],
+        &[("GG_AGENT_DIR", dir.as_path())],
+        "editor: agent asked",
+        0,
+    )?;
+    let reloaded = log
+        .lines()
+        .find(|l| l.contains("game reloaded"))
+        .unwrap_or_default();
+    let swap = crate::util::field_u64(reloaded, "tick")?;
+    anyhow::ensure!(
+        swap > ask_tick,
+        "the rebuild landed at tick {swap}, before the ask at {ask_tick} — the anchor is not \
+         anchoring"
+    );
+    anyhow::ensure!(
+        reloaded.contains("restore"),
+        "a schema-changing dylib did not take the restore path: {reloaded}"
+    );
+    anyhow::ensure!(
+        log.lines()
+            .any(|l| l.contains("migrated") && l.contains("demo03.cube") && l.contains("wobble")),
+        "the ask's wobble never arrived by name:\n{log}"
+    );
+    let looped = sequence(&log)?;
+    let at = |seq: &[(u64, String)], tick: u64| seq.iter().find(|(t, _)| *t == tick).cloned();
+    for tick in 0..swap {
+        anyhow::ensure!(
+            at(&looped, tick) == at(&quiet, tick),
+            "the reload changed tick {tick}, which ran before the swap at {swap} — state was not \
+             intact across the seam"
+        );
+    }
+    anyhow::ensure!(
+        at(&looped, swap) != at(&quiet, swap),
+        "tick {swap} is unchanged by a component gaining a field — the loop closed over nothing"
+    );
+
+    // And the grade: the crossing, as the record the panel reads (§6 M16 items
+    // 1–2), inside §9's bar.
+    let record = std::fs::read_to_string(dir.join("session.json"))?;
+    for expected in [
+        "\"outcome\": \"accepted\"",
+        "\"kind\": \"migrated\"",
+        "\"wobble\"",
+        "\"within_budget\": true",
+    ] {
+        anyhow::ensure!(
+            record.contains(expected),
+            "the loop's seam record is missing {expected}:\n{record}"
+        );
+    }
+    anyhow::ensure!(
+        json_field(&record, "state_before")? != json_field(&record, "state_after")?,
+        "the record reports the migration without the state moving:\n{record}"
+    );
+    println!(
+        "xtask reload --agent: the loop closed — asked at tick {ask_tick}, rebuilt into the \
+         session at {swap}, state intact to the seam and moved at it, inside §9's bar"
+    );
     Ok(())
 }
 

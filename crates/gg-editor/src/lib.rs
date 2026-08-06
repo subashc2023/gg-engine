@@ -873,16 +873,9 @@ impl Editor {
             self.font_rev += 1;
             self.atlas_seen = self.fonts.version();
         }
-        let canvas = self.fit.canvas;
         let open = self.menus.open();
         self.resolve_menus(open);
-        let area = Rect::new(
-            0.0,
-            BAR_H,
-            canvas.0 as f32,
-            (canvas.1 as f32 - BAR_H).max(0.0),
-        );
-        self.dock.resolve(area, tab_width);
+        self.resolve_dock();
         self.per_page = self.dock.body_of(Pane::Tree.id()).map_or(1, |body| {
             ((panels::tree_list(body).h / PITCH) as usize).max(1)
         });
@@ -1075,6 +1068,29 @@ impl Editor {
     #[must_use]
     pub fn pane_body(&self, pane: Pane) -> Option<Rect> {
         self.dock.body_of(pane.id())
+    }
+
+    /// Bring `pane`'s tab up, as a click on it would (§6 M16 exit row 4).
+    /// A session author needs this: aims are geometry against a layout, and
+    /// [`pane_body`](Self::pane_body) declines a pane behind another tab.
+    /// Requires a prior [`place`](Self::place) — resolving needs a canvas.
+    pub fn raise(&mut self, pane: Pane) {
+        self.dock.activate(pane.id());
+        self.resolve_dock();
+    }
+
+    /// Lay the dock out over the placed canvas — what changing which pane a
+    /// group shows must be followed by, since the resolved snapshot is what
+    /// [`pane_body`](Self::pane_body) answers from.
+    fn resolve_dock(&mut self) {
+        let canvas = self.fit.canvas;
+        let area = Rect::new(
+            0.0,
+            BAR_H,
+            canvas.0 as f32,
+            (canvas.1 as f32 - BAR_H).max(0.0),
+        );
+        self.dock.resolve(area, tab_width);
     }
 
     /// Where a pane's tab is, in logical units. Present whether or not the pane

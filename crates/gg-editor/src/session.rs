@@ -413,6 +413,63 @@ pub fn script(editor: &Editor) -> Vec<Act> {
     acts
 }
 
+/// The §1 loop's clicks (§6 M16 exit row 4), in the one order a replay can
+/// hold them. Asking comes *first*: while the game holds the pointer every
+/// panel is unreachable, and the only recordable way it takes the pointer — a
+/// press in the running viewport — is also the only way hands-on play reaches
+/// the sim at all (the game gets a dead frame until then), while the way back
+/// out is Escape, which is not a verb and so not in any replay.
+pub struct AgentScript {
+    /// Bring the agent pane up and focus its prompt, from wherever the
+    /// pointer starts.
+    pub focus: Vec<Act>,
+    /// Where `focus` leaves the pointer — what [`frames_from`] needs next.
+    pub prompt: (f32, f32),
+    /// A settle the caller's typing lands in — the prompt's characters ride
+    /// the replay's *text channel* rather than the action map, placed by tick
+    /// against the frames `focus` produced — then send.
+    pub ask: Vec<Act>,
+    /// Where `ask` leaves the pointer.
+    pub send: (f32, f32),
+    /// Into the running viewport: the click that hands the game the pointer,
+    /// after which the caller's held game verbs are §1's play.
+    pub play: Vec<Act>,
+}
+
+/// The loop's script against a placed editor. `editor` must also have the
+/// agent pane [`Editor::raise`]d: the aims inside it are `None` while it sits
+/// behind another tab. The replayed editor starts with it down, which is what
+/// the first piece's tab click is for — activating a tab moves no geometry,
+/// so aims taken against the raised layout land in the replay too.
+#[must_use]
+pub fn agent_script(editor: &Editor) -> Option<AgentScript> {
+    let tab = aim::tab(editor, Pane::Agent)?;
+    let prompt = aim::prompt(editor)?;
+    let send = aim::send(editor)?;
+    let viewport = aim::nowhere(editor)?;
+    Some(AgentScript {
+        focus: vec![
+            Act::Settle(30),
+            Act::To(tab),
+            Act::Settle(3),
+            Act::Click,
+            Act::To(prompt),
+            Act::Settle(3),
+            Act::Click,
+        ],
+        prompt,
+        ask: vec![
+            Act::Settle(12),
+            Act::To(send),
+            Act::Settle(3),
+            Act::Click,
+            Act::Settle(20),
+        ],
+        send,
+        play: vec![Act::To(viewport), Act::Settle(4), Act::Click],
+    })
+}
+
 /// Ticks a press is held, and the ones after the release.
 const PRESS: u32 = 2;
 const RELEASE: u32 = 6;
@@ -660,6 +717,37 @@ mod tests {
         assert_eq!(clicks, 3 + 1 + 1 + 6 + 1 + 2 + 3 + 2 + 1 + 4 + 2);
         let drags = acts.iter().filter(|a| matches!(a, Act::Drag(_))).count();
         assert_eq!(drags, 2, "a seam and a re-dock");
+    }
+
+    /// §6 M16 exit row 4: the loop's script aims inside a pane that starts
+    /// behind a tab, so it declines an unraised editor rather than aiming at
+    /// whatever pane is showing — and once raised, every aim is inside it.
+    #[test]
+    fn the_agent_script_is_authored_against_a_raised_pane() {
+        let mut editor = placed();
+        assert!(
+            agent_script(&editor).is_none(),
+            "aimed into a pane behind another tab"
+        );
+        editor.raise(Pane::Agent);
+        let script = agent_script(&editor).expect("the pane is up");
+        let body = editor.pane_body(Pane::Agent).expect("and has a body");
+        assert!(
+            body.contains(script.prompt.0, script.prompt.1),
+            "the prompt is outside its pane"
+        );
+        assert!(
+            body.contains(script.send.0, script.send.1),
+            "send is outside its pane"
+        );
+        let clicks = |acts: &[Act]| acts.iter().filter(|a| matches!(a, Act::Click)).count();
+        assert_eq!(clicks(&script.focus), 2, "the tab, then the field");
+        assert_eq!(clicks(&script.ask), 1, "send");
+        assert_eq!(
+            clicks(&script.play),
+            1,
+            "the viewport press that hands over"
+        );
     }
 
     /// The script is the same at every extent it is placed at — the same acts

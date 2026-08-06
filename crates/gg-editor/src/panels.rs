@@ -1016,6 +1016,14 @@ impl Editor {
             // most of what the first question's thirty seconds were.
             self.ask = gg_agent::Ask::spawn(&asked, &cwd, self.chat.session.as_deref());
             self.chat.asked(frame.tick);
+            // The length and not the text: the log is not a second transcript.
+            // §6 M16 exit row 4's gate anchors on this line — the rebuild it
+            // lands is placed *after* the ask, which is §1's own order.
+            tracing::info!(
+                tick = frame.tick,
+                chars = asked.len(),
+                "editor: agent asked"
+            );
             self.chat.say(chat::Who::You, asked);
         }
 
@@ -1326,10 +1334,11 @@ fn buttons(reload: Option<&gg_agent::Seam>) -> (bool, bool) {
 
 /// What the panel asks, given what the seam says and which button was pressed.
 ///
-/// Fixed text, because §4.7 has no way to record a typed one. `fix` is the ask
-/// that closes §1's loop: the agent edits the game's source and builds it, the
-/// watcher sees the artifact change, and the shell reloads with the world
-/// intact — no step of which is this panel's to perform.
+/// A *fill*, not a send, since §6 M16 item 5 gave typing a channel: a starting
+/// point a sentence of context can be added to. `fix` is the ask that closes
+/// §1's loop: the agent edits the game's source and builds it, the watcher
+/// sees the artifact change, and the shell reloads with the world intact — no
+/// step of which is this panel's to perform.
 fn prompt(reload: Option<&gg_agent::Seam>, fix: bool) -> Option<String> {
     let seam = reload?;
     let refusal = match &seam.outcome {

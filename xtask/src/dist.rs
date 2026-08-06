@@ -79,6 +79,11 @@ const BANNED_DIST_BYTES: &[&str] = &[
     // the editor's line above — the pane has no log lines, so its stable text
     // is the id its prompt row is declared under.
     "editor.agent.prompt",
+    // And the terminal's (§9 v1 box 7's other half): the panel rents `claude`
+    // by spawning it, and the flag value its invocation cannot be built
+    // without is the stable text proving the spawner is out of the binary,
+    // not just the pane that would draw its answers.
+    "stream-json",
 ];
 
 /// Byte needles a shipped binary must contain: the two log lines that exist only
