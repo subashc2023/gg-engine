@@ -420,6 +420,22 @@ impl App {
         gg_ui::Fit::new(self.surface())
     }
 
+    /// Where the *game's* canvas sits: the whole surface, or the editor's game
+    /// pane — the widget half of the rule [`gg_render::Renderer::set_viewport`]
+    /// states for the scene: a picture is composed for the rectangle that shows
+    /// it. Moves only the picture — the pointer and the hit test are in canvas
+    /// units ([`gg_ui::Ui::frame`]), which is what keeps this out of replays.
+    fn game_fit(&self) -> gg_ui::Fit {
+        #[cfg(feature = "editor")]
+        if let Some(editing) = &self.editor {
+            // The pane the *last* tick laid out — `Editor::tick` runs after the
+            // game's UI — so the picture trails a pane drag by one tick, same
+            // as the resize paint `play.rs` documents.
+            return gg_ui::Fit::inside(editing.ui.viewport_rect());
+        }
+        gg_ui::Fit::new(self.surface())
+    }
+
     /// The surface the editor lays its panes out for: `--editor-extent` when
     /// one was named, the real one otherwise (§6 M15.1).
     #[cfg(feature = "editor")]
@@ -563,11 +579,14 @@ impl App {
             return Ok(None);
         };
         let path = editing.save.display().to_string();
-        // The editor opens playing, so the first tick is the play edge nobody
-        // clicked. Here rather than in `Editing::new` because that is where the
-        // world first exists to capture.
+        // The editor opens *Stopped*, one tick in: the bootstrap tick has just
+        // run (`Editing::advance`'s `!opened` arm), the world now exists, and
+        // Stopped — nothing captured — is where an edit sticks. Play is the
+        // operator's first click, which is where the capture moved. A preloaded
+        // world (§6 M14's save as the opening scene) constructs `opened` true
+        // and never reaches this edge.
         if !core::mem::replace(&mut editing.opened, true) {
-            editing.stash.enter(tick, &self.world);
+            editing.paused = true;
         }
         let commands = editing.ui.tick(
             &mut self.world,
@@ -991,17 +1010,18 @@ impl Cursor {
 #[cfg(feature = "editor")]
 struct Editing {
     ui: gg_editor::Editor,
-    /// The sim is not advancing. Starts **false**: an editor that opened paused
-    /// would show a world whose bootstrap system had never run.
+    /// The sim is not advancing. Starts **false** so the bootstrap tick can
+    /// run — the world does not exist before it — and flips at the `opened`
+    /// edge: the editor opens *Stopped*, one tick in (§6 M15.2 post-close).
     paused: bool,
     /// The world captured at the play edge (§6 M15.2). Empty is `Stopped`, and
     /// `Stopped` is the only state an inspector edit survives.
     stash: Stash,
-    /// False until the first tick has captured. The editor opens *playing* for
-    /// `paused`'s reason, one level further out — and a capture needs a world,
-    /// which exists at the *end* of the first tick and not at construction.
-    /// Read by [`advance`](Editing::advance) too: the tick that fills the stash
-    /// is the one tick that must run without it.
+    /// False until the bootstrap tick has run. Constructed **true** when the
+    /// world was preloaded (§6 M14's save as the opening scene): data supplied
+    /// the world, so no game tick runs before the operator asks for one.
+    /// Read by [`advance`](Editing::advance): the bootstrap tick is the one
+    /// tick that must run with nothing captured.
     opened: bool,
     /// Advance one tick, then pause again. Consumed by [`Editing::advance`].
     step: bool,
@@ -1029,10 +1049,16 @@ impl Editing {
     fn new(args: &crate::Args, lib: &GameLib) -> Editing {
         use gg_editor::persist;
         let stem = &lib.name();
-        let save = args
-            .save
-            .clone()
-            .unwrap_or_else(|| persist::save_path(stem));
+        // A live session's save button writes the project's opening scene
+        // (`crate::opening_scene`), which is what makes the scene *mutable
+        // data*: stop, edit, save, and the next session opens from it. Gates
+        // name `--save` and replays keep the out-of-tree default — a replayed
+        // session must not leave a scene behind for the next run to open.
+        let save = args.save.clone().unwrap_or_else(|| {
+            persist::scene_path(args.input.as_deref())
+                .filter(|_| args.record.is_none() && args.replay.is_none())
+                .unwrap_or_else(|| persist::save_path(stem))
+        });
         // Not while recording or replaying. The layout *is* hit-testing (§6
         // M15.1), so a session that started from a file the gate never saw
         // would land its clicks somewhere else.
@@ -1042,6 +1068,9 @@ impl Editing {
         if let Some(path) = &layout {
             persist::restore(&mut ui, path);
         }
+        // Data supplied the world, so the bootstrap tick is not owed: the
+        // session opens Stopped at the save's own tick, zero game ticks run.
+        let preloaded = args.load.is_some() || crate::opening_scene(args).is_some();
         Editing {
             // The working directory, for `gg.cfg`'s reason: a launcher is
             // started *in* a workspace, and a flag pointing elsewhere would be a
@@ -1051,9 +1080,9 @@ impl Editing {
             projects: gg_editor::project::scan(Path::new(".")),
             open: None,
             ui,
-            paused: false,
+            paused: preloaded,
             stash: Stash::default(),
-            opened: false,
+            opened: preloaded,
             step: false,
             save,
             extent: args.editor_extent,
@@ -1075,12 +1104,12 @@ impl Editing {
     /// turns a step from `Stopped` into a play first, so a step that reached
     /// here with nothing captured would be one the editor never asked for.
     ///
-    /// The `!opened` arm is the first tick, which advances with nothing
-    /// captured yet — the capture is taken at the *end* of it, in `editor_tick`,
-    /// because the world a stop returns to is the bootstrapped one and bootstrap
-    /// has not run before the first tick. Without it the editor opens playing in
-    /// name only: tick 0 runs no systems, the play edge captures the empty
-    /// pre-bootstrap world, and the first stop hands that back (§6 M15.2).
+    /// The `!opened` arm is the bootstrap tick, which advances with nothing
+    /// captured: the world does not exist before it, and the Stopped state the
+    /// editor opens into needs a world to show (§6 M15.2 post-close). A
+    /// preloaded session constructs `opened` true and skips it — the save is
+    /// the world, and running a game tick over it before the operator asked
+    /// would make "load paused" a lie by one tick.
     fn advance(&mut self) -> bool {
         let step = core::mem::take(&mut self.step);
         (!self.opened || self.stash.held()) && (!self.paused || step)
@@ -1392,7 +1421,6 @@ impl Stages for App {
         // same reason platform events are: it is this tick's input (§6 M15.1).
         // A steer emitted after the latch would arrive one tick late and the
         // arrow would trail the OS cursor by a frame.
-        let surface = self.surface();
         if let Some((dx, dy)) = self.cursor.steer(self.ui_fit()) {
             self.input.cursor(dx, dy);
         }
@@ -1490,15 +1518,17 @@ impl Stages for App {
         // that kept ticking would route clicks against a world nothing is
         // advancing.
         //
-        // The extent moves the picture and never the hit test: the pointer is
+        // The fit moves the picture and never the hit test: the pointer is
         // integrated in canvas units precisely so a headless tick and a 4K one
         // resolve the same widget (`gg_ui::boundary`'s docs), which is what
-        // lets the determinism gate cover clicks at all.
+        // lets the determinism gate cover clicks at all — and what lets the
+        // editor's pane carry the picture without touching a replay.
         let ui_tick = self
             .ui_binding
             .map(|binding| UiTick::from_input(&self.input, &binding))
             .unwrap_or_default();
-        self.ui.frame(&mut self.world, &ui_tick, surface);
+        let fit = self.game_fit();
+        self.ui.frame(&mut self.world, &ui_tick, fit);
         // The audio tick (§6 M18 item 2). After the UI so a cue a game fires in
         // response to a click lands in the same tick as the click, and *outside*
         // the hash entirely — it takes `&World` and the compiler is what proves

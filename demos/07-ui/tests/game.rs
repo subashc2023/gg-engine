@@ -106,7 +106,7 @@ impl Game {
                 // which is the case `gg_ui::boundary::binding` leaves optional.
                 scroll: 0,
             },
-            self.target,
+            gg_ui::Fit::new(self.target),
         );
         self.previous = frame;
         self.tick += 1;

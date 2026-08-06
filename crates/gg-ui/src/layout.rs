@@ -12,6 +12,7 @@
 use crate::draw::Rect;
 use gg_ecs::boundary::CANVAS;
 use gg_input::AXIS_SCALE;
+use gg_render::Viewport;
 
 /// How a canvas sits inside a surface: a scale, an offset, and the extent the
 /// canvas itself has (§4.9).
@@ -21,9 +22,12 @@ use gg_input::AXIS_SCALE;
 /// Three copies of a rounding rule is three chances for the arrow to sit a
 /// pixel away from the widget it is over.
 ///
-/// Two constructors because there are two jobs. A *game* wants [`Fit::new`]: a
-/// fixed [`CANVAS`] scaled uniformly and centred, so a HUD is the same picture
-/// at every window size and the mismatch shows as letterboxing. The *editor*
+/// Three constructors because there are three jobs. A *game* wants
+/// [`Fit::new`]: a fixed [`CANVAS`] scaled uniformly and centred, so a HUD is
+/// the same picture at every window size and the mismatch shows as
+/// letterboxing. A game *under the editor* wants [`Fit::inside`]: the same
+/// rule aimed at the pane that shows it, for the reason
+/// `gg_render::Renderer::set_viewport` states for the scene. The *editor*
 /// wants [`Fit::fill`]: the canvas is whatever the window is at the chosen
 /// scale, so the panels reach the edges and there is no letterbox to leave
 /// showing (§6 M15.1).
@@ -43,12 +47,36 @@ impl Fit {
     /// Fit [`CANVAS`] into a surface `target` pixels across.
     #[must_use]
     pub fn new(target: (u32, u32)) -> Fit {
-        let scale = (target.0 as f32 / CANVAS.0 as f32).min(target.1 as f32 / CANVAS.1 as f32);
-        let axis =
-            |extent: u32, canvas: u32| ((extent as f32 - canvas as f32 * scale) * 0.5).floor();
+        Fit::inside(Viewport {
+            x: 0,
+            y: 0,
+            width: target.0,
+            height: target.1,
+        })
+    }
+
+    /// Fit [`CANVAS`] into `pane` — a rectangle *of* the surface, in physical
+    /// pixels: the editor's game viewport. [`Fit::new`]'s rule with the origin
+    /// moved, so the pane shows the whole picture at the pane's size and the
+    /// letterbox lands at the pane's edge rather than the window's.
+    ///
+    /// A zero-sized pane — the game docked behind another tab — is a zero
+    /// scale: the geometry collapses to the pane's corner and rasterizes
+    /// nothing, which is what hidden should draw.
+    #[must_use]
+    pub fn inside(pane: Viewport) -> Fit {
+        let scale = (pane.width as f32 / CANVAS.0 as f32).min(pane.height as f32 / CANVAS.1 as f32);
+        // Floored as one quantity: the pane origin is already whole pixels, so
+        // the letterboxing still never straddles one.
+        let axis = |origin: u32, extent: u32, canvas: u32| {
+            (origin as f32 + (extent as f32 - canvas as f32 * scale) * 0.5).floor()
+        };
         Fit {
             scale,
-            offset: (axis(target.0, CANVAS.0), axis(target.1, CANVAS.1)),
+            offset: (
+                axis(pane.x, pane.width, CANVAS.0),
+                axis(pane.y, pane.height, CANVAS.1),
+            ),
             canvas: CANVAS,
         }
     }
@@ -328,6 +356,39 @@ mod tests {
         }
         // A minimized surface is still a zero, not a one.
         assert_eq!(Fit::fill((0, 0), 2.0).canvas, (0, 0));
+    }
+
+    /// The property the editor's game pane rests on: a pane fit is the window
+    /// fit of the pane's extent carried to the pane's corner — same scale, same
+    /// letterbox, moved. Whole-pixel origins keep the floor exact, which is why
+    /// [`Viewport`] carries `u32`s.
+    #[test]
+    fn a_pane_fit_is_the_window_fit_carried_to_the_pane() {
+        for (x, y, width, height) in [(0, 0, 1280, 720), (307, 13, 986, 731), (1, 719, 640, 360)] {
+            let pane = Fit::inside(Viewport {
+                x,
+                y,
+                width,
+                height,
+            });
+            let window = Fit::new((width, height));
+            assert_eq!(pane.scale, window.scale, "{x},{y} {width}x{height}");
+            assert_eq!(
+                pane.offset,
+                (window.offset.0 + x as f32, window.offset.1 + y as f32),
+                "{x},{y} {width}x{height}"
+            );
+        }
+        // Hidden behind another tab: zero-sized, and a zero scale collapses the
+        // geometry rather than dividing or falling back to the window.
+        let hidden = Fit::inside(Viewport {
+            x: 40,
+            y: 20,
+            width: 0,
+            height: 0,
+        });
+        assert_eq!(hidden.scale, 0.0);
+        assert_eq!(hidden.to_surface(320.0, 180.0), (40.0, 20.0));
     }
 
     /// A pointer in the letterbox is at the edge of the UI, not off it — and a

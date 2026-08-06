@@ -30,6 +30,7 @@
 //! and would have to move hit-testing back onto `place`.
 
 use crate::draw::{DrawList, Rect};
+use crate::layout::Fit;
 use crate::router::{Binding, Response, Router, Tick};
 use crate::{WidgetId, font};
 use gg_ecs::boundary::{CANVAS, Verbs, Widget, state, widget};
@@ -141,10 +142,13 @@ impl Ui {
 
     /// Run one tick of UI over `world` and return the geometry for it.
     ///
-    /// `target` is the surface in physical pixels; the canvas is fitted into it
-    /// with a uniform scale and centred, so a UI authored once is the same UI at
-    /// every window size.
-    pub fn frame(&mut self, world: &mut World, tick: &Tick, target: (u32, u32)) -> &[UiVertex] {
+    /// `fit` is where the canvas sits on the surface — the whole of it in a
+    /// plain run ([`Fit::new`]), the editor's game pane under one
+    /// ([`Fit::inside`]). It moves the *picture* and never the hit test: the
+    /// pointer is integrated in canvas units and the widgets are hit in canvas
+    /// units, so a recorded session replays identically wherever the picture
+    /// lands.
+    pub fn frame(&mut self, world: &mut World, tick: &Tick, fit: Fit) -> &[UiVertex] {
         let Ui {
             list,
             router,
@@ -168,7 +172,6 @@ impl Ui {
         });
 
         list.clear();
-        let fit = crate::layout::Fit::new(target);
         list.push_transform(fit.offset, fit.scale);
         let mut hit_tested = false;
         for index in order.iter() {
@@ -342,10 +345,13 @@ mod tests {
         let mut world = world();
         // Frame one declares; the router resolves against the previous frame's
         // geometry, so nothing can be hovered yet (§4.9's one frame of lag).
-        ui.frame(&mut world, &moved(50.0, 30.0), TARGET);
+        ui.frame(&mut world, &moved(50.0, 30.0), Fit::new(TARGET));
         assert_eq!(state_of(&world, OK), 0, "nothing was declared last frame");
 
-        assert!(!ui.frame(&mut world, &Tick::default(), TARGET).is_empty());
+        assert!(
+            !ui.frame(&mut world, &Tick::default(), Fit::new(TARGET))
+                .is_empty()
+        );
         assert_eq!(state_of(&world, OK), state::HOVERED);
         assert_eq!(state_of(&world, CANCEL), 0);
     }
@@ -363,8 +369,8 @@ mod tests {
             w.order = order;
             world.insert(entity, w).expect("insert");
         }
-        ui.frame(&mut world, &moved(50.0, 30.0), TARGET);
-        ui.frame(&mut world, &Tick::default(), TARGET);
+        ui.frame(&mut world, &moved(50.0, 30.0), Fit::new(TARGET));
+        ui.frame(&mut world, &Tick::default(), Fit::new(TARGET));
         assert_eq!(state_of(&world, CANCEL), state::HOVERED, "the last drawn");
         assert_eq!(state_of(&world, OK), 0);
     }
@@ -388,7 +394,7 @@ mod tests {
             ];
             let mut clicked = Vec::new();
             for tick in &ticks {
-                ui.frame(&mut world, tick, target);
+                ui.frame(&mut world, tick, Fit::new(target));
                 for id in [OK, CANCEL] {
                     if state_of(&world, id) & state::CLICKED != 0 {
                         clicked.push(id);
@@ -419,7 +425,10 @@ mod tests {
         let mut w = Widget::panel([0.0, 0.0, 100.0, 100.0], 0xffff_ffff);
         w.kind = 9999;
         world.insert(entity, w).expect("insert");
-        assert!(ui.frame(&mut world, &Tick::default(), TARGET).is_empty());
+        assert!(
+            ui.frame(&mut world, &Tick::default(), Fit::new(TARGET))
+                .is_empty()
+        );
     }
 
     /// A game with no UI at all gets no pointer drawn over its camera.
@@ -428,7 +437,10 @@ mod tests {
         let mut ui = Ui::new().expect("query");
         let mut world = World::new();
         world.register::<Widget>().expect("register");
-        assert!(ui.frame(&mut world, &Tick::default(), TARGET).is_empty());
+        assert!(
+            ui.frame(&mut world, &Tick::default(), Fit::new(TARGET))
+                .is_empty()
+        );
     }
 
     /// The cursor follows what can be *pointed at*, not what is declared. A HUD
@@ -447,7 +459,9 @@ mod tests {
                 Widget::label([4.0, 4.0, 60.0, 10.0], 0xffff_ffff, "hp"),
             )
             .expect("insert");
-        let text = ui.frame(&mut world, &Tick::default(), TARGET).len();
+        let text = ui
+            .frame(&mut world, &Tick::default(), Fit::new(TARGET))
+            .len();
         assert!(text > 0, "the label drew nothing");
 
         let button = world.spawn();
@@ -457,7 +471,9 @@ mod tests {
                 Widget::button(WidgetId::new("ok").get(), [0.0; 4], 0, 0, ""),
             )
             .expect("insert");
-        let with_button = ui.frame(&mut world, &Tick::default(), TARGET).len();
+        let with_button = ui
+            .frame(&mut world, &Tick::default(), Fit::new(TARGET))
+            .len();
         assert_eq!(
             with_button - text,
             CURSOR_ONLY,
@@ -500,11 +516,11 @@ mod tests {
         let mut ui = Ui::new().expect("query");
         let mut world = world();
         for _ in 0..8 {
-            ui.frame(&mut world, &moved(1.0, 1.0), TARGET);
+            ui.frame(&mut world, &moved(1.0, 1.0), Fit::new(TARGET));
         }
         let sizes = (ui.widgets.capacity(), ui.order.capacity());
         for _ in 0..64 {
-            ui.frame(&mut world, &moved(1.0, 1.0), TARGET);
+            ui.frame(&mut world, &moved(1.0, 1.0), Fit::new(TARGET));
         }
         assert_eq!((ui.widgets.capacity(), ui.order.capacity()), sizes);
     }

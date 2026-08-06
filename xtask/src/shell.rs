@@ -2796,14 +2796,21 @@ fn play_mode() -> anyhow::Result<()> {
 /// set — which is what makes this the half of the gate a hash comparison cannot
 /// be: two runs that both clicked on nothing agree perfectly.
 const EDITOR_LOG: &[&str] = &[
-    "editor: play state",       // the title bar paused a running game
+    // §6 M15.2 post-close: the editor opens Stopped, so the *open* is the first
+    // stop — the camera latch fires at tick 0, before anything is clicked —
+    // and play is a click: the capture line and the transport line together,
+    // because the first is the Stash's own edge and the second is the operator
+    // reaching it.
+    "editor: camera taken", // item 2: the stopped scene is the operator's to look at
+    "play mode entered",
+    "editor: play state",       // the title bar started the stopped scene
+    "editor: play state",       // then paused the running game
     "component=\"demo05.hub\"", // the inspector reached a *game's* own component
     "field=\"angle\"",          // by name, out of a schema this host never compiled
     "editor: play state",       // and played it again
     "editor: play state",       // and paused it again
     "save written",             // `file` → `save`, not the shell's exit path
     "play mode stopped",        // §6 M15.2: and left play mode, restoring the capture
-    "editor: camera taken",     // item 2: the stopped scene is the operator's to look at
     // §6 M15.4, in the order the script performs them. The pick is only
     // blind-aimable because the spawn precedes it: a spawned entity lands down
     // the camera's own forward axis and so projects to the centre of the game
@@ -2920,15 +2927,27 @@ fn editor() -> anyhow::Result<()> {
             "[{label}] the inspector applied {nudges} edits, not {EDITOR_NUDGES}:\n{log}"
         );
 
-        // The editor opens *playing*, so the play edge is the first tick and
-        // nothing clicked it — which is exactly the edge that had no world
-        // behind it until §6 M15.2's `advance` learned about its own first
-        // tick. Ahead of the pair below because both are true of an empty
-        // capture.
+        // The editor opens *Stopped* one tick in (§6 M15.2 post-close), so the
+        // play edge is the script's first click and the capture behind it is
+        // the bootstrapped world. Both halves asserted: entities prove the
+        // bootstrap tick ran before the freeze, and the tick proves nobody
+        // auto-entered play — which is what "opens Stopped" looks like in a
+        // log.
         anyhow::ensure!(
             captured_entities(&log)? > 0,
-            "[{label}] the editor's play edge captured an empty world — the first tick ran no \
-             systems, so a stop hands back a scene the game never bootstrapped:\n{log}"
+            "[{label}] the editor's play edge captured an empty world — the bootstrap tick ran no \
+             systems, so a stop hands back a scene the game never made:\n{log}"
+        );
+        let entered = log
+            .lines()
+            .find(|l| l.contains("play mode entered"))
+            .map(|l| crate::util::field_u64(l, "tick"))
+            .transpose()?
+            .unwrap_or(0);
+        anyhow::ensure!(
+            entered > 1,
+            "[{label}] play mode entered at tick {entered} — the editor entered play by itself \
+             instead of opening Stopped and waiting for the transport (§6 M15.2 post-close):\n{log}"
         );
 
         // §6 M15.2 item 3, and it is M14's comparison pointed at a button: the
@@ -3037,12 +3056,60 @@ fn editor() -> anyhow::Result<()> {
             anyhow::bail!("§6 M15: {found}");
         }
     }
+
+    // §6 M15.2 post-close: the opening scene. The save the dev run's `file` →
+    // `save` wrote is a world as *data* — staged as `scene.ggsave` beside a
+    // copy of the action map, a live session opens from it: the probe names
+    // it, the load restores it, and nothing enters play, because nobody
+    // clicked. The constant hash is the sharpest half — a world no game tick
+    // has touched emits one value for the whole run.
+    let project = save_dir()?.join("opening-scene");
+    std::fs::create_dir_all(&project)?;
+    std::fs::copy(
+        workspace_root().join("demos/05-many/input.toml"),
+        project.join("input.toml"),
+    )?;
+    std::fs::copy(
+        save_dir()?.join("editor-dev.ggsv"),
+        project.join("scene.ggsave"),
+    )?;
+    let scene = play(
+        &host,
+        &game,
+        &[
+            "--input",
+            &project.join("input.toml").display().to_string(),
+            "--editor",
+            "--frames",
+            "40",
+        ],
+        true,
+    )?;
+    anyhow::ensure!(
+        scene.contains("opening scene") && scene.contains("save loaded"),
+        "§6 M15.2 post-close: a live editor session beside a `scene.ggsave` did not open from it \
+         — the probe is the convention, and a scene that must be named with `--load` is not \
+         one:\n{scene}"
+    );
+    anyhow::ensure!(
+        !scene.contains("play mode entered"),
+        "§6 M15.2 post-close: a session opened from a scene entered play with nobody clicking — \
+         load *paused* is the point of the data:\n{scene}"
+    );
+    let frozen = sequence(&scene)?;
+    anyhow::ensure!(
+        frozen.windows(2).all(|pair| pair[0].1 == pair[1].1),
+        "§6 M15.2 post-close: the canonical hash moved in a session that never left Stopped — a \
+         game tick ran over the loaded scene before the operator asked for one:\n{scene}"
+    );
+
     println!(
         "xtask reload: the recorded editor session replayed over demo 05 under dev and \
          instrumented and again under dev — {EDITOR_NUDGES} inspector edits inside the paused \
          window, identical hashes over {} of {total} ticks, and one {}-byte world out of the \
-         title bar's `file` menu (§6 M15); and a {}x{} session replayed headlessly under --editor-extent \
-         and only under it (§6 M15.1)",
+         title bar's `file` menu (§6 M15); a {}x{} session replayed headlessly under --editor-extent \
+         and only under it (§6 M15.1); and the same save reopened as `scene.ggsave` — Stopped at \
+         its own tick, hash frozen over 40 ticks, no play edge in the log (§6 M15.2 post-close)",
         runs[0].1.len(),
         worlds[0].2.len(),
         WINDOWED_EXTENT.0,

@@ -38,7 +38,7 @@ pub const gg_ui::boundary::verb::X: &str
 pub const gg_ui::boundary::verb::Y: &str
 pub struct gg_ui::boundary::Ui
 impl gg_ui::boundary::Ui
-pub fn gg_ui::boundary::Ui::frame(&mut self, &mut gg_ecs::world::World, &gg_ui::router::Tick, (u32, u32)) -> &[gg_render::ui::UiVertex]
+pub fn gg_ui::boundary::Ui::frame(&mut self, &mut gg_ecs::world::World, &gg_ui::router::Tick, gg_ui::layout::Fit) -> &[gg_render::ui::UiVertex]
 pub fn gg_ui::boundary::Ui::new() -> core::result::Result<gg_ui::boundary::Ui, gg_ecs::view::AliasError>
 pub fn gg_ui::boundary::Ui::pointer(&self) -> (f32, f32)
 pub fn gg_ui::boundary::Ui::vertices(&self) -> &[gg_render::ui::UiVertex]
@@ -157,6 +157,7 @@ pub gg_ui::layout::Fit::offset: (f32, f32)
 pub gg_ui::layout::Fit::scale: f32
 impl gg_ui::layout::Fit
 pub fn gg_ui::layout::Fit::fill((u32, u32), f32) -> gg_ui::layout::Fit
+pub fn gg_ui::layout::Fit::inside(gg_rhi::graph::Viewport) -> gg_ui::layout::Fit
 pub fn gg_ui::layout::Fit::new((u32, u32)) -> gg_ui::layout::Fit
 pub fn gg_ui::layout::Fit::steer(&self, (i32, i32), f32, f32) -> (i32, i32)
 pub fn gg_ui::layout::Fit::to_canvas(&self, f32, f32) -> (f32, f32)
@@ -320,6 +321,7 @@ pub gg_ui::Fit::offset: (f32, f32)
 pub gg_ui::Fit::scale: f32
 impl gg_ui::layout::Fit
 pub fn gg_ui::layout::Fit::fill((u32, u32), f32) -> gg_ui::layout::Fit
+pub fn gg_ui::layout::Fit::inside(gg_rhi::graph::Viewport) -> gg_ui::layout::Fit
 pub fn gg_ui::layout::Fit::new((u32, u32)) -> gg_ui::layout::Fit
 pub fn gg_ui::layout::Fit::steer(&self, (i32, i32), f32, f32) -> (i32, i32)
 pub fn gg_ui::layout::Fit::to_canvas(&self, f32, f32) -> (f32, f32)
@@ -407,7 +409,7 @@ pub fn gg_ui::layout::Stack::rewind(&mut self)
 pub fn gg_ui::layout::Stack::vertical((f32, f32), f32) -> Self
 pub struct gg_ui::Ui
 impl gg_ui::boundary::Ui
-pub fn gg_ui::boundary::Ui::frame(&mut self, &mut gg_ecs::world::World, &gg_ui::router::Tick, (u32, u32)) -> &[gg_render::ui::UiVertex]
+pub fn gg_ui::boundary::Ui::frame(&mut self, &mut gg_ecs::world::World, &gg_ui::router::Tick, gg_ui::layout::Fit) -> &[gg_render::ui::UiVertex]
 pub fn gg_ui::boundary::Ui::new() -> core::result::Result<gg_ui::boundary::Ui, gg_ecs::view::AliasError>
 pub fn gg_ui::boundary::Ui::pointer(&self) -> (f32, f32)
 pub fn gg_ui::boundary::Ui::vertices(&self) -> &[gg_render::ui::UiVertex]

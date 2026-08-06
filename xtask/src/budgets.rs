@@ -105,7 +105,17 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 /// step before any state moves). Nine lines after both extractions; raised by
 /// ten rather than golfed to exactly 1300, because a zero-headroom budget stops
 /// being a tripwire and starts being a coin flip on the next comment reflow.
-const SHELL_BUDGET: usize = 1310;
+///
+/// 1310 → 1335 at the §6 M15.2 post-close pair, and both additions are branch
+/// points by the same test. The widget-path viewport fit is `game_fit`: *which*
+/// `Fit` the game's UI composes under is decided by whether an editor exists,
+/// which is shell state — the arithmetic went to `gg_ui::Fit::inside`. The
+/// editor opening Stopped over a preloaded scene is `opening_scene` plus the
+/// `opened`/`paused` construction: *when* the probe applies (live sessions
+/// only, `--load` first) is the shell's ordering rule — *where* a scene lives
+/// went to `gg_editor::persist::scene_path`. Fifteen lines after those
+/// extractions; ten of headroom on top, for the tripwire reason above.
+const SHELL_BUDGET: usize = 1335;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

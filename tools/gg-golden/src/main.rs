@@ -1468,7 +1468,11 @@ fn render_tetris() -> Render {
 
     let mut ui = gg_ui::boundary::Ui::new()?;
     let vertices = ui
-        .frame(&mut world, &gg_ui::router::Tick::default(), CANVAS)
+        .frame(
+            &mut world,
+            &gg_ui::router::Tick::default(),
+            gg_ui::Fit::new(CANVAS),
+        )
         .to_vec();
     render_ui_at(CANVAS, &gg_ui::atlas::fallback(), &vertices)
 }

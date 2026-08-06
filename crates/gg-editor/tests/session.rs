@@ -110,14 +110,14 @@ fn run(target: (u32, u32), input: &[InputFrame]) -> Run {
     let mut editor = Editor::new(None);
     let (mut playing, mut steps, mut saves) = (Vec::new(), 0, 0);
     let (mut stops, mut before_stop) = (Vec::new(), None);
-    // The editor opens playing, so the capture is taken at the first tick and
-    // not at a button — `App::editor_tick`'s `opened` branch. Taken *before* the
-    // loop rather than inside it because this harness runs no systems: there is
-    // nothing the first tick could add, so the shell's rule that the first tick
-    // advances with nothing captured has no analogue here and is gated in
-    // `xtask reload --editor` instead, over a game that bootstraps.
-    let mut stash = Some(world.snapshot().encode());
-    let mut paused = false;
+    // The editor opens *Stopped* one tick in (§6 M15.2 post-close): nothing
+    // captured, and the capture waits for the script's first click on the
+    // transport. This harness runs no systems, so `world()` above stands in
+    // for the bootstrap tick's work; the shell's rule that the bootstrap tick
+    // advances with nothing captured is gated in `xtask reload --editor`, over
+    // a game that bootstraps.
+    let mut stash = None;
+    let mut paused = true;
     for (tick, frame) in input.iter().enumerate() {
         let ui = Tick {
             motion: (frame.axes[X.index()], frame.axes[Y.index()]),
@@ -217,7 +217,11 @@ fn the_scripted_session_edits_what_it_selected_and_asks_for_the_rest() {
         Some(sim::DVec3::new(8.0, 1.0, -30.0)),
         "four at 1.0, then +10 and -10 at the coarse step"
     );
-    assert_eq!(run.playing, vec![false, true, false], "pause, play, pause");
+    assert_eq!(
+        run.playing,
+        vec![true, false, true, false],
+        "play out of the Stopped open, pause, play, pause"
+    );
     assert_eq!(run.steps, 2, "two single ticks while paused");
     assert_eq!(run.saves, 1);
     // Six nudges, then §6 M15.4's spawn, duplicate, delete and undo.
@@ -254,13 +258,10 @@ fn a_stop_discards_what_play_did_and_lands_byte_for_byte_on_the_capture() {
 #[test]
 fn an_edit_made_while_stopped_survives_the_next_play_and_stop() {
     let editor = placed(TARGET);
-    let mut acts = vec![
-        // Out of the play mode the editor opened in.
-        Act::To(aim::stop(&editor)),
-        Act::Settle(3),
-        Act::Click,
-    ];
-    // Select row 1 and its first lane, then nudge once at the default step.
+    // The editor opens Stopped (§6 M15.2 post-close), which is exactly the
+    // state this test needs first — so it starts editing straight away: select
+    // row 1 and its first lane, then nudge once at the default step.
+    let mut acts = Vec::new();
     for at in [
         aim::tree_row(&editor, 1),
         aim::lane(&editor, 1, 0),
@@ -280,14 +281,14 @@ fn an_edit_made_while_stopped_survives_the_next_play_and_stop() {
         Act::Settle(5),
     ]);
     let run = run(TARGET, &frames(&acts, CLICK, X, Y));
-    assert_eq!(run.stops.len(), 2, "one out of the opening play, one back");
+    assert_eq!(run.stops.len(), 1, "the one stop after the play");
     // 4.0 + one nudge at the default step of 1.0, and it is still there after a
     // play captured it and a stop restored what it captured.
     assert_eq!(position(&run), sim::DVec3::new(5.0, 1.0, -30.0));
     assert_eq!(
-        run.stops[1],
+        run.stops[0],
         (false, true),
-        "nothing moved during that play, so the second stop changed nothing"
+        "nothing moved during that play, so the stop changed nothing"
     );
 }
 

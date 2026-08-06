@@ -93,6 +93,22 @@ pub struct Args {
     pub pack: Option<PathBuf>,
 }
 
+/// The save an editor session opens from (§6 M15.2 post-close), found rather
+/// than named — `gg_editor::persist::scene_path` says where, this says *when*:
+/// live editor sessions only. The probe is implicit, so a recorded or replayed
+/// session refuses it — a scene appearing beside the project later must not
+/// diverge a stream blessed without one — and `--load` stays the explicit
+/// spelling that works everywhere, taking precedence so the two cannot both
+/// load. A plain run loads nothing it was not told to.
+#[cfg(feature = "editor")]
+pub(crate) fn opening_scene(args: &Args) -> Option<PathBuf> {
+    let live = args.record.is_none() && args.replay.is_none() && args.load.is_none();
+    (args.editor && live)
+        .then(|| gg_editor::persist::scene_path(args.input.as_deref()))
+        .flatten()
+        .filter(|scene| scene.is_file())
+}
+
 /// One spelling of the handoff flag: [`Args`] parses it and
 /// [`gg_core::reload::rejuvenate::restart`] passes it on, and a drift between
 /// the two would make a twice-rejuvenated session accumulate argv.
@@ -189,6 +205,13 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     // resuming. A run given both continues into the saved one.
     if let Some(path) = &args.load {
         app.load_save(path)?;
+    }
+    // The project's opening scene (§6 M15.2 post-close): the world as data, so
+    // the editor opens Stopped at the save's tick with no game code run.
+    #[cfg(feature = "editor")]
+    if let Some(scene) = opening_scene(args) {
+        info!(scene = %scene.display(), "opening scene");
+        app.load_save(&scene)?;
     }
 
     // Headless is windowless, not invisible-windowed: §1.5 forbids an automated

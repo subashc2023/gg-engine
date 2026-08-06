@@ -30,8 +30,8 @@ use std::cell::Cell;
 
 use gg_ecs::World;
 use gg_ecs::boundary::{Widget, widget_id};
-use gg_ui::Ui;
 use gg_ui::router::{AXIS_SCALE, Tick};
+use gg_ui::{Fit, Ui};
 
 thread_local! {
     /// Allocation calls made **by this thread**.
@@ -149,13 +149,13 @@ fn a_settled_widget_frame_allocates_nothing_of_its_own() {
 
     let cold = calls();
     for tick in 0..512 {
-        ui.frame(&mut world, &tick_of(tick), EXTENT);
+        ui.frame(&mut world, &tick_of(tick), Fit::new(EXTENT));
     }
     let vertices = ui.vertices().len();
 
     let before = calls();
     for tick in 512..512 + MEASURED {
-        ui.frame(&mut world, &tick_of(tick), EXTENT);
+        ui.frame(&mut world, &tick_of(tick), Fit::new(EXTENT));
     }
     let allocations = calls() - before;
 

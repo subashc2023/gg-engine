@@ -298,15 +298,22 @@ pub mod aim {
 /// own layout depends on the OS answering (§6 M15.1's Exit row — window drag,
 /// resize and maximize appear nowhere in a replay).
 ///
-/// It starts by *pausing*, which is not an accident of taste: the editor opens
-/// on a running game because a paused one never runs its bootstrap system and
-/// an editor over an empty world would inspect nothing.
+/// It starts by *playing, then pausing* — two clicks on the same button. The
+/// editor opens Stopped one tick in (§6 M15.2 post-close), so the first click
+/// is the play edge the old editor took by itself, and the second puts the
+/// session in the paused window the six nudges land in.
 ///
 /// `editor` must already be [`Editor::place`]d at the extent the session will
 /// run at.
 #[must_use]
 pub fn script(editor: &Editor) -> Vec<Act> {
-    let mut acts = vec![Act::To(aim::play(editor)), Act::Settle(3), Act::Click];
+    let mut acts = vec![
+        Act::To(aim::play(editor)),
+        Act::Settle(3),
+        Act::Click,
+        Act::Settle(3),
+        Act::Click,
+    ];
     // Tree rows are archetype order, not spawn order (see `crate::scan`), so
     // which entity row 1 holds is a property of the world and not of the
     // script. What the script needs is only that it holds *something* — the
@@ -431,8 +438,9 @@ pub struct AgentScript {
     pub ask: Vec<Act>,
     /// Where `ask` leaves the pointer.
     pub send: (f32, f32),
-    /// Into the running viewport: the click that hands the game the pointer,
-    /// after which the caller's held game verbs are §1's play.
+    /// The transport's play — the editor opens Stopped (§6 M15.2 post-close),
+    /// and only a *running* viewport hands the pointer over — then the click
+    /// into it, after which the caller's held game verbs are §1's play.
     pub play: Vec<Act>,
 }
 
@@ -466,7 +474,14 @@ pub fn agent_script(editor: &Editor) -> Option<AgentScript> {
             Act::Settle(20),
         ],
         send,
-        play: vec![Act::To(viewport), Act::Settle(4), Act::Click],
+        play: vec![
+            Act::To(aim::play(editor)),
+            Act::Settle(3),
+            Act::Click,
+            Act::To(viewport),
+            Act::Settle(4),
+            Act::Click,
+        ],
     })
 }
 
@@ -703,9 +718,11 @@ mod tests {
         }
     }
 
-    /// The click count is the gate's contract: three play/pause presses, one
-    /// tree row, one lane, six nudges, one grain, two single steps, three tabs
-    /// and one save — plus §6 M15.1's two drags, which are not clicks.
+    /// The click count is the gate's contract: four play/pause presses (the
+    /// first starts the Stopped scene the editor opens into, §6 M15.2
+    /// post-close), one tree row, one lane, six nudges, one grain, two single
+    /// steps, three tabs and one save — plus §6 M15.1's two drags, which are
+    /// not clicks.
     #[test]
     fn the_script_clicks_what_the_gate_expects() {
         let editor = placed();
@@ -714,7 +731,7 @@ mod tests {
         // The save is two: the `file` title, then the item under it. The single
         // one after it is §6 M15.2's stop, and the last group is §6 M15.4's
         // spawn, pick, duplicate, delete and two-click undo.
-        assert_eq!(clicks, 3 + 1 + 1 + 6 + 1 + 2 + 3 + 2 + 1 + 4 + 2);
+        assert_eq!(clicks, 4 + 1 + 1 + 6 + 1 + 2 + 3 + 2 + 1 + 4 + 2);
         let drags = acts.iter().filter(|a| matches!(a, Act::Drag(_))).count();
         assert_eq!(drags, 2, "a seam and a re-dock");
     }
@@ -745,8 +762,8 @@ mod tests {
         assert_eq!(clicks(&script.ask), 1, "send");
         assert_eq!(
             clicks(&script.play),
-            1,
-            "the viewport press that hands over"
+            2,
+            "the transport's play, then the viewport press that hands over"
         );
     }
 
