@@ -19,5 +19,12 @@ rotate_cw = ["E"]
 rotate_ccw = ["Q"]
 hold = ["Space"]
 restart = ["R"]
+pause = ["P"]
+ui_click = ["Mouse1"]
+ui_focus = ["Tab"]
 
+# The steered pointer (§4.9, §6 M19): the menus are clicked with the arrow the
+# operator sees, so these are `PointerX`/`PointerY` — never raw `MouseX` counts.
 [game.axes]
+ui_x = ["PointerX"]
+ui_y = ["PointerY"]

@@ -466,15 +466,21 @@ impl Window {
         self.inner.scale_factor() as f32
     }
 
-    /// Hold the pointer and hide it — what mouse-look needs to be usable.
+    /// Hold the pointer, and say whether the arrow draws at all.
     ///
-    /// [`Event::MouseMotion`] is raw device motion and arrives with or without
-    /// this; what it buys is the pointer not leaving the window, which is the
-    /// difference between aiming and losing focus mid-turn. Best effort by
-    /// design: `Locked` is the Wayland/macOS mode and `Confined` the Windows/X11
-    /// one, no platform has both, and a refusal is a worse pointer rather than a
-    /// broken run.
-    pub fn set_pointer_held(&self, held: bool) {
+    /// `held` is what mouse-look needs to be usable: [`Event::MouseMotion`] is
+    /// raw device motion and arrives with or without this; what it buys is the
+    /// pointer not leaving the window, which is the difference between aiming
+    /// and losing focus mid-turn. Best effort by design: `Locked` is the
+    /// Wayland/macOS mode and `Confined` the Windows/X11 one, no platform has
+    /// both, and a refusal is a worse pointer rather than a broken run.
+    ///
+    /// `hidden` is the software-cursor case — a UI drawing its own arrow at the
+    /// steered pointer (§4.9) — where the OS arrow must go away *without* a
+    /// grab: the position keeps flowing through [`Event::CursorMoved`], which is
+    /// exactly what the steer reads. A held pointer is hidden regardless; only
+    /// applied over the window, which is the OS's rule and the right one.
+    pub fn set_pointer(&self, held: bool, hidden: bool) {
         use winit::window::CursorGrabMode;
         let mode = if held {
             CursorGrabMode::Locked
@@ -484,7 +490,7 @@ impl Window {
         if self.inner.set_cursor_grab(mode).is_err() && held {
             let _ = self.inner.set_cursor_grab(CursorGrabMode::Confined);
         }
-        self.inner.set_cursor_visible(!held);
+        self.inner.set_cursor_visible(!(held || hidden));
     }
 }
 

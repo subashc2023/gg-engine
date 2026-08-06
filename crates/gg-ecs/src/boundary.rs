@@ -35,6 +35,7 @@ mod game;
 mod host;
 mod load;
 mod macros;
+mod prefs;
 mod present;
 mod scene;
 mod ui;
@@ -44,6 +45,7 @@ pub use declare::{Table, assert_protocol_matches_raw, entry, init, layout_of, ru
 pub use game::{Access, BoundaryData, BoundaryError, Columns, GameWorld};
 pub use host::{SystemZone, host_api, set_logger, set_system_zone};
 pub use load::{SystemPanic, Verbs, read_verbs, same_schemas};
+pub use prefs::{Prefs, QUIET_MAX, cursor};
 pub use present::{Eye, Light, Model, Renderable, light};
 pub use scene::Node;
 pub use ui::{CANVAS, TEXT, Widget, state, widget, widget_id};

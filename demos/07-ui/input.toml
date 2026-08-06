@@ -10,6 +10,11 @@
 ui_click = ["Mouse1"]
 ui_focus = ["Tab"]
 
+# `PointerX`, not `MouseX`: the pointer verbs carry the *steered* cursor — the
+# shell differencing the OS arrow into canvas units (`Fit::steer`, §6 M15.1) —
+# so the arrow the operator sees and the arrow gg-ui draws are the same pixel
+# at any window size and any monitor scale. `MouseX` is raw device counts and
+# is what a camera binds, not a pointer.
 [game.axes]
-ui_x = ["MouseX"]
-ui_y = ["MouseY"]
+ui_x = ["PointerX"]
+ui_y = ["PointerY"]

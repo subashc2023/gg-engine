@@ -446,7 +446,16 @@ static SCALE: gg_core::cvar::CVar = gg_core::cvar::CVar::new_int(
 pub fn ui_scale(extent: (u32, u32), dpi: f32) -> f32 {
     match SCALE.int() {
         0 => {
-            let want = (dpi.max(0.0) * PER_DPI).round();
+            // Halves round *down*: 125% desktop scale asks for 2.5, and 3 is a
+            // UI 20% larger than the desktop asked for while 2 is the 100% look
+            // the operator already reads — oversize is the complaint, undersize
+            // is the status quo (§6 M19).
+            let want = dpi.max(0.0) * PER_DPI;
+            let want = if want.fract() == 0.5 {
+                want.floor()
+            } else {
+                want.round()
+            };
             // Whole scales only, so this is a floor division: at 1279 across,
             // scale 2 would leave 639 units and the panes would be a column
             // short of what every layout here is written for.
@@ -939,8 +948,13 @@ impl Editor {
         self.drag(tick);
 
         if frame.draw_cursor {
+            // Not a fallback for a missing OS cursor so much as the definition:
+            // this position is an integral of the replayed axis stream and
+            // exists whether or not a mouse does. A windowed host steers the
+            // two into agreement instead (§6 M15.1), which is why
+            // `Frame::draw_cursor` is false there.
             let at = self.router.pointer().position();
-            cursor(&mut self.list, at);
+            gg_ui::draw::cursor(&mut self.list, at);
         }
         self.list.pop_transform();
         // Whatever this tick had to rasterize — a status line the warm-up did
@@ -1652,23 +1666,6 @@ fn walk_panes(node: &Node, on: &mut impl FnMut(PaneId)) {
     }
 }
 
-/// The pointer, for a frame with no OS cursor to borrow — a golden render, or a
-/// replay driving a host that never opened a window.
-///
-/// It is not a fallback for a missing system cursor so much as the *definition*:
-/// this position is an integral of the replayed axis stream and exists whether
-/// or not a mouse does. What a windowed host does instead (§6 M15.1) is steer
-/// the two into agreement and let the OS draw its own, which is why
-/// [`Frame::draw_cursor`] is false there.
-fn cursor(list: &mut DrawList, at: (f32, f32)) {
-    for (color, grow) in [(0xd004_0608u32, 1.0), (0xffff_ffff, 0.0)] {
-        for row in 0..9u32 {
-            let i = f32::from(row as u16);
-            list.rect(Rect::new(at.0, at.1 + i, i + 1.0, 1.0).inset(-grow), color);
-        }
-    }
-}
-
 /// Truncate to `chars` glyphs on a character boundary — every panel here is
 /// narrower than the names it shows.
 pub(crate) fn fit_text(text: &str, chars: usize) -> &str {
@@ -2272,6 +2269,13 @@ mod tests {
         assert_eq!(ui_scale((3840, 2160), 1.0), 2.0, "M15.1 answered 4 here");
         assert_eq!(ui_scale((3840, 2160), 1.5), 3.0);
         assert_eq!(ui_scale((3840, 2160), 2.0), 4.0);
+        // Halves round down (§6 M19): 125% asks for 2.5, and the answer is the
+        // 100% look rather than a UI 20% larger than the desktop asked for.
+        // 175% asks for 3.5 and gets 3, same rule; 130% is past the half and
+        // rounds up as ever.
+        assert_eq!(ui_scale((1920, 1080), 1.25), 2.0, "2.5 rounded to 3 before");
+        assert_eq!(ui_scale((3840, 2160), 1.75), 3.0);
+        assert_eq!(ui_scale((3840, 2160), 1.3), 3.0);
         assert_eq!(fit((3840, 2160), 1.0).canvas, (1920, 1080));
         // The window is a cap and never a floor: a small window on a dense
         // monitor still leaves `MIN` units to lay panes out in.

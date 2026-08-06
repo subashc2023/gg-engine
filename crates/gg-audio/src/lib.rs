@@ -35,7 +35,7 @@
 mod device;
 pub mod synth;
 
-use gg_ecs::boundary::Sound;
+use gg_ecs::boundary::{Prefs, Sound};
 use gg_ecs::{AliasError, Entity, Query, World};
 use tracing::{debug, warn};
 
@@ -73,6 +73,11 @@ fn enforce_headless_law() {
 /// so a device cannot outlive the loop that owns it.
 pub struct Audio {
     query: Query<&'static Sound>,
+    /// The player's master volume (§6 M19). Read off the world's [`Prefs`]
+    /// each tick and applied to the trigger, not the mixer: a note keeps the
+    /// volume it started at, and there is no second channel into the audio
+    /// thread to race.
+    prefs: Query<&'static Prefs>,
     /// `(entity bits, last seq)`, sorted by the first — a handful of entries,
     /// looked up by binary search. Not an `IndexMap`: this is host state that
     /// never reaches the hash, and a sorted `Vec` needs no dependency.
@@ -96,6 +101,7 @@ impl Audio {
     pub fn silent() -> Result<Audio, AliasError> {
         Ok(Audio {
             query: Query::new()?,
+            prefs: Query::new()?,
             seen: Vec::new(),
             next: Vec::new(),
             fired: Vec::new(),
@@ -168,11 +174,22 @@ impl Audio {
     pub fn tick(&mut self, world: &World) {
         let Audio {
             query,
+            prefs,
             seen,
             next,
             fired,
             out,
         } = self;
+        // The first `Prefs` walked, `Prefs`' documented rule; a world that
+        // declares none plays at full volume, which is the zeroed default.
+        let mut volume = 1.0f32;
+        let mut found = false;
+        world.each_ref(prefs, |_, p: &Prefs| {
+            if !found {
+                volume = p.volume();
+                found = true;
+            }
+        });
         fired.clear();
         next.clear();
         world.each_ref(query, |entity: Entity, sound: &Sound| {
@@ -187,13 +204,18 @@ impl Audio {
                 return;
             };
             if seen[at].1 != sound.seq {
+                // Master volume lands in the trigger's own gain (§6 M19): what
+                // `fired` reports is what will sound, so a demo's "the cue is
+                // half as loud at half volume" is an ordinary assertion.
+                let mut sound = *sound;
+                sound.gain *= volume;
                 fired.push(Trigger {
                     // The entity's slot index, so one entity is one voice for as
                     // long as it lives. Two entities colliding modulo the bank
                     // cut each other off, which is a bank that is too small
                     // rather than a correctness problem.
                     slot: entity.index() as usize % VOICES,
-                    sound: *sound,
+                    sound,
                 });
             }
         });
@@ -342,6 +364,36 @@ mod tests {
             audio.fired().is_empty(),
             "a reload replayed the game's last note"
         );
+    }
+
+    /// §6 M19's master volume: the world's `Prefs` scales every trigger's gain,
+    /// half volume is half gain, and a world declaring none is full volume —
+    /// the zeroed default, which is what a migration writes.
+    #[test]
+    fn the_worlds_prefs_scale_what_fires() {
+        use gg_ecs::boundary::{Prefs, QUIET_MAX, cursor};
+
+        let (mut world, entities) = world_with(1);
+        let mut audio = Audio::silent().unwrap();
+        audio.tick(&world);
+        bump(&mut world, entities[0]);
+        audio.tick(&world);
+        assert_eq!(audio.fired()[0].sound.gain, 0.5, "no Prefs is full volume");
+
+        world.register::<Prefs>().unwrap();
+        let prefs = world.spawn();
+        world
+            .insert(
+                prefs,
+                Prefs {
+                    cursor: cursor::SOFTWARE,
+                    quiet: QUIET_MAX / 2,
+                },
+            )
+            .unwrap();
+        bump(&mut world, entities[0]);
+        audio.tick(&world);
+        assert_eq!(audio.fired()[0].sound.gain, 0.25, "half of the game's 0.5");
     }
 
     /// A despawned entity leaves the table on its own — the walk rebuilds it,

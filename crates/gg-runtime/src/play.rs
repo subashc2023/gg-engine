@@ -24,9 +24,10 @@ pub fn play(app: &mut App, title: &str, target: Option<u64>) -> anyhow::Result<u
     let mut frames = FrameLoop::default().resuming_at(app.next_tick());
     let mut last = Instant::now();
     let mut failure: Option<anyhow::Error> = None;
-    // What the window was last told, so the grab is a syscall on a change and
-    // not sixty a second. Starts unset: the first frame always states it.
-    let mut pointer_held: Option<bool> = None;
+    // What the window was last told — held, and OS arrow hidden — so the grab
+    // is a syscall on a change and not sixty a second. Starts unset: the first
+    // frame always states it.
+    let mut pointer_state: Option<(bool, bool)> = None;
     // The same, for the resize border's arrows (§6 M15.1 item 5).
     #[cfg(feature = "editor")]
     let mut cursor_shape: Option<gg_platform::CursorShape> = None;
@@ -166,11 +167,12 @@ pub fn play(app: &mut App, title: &str, target: Option<u64>) -> anyhow::Result<u
                     }
                 }
                 // Applied here rather than at the edge that changed it: the
-                // decision is a sim tick's (a press in the viewport) and the
-                // window is only reachable from this closure.
-                if pointer_held != Some(app.pointer_held()) {
-                    pointer_held = Some(app.pointer_held());
-                    window.set_pointer_held(app.pointer_held());
+                // decision is a sim tick's (a press in the viewport, a UI that
+                // drew its own arrow) and the window is only reachable from
+                // this closure.
+                if pointer_state != Some(app.pointer()) {
+                    pointer_state = Some(app.pointer());
+                    window.set_pointer(app.pointer().0, app.pointer().1);
                 }
                 let now = Instant::now();
                 let elapsed = now.duration_since(last);

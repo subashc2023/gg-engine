@@ -245,9 +245,10 @@ pub fn bless(commit: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Demo 10's verbs, in the id order `gg_game!` declares them (§4.7). No axes:
-/// Tetris is eight buttons, and a replay with an axis list the game does not
-/// have is refused at load by name.
+/// Demo 10's verbs, in the id order `gg_game!` declares them (§4.7). The axis
+/// list stays empty on purpose: the recorded sessions are keyboard games, the
+/// game's `ui_x`/`ui_y` are *appended* verbs — which `check_verbs` accepts —
+/// and a stream with no axis slots encodes no dead zeroes per frame.
 const TETRIS_ACTIONS: &[&str] = &[
     "left",
     "right",
@@ -257,6 +258,9 @@ const TETRIS_ACTIONS: &[&str] = &[
     "rotate_ccw",
     "hold",
     "restart",
+    "pause",
+    "ui_click",
+    "ui_focus",
 ];
 
 /// The recorded full game as a replay file — `demo_10_tetris::session`'s frames,
@@ -2124,14 +2128,14 @@ const RULES_SWAPS: [u64; 3] = [1_200, 2_000, 2_800];
 fn with_a_wider_record(source: &str) -> anyhow::Result<String> {
     let edits = [
         (
-            "    /// Points, over every game this world has played.\n    pub score: u32,\n}",
+            "    /// Points, over every game this world has played.\n    pub score: u32,\n",
             "    /// Points, over every game this world has played.\n    pub score: u32,\n    \
              /// Added by the save gate: a field the saved world never had, so\n    /// loading it \
-             is a migration rather than a copy (§4.5).\n    pub lines: u32,\n}",
+             is a migration rather than a copy (§4.5).\n    pub lines: u32,\n",
         ),
         (
-            "    world.put(board, Best { score: 0 });",
-            "    world.put(board, Best { score: 0, lines: 0 });",
+            "        Best {\n            score: 0,\n            top: [0; 5],\n        },",
+            "        Best {\n            score: 0,\n            lines: 0,\n            top: [0; 5],\n        },",
         ),
     ];
     let mut out = source.to_owned();

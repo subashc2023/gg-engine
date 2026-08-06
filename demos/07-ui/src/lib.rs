@@ -16,14 +16,18 @@
 //! the menu, toggles the same switches and closes it, on every machine. `xtask
 //! reload --ui` is the gate; `tests/clicks.rs` is the same claim in one process.
 //!
-//! # The pointer moves in canvas units
+//! # The pointer is steered onto the OS cursor
 //!
-//! A mouse delta of one physical pixel moves the pointer one *canvas* unit, so
-//! on a 1920-wide window the cursor crosses the screen in a third of the hand
-//! travel an OS cursor would need. That is the price of the property the
-//! milestone is actually buying — a replay that lands on the same widget at
-//! every window size — and a pointer-speed setting is where it gets paid back.
-//! P2 until a human complains.
+//! `input.toml` binds `ui_x`/`ui_y` to `PointerX`/`PointerY` — the shell's
+//! steered stream, the OS arrow differenced into canvas units (`Fit::steer`,
+//! §6 M15.1) — so the software arrow gg-ui draws sits on the hardware one at
+//! any window size and any monitor scale, and the OS arrow is hidden over the
+//! window while it does. A human complained (§6 M19): the original binding was
+//! raw `MouseX` counts treated as canvas units, which crossed a 1920-wide
+//! window in a third of the hand travel and could never agree with the arrow
+//! the OS was drawing. The replay property is unchanged either way — the
+//! pointer is still an integral of the recorded axis stream, and the recorded
+//! session predates the rebind and replays identically over it.
 
 use gg_ecs::Component;
 use gg_ecs::boundary::{

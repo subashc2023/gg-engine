@@ -28,6 +28,9 @@ pub use gg_ecs::boundary::VerbsTable
 pub use gg_ecs::boundary::WorldHandle
 pub use gg_ecs::boundary::asset_id
 pub use gg_ecs::boundary::log_level
+pub mod gg_ecs::boundary::cursor
+pub const gg_ecs::boundary::cursor::HARDWARE: u32
+pub const gg_ecs::boundary::cursor::SOFTWARE: u32
 pub mod gg_ecs::boundary::light
 pub const gg_ecs::boundary::light::DIRECTIONAL: u32
 pub const gg_ecs::boundary::light::POINT: u32
@@ -149,6 +152,20 @@ pub const gg_ecs::boundary::Node::FIELDS: &'static [gg_ecs::component::FieldDesc
 pub const gg_ecs::boundary::Node::TYPE_NAME: &'static str
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
 pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+#[repr(C)] pub struct gg_ecs::boundary::Prefs
+pub gg_ecs::boundary::Prefs::cursor: u32
+pub gg_ecs::boundary::Prefs::quiet: u32
+impl gg_ecs::boundary::Prefs
+pub fn gg_ecs::boundary::Prefs::hardware_cursor(&self) -> bool
+pub fn gg_ecs::boundary::Prefs::volume(&self) -> f32
+impl bytemuck::pod::Pod for gg_ecs::boundary::Prefs
+impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Prefs
+impl gg_ecs::component::Component for gg_ecs::boundary::Prefs
+pub const gg_ecs::boundary::Prefs::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Prefs::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Prefs::TYPE_NAME: &'static str
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Prefs
+pub fn gg_ecs::boundary::Prefs::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 #[repr(C)] pub struct gg_ecs::boundary::Renderable
 pub gg_ecs::boundary::Renderable::color: u32
 pub gg_ecs::boundary::Renderable::half_extent: gg_math::sim::Vec3
@@ -232,6 +249,7 @@ impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Widget
 pub fn gg_ecs::boundary::Widget::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 pub const gg_ecs::boundary::CANVAS: (u32, u32)
 pub const gg_ecs::boundary::MAX_MS: u32
+pub const gg_ecs::boundary::QUIET_MAX: u32
 pub const gg_ecs::boundary::TEXT: usize
 pub trait gg_ecs::boundary::BoundaryData
 pub type gg_ecs::boundary::BoundaryData::Columns<'w>
@@ -350,6 +368,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Node
 pub const gg_ecs::boundary::Node::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Node::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Node::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Prefs
+pub const gg_ecs::boundary::Prefs::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Prefs::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Prefs::TYPE_NAME: &'static str
 impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
 pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
@@ -625,6 +647,8 @@ impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Model
 pub fn gg_ecs::boundary::Model::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
 pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Prefs
+pub fn gg_ecs::boundary::Prefs::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Sound
@@ -1161,6 +1185,10 @@ impl gg_ecs::component::Component for gg_ecs::boundary::Node
 pub const gg_ecs::boundary::Node::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Node::FIELDS: &'static [gg_ecs::component::FieldDesc]
 pub const gg_ecs::boundary::Node::TYPE_NAME: &'static str
+impl gg_ecs::component::Component for gg_ecs::boundary::Prefs
+pub const gg_ecs::boundary::Prefs::DECLARED_ID: &'static str
+pub const gg_ecs::boundary::Prefs::FIELDS: &'static [gg_ecs::component::FieldDesc]
+pub const gg_ecs::boundary::Prefs::TYPE_NAME: &'static str
 impl gg_ecs::component::Component for gg_ecs::boundary::Renderable
 pub const gg_ecs::boundary::Renderable::DECLARED_ID: &'static str
 pub const gg_ecs::boundary::Renderable::FIELDS: &'static [gg_ecs::component::FieldDesc]
@@ -1272,6 +1300,8 @@ impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Model
 pub fn gg_ecs::boundary::Model::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
 pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
+impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Prefs
+pub fn gg_ecs::boundary::Prefs::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Sound

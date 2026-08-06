@@ -48,7 +48,10 @@
 //! Run it: `cargo xtask run 10-tetris`.
 
 use gg_ecs::Component;
-use gg_ecs::boundary::{ActionId, GameWorld, Sound, TEXT, Widget, log_level, wave};
+use gg_ecs::boundary::{
+    ActionId, GameWorld, Prefs, QUIET_MAX, Sound, TEXT, Widget, cursor, log_level, state, wave,
+    widget, widget_id,
+};
 use gg_math::sim;
 
 pub mod session;
@@ -96,8 +99,14 @@ pub const ROTATE_CW: ActionId = ActionId::new(4);
 pub const ROTATE_CCW: ActionId = ActionId::new(5);
 /// Swap the falling piece with the held one; once per piece.
 pub const HOLD: ActionId = ActionId::new(6);
-/// Start again. The only action that does anything after a top-out.
+/// Start again. The only action that does anything after a top-out — and, on
+/// the title screen, what starts the first game (§6 M19).
 pub const RESTART: ActionId = ActionId::new(7);
+/// Toggle the pause screen. Ignored on a dead board: GAME OVER is not a pause.
+pub const PAUSE: ActionId = ActionId::new(8);
+// Ids 9 and 10 are `ui_click`/`ui_focus`, and axes 0 and 1 are `ui_x`/`ui_y` —
+// §4.9's pointer verbs, routed by the host and never read here by name. They
+// are *appended* so the eight ids above keep the values every recording holds.
 
 // ---------------------------------------------------------------- the layout
 
@@ -148,6 +157,65 @@ pub const COLORS: [u32; 7] = [
     0xfff0_a000, // L
 ];
 
+/// The selectable palettes (§6 M19), indexed by [`Options::theme`]. Theme 0
+/// **is** [`COLORS`] — the golden reference renders through [`color_of`], which
+/// reads theme 0, so the default look is pinned by the picture and a new theme
+/// arrives without moving it.
+pub const THEMES: [[u32; 7]; 3] = [
+    COLORS,
+    // NEON: the same seven hues driven to full saturation.
+    [
+        0xff00_ffff, // I
+        0xffff_ff00, // O
+        0xffff_00ff, // T
+        0xff00_ff5a, // S
+        0xffff_2848, // Z
+        0xff2e_6cff, // J
+        0xffff_9a00, // L
+    ],
+    // MIST: the same assignment, washed toward the panel — for long sessions.
+    [
+        0xff7f_b2b2, // I
+        0xffb2_b27f, // O
+        0xffa0_7fb2, // T
+        0xff7f_b27f, // S
+        0xffb2_7f7f, // Z
+        0xff7f_7fb2, // J
+        0xffb2_997f, // L
+    ],
+];
+/// What the settings row calls each entry of [`THEMES`].
+pub const THEME_NAMES: [&str; 3] = ["CLASSIC", "NEON", "MIST"];
+
+/// The handling presets the settings screen cycles [`Rules`] through, with the
+/// names the row shows. NORMAL is [`Rules::DEFAULT`] by construction — a test
+/// pins it, because a drifted first entry would make "reset to normal" a lie.
+pub const PRESETS: [(&str, Rules); 3] = [
+    ("NORMAL", Rules::DEFAULT),
+    (
+        "FAST",
+        Rules {
+            gravity_ticks: 30,
+            das_ticks: 8,
+            arr_ticks: 1,
+            soft_drop_ticks: 2,
+            lock_delay_ticks: 24,
+            lines_per_level: 10,
+        },
+    ),
+    (
+        "ZEN",
+        Rules {
+            gravity_ticks: 96,
+            das_ticks: 12,
+            arr_ticks: 3,
+            soft_drop_ticks: 4,
+            lock_delay_ticks: 60,
+            lines_per_level: 10,
+        },
+    ),
+];
+
 /// The four backdrops: hold, stats, next, controls. `[x, y, w, h]`.
 const PANELS: [[f32; 4]; 4] = [
     [70.0, 37.0, 120.0, 96.0],
@@ -174,12 +242,13 @@ const VALUE_AT: [(f32, f32); 4] = [(80.0, 165.0), (80.0, 197.0), (80.0, 229.0), 
 
 /// The legend, which is the only documentation a player reads. Keyed by
 /// *physical* position like `input.toml`, so this is honest on AZERTY too.
-pub const KEYS: [(&str, &str); 6] = [
+pub const KEYS: [(&str, &str); 7] = [
     ("A D", "MOVE"),
     ("S", "SOFT DROP"),
     ("W", "HARD DROP"),
     ("Q E", "ROTATE"),
     ("SPC", "HOLD"),
+    ("P", "PAUSE"),
     ("R", "RESTART"),
 ];
 /// Top-left of the legend's first row, and the two column offsets within it.
@@ -236,6 +305,86 @@ const ORDER_CELL: u32 = 16;
 const ORDER_BAY: u32 = 256;
 const ORDER_TEXT: u32 = 512;
 const ORDER_BANNER: u32 = 1024;
+const ORDER_MENU: u32 = 2048;
+
+// ------------------------------------------------------------ the menu layer
+
+// [`MENU`] indices, doubling as `MenuItem::which`. The title screen:
+pub const M_TITLE_PLATE: u8 = 0;
+pub const M_TITLE_PLAY: u8 = 1;
+pub const M_TITLE_SETTINGS: u8 = 2;
+pub const M_TITLE_BEST: u8 = 3;
+/// Five ranked rows follow [`M_TITLE_BEST`] contiguously — `M_TITLE_ROW0 + i`.
+pub const M_TITLE_ROW0: u8 = 4;
+// The pause screen:
+pub const M_PAUSE_PLATE: u8 = 9;
+pub const M_PAUSE_LABEL: u8 = 10;
+pub const M_RESUME: u8 = 11;
+pub const M_PAUSE_SETTINGS: u8 = 12;
+pub const M_QUIT: u8 = 13;
+// The settings screen:
+pub const M_SET_PLATE: u8 = 14;
+pub const M_SET_TITLE: u8 = 15;
+pub const M_GHOST: u8 = 16;
+pub const M_VOLUME: u8 = 17;
+pub const M_CURSOR: u8 = 18;
+pub const M_SPEED: u8 = 19;
+pub const M_THEME: u8 = 20;
+pub const M_DONE: u8 = 21;
+
+/// One widget of the menu layer, at rest: which screens show it, what it is,
+/// and where it goes when shown. Hidden is a zero rect, [`Item`]-in-demo-07's
+/// rule and [`Banner`]'s.
+pub struct MenuDef {
+    /// `MenuItem::which`, restated so a test can assert the table is in index
+    /// order — a swapped pair would wire RESUME to the QUIT handler.
+    pub which: u8,
+    /// One of [`widget`]'s kinds.
+    pub kind: u32,
+    /// Widget identity — buttons need one for the router; the rest carry one
+    /// for uniform draw-order tie-breaking.
+    pub id: u64,
+    /// `[x, y, w, h]` in canvas units when shown.
+    pub rect: [f32; 4],
+    /// Bit `1 << SCREEN_*` for each screen that shows it.
+    pub on: u32,
+    /// The label at rest. Value rows are rewritten by [`hud`] every tick.
+    pub text: &'static str,
+}
+
+const ON_TITLE: u32 = 1 << SCREEN_TITLE;
+const ON_PAUSE: u32 = 1 << SCREEN_PAUSED;
+const ON_SETTINGS: u32 = 1 << SCREEN_SETTINGS;
+
+/// The whole menu layer. Buttons are 110×18 on the well's centre line; the
+/// settings overlay is wider because its rows carry a label *and* a value.
+///
+/// Unformatted for [`LAYOUT`]-in-demo-07's reason: it is a table.
+#[rustfmt::skip]
+pub const MENU: [MenuDef; 22] = [
+    MenuDef { which: M_TITLE_PLATE,    kind: widget::PANEL,  id: widget_id("tetris.title.plate"),    rect: [247.0,  96.0, 146.0, 140.0], on: ON_TITLE,    text: "" },
+    MenuDef { which: M_TITLE_PLAY,     kind: widget::BUTTON, id: widget_id("tetris.title.play"),     rect: [265.0, 110.0, 110.0,  18.0], on: ON_TITLE,    text: "PLAY" },
+    MenuDef { which: M_TITLE_SETTINGS, kind: widget::BUTTON, id: widget_id("tetris.title.settings"), rect: [265.0, 134.0, 110.0,  18.0], on: ON_TITLE,    text: "SETTINGS" },
+    MenuDef { which: M_TITLE_BEST,     kind: widget::LABEL,  id: widget_id("tetris.title.best"),     rect: [265.0, 162.0, 110.0,   9.0], on: ON_TITLE,    text: "BEST GAMES" },
+    MenuDef { which: M_TITLE_ROW0,     kind: widget::LABEL,  id: widget_id("tetris.title.row0"),     rect: [265.0, 174.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
+    MenuDef { which: M_TITLE_ROW0 + 1, kind: widget::LABEL,  id: widget_id("tetris.title.row1"),     rect: [265.0, 185.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
+    MenuDef { which: M_TITLE_ROW0 + 2, kind: widget::LABEL,  id: widget_id("tetris.title.row2"),     rect: [265.0, 196.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
+    MenuDef { which: M_TITLE_ROW0 + 3, kind: widget::LABEL,  id: widget_id("tetris.title.row3"),     rect: [265.0, 207.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
+    MenuDef { which: M_TITLE_ROW0 + 4, kind: widget::LABEL,  id: widget_id("tetris.title.row4"),     rect: [265.0, 218.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
+    MenuDef { which: M_PAUSE_PLATE,    kind: widget::PANEL,  id: widget_id("tetris.pause.plate"),    rect: [247.0,  96.0, 146.0, 120.0], on: ON_PAUSE,    text: "" },
+    MenuDef { which: M_PAUSE_LABEL,    kind: widget::LABEL,  id: widget_id("tetris.pause.label"),    rect: [302.0, 106.0,  36.0,   9.0], on: ON_PAUSE,    text: "PAUSED" },
+    MenuDef { which: M_RESUME,         kind: widget::BUTTON, id: widget_id("tetris.pause.resume"),   rect: [265.0, 122.0, 110.0,  18.0], on: ON_PAUSE,    text: "RESUME" },
+    MenuDef { which: M_PAUSE_SETTINGS, kind: widget::BUTTON, id: widget_id("tetris.pause.settings"), rect: [265.0, 146.0, 110.0,  18.0], on: ON_PAUSE,    text: "SETTINGS" },
+    MenuDef { which: M_QUIT,           kind: widget::BUTTON, id: widget_id("tetris.pause.quit"),     rect: [265.0, 170.0, 110.0,  18.0], on: ON_PAUSE,    text: "QUIT" },
+    MenuDef { which: M_SET_PLATE,      kind: widget::PANEL,  id: widget_id("tetris.set.plate"),      rect: [230.0,  78.0, 180.0, 182.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_SET_TITLE,      kind: widget::LABEL,  id: widget_id("tetris.set.title"),      rect: [296.0,  88.0,  48.0,   9.0], on: ON_SETTINGS, text: "SETTINGS" },
+    MenuDef { which: M_GHOST,          kind: widget::BUTTON, id: widget_id("tetris.set.ghost"),      rect: [242.0, 104.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_VOLUME,         kind: widget::BUTTON, id: widget_id("tetris.set.volume"),     rect: [242.0, 128.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_CURSOR,         kind: widget::BUTTON, id: widget_id("tetris.set.cursor"),     rect: [242.0, 152.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_SPEED,          kind: widget::BUTTON, id: widget_id("tetris.set.speed"),      rect: [242.0, 176.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_THEME,          kind: widget::BUTTON, id: widget_id("tetris.set.theme"),      rect: [242.0, 200.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_DONE,           kind: widget::BUTTON, id: widget_id("tetris.set.done"),       rect: [242.0, 232.0, 156.0,  18.0], on: ON_SETTINGS, text: "DONE" },
+];
 
 /// Top-left of a visible cell.
 #[must_use]
@@ -348,6 +497,19 @@ impl Rules {
 pub const MIN_GRAVITY_TICKS: u32 = 2;
 /// Score for clearing 1, 2, 3 and 4 rows, before the level multiplier.
 pub const LINE_SCORE: [u32; 4] = [100, 300, 500, 800];
+/// Score for a full T-spin clearing 0, 1, 2 and 3 rows, before the level
+/// multiplier — the guideline ladder (§6 M19). A T-spin cannot clear four.
+pub const SPIN_SCORE: [u32; 4] = [400, 800, 1200, 1600];
+/// Score for a mini T-spin clearing 0 and 1 rows, same terms.
+pub const MINI_SCORE: [u32; 2] = [100, 200];
+/// Per-link combo bonus: `COMBO_SCORE * (combo - 1) * level` on every clearing
+/// lock past the first consecutive one.
+pub const COMBO_SCORE: u32 = 50;
+/// Back-to-back multiplier, as a ratio — integer arithmetic, §1.3's terms: a
+/// difficult clear inside a live chain scores `* 3 / 2`.
+pub const B2B_NUM: u32 = 3;
+/// See [`B2B_NUM`].
+pub const B2B_DEN: u32 = 2;
 /// What [`Play::hold`] holds when it holds nothing.
 pub const NO_PIECE: u8 = u8::MAX;
 /// The composed-grid value meaning "the piece would land here". Outside the
@@ -377,6 +539,9 @@ pub struct Play {
     pub lines: u32,
     /// One-based, so the gravity formula reads as the rules do.
     pub level: u32,
+    /// Consecutive clearing locks. Zero until a lock clears; a lock that
+    /// clears nothing resets it. The bonus reads `combo - 1` (§6 M19).
+    pub combo: u32,
     /// The shuffled seven, drawn front to back.
     pub bag: [u8; 7],
     /// How many of [`Play::bag`] have been drawn.
@@ -391,10 +556,18 @@ pub struct Play {
     pub over: u8,
     /// Which direction DAS is charged for: 0 none, 1 left, 2 right.
     pub das_dir: u8,
+    /// A back-to-back chain is live: the last line clear was *difficult* — a
+    /// tetris or a T-spin clear. A plain clear breaks it; a clearless lock
+    /// does not (§6 M19).
+    pub b2b: u8,
+    /// What the piece last did on purpose: 0 not a rotation, 1 a rotation,
+    /// 2 a rotation whose kick was the table's last test — the twist SRS
+    /// upgrades from mini to full. What T-spin detection reads at lock.
+    pub last_rot: u8,
     /// Padding to the `u64` alignment the [`Play::rng`] field imposes. Named,
     /// because `derive(Pod)` refuses a type with bytes nobody declared — which
     /// is the point: hidden padding is hashed garbage (§4.2.1 hazard 4).
-    pub pad: [u8; 7],
+    pub pad: [u8; 1],
 }
 
 /// The best score this world has seen.
@@ -411,6 +584,67 @@ pub struct Play {
 pub struct Best {
     /// Points, over every game this world has played.
     pub score: u32,
+    /// The five highest *finished* games, descending — written when a game
+    /// ends (top-out, or quit from the pause screen), where `score` above is
+    /// written every tick. Two policies because they answer different
+    /// questions: `score` is what `--save` must never lose mid-run, and this
+    /// table is what the title screen shows (§6 M19).
+    pub top: [u32; 5],
+}
+
+/// Which screen the game is on (§6 M19). Zero — what a migration writes — is
+/// the title, which is the one screen safe to land on from anywhere.
+pub const SCREEN_TITLE: u32 = 0;
+/// The game is being played. [`Play::over`] lives *inside* this screen: GAME
+/// OVER is a dead board being looked at, not a menu.
+pub const SCREEN_PLAYING: u32 = 1;
+/// The pause overlay. Gameplay input is not read; the stack waits.
+pub const SCREEN_PAUSED: u32 = 2;
+/// The settings overlay, reached from the title or from pause.
+pub const SCREEN_SETTINGS: u32 = 3;
+
+/// The screen state machine — one word, because four screens do not need one
+/// each. Ordinary hashed state: a replayed session opens the same menus on the
+/// same ticks (§4.7).
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "tetris.screen")]
+#[repr(C)]
+pub struct Screen {
+    /// One of the `SCREEN_*` constants. An unknown value acts as the title.
+    pub at: u32,
+    /// Where the settings screen returns to — [`SCREEN_TITLE`] or
+    /// [`SCREEN_PAUSED`]. Meaningless on any other screen.
+    pub from: u32,
+}
+
+/// The game-owned settings (§6 M19). Engine-owned ones — master volume, the
+/// cursor — cross as [`Prefs`] instead; the split is §4.8's line.
+///
+/// Every field's zero is the default, `World::restore`'s rule (§4.2.2): a
+/// migration cannot hide the ghost or change the theme.
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "tetris.options")]
+#[repr(C)]
+pub struct Options {
+    /// `0` draws the landing ghost; anything else hides it. Inverted so the
+    /// default is on.
+    pub ghost_off: u32,
+    /// Index into [`THEMES`]. Out of range reads as theme 0.
+    pub theme: u32,
+    /// Index into [`PRESETS`] — the label for what [`Rules`] was last set to.
+    /// The rules themselves stay authoritative: an inspector edit to `Rules`
+    /// leaves this naming a preset the game no longer plays, which is honest.
+    pub preset: u32,
+}
+
+/// Marks a widget of the menu layer and names which one, so [`hud`] can show,
+/// hide and rewrite it without a lookup table of entity ids.
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "tetris.menuitem")]
+#[repr(C)]
+pub struct MenuItem {
+    /// An `M_*` constant — an index into [`MENU`].
+    pub which: u8,
 }
 
 /// A drawn cell of the well, addressed by where it is rather than by what is in
@@ -580,9 +814,40 @@ impl Text {
         Text::labelled(b"tetris: level ", value)
     }
 
+    /// `N  score` — a title-screen scoreboard row, one-based.
+    fn ranked(rank: u8, value: u32) -> Text {
+        let mut text = Text {
+            buf: [0; TEXT],
+            len: 0,
+        };
+        text.push(b'1' + (rank % 9));
+        text.push(b' ');
+        text.push(b' ');
+        let digits = Text::number(value);
+        for byte in &digits.buf[..digits.len] {
+            text.push(*byte);
+        }
+        text
+    }
+
     /// `tetris: best N`, printed when a game begins.
     fn best(value: u32) -> Text {
         Text::labelled(b"tetris: best ", value)
+    }
+
+    /// A prefix and a static suffix — the settings rows that name a choice.
+    fn pair(prefix: &[u8], suffix: &str) -> Text {
+        let mut text = Text {
+            buf: [0; TEXT],
+            len: 0,
+        };
+        for byte in prefix {
+            text.push(*byte);
+        }
+        for byte in suffix.bytes() {
+            text.push(byte);
+        }
+        text
     }
 
     /// A prefix and a number, built here so the log path allocates nothing
@@ -665,28 +930,109 @@ pub fn landing_row(well: &Well, piece: &Piece) -> i32 {
     }
 }
 
-/// Try to rotate, then try again shifted. Not SRS's kick tables — see
-/// [`SHAPES`] — but enough that a rotation against a wall or a stack finds the
-/// obvious place to go instead of being refused.
+/// SRS wall kicks for J, L, S, T and Z, as `(dcol, drow)` — **row-down**
+/// coordinates, so the guideline's published `(x, y)` pairs appear here with
+/// `y` negated. Indexed by the rotation state the *clockwise* turn leaves
+/// (`CW[from]` is the `from → from+1` table); a counter-clockwise turn from
+/// `s` runs the `s-1 → s` table negated, which is SRS's own symmetry and the
+/// reason there is no second table to transcribe wrong (§6 M19).
+const KICKS_JLSTZ: [[(i32, i32); 5]; 4] = [
+    [(0, 0), (-1, 0), (-1, -1), (0, 2), (-1, 2)],
+    [(0, 0), (1, 0), (1, 1), (0, -2), (1, -2)],
+    [(0, 0), (1, 0), (1, -1), (0, 2), (1, 2)],
+    [(0, 0), (-1, 0), (-1, 1), (0, -2), (-1, -2)],
+];
+/// The I piece's own table, same conventions — its 4x4 box kicks differently.
+const KICKS_I: [[(i32, i32); 5]; 4] = [
+    [(0, 0), (-2, 0), (1, 0), (-2, 1), (1, -2)],
+    [(0, 0), (-1, 0), (2, 0), (-1, -2), (2, 1)],
+    [(0, 0), (2, 0), (-1, 0), (2, -1), (-1, 2)],
+    [(0, 0), (1, 0), (-2, 0), (1, 2), (-2, -1)],
+];
+
+/// Try to rotate under SRS: the five kicks for this piece and transition, in
+/// table order, so two machines kick identically. Returns the index of the
+/// kick that fit — the last one is what upgrades a mini T-spin to a full one —
+/// or `None` for a refused rotation, which leaves `piece` untouched.
 ///
-/// The offsets are tried in a fixed order, so two machines kick identically.
-pub fn rotate(well: &Well, piece: &mut Piece, clockwise: bool) -> bool {
-    const KICKS: [i32; 5] = [0, -1, 1, -2, 2];
+/// O rotates onto itself ([`SHAPES`] repeats its mask), so its first "kick"
+/// always fits and the table never matters — which is also SRS's answer.
+pub fn rotate_kicked(well: &Well, piece: &mut Piece, clockwise: bool) -> Option<usize> {
     let from = piece.rot;
     piece.rot = if clockwise {
         (piece.rot + 1) % 4
     } else {
         (piece.rot + 3) % 4
     };
-    for kick in KICKS {
-        piece.col += kick;
+    let table = if piece.kind == 0 {
+        KICKS_I
+    } else {
+        KICKS_JLSTZ
+    };
+    // `CW[from]` going up; going down, the target state's CW table, negated.
+    let (row, flip) = match clockwise {
+        true => (from as usize, 1),
+        false => (piece.rot as usize, -1),
+    };
+    for (index, (dcol, drow)) in table[row].iter().enumerate() {
+        piece.col += dcol * flip;
+        piece.row += drow * flip;
         if !collides(well, piece) {
-            return true;
+            return Some(index);
         }
-        piece.col -= kick;
+        piece.col -= dcol * flip;
+        piece.row -= drow * flip;
     }
     piece.rot = from;
-    false
+    None
+}
+
+/// [`rotate_kicked`], for the callers that only ask whether it turned.
+pub fn rotate(well: &Well, piece: &mut Piece, clockwise: bool) -> bool {
+    rotate_kicked(well, piece, clockwise).is_some()
+}
+
+/// What a lock is worth spin-wise: `0` none, `1` a mini T-spin, `2` a full
+/// T-spin — the three-corner rule, judged on the well as it stands *before*
+/// the piece is written in (§6 M19).
+///
+/// A T-spin is a T whose last act was a rotation and whose 3x3 box has three
+/// or more of its corners filled (walls and floor count). Full needs the two
+/// corners beside the point — the side the stem does not touch — or the
+/// table's last kick, which is the SRS upgrade rule [`Play::last_rot`] carries
+/// as the value `2`.
+#[must_use]
+pub fn tspin_at_lock(well: &Well, piece: &Piece, last_rot: u8) -> u8 {
+    const T: u8 = 2;
+    if piece.kind != T || last_rot == 0 {
+        return 0;
+    }
+    // The T's 3x3 box is the mask's top-left 3x3 in every rotation.
+    let filled = |dr: i32, dc: i32| {
+        let (r, c) = (piece.row + dr, piece.col + dc);
+        if c < 0 || c >= WIDTH as i32 || r >= HEIGHT as i32 {
+            return true; // a wall or the floor braces a spin like a cell does
+        }
+        r >= 0 && well.cells[r as usize][c as usize] != 0
+    };
+    let corners = [(0, 0), (0, 2), (2, 0), (2, 2)];
+    let count = corners.iter().filter(|(r, c)| filled(*r, *c)).count();
+    if count < 3 {
+        return 0;
+    }
+    // The two corners beside the point, by rotation state: up, right, down,
+    // left — the order [`SHAPES`] stores the T in.
+    let front: [(i32, i32); 2] = match piece.rot % 4 {
+        0 => [(0, 0), (0, 2)],
+        1 => [(0, 2), (2, 2)],
+        2 => [(2, 0), (2, 2)],
+        _ => [(0, 0), (2, 0)],
+    };
+    if front.iter().all(|(r, c)| filled(*r, *c)) || last_rot == 2 {
+        2
+    } else {
+        1
+    }
 }
 
 /// Draw the next kind, refilling and reshuffling the bag when it runs out.
@@ -778,6 +1124,7 @@ pub fn new_play(seed: u64) -> Play {
         score: 0,
         lines: 0,
         level: 1,
+        combo: 0,
         bag: [0; 7],
         bag_pos: 7, // empty, so the first draw shuffles
         next: 0,
@@ -785,10 +1132,40 @@ pub fn new_play(seed: u64) -> Play {
         hold_used: 0,
         over: 0,
         das_dir: 0,
-        pad: [0; 7],
+        b2b: 0,
+        last_rot: 0,
+        pad: [0; 1],
     };
     play.next = draw(&mut play);
     play
+}
+
+/// A fresh game over the same world: what [`RESTART`] on a dead board and QUIT
+/// from the pause screen both do. The reseed is the stream's own next draw,
+/// never a clock read — a wall-clock seed is a game that cannot be replayed
+/// (§4.7).
+pub fn reset_game(well: &mut Well, play: &mut Play, piece: &mut Piece) {
+    let seed = play.rng.next_u64();
+    *well = Well {
+        cells: [[0; WIDTH]; HEIGHT],
+    };
+    *play = new_play(seed);
+    *piece = spawn_piece(draw(play));
+}
+
+/// File `score` into [`Best::top`], keeping it sorted descending. Zero is "no
+/// game" and is never filed — the title screen shows blank rows, not a
+/// scoreboard of nothing.
+pub fn record_top(best: &mut Best, score: u32) {
+    if score == 0 {
+        return;
+    }
+    let mut at = score;
+    for slot in &mut best.top {
+        if at > *slot {
+            core::mem::swap(&mut at, slot);
+        }
+    }
 }
 
 // --------------------------------------------------------------- the systems
@@ -814,7 +1191,39 @@ pub fn bootstrap(world: &mut GameWorld) {
     );
     world.put(board, piece);
     world.put(board, Rules::DEFAULT);
-    world.put(board, Best { score: 0 });
+    world.put(
+        board,
+        Best {
+            score: 0,
+            top: [0; 5],
+        },
+    );
+    // The game opens on the title (§6 M19); the board underneath is already
+    // dealt, so PLAY is a screen change and not a second bootstrap.
+    world.put(
+        board,
+        Screen {
+            at: SCREEN_TITLE,
+            from: SCREEN_TITLE,
+        },
+    );
+    // Zeroed is every default, deliberately (`World::restore`'s rule) — for
+    // the game's own options and for the host-read preferences alike.
+    world.put(
+        board,
+        Options {
+            ghost_off: 0,
+            theme: 0,
+            preset: 0,
+        },
+    );
+    world.put(
+        board,
+        Prefs {
+            cursor: 0,
+            quiet: 0,
+        },
+    );
 
     declare(|part, widget| {
         let entity = world.spawn_with(widget);
@@ -824,6 +1233,7 @@ pub fn bootstrap(world: &mut GameWorld) {
             Part::Bay(bay) => world.put(entity, bay),
             Part::Value(line) => world.put(entity, line),
             Part::Banner(banner) => world.put(entity, banner),
+            Part::Menu(item) => world.put(entity, item),
         }
     });
 
@@ -853,6 +1263,9 @@ pub enum Part {
     Value(HudLine),
     /// Part of the top-out banner, shown or hidden by [`hud`].
     Banner(Banner),
+    /// Part of the menu layer (§6 M19), shown, hidden and rewritten by [`hud`]
+    /// from the [`MENU`] table.
+    Menu(MenuItem),
 }
 
 /// Every widget this game declares, at rest, handed to `emit` once each in draw
@@ -947,6 +1360,26 @@ pub fn declare(mut emit: impl FnMut(Part, Widget)) {
             ordered(widget, ORDER_BANNER + index as u32),
         );
     }
+
+    // The menu layer, hidden the banner's way — `hud` gives each widget its
+    // [`MENU`] rect on the screens that show it. Buttons carry a real id: the
+    // router's hover and focus follow identity across frames (§4.9).
+    for (index, def) in MENU.iter().enumerate() {
+        let mut widget = match def.kind {
+            widget::PANEL => Widget::panel([0.0; 4], SHROUD),
+            widget::LABEL => Widget::label([0.0; 4], INK, def.text),
+            _ => Widget::button(def.id, [0.0; 4], SURROUND, INK, def.text),
+        };
+        widget.id = def.id;
+        if def.which == M_TITLE_BEST || def.which == M_PAUSE_LABEL || def.which == M_SET_TITLE {
+            widget.text_color = ACCENT;
+            widget.color = ACCENT;
+        }
+        emit(
+            Part::Menu(MenuItem { which: def.which }),
+            ordered(widget, ORDER_MENU + index as u32),
+        );
+    }
 }
 
 /// A widget's draw order, set after construction because the constructors do
@@ -973,6 +1406,14 @@ pub fn text_width(text: &str) -> f32 {
 /// Input is read into locals before the query, because `each` borrows the world
 /// and the two frames an edge is computed from are reached through it.
 pub fn step(world: &mut GameWorld) {
+    // Gameplay belongs to one screen (§6 M19). A paused game reads no input at
+    // all — DAS charge, gravity and the lock clock freeze with the stack.
+    let mut playing = false;
+    let _ = world.each::<&Screen>(|_, s| playing = s.at == SCREEN_PLAYING);
+    if !playing {
+        return;
+    }
+
     let (left, right) = (world.pressed(LEFT), world.pressed(RIGHT));
     let (tap_left, tap_right) = (world.just_pressed(LEFT), world.just_pressed(RIGHT));
     let soft = world.pressed(SOFT_DROP);
@@ -995,19 +1436,13 @@ pub fn step(world: &mut GameWorld) {
     // An `Option` and not a zero: a new game always has a record to start
     // against, and a world that has never scored starts against zero.
     let mut began_with = None;
-    let _ = world.each::<(&mut Well, &mut Play, &mut Piece, &Rules, &Best)>(
+    let _ = world.each::<(&mut Well, &mut Play, &mut Piece, &Rules, &mut Best)>(
         |_, (well, play, piece, rules, best)| {
             if play.over != 0 {
                 if restart {
-                    // A fresh clock-read seed would make the next game
-                    // unreproducible; advancing the stream keeps it in the world.
-                    let seed = play.rng.next_u64();
-                    *well = Well {
-                        cells: [[0; WIDTH]; HEIGHT],
-                    };
-                    *play = new_play(seed);
-                    let first = draw(play);
-                    *piece = spawn_piece(first);
+                    // `reset_game` reseeds from the stream itself — a
+                    // clock-read seed would make the next game unreproducible.
+                    reset_game(well, play, piece);
                     began_with = Some(best.score);
                 }
                 return;
@@ -1051,6 +1486,7 @@ pub fn step(world: &mut GameWorld) {
                     piece.col -= step_x;
                 } else {
                     play.lock_accum = 0;
+                    play.last_rot = 0;
                     fired[CUE_MOVE as usize] = true;
                 }
             }
@@ -1058,8 +1494,13 @@ pub fn step(world: &mut GameWorld) {
             // The refused rotation is silent on purpose: "nothing happened" is
             // the feedback, and a click on a kick that did not fit would say the
             // opposite of what the board shows.
-            if (cw || ccw) && rotate(well, piece, cw) {
+            if (cw || ccw)
+                && let Some(kick) = rotate_kicked(well, piece, cw)
+            {
                 play.lock_accum = 0;
+                // The table's last test is the twist that upgrades a mini
+                // T-spin (§6 M19) — remembered here, judged at the lock.
+                play.last_rot = if kick == 4 { 2 } else { 1 };
                 fired[CUE_ROTATE as usize] = true;
             }
 
@@ -1076,10 +1517,12 @@ pub fn step(world: &mut GameWorld) {
                 *piece = spawn_piece(swapped);
                 play.lock_accum = 0;
                 play.fall_accum = 0;
+                play.last_rot = 0;
                 fired[CUE_HOLD as usize] = true;
                 if collides(well, piece) {
                     play.over = 1;
                     fired[CUE_OVER as usize] = true;
+                    record_top(best, play.score);
                     return;
                 }
             }
@@ -1092,6 +1535,11 @@ pub fn step(world: &mut GameWorld) {
                 play.score = play
                     .score
                     .saturating_add((landed - piece.row).max(0) as u32 * 2);
+                if landed > piece.row {
+                    // A drop that moved is a move; one in place preserves the
+                    // twist that put the piece there.
+                    play.last_rot = 0;
+                }
                 piece.row = landed;
                 lock_now = true;
             } else {
@@ -1108,6 +1556,7 @@ pub fn step(world: &mut GameWorld) {
                         piece.row -= 1;
                     } else {
                         play.lock_accum = 0;
+                        play.last_rot = 0;
                         if soft {
                             play.score = play.score.saturating_add(1);
                         }
@@ -1129,15 +1578,42 @@ pub fn step(world: &mut GameWorld) {
                 return;
             }
 
+            // The spin is judged against the well the piece is *in*, before it
+            // becomes part of it (§6 M19).
+            let spin = tspin_at_lock(well, piece, play.last_rot);
             lock_piece(well, piece);
             fired[CUE_LOCK as usize] = true;
             let cleared = clear_rows(well);
+
+            // Guideline-shaped scoring, in one deterministic order: the base
+            // for what happened, the level multiplier, back-to-back on the
+            // difficult clears, then the combo bonus on top (§6 M19).
+            let base = match (spin, cleared) {
+                (2, rows) => SPIN_SCORE[rows.min(3) as usize],
+                (1, rows) => MINI_SCORE[rows.min(1) as usize],
+                (0, 1..) => LINE_SCORE[(cleared.min(4) - 1) as usize],
+                _ => 0,
+            };
+            let difficult = cleared == 4 || (spin != 0 && cleared > 0);
+            let mut earned = base.saturating_mul(play.level);
+            if difficult && play.b2b != 0 {
+                earned = earned.saturating_mul(B2B_NUM) / B2B_DEN;
+            }
+            play.score = play.score.saturating_add(earned);
+
             if cleared > 0 {
                 play.lines = play.lines.saturating_add(cleared);
-                let index = (cleared.min(4) - 1) as usize;
-                play.score = play
-                    .score
-                    .saturating_add(LINE_SCORE[index].saturating_mul(play.level));
+                play.combo = play.combo.saturating_add(1);
+                if play.combo > 1 {
+                    play.score = play.score.saturating_add(
+                        COMBO_SCORE
+                            .saturating_mul(play.combo - 1)
+                            .saturating_mul(play.level),
+                    );
+                }
+                // Difficult clears feed the chain; a plain clear breaks it. A
+                // clearless lock — including a clearless T-spin — leaves it be.
+                play.b2b = u8::from(difficult);
                 let was = play.level;
                 play.level = play.lines / rules.lines_per_level.max(1) + 1;
                 fired[CUE_CLEAR as usize] = true;
@@ -1146,10 +1622,13 @@ pub fn step(world: &mut GameWorld) {
                     fired[CUE_LEVEL as usize] = true;
                     leveled_to = play.level;
                 }
+            } else {
+                play.combo = 0;
             }
             play.lock_accum = 0;
             play.fall_accum = 0;
             play.hold_used = 0;
+            play.last_rot = 0;
             let kind = play.next;
             play.next = draw(play);
             *piece = spawn_piece(kind);
@@ -1157,6 +1636,9 @@ pub fn step(world: &mut GameWorld) {
                 play.over = 1;
                 topped_out = true;
                 fired[CUE_OVER as usize] = true;
+                // The finished game joins the title screen's table (§6 M19).
+                // `Best::score` keeps its own every-tick rule below.
+                record_top(best, play.score);
             }
         },
     );
@@ -1204,6 +1686,124 @@ pub fn step(world: &mut GameWorld) {
     }
 }
 
+/// The screen-transition and settings system (§6 M19): pause, the title, and
+/// what the settings rows write. After [`step`] so a pause lands on a tick the
+/// game finished, before [`present`]/[`hud`] so the frame drawn is this tick's.
+///
+/// Clicks arrive as [`state::CLICKED`] bits the host wrote *last* tick (§4.9's
+/// one frame of lag), exactly demo 07's shape.
+pub fn menu(world: &mut GameWorld) {
+    let pause = world.just_pressed(PAUSE);
+    let start = world.just_pressed(RESTART);
+
+    let mut clicked = 0u64;
+    let _ = world.each::<&Widget>(|_, w| {
+        if w.state & state::CLICKED != 0 {
+            clicked = w.id;
+        }
+    });
+
+    let (mut at, mut from, mut over) = (SCREEN_TITLE, SCREEN_TITLE, false);
+    let _ = world.each::<(&Screen, &Play)>(|_, (s, p): (&Screen, &Play)| {
+        at = s.at;
+        from = s.from;
+        over = p.over != 0;
+    });
+    let is = |which: u8| clicked != 0 && clicked == MENU[which as usize].id;
+
+    // The settings rows change values, never the screen.
+    if at == SCREEN_SETTINGS && clicked != 0 {
+        let mut preset_rules = None;
+        let mut said: Option<&'static str> = None;
+        let _ = world.each::<&mut Options>(|_, o: &mut Options| {
+            if is(M_GHOST) {
+                o.ghost_off ^= 1;
+                said = Some(if o.ghost_off == 0 {
+                    "tetris: ghost on"
+                } else {
+                    "tetris: ghost off"
+                });
+            }
+            if is(M_THEME) {
+                o.theme = (o.theme + 1) % THEMES.len() as u32;
+                said = Some("tetris: theme changed");
+            }
+            if is(M_SPEED) {
+                o.preset = (o.preset + 1) % PRESETS.len() as u32;
+                preset_rules = Some(PRESETS[o.preset as usize].1);
+                said = Some("tetris: speed changed");
+            }
+        });
+        if let Some(rules) = preset_rules {
+            let _ = world.each::<&mut Rules>(|_, r: &mut Rules| *r = rules);
+        }
+        let _ = world.each::<&mut Prefs>(|_, p: &mut Prefs| {
+            if is(M_VOLUME) {
+                // 100 → 75 → 50 → 25 → 0 → 100, in the fixed point Prefs holds.
+                p.quiet = match p.quiet >= QUIET_MAX {
+                    true => 0,
+                    false => (p.quiet + QUIET_MAX / 4).min(QUIET_MAX),
+                };
+                said = Some("tetris: volume changed");
+            }
+            if is(M_CURSOR) {
+                p.cursor = match p.hardware_cursor() {
+                    true => cursor::SOFTWARE,
+                    false => cursor::HARDWARE,
+                };
+                said = Some("tetris: cursor changed");
+            }
+        });
+        if let Some(line) = said {
+            world.log(log_level::INFO, line);
+        }
+    }
+
+    // QUIT files the abandoned run and deals a fresh board under the title, so
+    // PLAY is always a new game (§6 M19). The score is recorded exactly as a
+    // top-out records it — walking away is finishing.
+    if at == SCREEN_PAUSED && is(M_QUIT) {
+        let _ = world.each::<(&mut Well, &mut Play, &mut Piece, &mut Best)>(
+            |_, (well, play, piece, best)| {
+                record_top(best, play.score);
+                reset_game(well, play, piece);
+            },
+        );
+        world.log(log_level::INFO, "tetris: quit");
+    }
+
+    let next = if at == SCREEN_TITLE && (start || is(M_TITLE_PLAY)) {
+        Some((SCREEN_PLAYING, from))
+    } else if at == SCREEN_TITLE && is(M_TITLE_SETTINGS) {
+        Some((SCREEN_SETTINGS, SCREEN_TITLE))
+    } else if at == SCREEN_PLAYING && pause && !over {
+        Some((SCREEN_PAUSED, from))
+    } else if at == SCREEN_PAUSED && (pause || is(M_RESUME)) {
+        Some((SCREEN_PLAYING, from))
+    } else if at == SCREEN_PAUSED && is(M_PAUSE_SETTINGS) {
+        Some((SCREEN_SETTINGS, SCREEN_PAUSED))
+    } else if at == SCREEN_PAUSED && is(M_QUIT) {
+        Some((SCREEN_TITLE, from))
+    } else if at == SCREEN_SETTINGS && is(M_DONE) {
+        Some((from, from))
+    } else {
+        None
+    };
+    if let Some((to, keep)) = next {
+        let _ = world.each::<&mut Screen>(|_, s: &mut Screen| {
+            s.at = to;
+            s.from = keep;
+        });
+        match to {
+            SCREEN_PAUSED => world.log(log_level::INFO, "tetris: paused"),
+            SCREEN_PLAYING if at != SCREEN_TITLE => {
+                world.log(log_level::INFO, "tetris: resumed");
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The well with the ghost and the falling piece composited into it — what is
 /// on screen, as opposed to what is locked.
 ///
@@ -1211,21 +1811,33 @@ pub fn step(world: &mut GameWorld) {
 /// construction rather than by both being written the same day.
 #[must_use]
 pub fn compose_well(well: &Well, play: &Play, piece: &Piece) -> [[u8; WIDTH]; HEIGHT] {
+    compose_well_opt(well, play, piece, true)
+}
+
+/// [`compose_well`], with the ghost the player's to switch off (§6 M19).
+#[must_use]
+pub fn compose_well_opt(
+    well: &Well,
+    play: &Play,
+    piece: &Piece,
+    ghost: bool,
+) -> [[u8; WIDTH]; HEIGHT] {
     let mut grid = well.cells;
     if play.over != 0 {
         return grid;
     }
     // Ghost first, so the piece overwrites it where the two overlap — a piece
     // resting on the floor is its own ghost.
-    let ghost = Piece {
+    let landing = Piece {
         row: landing_row(well, piece),
         ..*piece
     };
-    for (at, value) in [(&ghost, GHOST_CELL), (piece, piece.kind + 1)] {
+    let layers = [(&landing, GHOST_CELL), (piece, piece.kind + 1)];
+    for (at, value) in layers.iter().skip(usize::from(!ghost)) {
         for (row, col) in cells_of(at.kind, at.rot) {
             let (r, c) = (at.row + row, at.col + col);
             if r >= 0 && r < HEIGHT as i32 && c >= 0 && c < WIDTH as i32 {
-                grid[r as usize][c as usize] = value;
+                grid[r as usize][c as usize] = *value;
             }
         }
     }
@@ -1290,55 +1902,155 @@ pub fn value_of(play: &Play, best: &Best, line: &HudLine) -> u32 {
 /// Two passes: compose into local grids first, because the board and the drawn
 /// cells are different entities and one `each` cannot hold both.
 pub fn present(world: &mut GameWorld) {
+    let mut opts = Options {
+        ghost_off: 0,
+        theme: 0,
+        preset: 0,
+    };
+    let _ = world.each::<&Options>(|_, o| opts = *o);
     let mut grid = [[0u8; WIDTH]; HEIGHT];
     let mut bays = [[0u8; 16]; 2];
     let _ = world.each::<(&Well, &Play, &Piece)>(|_, (well, play, piece)| {
-        grid = compose_well(well, play, piece);
+        grid = compose_well_opt(well, play, piece, opts.ghost_off == 0);
         bays = compose_bays(play);
     });
 
     let _ = world.each::<(&Cell, &mut Widget)>(|_, (cell, widget)| {
-        widget.color = cell_color(&grid, cell);
+        widget.color = themed_color(
+            opts.theme,
+            grid[cell.row as usize + HIDDEN][cell.col as usize % WIDTH],
+        );
     });
     let _ = world.each::<(&Bay, &mut Widget)>(|_, (bay, widget)| {
-        widget.color = bay_color(&bays, bay);
+        widget.color = themed_color(
+            opts.theme,
+            bays[bay.slot as usize % 2][(bay.row as usize * 4 + bay.col as usize) % 16],
+        );
     });
 }
 
 /// A composed-cell value's colour: `0` is the well's own dark, [`GHOST_CELL`]
-/// the landing hint, anything else its piece.
+/// the landing hint, anything else its piece — in theme 0, which is what the
+/// golden reference renders through.
 #[must_use]
 pub fn color_of(value: u8) -> u32 {
+    themed_color(0, value)
+}
+
+/// [`color_of`], under a selected palette (§6 M19). The well's own dark and the
+/// ghost are not themed: what a theme changes is the pieces.
+#[must_use]
+pub fn themed_color(theme: u32, value: u8) -> u32 {
     match value {
         0 => EMPTY,
         GHOST_CELL => GHOST,
-        _ => COLORS[(value - 1) as usize % COLORS.len()],
+        _ => THEMES[theme as usize % THEMES.len()][(value - 1) as usize % COLORS.len()],
     }
 }
 
-/// Rewrite the three numbers, and show or hide the banner.
+/// Rewrite the three numbers, show or hide the banner, and dress the menu
+/// layer for whatever screen the game is on (§6 M19).
 pub fn hud(world: &mut GameWorld) {
     let mut snapshot = None;
     let _ = world.each::<(&Play, &Best)>(|_, (play, best)| snapshot = Some((*play, *best)));
     let Some((play, best)) = snapshot else {
         return;
     };
+    let (mut screen, mut opts, mut prefs) = (
+        Screen {
+            at: SCREEN_TITLE,
+            from: SCREEN_TITLE,
+        },
+        Options {
+            ghost_off: 0,
+            theme: 0,
+            preset: 0,
+        },
+        Prefs {
+            cursor: 0,
+            quiet: 0,
+        },
+    );
+    let _ = world.each::<&Screen>(|_, s| screen = *s);
+    let _ = world.each::<&Options>(|_, o| opts = *o);
+    let _ = world.each::<&Prefs>(|_, p| prefs = *p);
+
     let _ = world.each::<(&HudLine, &mut Widget)>(|_, (line, widget)| {
         widget.set_text(Text::number(value_of(&play, &best, line)).as_str());
     });
+    // GAME OVER belongs to the playing screen: a menu over a dead board says
+    // what the menu says, not both at once.
     let _ = world.each::<(&Banner, &mut Widget)>(|_, (banner, widget)| {
-        widget.rect = match play.over != 0 {
+        widget.rect = match play.over != 0 && screen.at == SCREEN_PLAYING {
             true => banner.rect,
             false => [0.0; 4],
         };
     });
+
+    // Percent for the volume row, computed the host's way round (`Prefs`'
+    // fixed point) so the label and the loudness cannot disagree.
+    let volume = (QUIET_MAX - prefs.quiet.min(QUIET_MAX)) * 100 / QUIET_MAX;
+    let _ = world.each::<(&MenuItem, &mut Widget)>(|_, (item, widget)| {
+        let def = &MENU[item.which as usize % MENU.len()];
+        let shown = def.on & (1 << screen.at.min(31)) != 0;
+        widget.rect = match shown {
+            true => def.rect,
+            false => [0.0; 4],
+        };
+        if !shown {
+            return;
+        }
+        match item.which {
+            M_GHOST => widget.set_text(if opts.ghost_off == 0 {
+                "GHOST      ON"
+            } else {
+                "GHOST      OFF"
+            }),
+            M_VOLUME => widget.set_text(Text::labelled(b"VOLUME     ", volume).as_str()),
+            M_CURSOR => widget.set_text(if prefs.hardware_cursor() {
+                "CURSOR     SYSTEM"
+            } else {
+                "CURSOR     DRAWN"
+            }),
+            M_SPEED => {
+                widget.set_text(Text::pair(b"SPEED      ", speed_name(opts.preset)).as_str());
+            }
+            M_THEME => {
+                widget.set_text(Text::pair(b"THEME      ", theme_name(opts.theme)).as_str());
+            }
+            which if (M_TITLE_ROW0..M_TITLE_ROW0 + 5).contains(&which) => {
+                let rank = which - M_TITLE_ROW0;
+                let score = best.top[rank as usize % best.top.len()];
+                match score {
+                    0 => widget.set_text(""),
+                    _ => widget.set_text(Text::ranked(rank, score).as_str()),
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+/// [`PRESETS`]' label for a preset index, out-of-range reading as NORMAL.
+#[must_use]
+pub fn speed_name(preset: u32) -> &'static str {
+    PRESETS[preset as usize % PRESETS.len()].0
+}
+
+/// [`THEME_NAMES`]' label for a theme index, out-of-range reading as CLASSIC.
+#[must_use]
+pub fn theme_name(theme: u32) -> &'static str {
+    THEME_NAMES[theme as usize % THEME_NAMES.len()]
 }
 
 // Order in `systems` is execution order (§4.1); order in the verb lists is the
 // id space a replay records (§4.7). Neither is alphabetical, neither may drift.
 #[cfg(feature = "game")]
 gg_ecs::gg_game! {
-    components: [Well, Piece, Rules, Play, Best, Cell, Bay, HudLine, Banner, Widget, Cue, Sound],
+    components: [
+        Well, Piece, Rules, Play, Best, Cell, Bay, HudLine, Banner, Screen, Options, MenuItem,
+        Widget, Cue, Sound, Prefs
+    ],
     actions: [
         "left",
         "right",
@@ -1347,10 +2059,13 @@ gg_ecs::gg_game! {
         "rotate_cw",
         "rotate_ccw",
         "hold",
-        "restart"
+        "restart",
+        "pause",
+        "ui_click",
+        "ui_focus"
     ],
-    axes: [],
-    systems: [bootstrap, step, present, hud],
+    axes: ["ui_x", "ui_y"],
+    systems: [bootstrap, step, menu, present, hud],
 }
 
 #[cfg(test)]
@@ -1382,6 +2097,9 @@ mod tests {
                     all.push(("bay", bay_rect(slot, row, col)));
                 }
             }
+        }
+        for def in &MENU {
+            all.push(("menu", def.rect));
         }
         all
     }
@@ -1457,16 +2175,18 @@ mod tests {
     #[test]
     fn every_declared_label_is_wide_enough_for_its_text() {
         let mut checked = 0;
-        declare(|_, widget| {
+        declare(|part, widget| {
             let body = widget.text();
             if body.is_empty() {
                 return;
             }
-            // The banner is declared at a zero rect and given its real one by
-            // `hud`, so it is measured against that rather than against nothing.
-            let width = match widget.rect[2] {
-                0.0 => banner_rect(1)[2],
-                width => width,
+            // The banner and the menu layer are declared at zero rects and
+            // given their real ones by `hud`, so each is measured against the
+            // rect it will be shown at rather than against nothing.
+            let width = match (&part, widget.rect[2]) {
+                (Part::Menu(item), _) => MENU[item.which as usize].rect[2],
+                (_, 0.0) => banner_rect(1)[2],
+                (_, width) => width,
             };
             assert!(
                 width >= text_width(body),
@@ -1474,11 +2194,28 @@ mod tests {
             );
             checked += 1;
         });
+        // The menu widgets carrying text at rest: the buttons and headings
+        // whose labels never change — value rows arrive empty and are written
+        // by `hud`.
+        let menu_text = MENU.iter().filter(|def| !def.text.is_empty()).count();
         assert_eq!(
             checked,
-            STATIC_TEXT.len() + KEYS.len() * 2 + VALUE_AT.len() + 2,
+            STATIC_TEXT.len() + KEYS.len() * 2 + VALUE_AT.len() + 2 + menu_text,
             "a label stopped being declared"
         );
+        // And the value rows fit their widest values once `hud` writes them.
+        for (which, widest) in [
+            (M_GHOST, "GHOST      OFF"),
+            (M_VOLUME, "VOLUME     100"),
+            (M_CURSOR, "CURSOR     SYSTEM"),
+            (M_SPEED, "SPEED      NORMAL"),
+            (M_THEME, "THEME      CLASSIC"),
+        ] {
+            assert!(
+                MENU[which as usize].rect[2] >= text_width(widest),
+                "{widest:?} is clipped by its settings row"
+            );
+        }
 
         for (key, action) in KEYS {
             // The two columns must not collide either: the key column is

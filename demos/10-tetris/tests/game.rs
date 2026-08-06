@@ -14,9 +14,12 @@
 use demo_10_tetris::{
     Banner, Bay, Best, COLORS, CUE_CLEAR, CUE_HOLD, CUE_LEVEL, CUE_LOCK, CUE_MOVE, CUE_OVER,
     CUE_ROTATE, CUES, Cell, Cue, HARD_DROP, HEIGHT, HIDDEN, HOLD, HOLD_BAY, HudLine, LEFT,
-    MIN_GRAVITY_TICKS, NEXT_BAY, NO_PIECE, Piece, Play, RESTART, ROTATE_CW, Rules, SEED, SHAPES,
-    WIDTH, Well, cells_of, clear_rows, collides, color_of, draw, gravity_for, landing_row,
-    new_play, session, spawn_piece, voice_of,
+    M_CURSOR, M_DONE, M_GHOST, M_QUIT, M_RESUME, M_THEME, M_TITLE_SETTINGS, M_VOLUME, MENU,
+    MIN_GRAVITY_TICKS, NEXT_BAY, NO_PIECE, Options, PAUSE, PRESETS, Piece, Play, RESTART,
+    ROTATE_CW, Rules, SCREEN_PAUSED, SCREEN_PLAYING, SCREEN_SETTINGS, SCREEN_TITLE, SEED, SHAPES,
+    Screen, THEMES, WIDTH, Well, cells_of, clear_rows, collides, color_of, draw, gravity_for,
+    landing_row, new_play, record_top, rotate_kicked, session, spawn_piece, themed_color,
+    tspin_at_lock, voice_of,
 };
 use gg_ecs::boundary::{
     self, AbiInfo, ActionId, ComponentsTable, HostApiV1, InputFrame, Sound, SystemsTable, TickCtx,
@@ -57,7 +60,7 @@ impl Game {
             let declared = world.adopt(&gg_game_components()).unwrap();
             (gg_game_systems(), declared)
         };
-        assert_eq!(declared, 12, "ten of ours and the protocol's two");
+        assert_eq!(declared, 16, "thirteen of ours and the protocol's three");
         Game {
             world,
             table,
@@ -70,6 +73,19 @@ impl Game {
     fn hold(&mut self, action: ActionId) -> &mut Self {
         self.held |= 1 << action.index();
         self
+    }
+
+    /// Bootstrap and leave the title screen (§6 M19): one tick with `RESTART`
+    /// down, which is PLAY's keyboard spelling there. The board afterwards is
+    /// `bootstrap`'s own — entering play deals nothing new.
+    fn start(&mut self) {
+        self.hold(RESTART);
+        self.step();
+        assert_eq!(
+            self.one::<demo_10_tetris::Screen>().at,
+            demo_10_tetris::SCREEN_PLAYING,
+            "RESTART on the title did not start the game"
+        );
     }
 
     fn step(&mut self) {
@@ -182,6 +198,26 @@ impl Game {
         }
         out
     }
+
+    /// Click a menu widget: set the bit the host would have written after last
+    /// tick's frame (§4.9's lag), run the tick that reads it, then clear it —
+    /// the host rewrites `state` every tick and this harness has no host, so
+    /// without the clear one click would repeat forever.
+    fn click(&mut self, which: u8) {
+        let id = MENU[which as usize].id;
+        let query = Query::<&mut Widget>::new().unwrap();
+        self.world.each(&query, |_, w: &mut Widget| {
+            if w.id == id {
+                w.state |= gg_ecs::boundary::state::CLICKED;
+            }
+        });
+        self.step();
+        self.world.each(&query, |_, w: &mut Widget| w.state = 0);
+    }
+
+    fn screen(&self) -> u32 {
+        self.one::<Screen>().at
+    }
 }
 
 /// The cue kinds whose sequence moved between `before` and `after`.
@@ -223,7 +259,7 @@ fn the_shape_table_is_seven_tetrominoes() {
 fn expected_widgets() -> usize {
     let chrome = 4 + 1; // four panels and the well's surround
     let text = demo_10_tetris::KEYS.len() * 2 + 8 + 4 + 3; // legend, captions, values, banner
-    (HEIGHT - HIDDEN) * WIDTH + 32 + chrome + text
+    (HEIGHT - HIDDEN) * WIDTH + 32 + chrome + text + MENU.len()
 }
 
 #[test]
@@ -262,6 +298,7 @@ fn bootstrap_run_again_spawns_nothing_new() {
 #[test]
 fn the_falling_piece_and_its_ghost_are_on_the_board() {
     let mut game = Game::load();
+    game.start();
     for _ in 0..12 {
         game.hold(demo_10_tetris::SOFT_DROP);
         game.step();
@@ -315,7 +352,7 @@ fn the_falling_piece_and_its_ghost_are_on_the_board() {
 #[test]
 fn the_hold_bay_fills_only_after_a_swap() {
     let mut game = Game::load();
-    game.step();
+    game.start();
     let filled = |game: &Game, slot: u8| {
         game.widgets_with::<Bay>()
             .iter()
@@ -340,6 +377,7 @@ fn the_hold_bay_fills_only_after_a_swap() {
 #[test]
 fn the_score_reaches_the_hud() {
     let mut game = Game::load();
+    game.start();
     game.hold(HARD_DROP);
     game.step();
     game.step();
@@ -361,7 +399,7 @@ fn the_score_reaches_the_hud() {
 #[test]
 fn the_banner_is_hidden_until_the_game_is_over() {
     let mut game = Game::load();
-    game.step();
+    game.start();
     for (_, widget) in game.widgets_with::<Banner>() {
         assert_eq!(widget.rect, [0.0; 4], "GAME OVER showed on a live board");
     }
@@ -388,7 +426,7 @@ fn the_banner_is_hidden_until_the_game_is_over() {
 #[test]
 fn gravity_moves_the_piece_down_on_its_own() {
     let mut game = Game::load();
-    game.step();
+    game.start();
     let start = game.one::<Piece>().row;
     let budget = gravity_for(&Rules::DEFAULT, 1);
     game.steps(u64::from(budget) + 1);
@@ -404,6 +442,7 @@ fn gravity_moves_the_piece_down_on_its_own() {
 #[test]
 fn the_same_inputs_produce_the_same_world_hash() {
     let script = |game: &mut Game| {
+        game.start();
         for tick in 0..400u64 {
             match tick % 7 {
                 0 => {
@@ -564,7 +603,7 @@ fn a_new_game_holds_nothing_and_has_a_next_piece() {
 #[test]
 fn restart_clears_the_well_and_deals_again() {
     let mut game = Game::load();
-    game.step();
+    game.start();
     // Hard-drop every other tick until the stack reaches the ceiling. Alternate,
     // because hard drop is an *edge*: a key held down is one drop, which is what
     // makes it a hard drop rather than a repeat. Left to gravity this would take
@@ -639,7 +678,7 @@ fn a_new_game_declares_a_cue_bank_that_has_not_played() {
 #[test]
 fn moving_rotating_and_holding_each_play_their_own_cue() {
     let mut game = Game::load();
-    game.step();
+    game.start();
 
     let before = game.cues();
     game.hold(LEFT);
@@ -668,7 +707,7 @@ fn moving_rotating_and_holding_each_play_their_own_cue() {
 #[test]
 fn a_refused_rotation_makes_no_sound() {
     let mut game = Game::load();
-    game.step();
+    game.start();
     // Wedge the piece against the left wall, then try to turn into it. Some
     // pieces still fit, so this asserts the correspondence rather than a
     // refusal: rotated or not, the cue and the piece agree.
@@ -691,7 +730,7 @@ fn a_refused_rotation_makes_no_sound() {
 #[test]
 fn a_lock_and_a_clear_are_separate_cues_and_the_clear_is_tuned_by_its_rows() {
     let mut game = Game::load();
-    game.step();
+    game.start();
 
     // Hard-drop until something locks. The first drop always does.
     let before = game.cues();
@@ -705,7 +744,7 @@ fn a_lock_and_a_clear_are_separate_cues_and_the_clear_is_tuned_by_its_rows() {
     // Fill the floor but for one column, then drop into it: one row, then four.
     for rows in [1u32, 4] {
         let mut game = Game::load();
-        game.step();
+        game.start();
         let one = game.cue(CUE_CLEAR);
         let four = single_clear(&mut game, rows);
         assert!(
@@ -784,7 +823,7 @@ fn vertical_i() -> (u8, u8) {
 #[test]
 fn a_top_out_plays_its_cue_exactly_once() {
     let mut game = Game::load();
-    game.step();
+    game.start();
     for tick in 0..2_000 {
         if tick % 2 == 0 {
             game.hold(HARD_DROP);
@@ -817,7 +856,7 @@ fn a_top_out_plays_its_cue_exactly_once() {
 #[test]
 fn the_recorded_session_plays_a_whole_game() {
     let frames = session::frames();
-    assert_eq!(frames.len(), 600, "the session changed length");
+    assert_eq!(frames.len(), 602, "the session changed length");
 
     let mut game = Game::load();
     let mut over_at = None;
@@ -838,7 +877,7 @@ fn the_recorded_session_plays_a_whole_game() {
     let play = game.one::<Play>();
     assert_eq!(
         over_at,
-        Some(568),
+        Some(570),
         "the game did not end where it was recorded"
     );
     assert_eq!(
@@ -848,7 +887,7 @@ fn the_recorded_session_plays_a_whole_game() {
     );
     assert_eq!(
         (play.lines, play.level, play.score),
-        (24, 3, 7032),
+        (24, 3, 7982),
         "the recorded game came out differently"
     );
     // Every cue the game has, sounded at least once — a session that never
@@ -960,7 +999,7 @@ fn a_reseeded_bag_diverges_by_name_and_plays_a_different_game() {
     let play = game.one::<Play>();
     assert_ne!(
         (over_at, play.lines, play.score),
-        (Some(568), 24, 7032),
+        (Some(570), 24, 7982),
         "a different bag played the same game"
     );
 }
@@ -987,7 +1026,7 @@ fn the_endless_session_keeps_playing_with_a_stack_on_the_board() {
     let last = progress[TICKS - 1];
     assert_eq!(
         (last.lines, last.level, last.score),
-        (176, 18, 186_546),
+        (176, 18, 216_946),
         "the endless bot played a different game than the one this gate is pinned to"
     );
     assert!(
@@ -999,9 +1038,10 @@ fn the_endless_session_keeps_playing_with_a_stack_on_the_board() {
     // clear that took everything and the next lock, so a gate that asserts a
     // non-empty well is asserting something that is true nearly always and
     // checked exactly.
+    // Two of the empty ticks are the title screen the stream opens on (§6 M19).
     let empty = progress.iter().filter(|p| p.occupied == 0).count();
     let deepest = progress.iter().map(|p| p.occupied).max().unwrap();
-    assert_eq!((empty, deepest), (6, 82));
+    assert_eq!((empty, deepest), (8, 82));
 }
 
 /// §6 M18's save row, from the game's side: **the record outlives the game that
@@ -1014,7 +1054,7 @@ fn the_endless_session_keeps_playing_with_a_stack_on_the_board() {
 #[test]
 fn the_best_score_survives_the_game_that_set_it() {
     let mut game = Game::load();
-    game.step();
+    game.start();
     assert_eq!(game.one::<Best>().score, 0, "a new world has no record");
 
     // Play until the well fills, the way `restart_clears_the_well_and_deals_again`
@@ -1056,11 +1096,427 @@ fn the_best_score_survives_the_game_that_set_it() {
     );
 }
 
+// ------------------------------------------------------------ the screens
+
+/// The game opens on the title (§6 M19), plays nothing there, and starts on
+/// `RESTART` — the whole reason every other test begins with `start()`.
+#[test]
+fn the_title_screen_holds_the_game_until_play() {
+    let mut game = Game::load();
+    game.step();
+    assert_eq!(game.screen(), SCREEN_TITLE);
+    let before = game.one::<Piece>();
+    game.steps(120);
+    assert_eq!(
+        game.one::<Piece>().row,
+        before.row,
+        "gravity ran on the title screen"
+    );
+    assert_eq!(game.cues(), [0; CUES], "the title screen made a sound");
+
+    game.hold(RESTART);
+    game.step();
+    assert_eq!(game.screen(), SCREEN_PLAYING);
+    let budget = gravity_for(&Rules::DEFAULT, 1);
+    game.steps(u64::from(budget) + 1);
+    assert!(game.one::<Piece>().row > before.row, "PLAY did not play");
+}
+
+/// Pause freezes exactly the sim: the piece, the clocks and the cues — and
+/// resumes where it stopped. The pause key toggles both ways.
+#[test]
+fn pause_freezes_the_game_and_resume_continues_it() {
+    let mut game = Game::load();
+    game.start();
+    game.steps(10);
+    let frozen = game.one::<Piece>();
+    let quiet = game.cues();
+
+    game.hold(PAUSE);
+    game.step();
+    assert_eq!(game.screen(), SCREEN_PAUSED);
+    // Held keys and gravity do nothing while paused.
+    for _ in 0..200 {
+        game.hold(LEFT).hold(demo_10_tetris::SOFT_DROP);
+        game.step();
+    }
+    assert_eq!(game.one::<Piece>().col, frozen.col, "a paused piece moved");
+    assert_eq!(game.one::<Piece>().row, frozen.row, "a paused piece fell");
+    assert_eq!(played(quiet, game.cues()), Vec::<u8>::new());
+
+    game.hold(PAUSE);
+    game.step();
+    assert_eq!(game.screen(), SCREEN_PLAYING);
+    let budget = gravity_for(&Rules::DEFAULT, 1);
+    game.steps(u64::from(budget) + 1);
+    assert!(
+        game.one::<Piece>().row > frozen.row,
+        "resume did not resume"
+    );
+
+    // The RESUME button is the click spelling of the same edge.
+    game.hold(PAUSE);
+    game.step();
+    assert_eq!(game.screen(), SCREEN_PAUSED);
+    game.click(M_RESUME);
+    assert_eq!(game.screen(), SCREEN_PLAYING);
+}
+
+/// QUIT files the abandoned score in the title table and deals a fresh board,
+/// so PLAY from the title is always a new game.
+#[test]
+fn quit_records_the_run_and_returns_a_fresh_board_to_the_title() {
+    let mut game = Game::load();
+    game.start();
+    for _ in 0..6 {
+        game.hold(HARD_DROP);
+        game.step();
+        game.step();
+    }
+    let abandoned = game.one::<Play>().score;
+    assert!(abandoned > 0, "six hard drops scored nothing");
+
+    game.hold(PAUSE);
+    game.step();
+    game.click(M_QUIT);
+    assert_eq!(game.screen(), SCREEN_TITLE);
+    let best = game.one::<Best>();
+    assert_eq!(best.top[0], abandoned, "walking away lost the score");
+    assert_eq!(game.one::<Play>().score, 0, "QUIT kept the old run");
+    assert!(
+        game.one::<Well>()
+            .cells
+            .iter()
+            .all(|r| r.iter().all(|&c| c == 0)),
+        "QUIT left the old stack on the board"
+    );
+}
+
+/// The settings screen: reachable from title and pause, DONE returns to where
+/// it came from, and every row edits the value it names — through the real
+/// systems table, with the click arriving as the host writes it (§4.9).
+#[test]
+fn the_settings_rows_edit_what_they_name_and_done_returns() {
+    let mut game = Game::load();
+    game.step();
+    game.click(M_TITLE_SETTINGS);
+    assert_eq!(game.screen(), SCREEN_SETTINGS);
+
+    game.click(M_GHOST);
+    assert_eq!(game.one::<Options>().ghost_off, 1, "the ghost row is dead");
+    game.click(M_THEME);
+    assert_eq!(game.one::<Options>().theme, 1, "the theme row is dead");
+    game.click(M_VOLUME);
+    let prefs = game.one::<gg_ecs::boundary::Prefs>();
+    assert_eq!(
+        prefs.quiet,
+        gg_ecs::boundary::QUIET_MAX / 4,
+        "the volume row is dead"
+    );
+    game.click(M_CURSOR);
+    assert!(
+        game.one::<gg_ecs::boundary::Prefs>().hardware_cursor(),
+        "the cursor row is dead"
+    );
+    game.click(demo_10_tetris::M_SPEED);
+    let rules = game.one::<Rules>();
+    assert_eq!(
+        bytemuck::bytes_of(&rules),
+        bytemuck::bytes_of(&PRESETS[1].1),
+        "the speed row did not write the FAST preset into Rules"
+    );
+    assert_eq!(game.one::<Options>().preset, 1);
+
+    game.click(M_DONE);
+    assert_eq!(
+        game.screen(),
+        SCREEN_TITLE,
+        "DONE forgot where it came from"
+    );
+
+    // And from pause, DONE goes back to pause — not to the title.
+    game.hold(RESTART);
+    game.step();
+    game.hold(PAUSE);
+    game.step();
+    game.click(demo_10_tetris::M_PAUSE_SETTINGS);
+    assert_eq!(game.screen(), SCREEN_SETTINGS);
+    game.click(M_DONE);
+    assert_eq!(game.screen(), SCREEN_PAUSED);
+}
+
+/// A hidden ghost is a present-time choice, not a sim one: the hash-relevant
+/// state is the `Options` component, and the board draws no `GHOST_CELL`.
+#[test]
+fn turning_the_ghost_off_takes_it_off_the_board() {
+    let mut game = Game::load();
+    game.start();
+    game.steps(4);
+    let ghosts = |game: &Game| {
+        game.widgets_with::<Cell>()
+            .iter()
+            .filter(|(_, w)| w.color == color_of(demo_10_tetris::GHOST_CELL))
+            .count()
+    };
+    assert_eq!(ghosts(&game), 4, "no ghost to switch off");
+
+    game.world.each(
+        &Query::<&mut Options>::new().unwrap(),
+        |_, o: &mut Options| {
+            o.ghost_off = 1;
+        },
+    );
+    game.step();
+    assert_eq!(ghosts(&game), 0, "the ghost survived its own setting");
+}
+
+/// A theme recolours the pieces and only the pieces — empty cells and the
+/// ghost stay the well's own, so the board keeps reading as a board.
+#[test]
+fn a_theme_recolours_the_locked_stack() {
+    let mut game = Game::load();
+    game.start();
+    game.hold(HARD_DROP);
+    game.step();
+    game.step();
+    let kind = {
+        let well = game.one::<Well>();
+        well.cells
+            .iter()
+            .flatten()
+            .copied()
+            .find(|c| *c != 0)
+            .expect("a hard drop locked nothing")
+    };
+    let classic = themed_color(0, kind);
+    game.world.each(
+        &Query::<&mut Options>::new().unwrap(),
+        |_, o: &mut Options| {
+            o.theme = 1;
+        },
+    );
+    game.step();
+    let painted = game
+        .widgets_with::<Cell>()
+        .iter()
+        .filter(|(_, w)| w.color == themed_color(1, kind))
+        .count();
+    assert!(painted >= 1, "the neon theme never reached the board");
+    assert_ne!(themed_color(1, kind), classic, "theme 1 is theme 0");
+}
+
+// ------------------------------------------------------- SRS and the T-spin
+
+/// The kicks are SRS's published tables, checked at the wall: a vertical I
+/// flush against the left wall rotates flat by kicking two columns right —
+/// table entry two — rather than being refused where the old five-offset list
+/// would have slid it one.
+#[test]
+fn srs_kicks_a_wall_bound_i_the_published_distance() {
+    let well = Well {
+        cells: [[0; WIDTH]; HEIGHT],
+    };
+    // I in rotation R occupies column 2 of its box; col -2 puts it on the wall.
+    let mut piece = Piece {
+        col: -2,
+        row: 6,
+        kind: 0,
+        rot: 1,
+        pad: [0; 2],
+    };
+    let kick = rotate_kicked(&well, &mut piece, false);
+    assert_eq!(
+        kick,
+        Some(1),
+        "the wall kick was not the table's second test"
+    );
+    assert_eq!(
+        (piece.rot, piece.col),
+        (0, 0),
+        "the I did not land flat at the wall"
+    );
+
+    // Open air is always the first test, and the piece does not move.
+    let mut free = spawn_piece(2);
+    free.row = 8;
+    assert_eq!(rotate_kicked(&well, &mut free, true), Some(0));
+    assert_eq!((free.col, free.row), (3, 8));
+}
+
+/// The three-corner rule, all four verdicts: no spin without a rotation, no
+/// spin under three corners, mini when the point-side corners are open, full
+/// when they are filled.
+#[test]
+fn the_three_corner_rule_tells_full_from_mini_from_nothing() {
+    let mut well = Well {
+        cells: [[0; WIDTH]; HEIGHT],
+    };
+    // A T pointing down in a pocket at the floor: box corners at (row, 0/2)
+    // and (row+2, 0/2), the bottom pair braced by the floor's neighbours.
+    let piece = Piece {
+        col: 0,
+        row: HEIGHT as i32 - 3,
+        kind: 2,
+        rot: 2,
+        pad: [0; 2],
+    };
+    well.cells[HEIGHT - 1][0] = 1;
+    well.cells[HEIGHT - 1][2] = 1;
+    assert_eq!(tspin_at_lock(&well, &piece, 1), 0, "two corners spun");
+
+    well.cells[HEIGHT - 3][0] = 1;
+    assert_eq!(tspin_at_lock(&well, &piece, 0), 0, "no rotation, no spin");
+    assert_eq!(
+        tspin_at_lock(&well, &piece, 1),
+        2,
+        "both point-side corners are filled: this is the full spin"
+    );
+
+    // Point up over the same pocket: the front corners are the open top pair,
+    // so three corners make it a mini — unless the last kick was the table's
+    // fifth, which upgrades it.
+    let up = Piece { rot: 0, ..piece };
+    assert_eq!(
+        tspin_at_lock(&well, &up, 1),
+        1,
+        "the open-front spin is mini"
+    );
+    assert_eq!(tspin_at_lock(&well, &up, 2), 2, "the fifth kick upgrades");
+}
+
+/// A T-spin single through the real systems: the pocket is built, the spin
+/// state is planted, and the lock scores `SPIN_SCORE[1] * level` — none of
+/// which a plain single is worth.
+#[test]
+fn a_tspin_single_scores_the_spin_table() {
+    let mut game = Game::load();
+    game.start();
+    let mut well = game.one::<Well>();
+    // Bottom row full but for the T's stem column; the row above holds the
+    // bracing corner.
+    for (col, cell) in well.cells[HEIGHT - 1].iter_mut().enumerate() {
+        *cell = u8::from(col != 1);
+    }
+    well.cells[HEIGHT - 3][0] = 1;
+    game.put_well(well);
+    game.put_piece(Piece {
+        col: 0,
+        row: HEIGHT as i32 - 3,
+        kind: 2,
+        rot: 2,
+        pad: [0; 2],
+    });
+    let mut play = game.one::<Play>();
+    play.last_rot = 1;
+    play.score = 0;
+    game.put_play(play);
+
+    game.hold(HARD_DROP);
+    game.step();
+    let play = game.one::<Play>();
+    assert_eq!(play.lines, 1, "the T-spin single cleared no row");
+    assert_eq!(
+        play.score,
+        demo_10_tetris::SPIN_SCORE[1],
+        "a full T-spin single is the spin table at level 1"
+    );
+    assert_eq!(play.b2b, 1, "a T-spin clear starts the back-to-back chain");
+}
+
+/// Back-to-back and combo, in one sitting: two tetrises on consecutive locks —
+/// the second is worth `* 3 / 2`, plus one combo link.
+#[test]
+fn consecutive_tetrises_pay_back_to_back_and_the_combo_link() {
+    let mut game = Game::load();
+    game.start();
+    let drop_tetris = |game: &mut Game| {
+        // A released-keys tick first: hard drop is an edge, and the previous
+        // drop's press is still the previous frame.
+        game.step();
+        let before = game.one::<Play>().score;
+        single_clear(game, 4);
+        game.one::<Play>().score - before
+    };
+    let first = drop_tetris(&mut game);
+    assert!(
+        first > demo_10_tetris::LINE_SCORE[3],
+        "a tetris at level 1 is the line table plus the drop distance, got {first}"
+    );
+    assert_eq!(game.one::<Play>().b2b, 1, "a tetris starts the chain");
+    let second = drop_tetris(&mut game);
+    // The two drops fall the same distance, so the distance points cancel and
+    // the difference is exactly the back-to-back half and the combo link.
+    assert_eq!(
+        second - first,
+        demo_10_tetris::LINE_SCORE[3] * 3 / 2 - demo_10_tetris::LINE_SCORE[3]
+            + demo_10_tetris::COMBO_SCORE,
+        "the second consecutive tetris pays back-to-back and one combo link"
+    );
+}
+
+/// The scoreboard files finished games in order and ignores the empty ones.
+#[test]
+fn the_title_table_keeps_the_five_best_descending() {
+    let mut best = Best {
+        score: 0,
+        top: [0; 5],
+    };
+    for score in [300, 100, 500, 200, 400, 250, 600] {
+        record_top(&mut best, score);
+    }
+    assert_eq!(best.top, [600, 500, 400, 300, 250]);
+    record_top(&mut best, 0);
+    assert_eq!(best.top, [600, 500, 400, 300, 250], "zero is not a game");
+}
+
+/// Theme 0 is the classic palette the golden reference pins, every palette is
+/// opaque, and the non-piece cells are never themed.
+#[test]
+fn theme_zero_is_classic_and_every_palette_is_opaque() {
+    assert_eq!(THEMES[0], COLORS);
+    assert_eq!(THEMES.len(), demo_10_tetris::THEME_NAMES.len());
+    for theme in THEMES {
+        for color in theme {
+            assert_eq!(color >> 24, 0xff, "{color:#010x} is not opaque");
+        }
+    }
+    for theme in 0..THEMES.len() as u32 {
+        assert_eq!(themed_color(theme, 0), color_of(0));
+        assert_eq!(
+            themed_color(theme, demo_10_tetris::GHOST_CELL),
+            color_of(demo_10_tetris::GHOST_CELL)
+        );
+    }
+}
+
+/// The first preset is the default rules — "reset to NORMAL" must not drift.
+#[test]
+fn the_first_preset_is_the_default_rules() {
+    assert_eq!(PRESETS[0].0, "NORMAL");
+    assert_eq!(
+        bytemuck::bytes_of(&PRESETS[0].1),
+        bytemuck::bytes_of(&Rules::DEFAULT)
+    );
+}
+
+/// The menu table is in index order with distinct widget ids — `MenuItem`
+/// indexes it, and a swapped pair would wire RESUME to the QUIT handler.
+#[test]
+fn the_menu_table_is_in_index_order_with_distinct_ids() {
+    for (index, def) in MENU.iter().enumerate() {
+        assert_eq!(def.which as usize, index, "MENU[{index}] names another row");
+    }
+    let mut ids: Vec<u64> = MENU.iter().map(|d| d.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), MENU.len(), "two menu widgets share an id");
+}
+
 /// The record is on screen, and it is its own row.
 #[test]
 fn the_best_score_reaches_the_hud() {
     let mut game = Game::load();
-    game.step();
+    game.start();
     game.world
         .each(&Query::<&mut Best>::new().unwrap(), |_, best: &mut Best| {
             best.score = 204_900;

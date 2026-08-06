@@ -38,6 +38,7 @@ pub const gg_ui::boundary::verb::X: &str
 pub const gg_ui::boundary::verb::Y: &str
 pub struct gg_ui::boundary::Ui
 impl gg_ui::boundary::Ui
+pub fn gg_ui::boundary::Ui::cursor_drawn(&self) -> bool
 pub fn gg_ui::boundary::Ui::frame(&mut self, &mut gg_ecs::world::World, &gg_ui::router::Tick, gg_ui::layout::Fit) -> &[gg_render::ui::UiVertex]
 pub fn gg_ui::boundary::Ui::new() -> core::result::Result<gg_ui::boundary::Ui, gg_ecs::view::AliasError>
 pub fn gg_ui::boundary::Ui::pointer(&self) -> (f32, f32)
@@ -139,6 +140,7 @@ pub fn gg_ui::draw::Rect::is_empty(&self) -> bool
 pub const fn gg_ui::draw::Rect::new(f32, f32, f32, f32) -> Self
 pub fn gg_ui::draw::Rect::right(&self) -> f32
 pub fn gg_ui::draw::Rect::union(&self, &gg_ui::draw::Rect) -> gg_ui::draw::Rect
+pub fn gg_ui::draw::cursor(&mut gg_ui::draw::DrawList, (f32, f32))
 pub mod gg_ui::font
 pub const gg_ui::font::BAND: (u32, u32)
 pub const gg_ui::font::CELL: (u32, u32)
@@ -409,6 +411,7 @@ pub fn gg_ui::layout::Stack::rewind(&mut self)
 pub fn gg_ui::layout::Stack::vertical((f32, f32), f32) -> Self
 pub struct gg_ui::Ui
 impl gg_ui::boundary::Ui
+pub fn gg_ui::boundary::Ui::cursor_drawn(&self) -> bool
 pub fn gg_ui::boundary::Ui::frame(&mut self, &mut gg_ecs::world::World, &gg_ui::router::Tick, gg_ui::layout::Fit) -> &[gg_render::ui::UiVertex]
 pub fn gg_ui::boundary::Ui::new() -> core::result::Result<gg_ui::boundary::Ui, gg_ecs::view::AliasError>
 pub fn gg_ui::boundary::Ui::pointer(&self) -> (f32, f32)

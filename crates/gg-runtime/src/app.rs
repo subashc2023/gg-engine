@@ -231,8 +231,8 @@ impl App {
             view: View::default(),
             ui: gg_ui::Ui::new()?,
             audio: gg_audio::Audio::device_unless_headless()?,
+            cursor: Cursor::new(args.editor || ui_binding.is_some()),
             ui_binding,
-            cursor: Cursor::new(args.editor),
             #[cfg(feature = "editor")]
             ui_atlas_rev: 0,
             ui_geometry: Vec::new(),
@@ -364,10 +364,17 @@ impl App {
         self.cursor.at = Some((x, y));
     }
 
-    /// Whether the game should hold and hide the pointer this frame. Applied by
-    /// the windowed loop, which is the only place a window exists.
-    pub fn pointer_held(&self) -> bool {
-        self.cursor.held
+    /// What the window does with the pointer this frame: `(held, hidden)`.
+    /// Held is mouse-look's grab; hidden is the software-cursor case — the UI
+    /// drew the arrow at the steered pointer last tick, so the OS arrow is a
+    /// second arrow on the same pixel (§4.9). Whether it draws is the UI
+    /// stage's own decision (`Prefs::cursor`, §6 M19); the shell only relays
+    /// it. Applied by the windowed loop, the only place a window exists.
+    pub fn pointer(&self) -> (bool, bool) {
+        (
+            self.cursor.held,
+            !self.cursor.held && self.ui.cursor_drawn(),
+        )
     }
 
     /// Hand the pointer back, reporting where a system cursor should be warped
@@ -978,14 +985,16 @@ struct Cursor {
 }
 
 impl Cursor {
-    /// Held from the start unless an editor is opening: mouse-look wants the
-    /// pointer inside the window before the first frame, and every demo has
-    /// always started that way.
-    fn new(editor: bool) -> Cursor {
+    /// `free` starts the pointer unheld: an editor opening, or a game whose UI
+    /// binds the pointer verbs — a menu is aimed with an arrow the operator can
+    /// see, and grabbing it would park the steer's only input. Everything else
+    /// keeps the old start: mouse-look wants the pointer inside the window
+    /// before the first frame, and every demo has always started that way.
+    fn new(free: bool) -> Cursor {
         Cursor {
             at: None,
             steered: (0, 0),
-            held: !editor,
+            held: !free,
         }
     }
 

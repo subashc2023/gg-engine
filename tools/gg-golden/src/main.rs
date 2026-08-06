@@ -1433,7 +1433,10 @@ fn render_tetris() -> Render {
     play.hold = 2; // T, so the hold bay is not the empty case
     // Ahead of the run in progress, so BEST and SCORE are visibly different
     // numbers rather than one repeated twice.
-    let best = tetris::Best { score: 204_900 };
+    let best = tetris::Best {
+        score: 204_900,
+        top: [0; 5],
+    };
     let piece = tetris::Piece {
         col: 4,
         row: 6,
@@ -1447,9 +1450,10 @@ fn render_tetris() -> Render {
     let mut declared = Vec::new();
     tetris::declare(|part, mut widget| {
         match part {
-            // The banner belongs to a dead board and this one is alive; a
-            // `Banner` widget is declared at a zero rect, which draws nothing.
-            tetris::Part::Chrome | tetris::Part::Banner(_) => {}
+            // The banner belongs to a dead board and this one is alive — and
+            // the menu layer to a screen this picture is not on (§6 M19); both
+            // are declared at zero rects, which draw nothing.
+            tetris::Part::Chrome | tetris::Part::Banner(_) | tetris::Part::Menu(_) => {}
             tetris::Part::Cell(cell) => widget.color = tetris::cell_color(&grid, &cell),
             tetris::Part::Bay(bay) => widget.color = tetris::bay_color(&bays, &bay),
             tetris::Part::Value(line) => {

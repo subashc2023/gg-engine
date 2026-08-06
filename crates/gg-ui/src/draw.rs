@@ -306,6 +306,57 @@ impl DrawList {
     }
 }
 
+/// The cursor's fill and its one-unit halo — the halo is what keeps it visible
+/// over a light panel.
+const CURSOR: u32 = 0xffff_ffff;
+const CURSOR_HALO: u32 = 0xd004_0608;
+
+/// The classic arrow silhouette as `(dx, dy, width)` runs of unit cells, tip at
+/// the origin:
+///
+/// ```text
+/// X            The base cut and the hanging tail are not decoration: a 45°
+/// XX           body alone is the bottom-left half of a square, and nothing
+/// XXX          on it says which corner points (§6 M19).
+/// XXXX
+/// XXXXX
+/// XXXXXX
+/// XXXXXXX
+/// XXXXXXXX
+/// XXXXX
+/// XX XX
+///     XX
+/// ```
+pub(crate) const ARROW: [(f32, f32, f32); 12] = [
+    (0.0, 0.0, 1.0),
+    (0.0, 1.0, 2.0),
+    (0.0, 2.0, 3.0),
+    (0.0, 3.0, 4.0),
+    (0.0, 4.0, 5.0),
+    (0.0, 5.0, 6.0),
+    (0.0, 6.0, 7.0),
+    (0.0, 7.0, 8.0),
+    (0.0, 8.0, 5.0),
+    (0.0, 9.0, 2.0),
+    (3.0, 9.0, 2.0),
+    (4.0, 10.0, 2.0),
+];
+
+/// An arrow with its tip at `at`, in canvas units.
+///
+/// Host-drawn because the pointer is an integral of the replayed axis stream
+/// ([`crate::Router`]), not where the OS thinks the mouse is, so the OS arrow
+/// cannot stand in for it. Runs of rects because the draw list has one
+/// primitive; the halo pass is every run dilated by a unit, which is also what
+/// fills the notch between runs as outline.
+pub fn cursor(list: &mut DrawList, at: (f32, f32)) {
+    for (color, grow) in [(CURSOR_HALO, 1.0), (CURSOR, 0.0)] {
+        for (dx, dy, w) in ARROW {
+            list.rect(Rect::new(at.0 + dx, at.1 + dy, w, 1.0).inset(-grow), color);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

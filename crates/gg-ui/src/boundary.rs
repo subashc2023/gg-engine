@@ -33,7 +33,7 @@ use crate::draw::{DrawList, Rect};
 use crate::layout::Fit;
 use crate::router::{Binding, Response, Router, Tick};
 use crate::{WidgetId, font};
-use gg_ecs::boundary::{CANVAS, Verbs, Widget, state, widget};
+use gg_ecs::boundary::{CANVAS, Prefs, Verbs, Widget, state, widget};
 use gg_ecs::{AliasError, Query, World};
 use gg_input::{ActionId, AxisId, MAX_ACTIONS, MAX_AXES};
 use gg_render::ui::UiVertex;
@@ -43,15 +43,6 @@ use gg_render::ui::UiVertex;
 /// it — so the ring that shows it is host-drawn too.
 const FOCUS: u32 = 0xff7f_d0a0;
 const BORDER: f32 = 1.0;
-
-/// The cursor: fill, its one-unit halo, and its height in canvas units. Host-
-/// drawn for the reason [`crate::router`]'s docs give — the pointer is an
-/// integral of the replayed axis stream, so it is *not* where the OS thinks the
-/// mouse is and the OS cursor cannot stand in for it. The halo is what keeps it
-/// visible over a light panel.
-const CURSOR: u32 = 0xffff_ffff;
-const CURSOR_HALO: u32 = 0xd004_0608;
-const CURSOR_HEIGHT: u32 = 9;
 
 /// The verb names a host looks for to route a game's UI (§4.7, §4.9).
 ///
@@ -114,6 +105,12 @@ pub struct Ui {
     /// Indices into `widgets`, sorted into draw order. Separate so `widgets`
     /// keeps the world order the write-back pass walks.
     order: Vec<u32>,
+    /// The player's preference for which arrow they see (§6 M19) — read off
+    /// the world's [`Prefs`], the first walked, so the game's settings menu
+    /// reaches this stage without the host relaying a flag.
+    prefs: Query<&'static Prefs>,
+    /// Whether the last frame drew the software arrow — see [`Ui::cursor_drawn`].
+    arrow: bool,
 }
 
 impl Ui {
@@ -131,6 +128,8 @@ impl Ui {
             query: Query::new()?,
             widgets: Vec::new(),
             order: Vec::new(),
+            prefs: Query::new()?,
+            arrow: false,
         })
     }
 
@@ -138,6 +137,17 @@ impl Ui {
     #[must_use]
     pub fn pointer(&self) -> (f32, f32) {
         self.router.pointer().position()
+    }
+
+    /// Whether the last [`frame`](Self::frame) drew the software arrow: the UI
+    /// had something to point *at* — a hit-tested widget with area — and the
+    /// world's [`Prefs`] did not ask for the hardware cursor. What a host asks
+    /// to decide the OS arrow's fate: hidden while this stage draws its own,
+    /// shown otherwise — over a plain HUD, and under the hardware preference,
+    /// where the routing is identical and only the picture changes.
+    #[must_use]
+    pub fn cursor_drawn(&self) -> bool {
+        self.arrow
     }
 
     /// Run one tick of UI over `world` and return the geometry for it.
@@ -155,7 +165,16 @@ impl Ui {
             query,
             widgets,
             order,
+            prefs,
+            arrow,
         } = self;
+        // The player's arrow preference, off the world itself (§6 M19): the
+        // menu click that set it is ordinary recorded input, and no host flag
+        // needs relaying.
+        let mut hardware = None;
+        world.each_ref(prefs, |_, p: &Prefs| {
+            hardware.get_or_insert(p.hardware_cursor());
+        });
         router.begin(tick, CANVAS);
         widgets.clear();
         order.clear();
@@ -188,7 +207,10 @@ impl Ui {
                     list.pop_clip();
                 }
                 widget::BUTTON => {
-                    hit_tested = true;
+                    // Area is part of the rule: a zero rect is how a game hides
+                    // a widget (§4.9), and a hidden menu's buttons must not
+                    // summon the arrow back over a board nothing points at.
+                    hit_tested |= rect.w > 0.0 && rect.h > 0.0;
                     let response = router.hit(WidgetId::from_hash(w.id), rect);
                     w.state = flags(&response);
                     let fill = if response.hovered || response.held {
@@ -225,8 +247,9 @@ impl Ui {
         // is the case that found this: 262 widgets, none of them a button, and a
         // white arrow parked in the corner of every frame because "a UI exists"
         // was standing in for "a UI is pointed at".
-        if hit_tested {
-            cursor(list, router.pointer().position());
+        *arrow = hit_tested && !hardware.unwrap_or(false);
+        if *arrow {
+            crate::draw::cursor(list, router.pointer().position());
         }
         list.pop_transform();
 
@@ -249,20 +272,6 @@ impl Ui {
     #[must_use]
     pub fn vertices(&self) -> &[UiVertex] {
         self.list.vertices()
-    }
-}
-
-/// An arrow with its tip at `at`, in canvas units.
-///
-/// Rows rather than a triangle because the draw list has one primitive; the
-/// first pass is the same shape dilated by a unit, which is the halo.
-fn cursor(list: &mut DrawList, at: (f32, f32)) {
-    for (color, grow) in [(CURSOR_HALO, 1.0), (CURSOR, 0.0)] {
-        for row in 0..CURSOR_HEIGHT {
-            let i = f32::from(row as u16);
-            let rect = Rect::new(at.0, at.1 + i, i + 1.0, 1.0);
-            list.rect(rect.inset(-grow), color);
-        }
     }
 }
 
@@ -408,9 +417,9 @@ mod tests {
         assert_eq!(click((3840, 2160)), click(TARGET), "and at 4K");
     }
 
-    /// The cursor alone: two passes of `CURSOR_HEIGHT` rows, six vertices a
-    /// quad. What "drew nothing but the pointer" means.
-    const CURSOR_ONLY: usize = 2 * CURSOR_HEIGHT as usize * 6;
+    /// The cursor alone: two passes of the arrow's runs, six vertices a quad.
+    /// What "drew nothing but the pointer" means.
+    const CURSOR_ONLY: usize = 2 * crate::draw::ARROW.len() * 6;
 
     /// A widget whose kind this host does not know draws nothing rather than
     /// drawing something wrong — the game may be built against a newer
@@ -471,13 +480,75 @@ mod tests {
                 Widget::button(WidgetId::new("ok").get(), [0.0; 4], 0, 0, ""),
             )
             .expect("insert");
+        let hidden = ui
+            .frame(&mut world, &Tick::default(), Fit::new(TARGET))
+            .len();
+        assert_eq!(
+            hidden, text,
+            "a zero rect is how a game hides a button (§4.9), and a hidden menu \
+             must not summon the arrow"
+        );
+        assert!(!ui.cursor_drawn());
+
+        world
+            .insert(
+                button,
+                Widget::button(
+                    WidgetId::new("ok").get(),
+                    [10.0, 10.0, 40.0, 12.0],
+                    0,
+                    0,
+                    "",
+                ),
+            )
+            .expect("insert");
         let with_button = ui
             .frame(&mut world, &Tick::default(), Fit::new(TARGET))
             .len();
         assert_eq!(
             with_button - text,
-            CURSOR_ONLY,
+            CURSOR_ONLY + 6, // the button's own quad, then the pointer it brought
             "one hit-tested widget is what brings the pointer"
+        );
+        assert!(ui.cursor_drawn());
+    }
+
+    /// The hardware-cursor preference (`Prefs`, §6 M19): the pointer still
+    /// routes — a hover still lands in the world — but no second arrow is
+    /// drawn over the OS one, and `cursor_drawn` tells the host to leave the
+    /// OS arrow showing.
+    #[test]
+    fn the_hardware_preference_keeps_the_routing_and_drops_the_arrow() {
+        use gg_ecs::boundary::cursor;
+
+        let mut ui = Ui::new().expect("query");
+        let mut world = world();
+        ui.frame(&mut world, &moved(50.0, 30.0), Fit::new(TARGET));
+        let drawn = ui
+            .frame(&mut world, &Tick::default(), Fit::new(TARGET))
+            .len();
+        assert!(ui.cursor_drawn());
+
+        world.register::<Prefs>().expect("register");
+        let prefs = world.spawn();
+        world
+            .insert(
+                prefs,
+                Prefs {
+                    cursor: cursor::HARDWARE,
+                    quiet: 0,
+                },
+            )
+            .expect("insert");
+        let bare = ui
+            .frame(&mut world, &Tick::default(), Fit::new(TARGET))
+            .len();
+        assert_eq!(drawn - bare, CURSOR_ONLY, "only the arrow went away");
+        assert!(!ui.cursor_drawn(), "the OS arrow stands in");
+        assert_eq!(
+            state_of(&world, OK),
+            state::HOVERED,
+            "the routing is intact"
         );
     }
 

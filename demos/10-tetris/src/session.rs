@@ -107,6 +107,10 @@ const MAX_PIECES: usize = 400;
 #[must_use]
 pub fn frames() -> Vec<InputFrame> {
     let mut out = Vec::new();
+    // The game opens on the title screen (§6 M19); `RESTART` is the keyboard
+    // spelling of PLAY there. The board underneath is `bootstrap`'s, untouched
+    // by the press, so the mirror below stays the opening position.
+    tap(&mut out, RESTART);
     // `bootstrap`'s opening position, mirrored: the same seed and the same first
     // draw, or the bot would be playing a different game from the one it records.
     let mut well = Well {
@@ -157,6 +161,8 @@ pub fn frames() -> Vec<InputFrame> {
 #[must_use]
 pub fn endless(ticks: usize) -> Vec<InputFrame> {
     let mut out = Vec::with_capacity(ticks + 32);
+    // Off the title screen first, as [`frames`] does (§6 M19).
+    tap(&mut out, RESTART);
     let mut well = Well {
         cells: [[0; WIDTH]; HEIGHT],
     };
