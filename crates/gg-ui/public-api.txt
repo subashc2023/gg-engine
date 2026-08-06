@@ -1,0 +1,419 @@
+pub mod gg_ui
+pub mod gg_ui::atlas
+pub struct gg_ui::atlas::Atlas
+impl gg_ui::atlas::Atlas
+pub fn gg_ui::atlas::Atlas::coverage(&self) -> gg_render::ui::Coverage<'_>
+pub fn gg_ui::atlas::Atlas::get(&self, gg_ui::atlas::Key) -> core::option::Option<gg_ui::atlas::Slot>
+pub fn gg_ui::atlas::Atlas::insert(&mut self, gg_ui::atlas::Key, &gg_ui::atlas::Raster<'_>) -> core::option::Option<gg_ui::atlas::Slot>
+pub fn gg_ui::atlas::Atlas::version(&self) -> u64
+impl core::default::Default for gg_ui::atlas::Atlas
+pub fn gg_ui::atlas::Atlas::default() -> Self
+pub struct gg_ui::atlas::Key
+pub gg_ui::atlas::Key::face: u16
+pub gg_ui::atlas::Key::glyph: u16
+pub gg_ui::atlas::Key::px: u16
+pub struct gg_ui::atlas::Raster<'a>
+pub gg_ui::atlas::Raster::coverage: &'a [u8]
+pub gg_ui::atlas::Raster::h: u32
+pub gg_ui::atlas::Raster::left: i32
+pub gg_ui::atlas::Raster::top: i32
+pub gg_ui::atlas::Raster::w: u32
+pub struct gg_ui::atlas::Slot
+pub gg_ui::atlas::Slot::h: u32
+pub gg_ui::atlas::Slot::left: i32
+pub gg_ui::atlas::Slot::top: i32
+pub gg_ui::atlas::Slot::w: u32
+pub gg_ui::atlas::Slot::x: u32
+pub gg_ui::atlas::Slot::y: u32
+impl gg_ui::atlas::Slot
+pub fn gg_ui::atlas::Slot::uv(&self) -> (f32, f32, f32, f32)
+pub fn gg_ui::atlas::fallback() -> gg_render::ui::Coverage<'static>
+pub mod gg_ui::boundary
+pub mod gg_ui::boundary::verb
+pub const gg_ui::boundary::verb::CLICK: &str
+pub const gg_ui::boundary::verb::FOCUS: &str
+pub const gg_ui::boundary::verb::SCROLL_DOWN: &str
+pub const gg_ui::boundary::verb::SCROLL_UP: &str
+pub const gg_ui::boundary::verb::X: &str
+pub const gg_ui::boundary::verb::Y: &str
+pub struct gg_ui::boundary::Ui
+impl gg_ui::boundary::Ui
+pub fn gg_ui::boundary::Ui::frame(&mut self, &mut gg_ecs::world::World, &gg_ui::router::Tick, (u32, u32)) -> &[gg_render::ui::UiVertex]
+pub fn gg_ui::boundary::Ui::new() -> core::result::Result<gg_ui::boundary::Ui, gg_ecs::view::AliasError>
+pub fn gg_ui::boundary::Ui::pointer(&self) -> (f32, f32)
+pub fn gg_ui::boundary::Ui::vertices(&self) -> &[gg_render::ui::UiVertex]
+pub fn gg_ui::boundary::binding(&gg_ecs::boundary::load::Verbs) -> core::option::Option<gg_ui::router::Binding>
+pub mod gg_ui::dock
+pub enum gg_ui::dock::Node
+pub gg_ui::dock::Node::Split
+pub gg_ui::dock::Node::Split::at: f32
+pub gg_ui::dock::Node::Split::axis: gg_ui::layout::Axis
+pub gg_ui::dock::Node::Split::first: alloc::boxed::Box<gg_ui::dock::Node>
+pub gg_ui::dock::Node::Split::second: alloc::boxed::Box<gg_ui::dock::Node>
+pub gg_ui::dock::Node::Tabs
+pub gg_ui::dock::Node::Tabs::active: usize
+pub gg_ui::dock::Node::Tabs::panes: alloc::vec::Vec<gg_ui::dock::PaneId>
+impl gg_ui::dock::Node
+pub fn gg_ui::dock::Node::pane(gg_ui::dock::PaneId) -> gg_ui::dock::Node
+pub fn gg_ui::dock::Node::split(gg_ui::layout::Axis, f32, gg_ui::dock::Node, gg_ui::dock::Node) -> gg_ui::dock::Node
+pub enum gg_ui::dock::Zone
+pub gg_ui::dock::Zone::Bottom
+pub gg_ui::dock::Zone::Centre
+pub gg_ui::dock::Zone::Left
+pub gg_ui::dock::Zone::Right
+pub gg_ui::dock::Zone::Top
+pub struct gg_ui::dock::Dock
+impl gg_ui::dock::Dock
+pub fn gg_ui::dock::Dock::activate(&mut self, gg_ui::dock::PaneId)
+pub fn gg_ui::dock::Dock::active_of(&self, &gg_ui::dock::Group) -> core::option::Option<gg_ui::dock::PaneId>
+pub fn gg_ui::dock::Dock::body_of(&self, gg_ui::dock::PaneId) -> core::option::Option<gg_ui::draw::Rect>
+pub fn gg_ui::dock::Dock::drop_at(&self, f32, f32) -> core::option::Option<gg_ui::dock::Drop>
+pub fn gg_ui::dock::Dock::groups(&self) -> &[gg_ui::dock::Group]
+pub fn gg_ui::dock::Dock::move_pane(&mut self, gg_ui::dock::PaneId, gg_ui::dock::Drop)
+pub fn gg_ui::dock::Dock::new(gg_ui::dock::Node) -> gg_ui::dock::Dock
+pub fn gg_ui::dock::Dock::panes(&self) -> usize
+pub fn gg_ui::dock::Dock::preview(&self, gg_ui::dock::Drop) -> core::option::Option<gg_ui::draw::Rect>
+pub fn gg_ui::dock::Dock::resolve<F: core::ops::function::Fn(gg_ui::dock::PaneId) -> f32>(&mut self, gg_ui::draw::Rect, F)
+pub fn gg_ui::dock::Dock::root(&self) -> &gg_ui::dock::Node
+pub fn gg_ui::dock::Dock::seams(&self) -> &[gg_ui::dock::Seam]
+pub fn gg_ui::dock::Dock::set_root(&mut self, gg_ui::dock::Node)
+pub fn gg_ui::dock::Dock::steer(&mut self, gg_ui::dock::Path, (f32, f32), f32)
+pub fn gg_ui::dock::Dock::tabs(&self) -> &[gg_ui::dock::Tab]
+pub struct gg_ui::dock::Drop
+pub gg_ui::dock::Drop::onto: gg_ui::dock::PaneId
+pub gg_ui::dock::Drop::zone: gg_ui::dock::Zone
+pub struct gg_ui::dock::Group
+pub gg_ui::dock::Group::active: u32
+pub gg_ui::dock::Group::body: gg_ui::draw::Rect
+pub gg_ui::dock::Group::count: u32
+pub gg_ui::dock::Group::first: u32
+pub gg_ui::dock::Group::path: gg_ui::dock::Path
+pub gg_ui::dock::Group::region: gg_ui::draw::Rect
+pub gg_ui::dock::Group::strip: gg_ui::draw::Rect
+pub struct gg_ui::dock::PaneId(pub u16)
+pub struct gg_ui::dock::Path
+impl gg_ui::dock::Path
+pub fn gg_ui::dock::Path::child(self, bool) -> gg_ui::dock::Path
+pub fn gg_ui::dock::Path::key(self) -> u64
+pub struct gg_ui::dock::Seam
+pub gg_ui::dock::Seam::axis: gg_ui::layout::Axis
+pub gg_ui::dock::Seam::path: gg_ui::dock::Path
+pub gg_ui::dock::Seam::rect: gg_ui::draw::Rect
+pub gg_ui::dock::Seam::span: (f32, f32)
+pub struct gg_ui::dock::Tab
+pub gg_ui::dock::Tab::pane: gg_ui::dock::PaneId
+pub gg_ui::dock::Tab::rect: gg_ui::draw::Rect
+pub const gg_ui::dock::MAX_DEPTH: u8
+pub const gg_ui::dock::MIN: f32
+pub const gg_ui::dock::SEAM: f32
+pub const gg_ui::dock::STRIP: f32
+pub mod gg_ui::draw
+pub struct gg_ui::draw::DrawList
+impl gg_ui::draw::DrawList
+pub fn gg_ui::draw::DrawList::clear(&mut self)
+pub fn gg_ui::draw::DrawList::glyphs(&mut self, f32, f32, &[gg_ui::draw::Glyph], u32)
+pub fn gg_ui::draw::DrawList::line_height() -> f32
+pub fn gg_ui::draw::DrawList::place(&self, gg_ui::draw::Rect) -> gg_ui::draw::Rect
+pub fn gg_ui::draw::DrawList::pop_clip(&mut self)
+pub fn gg_ui::draw::DrawList::pop_transform(&mut self)
+pub fn gg_ui::draw::DrawList::push_clip(&mut self, gg_ui::draw::Rect)
+pub fn gg_ui::draw::DrawList::push_transform(&mut self, (f32, f32), f32)
+pub fn gg_ui::draw::DrawList::rect(&mut self, gg_ui::draw::Rect, u32)
+pub fn gg_ui::draw::DrawList::text(&mut self, f32, f32, &str, u32) -> f32
+pub fn gg_ui::draw::DrawList::vertices(&self) -> &[gg_render::ui::UiVertex]
+pub fn gg_ui::draw::DrawList::width(&str) -> f32
+pub struct gg_ui::draw::Glyph
+pub gg_ui::draw::Glyph::rect: gg_ui::draw::Rect
+pub gg_ui::draw::Glyph::uv: (f32, f32, f32, f32)
+pub struct gg_ui::draw::Rect
+pub gg_ui::draw::Rect::h: f32
+pub gg_ui::draw::Rect::w: f32
+pub gg_ui::draw::Rect::x: f32
+pub gg_ui::draw::Rect::y: f32
+impl gg_ui::draw::Rect
+pub fn gg_ui::draw::Rect::bottom(&self) -> f32
+pub fn gg_ui::draw::Rect::contains(&self, f32, f32) -> bool
+pub fn gg_ui::draw::Rect::inset(&self, f32) -> gg_ui::draw::Rect
+pub fn gg_ui::draw::Rect::intersect(&self, &gg_ui::draw::Rect) -> gg_ui::draw::Rect
+pub fn gg_ui::draw::Rect::is_empty(&self) -> bool
+pub const fn gg_ui::draw::Rect::new(f32, f32, f32, f32) -> Self
+pub fn gg_ui::draw::Rect::right(&self) -> f32
+pub fn gg_ui::draw::Rect::union(&self, &gg_ui::draw::Rect) -> gg_ui::draw::Rect
+pub mod gg_ui::font
+pub const gg_ui::font::BAND: (u32, u32)
+pub const gg_ui::font::CELL: (u32, u32)
+pub const gg_ui::font::EXTENT: (u32, u32)
+pub const gg_ui::font::GLYPH: (u32, u32)
+pub fn gg_ui::font::atlas() -> alloc::vec::Vec<u8>
+pub fn gg_ui::font::solid_uv() -> (f32, f32)
+pub fn gg_ui::font::uv(char) -> (f32, f32, f32, f32)
+pub mod gg_ui::layout
+pub enum gg_ui::layout::Axis
+pub gg_ui::layout::Axis::Horizontal
+pub gg_ui::layout::Axis::Vertical
+pub struct gg_ui::layout::Fit
+pub gg_ui::layout::Fit::canvas: (u32, u32)
+pub gg_ui::layout::Fit::offset: (f32, f32)
+pub gg_ui::layout::Fit::scale: f32
+impl gg_ui::layout::Fit
+pub fn gg_ui::layout::Fit::fill((u32, u32), f32) -> gg_ui::layout::Fit
+pub fn gg_ui::layout::Fit::new((u32, u32)) -> gg_ui::layout::Fit
+pub fn gg_ui::layout::Fit::steer(&self, (i32, i32), f32, f32) -> (i32, i32)
+pub fn gg_ui::layout::Fit::to_canvas(&self, f32, f32) -> (f32, f32)
+pub fn gg_ui::layout::Fit::to_canvas_fixed(&self, f32, f32) -> (i32, i32)
+pub fn gg_ui::layout::Fit::to_surface(&self, f32, f32) -> (f32, f32)
+pub struct gg_ui::layout::Stack
+impl gg_ui::layout::Stack
+pub fn gg_ui::layout::Stack::content(&self) -> gg_ui::draw::Rect
+pub fn gg_ui::layout::Stack::horizontal((f32, f32), f32) -> Self
+pub fn gg_ui::layout::Stack::push(&mut self, f32, f32) -> gg_ui::draw::Rect
+pub fn gg_ui::layout::Stack::rewind(&mut self)
+pub fn gg_ui::layout::Stack::vertical((f32, f32), f32) -> Self
+pub mod gg_ui::menu
+pub struct gg_ui::menu::Menu<'a>
+pub gg_ui::menu::Menu::items: &'a [&'a str]
+pub gg_ui::menu::Menu::title: &'a str
+pub struct gg_ui::menu::MenuBar
+impl gg_ui::menu::MenuBar
+pub fn gg_ui::menu::MenuBar::close(&mut self)
+pub fn gg_ui::menu::MenuBar::contains(&self, f32, f32) -> bool
+pub fn gg_ui::menu::MenuBar::items(&self) -> &[gg_ui::draw::Rect]
+pub fn gg_ui::menu::MenuBar::open(&self) -> core::option::Option<usize>
+pub fn gg_ui::menu::MenuBar::panel(&self) -> core::option::Option<gg_ui::draw::Rect>
+pub fn gg_ui::menu::MenuBar::resolve(&mut self, gg_ui::draw::Rect, f32, &[gg_ui::menu::Menu<'_>], core::option::Option<usize>, &dyn core::ops::function::Fn(&str) -> f32)
+pub fn gg_ui::menu::MenuBar::right(&self) -> f32
+pub fn gg_ui::menu::MenuBar::titles(&self) -> &[gg_ui::draw::Rect]
+pub fn gg_ui::menu::MenuBar::toggle(&mut self, usize)
+pub const gg_ui::menu::PAD: f32
+pub const gg_ui::menu::PITCH: f32
+pub const gg_ui::menu::ROW: f32
+pub mod gg_ui::router
+pub use gg_ui::router::AXIS_SCALE
+pub struct gg_ui::router::Binding
+pub gg_ui::router::Binding::advance_focus: gg_abi::input::ActionId
+pub gg_ui::router::Binding::primary: gg_abi::input::ActionId
+pub gg_ui::router::Binding::scroll_down: core::option::Option<gg_abi::input::ActionId>
+pub gg_ui::router::Binding::scroll_up: core::option::Option<gg_abi::input::ActionId>
+pub gg_ui::router::Binding::x: gg_abi::input::AxisId
+pub gg_ui::router::Binding::y: gg_abi::input::AxisId
+pub struct gg_ui::router::Pointer
+impl gg_ui::router::Pointer
+pub fn gg_ui::router::Pointer::inside(self, &gg_ui::draw::Rect) -> bool
+pub fn gg_ui::router::Pointer::position(self) -> (f32, f32)
+pub fn gg_ui::router::Pointer::raw(self) -> (i32, i32)
+pub struct gg_ui::router::Response
+pub gg_ui::router::Response::clicked: bool
+pub gg_ui::router::Response::focused: bool
+pub gg_ui::router::Response::held: bool
+pub gg_ui::router::Response::hovered: bool
+pub struct gg_ui::router::Router
+impl gg_ui::router::Router
+pub fn gg_ui::router::Router::begin(&mut self, &gg_ui::router::Tick, (u32, u32))
+pub fn gg_ui::router::Router::duplicate(&self) -> core::option::Option<gg_ui::router::WidgetId>
+pub fn gg_ui::router::Router::focused(&self) -> core::option::Option<gg_ui::router::WidgetId>
+pub fn gg_ui::router::Router::hit(&mut self, gg_ui::router::WidgetId, gg_ui::draw::Rect) -> gg_ui::router::Response
+pub fn gg_ui::router::Router::pointer(&self) -> gg_ui::router::Pointer
+pub struct gg_ui::router::Tick
+pub gg_ui::router::Tick::advance_focus: bool
+pub gg_ui::router::Tick::motion: (i32, i32)
+pub gg_ui::router::Tick::primary: bool
+pub gg_ui::router::Tick::scroll: i32
+impl gg_ui::router::Tick
+pub fn gg_ui::router::Tick::from_input(&gg_input::state::Input, &gg_ui::router::Binding) -> gg_ui::router::Tick
+pub struct gg_ui::router::WidgetId(_)
+impl gg_ui::router::WidgetId
+pub const fn gg_ui::router::WidgetId::from_hash(u64) -> Self
+pub const fn gg_ui::router::WidgetId::get(self) -> u64
+pub const fn gg_ui::router::WidgetId::indexed(self, u64) -> Self
+pub const fn gg_ui::router::WidgetId::new(&str) -> Self
+pub mod gg_ui::scratch
+pub struct gg_ui::scratch::Scratch
+impl gg_ui::scratch::Scratch
+pub fn gg_ui::scratch::Scratch::clear(&mut self)
+pub fn gg_ui::scratch::Scratch::get(&self, gg_ui::scratch::Span) -> &str
+pub fn gg_ui::scratch::Scratch::is_empty(&self) -> bool
+pub fn gg_ui::scratch::Scratch::len(&self) -> usize
+pub fn gg_ui::scratch::Scratch::line(&mut self, core::fmt::Arguments<'_>) -> gg_ui::scratch::Span
+pub struct gg_ui::scratch::Span
+impl gg_ui::scratch::Span
+pub const gg_ui::scratch::Span::EMPTY: gg_ui::scratch::Span
+pub fn gg_ui::scratch::Span::is_empty(&self) -> bool
+pub fn gg_ui::scratch::Span::len(&self) -> usize
+pub mod gg_ui::scroll
+pub struct gg_ui::scroll::Scroll
+pub gg_ui::scroll::Scroll::bar: core::option::Option<(gg_ui::draw::Rect, gg_ui::draw::Rect)>
+pub gg_ui::scroll::Scroll::max: f32
+pub gg_ui::scroll::Scroll::offset: f32
+pub gg_ui::scroll::Scroll::view: gg_ui::draw::Rect
+impl gg_ui::scroll::Scroll
+pub fn gg_ui::scroll::Scroll::new(gg_ui::draw::Rect, f32, f32) -> gg_ui::scroll::Scroll
+pub fn gg_ui::scroll::Scroll::offset_at(&self, f32) -> f32
+pub fn gg_ui::scroll::Scroll::row(&self, f32, f32) -> core::option::Option<gg_ui::draw::Rect>
+pub const gg_ui::scroll::BAR: f32
+pub mod gg_ui::text
+pub enum gg_ui::text::TextError
+pub gg_ui::text::TextError::NoSuchFace(usize, usize)
+pub gg_ui::text::TextError::TooManyFaces
+pub struct gg_ui::text::FaceId(_)
+impl gg_ui::text::FaceId
+pub const gg_ui::text::FaceId::FALLBACK: gg_ui::text::FaceId
+pub struct gg_ui::text::Fonts
+impl gg_ui::text::Fonts
+pub fn gg_ui::text::Fonts::coverage(&self) -> gg_render::ui::Coverage<'_>
+pub fn gg_ui::text::Fonts::glyphs(&self) -> &[gg_ui::draw::Glyph]
+pub fn gg_ui::text::Fonts::layout(&mut self, gg_ui::text::FaceId, u16, &str) -> f32
+pub fn gg_ui::text::Fonts::load(&mut self, alloc::vec::Vec<u8>, usize) -> core::result::Result<gg_ui::text::FaceId, gg_ui::text::TextError>
+pub fn gg_ui::text::Fonts::metrics(&self, gg_ui::text::FaceId, u16) -> gg_ui::text::Metrics
+pub fn gg_ui::text::Fonts::version(&self) -> u64
+pub struct gg_ui::text::Metrics
+pub gg_ui::text::Metrics::ascent: f32
+pub gg_ui::text::Metrics::descent: f32
+pub gg_ui::text::Metrics::line_height: f32
+pub enum gg_ui::Axis
+pub gg_ui::Axis::Horizontal
+pub gg_ui::Axis::Vertical
+pub struct gg_ui::Atlas
+impl gg_ui::atlas::Atlas
+pub fn gg_ui::atlas::Atlas::coverage(&self) -> gg_render::ui::Coverage<'_>
+pub fn gg_ui::atlas::Atlas::get(&self, gg_ui::atlas::Key) -> core::option::Option<gg_ui::atlas::Slot>
+pub fn gg_ui::atlas::Atlas::insert(&mut self, gg_ui::atlas::Key, &gg_ui::atlas::Raster<'_>) -> core::option::Option<gg_ui::atlas::Slot>
+pub fn gg_ui::atlas::Atlas::version(&self) -> u64
+impl core::default::Default for gg_ui::atlas::Atlas
+pub fn gg_ui::atlas::Atlas::default() -> Self
+pub struct gg_ui::Dock
+impl gg_ui::dock::Dock
+pub fn gg_ui::dock::Dock::activate(&mut self, gg_ui::dock::PaneId)
+pub fn gg_ui::dock::Dock::active_of(&self, &gg_ui::dock::Group) -> core::option::Option<gg_ui::dock::PaneId>
+pub fn gg_ui::dock::Dock::body_of(&self, gg_ui::dock::PaneId) -> core::option::Option<gg_ui::draw::Rect>
+pub fn gg_ui::dock::Dock::drop_at(&self, f32, f32) -> core::option::Option<gg_ui::dock::Drop>
+pub fn gg_ui::dock::Dock::groups(&self) -> &[gg_ui::dock::Group]
+pub fn gg_ui::dock::Dock::move_pane(&mut self, gg_ui::dock::PaneId, gg_ui::dock::Drop)
+pub fn gg_ui::dock::Dock::new(gg_ui::dock::Node) -> gg_ui::dock::Dock
+pub fn gg_ui::dock::Dock::panes(&self) -> usize
+pub fn gg_ui::dock::Dock::preview(&self, gg_ui::dock::Drop) -> core::option::Option<gg_ui::draw::Rect>
+pub fn gg_ui::dock::Dock::resolve<F: core::ops::function::Fn(gg_ui::dock::PaneId) -> f32>(&mut self, gg_ui::draw::Rect, F)
+pub fn gg_ui::dock::Dock::root(&self) -> &gg_ui::dock::Node
+pub fn gg_ui::dock::Dock::seams(&self) -> &[gg_ui::dock::Seam]
+pub fn gg_ui::dock::Dock::set_root(&mut self, gg_ui::dock::Node)
+pub fn gg_ui::dock::Dock::steer(&mut self, gg_ui::dock::Path, (f32, f32), f32)
+pub fn gg_ui::dock::Dock::tabs(&self) -> &[gg_ui::dock::Tab]
+pub struct gg_ui::DrawList
+impl gg_ui::draw::DrawList
+pub fn gg_ui::draw::DrawList::clear(&mut self)
+pub fn gg_ui::draw::DrawList::glyphs(&mut self, f32, f32, &[gg_ui::draw::Glyph], u32)
+pub fn gg_ui::draw::DrawList::line_height() -> f32
+pub fn gg_ui::draw::DrawList::place(&self, gg_ui::draw::Rect) -> gg_ui::draw::Rect
+pub fn gg_ui::draw::DrawList::pop_clip(&mut self)
+pub fn gg_ui::draw::DrawList::pop_transform(&mut self)
+pub fn gg_ui::draw::DrawList::push_clip(&mut self, gg_ui::draw::Rect)
+pub fn gg_ui::draw::DrawList::push_transform(&mut self, (f32, f32), f32)
+pub fn gg_ui::draw::DrawList::rect(&mut self, gg_ui::draw::Rect, u32)
+pub fn gg_ui::draw::DrawList::text(&mut self, f32, f32, &str, u32) -> f32
+pub fn gg_ui::draw::DrawList::vertices(&self) -> &[gg_render::ui::UiVertex]
+pub fn gg_ui::draw::DrawList::width(&str) -> f32
+pub struct gg_ui::FaceId(_)
+impl gg_ui::text::FaceId
+pub const gg_ui::text::FaceId::FALLBACK: gg_ui::text::FaceId
+pub struct gg_ui::Fit
+pub gg_ui::Fit::canvas: (u32, u32)
+pub gg_ui::Fit::offset: (f32, f32)
+pub gg_ui::Fit::scale: f32
+impl gg_ui::layout::Fit
+pub fn gg_ui::layout::Fit::fill((u32, u32), f32) -> gg_ui::layout::Fit
+pub fn gg_ui::layout::Fit::new((u32, u32)) -> gg_ui::layout::Fit
+pub fn gg_ui::layout::Fit::steer(&self, (i32, i32), f32, f32) -> (i32, i32)
+pub fn gg_ui::layout::Fit::to_canvas(&self, f32, f32) -> (f32, f32)
+pub fn gg_ui::layout::Fit::to_canvas_fixed(&self, f32, f32) -> (i32, i32)
+pub fn gg_ui::layout::Fit::to_surface(&self, f32, f32) -> (f32, f32)
+pub struct gg_ui::Fonts
+impl gg_ui::text::Fonts
+pub fn gg_ui::text::Fonts::coverage(&self) -> gg_render::ui::Coverage<'_>
+pub fn gg_ui::text::Fonts::glyphs(&self) -> &[gg_ui::draw::Glyph]
+pub fn gg_ui::text::Fonts::layout(&mut self, gg_ui::text::FaceId, u16, &str) -> f32
+pub fn gg_ui::text::Fonts::load(&mut self, alloc::vec::Vec<u8>, usize) -> core::result::Result<gg_ui::text::FaceId, gg_ui::text::TextError>
+pub fn gg_ui::text::Fonts::metrics(&self, gg_ui::text::FaceId, u16) -> gg_ui::text::Metrics
+pub fn gg_ui::text::Fonts::version(&self) -> u64
+pub struct gg_ui::Glyph
+pub gg_ui::Glyph::rect: gg_ui::draw::Rect
+pub gg_ui::Glyph::uv: (f32, f32, f32, f32)
+pub struct gg_ui::Menu<'a>
+pub gg_ui::Menu::items: &'a [&'a str]
+pub gg_ui::Menu::title: &'a str
+pub struct gg_ui::MenuBar
+impl gg_ui::menu::MenuBar
+pub fn gg_ui::menu::MenuBar::close(&mut self)
+pub fn gg_ui::menu::MenuBar::contains(&self, f32, f32) -> bool
+pub fn gg_ui::menu::MenuBar::items(&self) -> &[gg_ui::draw::Rect]
+pub fn gg_ui::menu::MenuBar::open(&self) -> core::option::Option<usize>
+pub fn gg_ui::menu::MenuBar::panel(&self) -> core::option::Option<gg_ui::draw::Rect>
+pub fn gg_ui::menu::MenuBar::resolve(&mut self, gg_ui::draw::Rect, f32, &[gg_ui::menu::Menu<'_>], core::option::Option<usize>, &dyn core::ops::function::Fn(&str) -> f32)
+pub fn gg_ui::menu::MenuBar::right(&self) -> f32
+pub fn gg_ui::menu::MenuBar::titles(&self) -> &[gg_ui::draw::Rect]
+pub fn gg_ui::menu::MenuBar::toggle(&mut self, usize)
+pub struct gg_ui::PaneId(pub u16)
+pub struct gg_ui::Pointer
+impl gg_ui::router::Pointer
+pub fn gg_ui::router::Pointer::inside(self, &gg_ui::draw::Rect) -> bool
+pub fn gg_ui::router::Pointer::position(self) -> (f32, f32)
+pub fn gg_ui::router::Pointer::raw(self) -> (i32, i32)
+pub struct gg_ui::Rect
+pub gg_ui::Rect::h: f32
+pub gg_ui::Rect::w: f32
+pub gg_ui::Rect::x: f32
+pub gg_ui::Rect::y: f32
+impl gg_ui::draw::Rect
+pub fn gg_ui::draw::Rect::bottom(&self) -> f32
+pub fn gg_ui::draw::Rect::contains(&self, f32, f32) -> bool
+pub fn gg_ui::draw::Rect::inset(&self, f32) -> gg_ui::draw::Rect
+pub fn gg_ui::draw::Rect::intersect(&self, &gg_ui::draw::Rect) -> gg_ui::draw::Rect
+pub fn gg_ui::draw::Rect::is_empty(&self) -> bool
+pub const fn gg_ui::draw::Rect::new(f32, f32, f32, f32) -> Self
+pub fn gg_ui::draw::Rect::right(&self) -> f32
+pub fn gg_ui::draw::Rect::union(&self, &gg_ui::draw::Rect) -> gg_ui::draw::Rect
+pub struct gg_ui::Router
+impl gg_ui::router::Router
+pub fn gg_ui::router::Router::begin(&mut self, &gg_ui::router::Tick, (u32, u32))
+pub fn gg_ui::router::Router::duplicate(&self) -> core::option::Option<gg_ui::router::WidgetId>
+pub fn gg_ui::router::Router::focused(&self) -> core::option::Option<gg_ui::router::WidgetId>
+pub fn gg_ui::router::Router::hit(&mut self, gg_ui::router::WidgetId, gg_ui::draw::Rect) -> gg_ui::router::Response
+pub fn gg_ui::router::Router::pointer(&self) -> gg_ui::router::Pointer
+pub struct gg_ui::Scratch
+impl gg_ui::scratch::Scratch
+pub fn gg_ui::scratch::Scratch::clear(&mut self)
+pub fn gg_ui::scratch::Scratch::get(&self, gg_ui::scratch::Span) -> &str
+pub fn gg_ui::scratch::Scratch::is_empty(&self) -> bool
+pub fn gg_ui::scratch::Scratch::len(&self) -> usize
+pub fn gg_ui::scratch::Scratch::line(&mut self, core::fmt::Arguments<'_>) -> gg_ui::scratch::Span
+pub struct gg_ui::Scroll
+pub gg_ui::Scroll::bar: core::option::Option<(gg_ui::draw::Rect, gg_ui::draw::Rect)>
+pub gg_ui::Scroll::max: f32
+pub gg_ui::Scroll::offset: f32
+pub gg_ui::Scroll::view: gg_ui::draw::Rect
+impl gg_ui::scroll::Scroll
+pub fn gg_ui::scroll::Scroll::new(gg_ui::draw::Rect, f32, f32) -> gg_ui::scroll::Scroll
+pub fn gg_ui::scroll::Scroll::offset_at(&self, f32) -> f32
+pub fn gg_ui::scroll::Scroll::row(&self, f32, f32) -> core::option::Option<gg_ui::draw::Rect>
+pub struct gg_ui::Span
+impl gg_ui::scratch::Span
+pub const gg_ui::scratch::Span::EMPTY: gg_ui::scratch::Span
+pub fn gg_ui::scratch::Span::is_empty(&self) -> bool
+pub fn gg_ui::scratch::Span::len(&self) -> usize
+pub struct gg_ui::Stack
+impl gg_ui::layout::Stack
+pub fn gg_ui::layout::Stack::content(&self) -> gg_ui::draw::Rect
+pub fn gg_ui::layout::Stack::horizontal((f32, f32), f32) -> Self
+pub fn gg_ui::layout::Stack::push(&mut self, f32, f32) -> gg_ui::draw::Rect
+pub fn gg_ui::layout::Stack::rewind(&mut self)
+pub fn gg_ui::layout::Stack::vertical((f32, f32), f32) -> Self
+pub struct gg_ui::Ui
+impl gg_ui::boundary::Ui
+pub fn gg_ui::boundary::Ui::frame(&mut self, &mut gg_ecs::world::World, &gg_ui::router::Tick, (u32, u32)) -> &[gg_render::ui::UiVertex]
+pub fn gg_ui::boundary::Ui::new() -> core::result::Result<gg_ui::boundary::Ui, gg_ecs::view::AliasError>
+pub fn gg_ui::boundary::Ui::pointer(&self) -> (f32, f32)
+pub fn gg_ui::boundary::Ui::vertices(&self) -> &[gg_render::ui::UiVertex]
+pub struct gg_ui::WidgetId(_)
+impl gg_ui::router::WidgetId
+pub const fn gg_ui::router::WidgetId::from_hash(u64) -> Self
+pub const fn gg_ui::router::WidgetId::get(self) -> u64
+pub const fn gg_ui::router::WidgetId::indexed(self, u64) -> Self
+pub const fn gg_ui::router::WidgetId::new(&str) -> Self

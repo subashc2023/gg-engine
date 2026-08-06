@@ -925,6 +925,41 @@ const BUDGET_MS: u128 = 2_000;
 /// toolchain rather than with the project. Measured at ~3.2 s (2026-08-01).
 const FAT_CEILING_MS: u128 = 10_000;
 
+/// Attempts an absolute wall-clock gate gets before its best sample is the
+/// verdict. See [`best_under`].
+const WALL_CLOCK_TRIES: usize = 3;
+
+/// Sample a wall-clock measurement up to `tries` times and hand back the best,
+/// returning early the moment a sample fits `budget`. The fast tier's
+/// best-of-five reasoning (`ci.rs`), applied to the other absolute clocks: on a
+/// shared desk one slow sample means the machine was busy — an antivirus pass,
+/// a parallel build — not that the subject got slower, and a gate that goes red
+/// for a reason unrelated to the code under test is the flake class §5 budgets
+/// at <0.5%. A subject over the bar on every attempt has actually missed it.
+/// The verdict stays the caller's: this returns the number, the caller owns the
+/// `ensure!` and its prose.
+fn best_under(
+    what: &str,
+    budget: u128,
+    tries: usize,
+    mut sample: impl FnMut() -> anyhow::Result<u128>,
+) -> anyhow::Result<u128> {
+    let mut best = u128::MAX;
+    for attempt in 1..=tries {
+        best = best.min(sample()?);
+        if best <= budget {
+            return Ok(best);
+        }
+        if attempt < tries {
+            println!(
+                "xtask: {what} is over {budget} ms at attempt {attempt} of {tries} — sampling \
+                 again (a busy desk is not the subject being slow)"
+            );
+        }
+    }
+    Ok(best)
+}
+
 /// Demo 03 with a game's worth of extra code bolted on (§6 M5 finding (e)).
 ///
 /// The cost that grows with a project is the **game crate's** rebuild-and-link —
@@ -983,12 +1018,22 @@ fn fat_source(source: &str, systems: usize) -> anyhow::Result<String> {
 /// halves are reported separately because they degrade for different reasons and
 /// have different fixes (a faster linker versus a cheaper migration).
 fn latency() -> anyhow::Result<()> {
-    let small = measure_loop("small", SMALL_SYSTEMS, BUDGET_MS)?;
+    let small = best_under(
+        "the small point's loop",
+        BUDGET_MS,
+        WALL_CLOCK_TRIES,
+        || measure_loop("small", SMALL_SYSTEMS, BUDGET_MS),
+    )?;
     anyhow::ensure!(
         small <= BUDGET_MS,
         "at roughly twice demo 03's size the loop takes {small} ms against M5's {BUDGET_MS} ms          budget. The fixes are compile-side and none of them is an architecture change (§6 M5):          split the game across several dylibs behind the same table, a dev-profile codegen          backend, a faster linker, or keep the fast-iteration systems in a small crate."
     );
-    let fat = measure_loop("fat", FAT_SYSTEMS, FAT_CEILING_MS)?;
+    let fat = best_under(
+        "the fat point's loop",
+        FAT_CEILING_MS,
+        WALL_CLOCK_TRIES,
+        || measure_loop("fat", FAT_SYSTEMS, FAT_CEILING_MS),
+    )?;
     anyhow::ensure!(
         fat <= FAT_CEILING_MS,
         "the fat point cost {fat} ms against a {FAT_CEILING_MS} ms ceiling — that is a toolchain          or machine event, not a project one"
@@ -1159,24 +1204,38 @@ fn chaos_reload() -> anyhow::Result<()> {
     ) {
         anyhow::bail!("§5.11: reloading an identical dylib was not hash-neutral — {found}");
     }
-    let swap = crate::util::field_u64(
-        log.lines()
-            .find(|l| l.contains("game reloaded"))
-            .unwrap_or_default(),
-        "tick",
-    )?;
-    println!("xtask: chaos reload — an identical dylib swapped in at tick {swap} changed nothing");
+    let reloaded = log
+        .lines()
+        .find(|l| l.contains("game reloaded"))
+        .unwrap_or_default();
+    let swap = crate::util::field_u64(reloaded, "tick")?;
+    // The identical case must also be the *cheap* case: unchanged fingerprints
+    // take §4.2.2's pointer swap — a snapshot/restore here would mean the 2 s
+    // bar is graded on the slow path for every trivial edit.
+    anyhow::ensure!(
+        reloaded.contains("pointer-swap"),
+        "an identical dylib did not take §4.2.2's schema-unchanged pointer swap: {reloaded}"
+    );
+    println!(
+        "xtask: chaos reload — an identical dylib swapped in at tick {swap} changed nothing, \
+         through the pointer-swap path"
+    );
 
     // Case two: the migration.
     std::fs::copy(&before, &game)?;
     let log = reload_midway(&game, &after, &["--replay", &stream])?;
     let migrated = sequence(&log)?;
-    let swap = crate::util::field_u64(
-        log.lines()
-            .find(|l| l.contains("game reloaded"))
-            .unwrap_or_default(),
-        "tick",
-    )?;
+    let reloaded = log
+        .lines()
+        .find(|l| l.contains("game reloaded"))
+        .unwrap_or_default();
+    let swap = crate::util::field_u64(reloaded, "tick")?;
+    // And the migrating case must be the careful one: a changed fingerprint may
+    // never ride the pointer swap (§4.2.2).
+    anyhow::ensure!(
+        reloaded.contains("restore"),
+        "a schema-changing dylib did not take the restore path: {reloaded}"
+    );
     let report = log
         .lines()
         .find(|l| l.contains("migrated") && l.contains("demo03.cube"))
@@ -1219,21 +1278,21 @@ fn chaos_reload() -> anyhow::Result<()> {
 
 /// A dev shell playing `game`, with the artifact rewritten underneath it partway
 /// through. Returns the whole log.
-///
-/// The rewrite is the reload trigger, and 400 ms is chosen the way the
-/// rejuvenation gate chooses it: a busier machine makes the window wider, never
-/// narrower, which is the direction a timing assumption should fail in.
 fn reload_midway(game: &Path, replacement: &Path, args: &[&str]) -> anyhow::Result<String> {
-    reload_after(game, replacement, args, 400)
+    reload_after(game, replacement, args, crate::util::READY, 400)
 }
 
-/// [`reload_midway`] with the moment named, for a gate that has a reason to want
-/// the swap somewhere other than where 400 ms lands it.
+/// [`reload_midway`] with the moment named: the rewrite lands `nudge_ms` after
+/// the child first logs a line containing `marker`. [`crate::util::READY`] is
+/// the earliest legal marker — the watcher exists from that line — and a gate
+/// that needs the swap near a *tick* passes that tick's own hash line instead,
+/// which prices nothing in wall time (see [`rules`]).
 fn reload_after(
     game: &Path,
     replacement: &Path,
     args: &[&str],
-    delay_ms: u64,
+    marker: &str,
+    nudge_ms: u64,
 ) -> anyhow::Result<String> {
     use std::process::Stdio;
 
@@ -1249,21 +1308,58 @@ fn reload_after(
         .env("RUST_LOG", "info,gg::hash=debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = cmd.spawn()?;
-    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-    std::fs::copy(replacement, game)?;
-    let out = child.wait_with_output()?;
-    let log = format!("{}{}", plain(&out.stdout), plain(&out.stderr));
-    anyhow::ensure!(
-        out.status.success(),
-        "the shell exited {}\n{log}",
-        out.status
-    );
+    let mut child = cmd.spawn()?;
+    let (log, status) = rewrite_once_watching(&mut child, replacement, game, marker, nudge_ms)?;
+    anyhow::ensure!(status.success(), "the shell exited {status}\n{log}");
     anyhow::ensure!(
         log.contains("game reloaded"),
         "the rewrite did not produce a reload:\n{log}"
     );
     Ok(log)
+}
+
+/// Wait for the child to log a line containing `marker`, then `nudge_ms` more
+/// to place the swap, rewrite `game` from `replacement`, and drain the child to
+/// exit. Returns `(log, status)`.
+///
+/// The wait is anchored at the child's own output, never at spawn: before
+/// `Watch::new` a file event is a trigger nobody is holding — the flake the
+/// rejuvenation-gate correction retired, which a delay-from-spawn re-creates on
+/// any machine still loading at the deadline. Every marker a caller passes is
+/// at or after [`crate::util::READY`], so the watcher exists by the time the
+/// copy lands; whatever follows the marker is placement only, and a busy
+/// machine can only move it later into the run.
+fn rewrite_once_watching(
+    child: &mut std::process::Child,
+    replacement: &Path,
+    game: &Path,
+    marker: &str,
+    nudge_ms: u64,
+) -> anyhow::Result<(String, std::process::ExitStatus)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = crate::util::drain(child.stdout.take(), marker.to_owned(), tx.clone());
+    let stderr = crate::util::drain(child.stderr.take(), marker.to_owned(), tx);
+    // Generous because it measures nothing: the difference between a failure
+    // and a hang.
+    if rx.recv_timeout(std::time::Duration::from_secs(60)).is_err() {
+        let _ = child.kill();
+        anyhow::bail!(
+            "the shell never logged `{marker}`, so the rewrite would have gone to nobody:\n{}{}",
+            stdout.join().unwrap_or_default(),
+            stderr.join().unwrap_or_default()
+        );
+    }
+    if nudge_ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(nudge_ms));
+    }
+    std::fs::copy(replacement, game)?;
+    let status = child.wait()?;
+    let log = format!(
+        "{}{}",
+        stdout.join().unwrap_or_default(),
+        stderr.join().unwrap_or_default()
+    );
+    Ok((log, status))
 }
 
 /// §6 M16: **the seam's outcome is a record, and a refusal names itself in it.**
@@ -1387,16 +1483,10 @@ fn agent_session(game: &Path, replacement: &Path, dir: &Path) -> anyhow::Result<
         .env("GG_AGENT_DIR", dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = cmd.spawn()?;
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    std::fs::copy(replacement, game)?;
-    let out = child.wait_with_output()?;
-    let log = format!("{}{}", plain(&out.stdout), plain(&out.stderr));
-    anyhow::ensure!(
-        out.status.success(),
-        "the shell exited {}\n{log}",
-        out.status
-    );
+    let mut child = cmd.spawn()?;
+    let (log, status) =
+        rewrite_once_watching(&mut child, replacement, game, crate::util::READY, 400)?;
+    anyhow::ensure!(status.success(), "the shell exited {status}\n{log}");
     let record = std::fs::read_to_string(dir.join("session.json"))?;
     Ok((log, record))
 }
@@ -1752,16 +1842,19 @@ fn tetris() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Ticks of the endless stream the rule change is measured over. The swap is set
-/// by wall time (400 ms), which on this desk lands a few hundred ticks in, so the
-/// margin is bought in ticks: a machine several times faster still swaps inside
-/// the first half, which the gate asserts rather than assumes.
+/// Ticks of the endless stream the rule change is measured over. The swap is
+/// aimed at a tick ([`RULES_SWAPS`]) and lands it plus however far the replay
+/// raced while the sighting crossed a pipe, so the margin is bought in ticks: a
+/// headless replay runs at thousands of ticks a second, and the gate asserts
+/// the first half rather than assuming it.
 const RULES_TICKS: usize = 8_000;
 
-/// Sleeps to try the swap at, in milliseconds. More than one because the moment
-/// is the machine's choice and one of the moments is uninformative — see the
-/// loop in [`rules`].
-const RULES_NUDGES: [u64; 3] = [400, 560, 720];
+/// Ticks to aim the swap at — the rewrite lands when the shell's own hash line
+/// for that tick is seen, so no wall time is priced (this gate failed the day
+/// the trigger was re-anchored, 400 ms of full-speed replay being half the
+/// stream). More than one because a swap landing on a clearing tick is
+/// uninformative — see the loop in [`rules`].
+const RULES_SWAPS: [u64; 3] = [1_200, 2_000, 2_800];
 
 /// The schema edit: `Best` gains a field.
 ///
@@ -1862,8 +1955,31 @@ fn with_a_different_score(source: &str) -> anyhow::Result<String> {
 ///   other case; this one is the common edit, where the cost is a pointer.
 ///
 /// The budget is M5's `BUDGET_MS`, measured the way `measure_loop` measures it —
-/// the rebuild a save triggers, plus the host's own save-to-swap.
+/// the rebuild a save triggers, plus the host's own save-to-swap — and judged
+/// on the best of up to [`WALL_CLOCK_TRIES`] runs ([`best_under`]). A retry
+/// re-runs the *whole* proof: the correctness claims are asserted inside every
+/// attempt and are never what a resample waives; only the clock gets another
+/// swing.
 fn rules() -> anyhow::Result<()> {
+    let total = best_under(
+        "the rule edit's save-to-new-rule",
+        BUDGET_MS,
+        WALL_CLOCK_TRIES,
+        rules_once,
+    )?;
+    anyhow::ensure!(
+        total <= BUDGET_MS,
+        "the rule reached the running game in {total} ms at its best over {WALL_CLOCK_TRIES} \
+         attempts against §9's {BUDGET_MS} ms — the per-attempt rebuild/swap breakdown is in the \
+         lines above"
+    );
+    Ok(())
+}
+
+/// One full run of the rules gate: every correctness assertion, then the
+/// measured save-to-new-rule total in milliseconds — the budget verdict is
+/// [`rules`]'s.
+fn rules_once() -> anyhow::Result<u128> {
     let source = game_source(DEMO_10)?;
     let edited = with_a_different_score(&source)?;
 
@@ -1904,17 +2020,18 @@ fn rules() -> anyhow::Result<()> {
     std::fs::copy(&before, &game)?;
     let untouched = sequence(&play(&host, &game, &["--replay", &stream], true)?)?;
 
-    // The swap is placed by wall time, so *which tick* it lands on is the
-    // machine's to choose. Landing on a clearing tick makes the run
-    // uninformative rather than red: the new rule bites on the same tick the new
-    // build arrives, so every difference — including a world that did not
-    // survive — shows in the same place and the two cannot be told apart. The
-    // gate takes another swing at a different moment instead of asserting
-    // something it did not observe.
+    // The swap is aimed at a tick, and where it *lands* is still the machine's
+    // to choose — the sighting crosses a pipe while the replay races on.
+    // Landing on a clearing tick makes the run uninformative rather than red:
+    // the new rule bites on the same tick the new build arrives, so every
+    // difference — including a world that did not survive — shows in the same
+    // place and the two cannot be told apart. The gate takes another swing at a
+    // different moment instead of asserting something it did not observe.
     let mut taken = None;
-    for delay_ms in RULES_NUDGES {
+    for aim in RULES_SWAPS {
         std::fs::copy(&before, &game)?;
-        let log = reload_after(&game, &after, &["--replay", &stream], delay_ms)?;
+        let marker = format!("tick={aim} hash=");
+        let log = reload_after(&game, &after, &["--replay", &stream], &marker, 0)?;
         let swapped = sequence(&log)?;
         let reloaded = log
             .lines()
@@ -1959,7 +2076,7 @@ fn rules() -> anyhow::Result<()> {
         anyhow::anyhow!(
             "every one of {} attempts put the swap on a clearing tick, which is a coincidence \
              worth looking at rather than retrying further",
-            RULES_NUDGES.len()
+            RULES_SWAPS.len()
         )
     })?;
 
@@ -1995,11 +2112,6 @@ fn rules() -> anyhow::Result<()> {
     );
 
     let total = rebuild_ms + swap_ms;
-    anyhow::ensure!(
-        total <= BUDGET_MS,
-        "the rule reached the running game in {total} ms (rebuild {rebuild_ms} + swap {swap_ms}) \
-         against §9's {BUDGET_MS} ms"
-    );
     println!(
         "xtask reload: demo 10's scoring rule was rewritten under a game in progress — a new build \
          swapped in at tick {swap} onto a well of {} cells at {} lines, hashing identically to the \
@@ -2010,7 +2122,7 @@ fn rules() -> anyhow::Result<()> {
         at_swap.lines,
         clear - swap - 1,
     );
-    Ok(())
+    Ok(total)
 }
 
 /// Ticks appended to the recorded session for the save gate: idle, one press of

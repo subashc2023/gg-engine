@@ -61,4 +61,13 @@ deny = [
     # means as a machine: the dogfooding is not a policy, it is that there is no
     # other option in the tree.
     { crate = "egui", wrappers = [] },
+    # Instrument containment (§3, CLAUDE.md): gg-tools answers questions and
+    # gates nothing — no crate may depend on it, in any tier, so the first
+    # dependent gets a review rather than a green run. The wrappers list cannot
+    # be empty like egui's: an empty list bans *presence*, and the instruments
+    # legitimately exist in the workspace. Naming the crate as its own wrapper
+    # allows existence while arming the edge check — nothing can depend on
+    # itself, so every real dependent is a violation. The dist half of the same
+    # promise is `BANNED_DIST_CRATES` in `xtask dist` (§5.8).
+    { crate = "gg-tools", wrappers = ["gg-tools"] },
 ]

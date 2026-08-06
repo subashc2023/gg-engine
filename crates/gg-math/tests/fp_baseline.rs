@@ -65,10 +65,15 @@ macro_rules! width_report {
 
         // IEEE core ops. `mul_add` beside its unfused spelling: if the
         // compiler ever contracts `x*x + c` into an FMA (it must not — §4.2.1),
-        // the unfused line changes and this test is the tripwire.
+        // the unfused line changes and this test is the tripwire. The constant
+        // is chosen so fused and unfused bits differ in BOTH widths — the
+        // original 1.0000001 landed f32's residue on an exact half-ULP tie that
+        // rounded back to the unfused value, leaving that half of the tripwire
+        // inert (the baseline held two identical lines and contraction would
+        // have moved nothing).
         push("sqrt.2", sim::sqrt(bb(2.0)));
         push("sqrt.big", sim::sqrt(bb(12345.6789)));
-        let m = bb(1.0000001);
+        let m = bb(1.0000002);
         push("mul_add", sim::mul_add(m, m, bb(-1.0)));
         push("unfused_mul_add", m * m + bb(-1.0));
 

@@ -165,6 +165,39 @@ pub unsafe fn read_verbs(table: &VerbsTable) -> Verbs {
     }
 }
 
+/// Whether two builds declare identical component schemas: the same declared
+/// ids, each with the same schema hash — §4.2.2's "all fingerprints unchanged",
+/// which is what licenses a reload to swap the systems table and leave the
+/// world untouched. Order-insensitive, because registration is by id and a
+/// column cares nothing for its declaration's position in the table.
+///
+/// # Safety
+///
+/// Both tables must be `gg_game_components()` results of verified dylibs that
+/// are never unloaded (§4.2.2).
+#[must_use]
+pub unsafe fn same_schemas(a: &ComponentsTable, b: &ComponentsTable) -> bool {
+    // SAFETY: the caller's obligation, per table.
+    unsafe { schemas(a) == schemas(b) }
+}
+
+/// The `(declared id, schema hash)` pairs one table declares, sorted.
+///
+/// # Safety
+///
+/// As [`same_schemas`], for one table.
+unsafe fn schemas(table: &ComponentsTable) -> Vec<(&'static str, [u8; 16])> {
+    // SAFETY: the caller's obligation.
+    let entries = unsafe { slice(table.entries, table.len) };
+    let mut pairs: Vec<_> = entries
+        .iter()
+        // SAFETY: as above, for each entry's declared-id text.
+        .map(|l| (unsafe { text(l.declared, l.declared_len) }, l.schema_hash))
+        .collect();
+    pairs.sort_unstable();
+    pairs
+}
+
 /// # Safety
 ///
 /// Every entry's `name`/`name_len` must describe live UTF-8.
@@ -217,8 +250,9 @@ unsafe fn info(layout: &ComponentLayout) -> ComponentInfo {
         // A component the host has no type for encodes as its bytes, which is
         // what the raw fast path already does — so the two canonical hashes
         // agree here by construction rather than by comparison. The field-wise
-        // protocol check that makes that a *derivation* runs in the dylib, where
-        // the type exists (§4.2.1).
+        // protocol check that makes that a *derivation* runs in the dylib,
+        // where the type exists: `gg_game!` emits it as a test over every
+        // declared component (`declare::assert_protocol_matches_raw`, §4.2.1).
         protocol_hash: |bytes, h| h.bytes(bytes),
     }
 }

@@ -97,11 +97,12 @@ pub fn build(source: &Path, out: &Path) -> Result<Stats> {
 /// `hash`. All or nothing: a source is the unit that is hashed, so reusing half
 /// of one would mean trusting a hash that covers the other half too.
 fn reuse(previous: &Pack, stem: &str, hash: u64, writer: &mut PackWriter) -> Result<Option<usize>> {
-    let prefix = format!("{stem}/");
+    // Ownership by the naming shape, not by prefix — `import::owns` is the
+    // inverse of the naming `import::document` writes.
     let owned: Vec<_> = previous
         .entries()
         .iter()
-        .filter(|e| previous.name(e).starts_with(&prefix))
+        .filter(|e| import::owns(stem, previous.name(e)))
         .collect();
     if owned.is_empty() || owned.iter().any(|e| e.source_hash != hash) {
         return Ok(None);

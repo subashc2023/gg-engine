@@ -300,6 +300,7 @@ pub fn &mut T::access(&mut gg_ecs::boundary::Access)
 pub unsafe fn &mut T::columns<'w>(&mut gg_ecs::boundary::Columns<'_>) -> Self::Columns
 pub fn &mut T::get<'r, 'w: 'r>(&'r mut Self::Columns, usize) -> Self::Item
 pub const fn gg_ecs::boundary::abi_info() -> gg_abi::AbiInfo
+pub fn gg_ecs::boundary::assert_protocol_matches_raw<T: gg_ecs::component::Component>()
 pub fn gg_ecs::boundary::entry(&'static str, gg_abi::system::SystemFn) -> gg_abi::system::SystemEntry
 pub fn gg_ecs::boundary::handle(&mut gg_ecs::world::World) -> *mut gg_abi::host::WorldHandle
 pub fn gg_ecs::boundary::host_api() -> &'static gg_abi::host::HostApiV1
@@ -307,6 +308,7 @@ pub unsafe fn gg_ecs::boundary::init(*const gg_abi::host::HostApiV1)
 pub fn gg_ecs::boundary::layout_of<T: gg_ecs::component::Component>() -> gg_abi::layout::ComponentLayout
 pub unsafe fn gg_ecs::boundary::read_verbs(&gg_abi::verb::VerbsTable) -> gg_ecs::boundary::Verbs
 pub unsafe fn gg_ecs::boundary::run(*mut gg_abi::host::WorldHandle, *const gg_abi::system::TickCtx, fn(&mut gg_ecs::GameWorld<'_>)) -> gg_abi::system::SystemStatus
+pub unsafe fn gg_ecs::boundary::same_schemas(&gg_abi::layout::ComponentsTable, &gg_abi::layout::ComponentsTable) -> bool
 pub fn gg_ecs::boundary::set_logger(fn(u32, &str)) -> core::result::Result<(), fn(u32, &str)>
 pub fn gg_ecs::boundary::set_system_zone(gg_ecs::boundary::SystemZone) -> core::result::Result<(), gg_ecs::boundary::SystemZone>
 pub fn gg_ecs::boundary::system_id(&str) -> u64
@@ -757,6 +759,8 @@ pub gg_ecs::world::snapshot::SnapshotError::Format
 pub gg_ecs::world::snapshot::SnapshotError::Format::found: u32
 pub gg_ecs::world::snapshot::SnapshotError::Magic
 pub gg_ecs::world::snapshot::SnapshotError::Magic::found: [u8; 4]
+pub gg_ecs::world::snapshot::SnapshotError::Malformed
+pub gg_ecs::world::snapshot::SnapshotError::Malformed::detail: alloc::string::String
 pub gg_ecs::world::snapshot::SnapshotError::NotUtf8
 pub gg_ecs::world::snapshot::SnapshotError::SchemaContradiction
 pub gg_ecs::world::snapshot::SnapshotError::SchemaContradiction::captured: usize
@@ -773,6 +777,7 @@ pub gg_ecs::world::snapshot::MigrationReport::components: alloc::vec::Vec<(alloc
 pub gg_ecs::world::snapshot::MigrationReport::entities: u32
 impl gg_ecs::world::snapshot::MigrationReport
 pub fn gg_ecs::world::snapshot::MigrationReport::is_clean(&self) -> bool
+pub fn gg_ecs::world::snapshot::MigrationReport::untouched(u32) -> gg_ecs::world::snapshot::MigrationReport
 pub struct gg_ecs::world::snapshot::Snapshot
 impl gg_ecs::world::snapshot::Snapshot
 pub fn gg_ecs::world::snapshot::Snapshot::components(&self) -> impl core::iter::traits::iterator::Iterator<Item = (gg_ecs::hash::ComponentId, gg_ecs::hash::SchemaHash)> + '_
@@ -898,6 +903,8 @@ pub gg_ecs::SnapshotError::Format
 pub gg_ecs::SnapshotError::Format::found: u32
 pub gg_ecs::SnapshotError::Magic
 pub gg_ecs::SnapshotError::Magic::found: [u8; 4]
+pub gg_ecs::SnapshotError::Malformed
+pub gg_ecs::SnapshotError::Malformed::detail: alloc::string::String
 pub gg_ecs::SnapshotError::NotUtf8
 pub gg_ecs::SnapshotError::SchemaContradiction
 pub gg_ecs::SnapshotError::SchemaContradiction::captured: usize
@@ -999,6 +1006,7 @@ pub gg_ecs::MigrationReport::components: alloc::vec::Vec<(alloc::string::String,
 pub gg_ecs::MigrationReport::entities: u32
 impl gg_ecs::world::snapshot::MigrationReport
 pub fn gg_ecs::world::snapshot::MigrationReport::is_clean(&self) -> bool
+pub fn gg_ecs::world::snapshot::MigrationReport::untouched(u32) -> gg_ecs::world::snapshot::MigrationReport
 pub struct gg_ecs::NanHit
 pub gg_ecs::NanHit::bits: u64
 pub gg_ecs::NanHit::component: &'static str

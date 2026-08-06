@@ -20,6 +20,14 @@
 # under qemu-user (dev + dist). Contract version stays v1: a bump would only be
 # honest if the bits had moved. libm held at 0.2.16 across the event, so rustc
 # and LLVM are the sole variables - which is the point of changing one thing.
+#
+# Edit 2026-08-05 (post-M18 audit, not a Contract event - the operation
+# sequence changed, not the environment): the mul_add input moved 1.0000001 ->
+# 1.0000002 because the old constant landed f32's fused-vs-unfused residue on
+# an exact half-ULP tie - the two f32 lines below held identical bits, so FMA
+# contraction would have moved nothing and that half of the tripwire was inert.
+# Only the four mul_add lines changed; f32's pair now differs by 1 ulp and
+# f64's by the trailing bits, so both widths can fail.
 f32/sin = 0x3F157682
 f32/cos = 0x3F4FD6A7
 f32/sin_cos.s = 0x3F157682
@@ -45,8 +53,8 @@ f32/cbrt = 0x3F895065
 f32/hypot = 0x40A70B7E
 f32/sqrt.2 = 0x3FB504F3
 f32/sqrt.big = 0x42DE38E3
-f32/mul_add = 0x34800000
-f32/unfused_mul_add = 0x34800000
+f32/mul_add = 0x35000001
+f32/unfused_mul_add = 0x35000000
 f32/chain.arith = 0x40E5AADC
 f32/chain.dot = 0x3FD9999A
 f32/chain.cross.x = 0x3D4CCCD0
@@ -88,8 +96,8 @@ f64/cbrt = 0x3FF12A0CA1EDB952
 f64/hypot = 0x4014E16FDACFF937
 f64/sqrt.2 = 0x3FF6A09E667F3BCD
 f64/sqrt.big = 0x405BC71C6FA84664
-f64/mul_add = 0x3E8AD7F2B1849B87
-f64/unfused_mul_add = 0x3E8AD7F2B1800000
+f64/mul_add = 0x3E9AD7F2C789370C
+f64/unfused_mul_add = 0x3E9AD7F2C7800000
 f64/chain.arith = 0x401CB55BAE1D11E8
 f64/chain.dot = 0x3FFB333333333334
 f64/chain.cross.x = 0x3FA9999999999990

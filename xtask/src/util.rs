@@ -104,6 +104,47 @@ pub fn plain(bytes: &[u8]) -> String {
     out
 }
 
+/// What the shell logs once its watcher exists (`app.rs`, after `Watch::new`).
+///
+/// Every gate that rewrites a dylib under a running shell waits for this line
+/// first — a file event with nobody listening is not late, it is *gone*, which
+/// was the push tier's one flaky gate until M14's correction retired the sleep.
+pub const READY: &str = "game loaded";
+
+/// Read a child stream to EOF on its own thread, signalling the first time a
+/// line contains `marker`, and hand back the whole thing ANSI-stripped.
+///
+/// Per line rather than at the end, because `tracing` writes escapes *inside* a
+/// record — a marker matched against the raw bytes would work until someone
+/// coloured the message.
+pub fn drain<R: std::io::Read + Send + 'static>(
+    stream: Option<R>,
+    marker: String,
+    tx: std::sync::mpsc::Sender<()>,
+) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        use std::io::BufRead as _;
+        let Some(stream) = stream else {
+            return String::new();
+        };
+        let mut log = String::new();
+        let mut seen = false;
+        for line in std::io::BufReader::new(stream)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let line = plain(line.as_bytes());
+            if !seen && line.contains(&marker) {
+                seen = true;
+                let _ = tx.send(()); // the other stream may have got there first
+            }
+            log.push_str(&line);
+            log.push('\n');
+        }
+        log
+    })
+}
+
 /// A `tracing` field's value, as text up to the next space. Run [`plain`] first.
 pub fn field<'a>(line: &'a str, name: &str) -> anyhow::Result<&'a str> {
     let at = line

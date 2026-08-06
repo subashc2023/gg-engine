@@ -166,6 +166,58 @@ pub fn layout_of<T: Component>() -> ComponentLayout {
     }
 }
 
+/// §4.2.1's fast-path == protocol check, run where the type exists.
+///
+/// `World::canonical_hash` hashes raw column bytes; the explicit protocol
+/// (`StateHash`) is the definition it is an optimization of. For a host-side
+/// type the registry captures the real protocol encoder and CI compares the two
+/// walks — but a dylib's components cross the seam as layouts, the host has no
+/// `T`, and the protocol closure it registers *is* the fast path (`load.rs`),
+/// so a host-side comparison over a game world is a tautology. This is the
+/// other half: [`gg_game!`](crate::gg_game) emits a test calling it for every
+/// declared component, in the crate where `T` is real — the day a
+/// `Pod`-compatible type gains an encoding that is not its memory image (a
+/// length-prefixed inline vec is the §4.2.1-sanctioned shape that would want
+/// one), the game crate's own suite goes red instead of the optimization
+/// silently becoming the definition.
+///
+/// # Panics
+///
+/// Test assertion: panics if any byte pattern hashes differently through the
+/// protocol than raw.
+pub fn assert_protocol_matches_raw<T: Component>() {
+    // Any byte pattern is a valid `T` (`Component: Pod`). The position-varying
+    // pattern catches field reordering; the constants catch a tag or length
+    // inserted anywhere, whatever the surrounding bytes.
+    let patterns: [fn(usize) -> u8; 4] = [
+        |_| 0x00,
+        |_| 0xFF,
+        |_| 0xA5,
+        |i| (i as u8).wrapping_mul(31).wrapping_add(7),
+    ];
+    for (at, pattern) in patterns.iter().enumerate() {
+        let mut value = bytemuck::Zeroable::zeroed();
+        let bytes = bytemuck::bytes_of_mut::<T>(&mut value);
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = pattern(i);
+        }
+        let mut raw = crate::hash::StateHasher::canonical();
+        raw.bytes(bytes);
+        let mut protocol = crate::hash::StateHasher::canonical();
+        crate::StateHash::state_hash(&value, &mut protocol);
+        assert_eq!(
+            raw.finish_canonical(),
+            protocol.finish_canonical(),
+            "`{}` (\"{}\"): the explicit protocol encoding differs from the raw memory image \
+             (byte pattern {at}) — the raw fast path is no longer a derivation for this \
+             component (§4.2.1), so its `StateHash` must encode exactly its bytes, or the \
+             component cannot cross the boundary",
+            T::TYPE_NAME,
+            T::DECLARED_ID,
+        );
+    }
+}
+
 /// One systems-table entry: the declared name, its stable id, and the shim.
 #[must_use]
 pub fn entry(name: &'static str, run: SystemFn) -> SystemEntry {
@@ -303,5 +355,90 @@ fn status_from(message: String) -> SystemStatus {
         code: SystemStatus::PANICKED,
         message_len: leaked.len() as u32,
         message: leaked.as_ptr(),
+    }
+}
+
+/// Both directions of [`assert_protocol_matches_raw`], planted here beside the
+/// machine: a check that cannot fail is not a check (§5's rule), and the demos'
+/// emitted tests only ever show the passing side.
+#[cfg(test)]
+mod tests {
+    use crate::component::FieldDesc;
+    use crate::hash::StateHasher;
+
+    macro_rules! planted_component {
+        ($name:ident, $declared:literal, |$self_:ident, $h:ident| $encode:expr) => {
+            #[derive(Clone, Copy)]
+            #[repr(C)]
+            struct $name {
+                a: u32,
+                b: u32,
+            }
+            // SAFETY: `repr(C)` over two `u32`s — no padding, all bit patterns
+            // valid.
+            unsafe impl bytemuck::Zeroable for $name {}
+            // SAFETY: as above, plus `Copy`.
+            unsafe impl bytemuck::Pod for $name {}
+            impl crate::StateHash for $name {
+                fn state_hash(&self, $h: &mut StateHasher) {
+                    let $self_ = self;
+                    $encode
+                }
+            }
+            impl crate::Component for $name {
+                const DECLARED_ID: &'static str = $declared;
+                const TYPE_NAME: &'static str = stringify!($name);
+                const FIELDS: &'static [FieldDesc] = &[
+                    FieldDesc {
+                        name: "a",
+                        ty: "u32",
+                        offset: 0,
+                        size: 4,
+                    },
+                    FieldDesc {
+                        name: "b",
+                        ty: "u32",
+                        offset: 4,
+                        size: 4,
+                    },
+                ];
+            }
+        };
+    }
+
+    planted_component!(Faithful, "declare.faithful", |v, h| {
+        h.u32(v.a);
+        h.u32(v.b);
+    });
+
+    // The §4.2.1 scenario by hand: an encoding that absorbs a length the raw
+    // bytes do not carry — the shape an inline-vec newtype would want.
+    planted_component!(Prefixed, "declare.prefixed", |v, h| {
+        h.u64(2);
+        h.u32(v.a);
+        h.u32(v.b);
+    });
+
+    // The other divergence class: fields absorbed out of memory order.
+    planted_component!(Reordered, "declare.reordered", |v, h| {
+        h.u32(v.b);
+        h.u32(v.a);
+    });
+
+    #[test]
+    fn a_faithful_encoding_passes() {
+        super::assert_protocol_matches_raw::<Faithful>();
+    }
+
+    #[test]
+    #[should_panic(expected = "no longer a derivation")]
+    fn a_length_prefixed_encoding_is_caught() {
+        super::assert_protocol_matches_raw::<Prefixed>();
+    }
+
+    #[test]
+    #[should_panic(expected = "no longer a derivation")]
+    fn a_reordered_encoding_is_caught() {
+        super::assert_protocol_matches_raw::<Reordered>();
     }
 }

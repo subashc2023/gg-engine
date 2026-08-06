@@ -50,8 +50,12 @@ impl ShaderWatcher {
                 }
             })
             .map_err(|e| ShaderError::BadPath(format!("watcher: {e}")))?;
+        // Recursive: `#include`d files live in subdirectories (gg-render's
+        // `shaders/include/`), and an edit there is a shader edit like any
+        // other. The consumer recompiles whole modules, so no dependency
+        // tracking is needed — any `.slang` event is reason enough.
         watcher
-            .watch(Path::new(search_dir), notify::RecursiveMode::NonRecursive)
+            .watch(Path::new(search_dir), notify::RecursiveMode::Recursive)
             .map_err(|e| ShaderError::BadPath(format!("watch {search_dir}: {e}")))?;
         Ok(Self {
             search_dir: search_dir.to_string(),

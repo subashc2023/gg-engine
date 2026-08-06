@@ -194,6 +194,32 @@ impl UiPass {
     }
 }
 
+#[cfg(feature = "hot-reload")]
+impl UiPass {
+    /// Rebuild the `ui.slang` pipeline from a hot recompile (§4.4).
+    pub(crate) fn swap_shaders(
+        &mut self,
+        rhi: &mut impl crate::GpuHost,
+        module: &gg_shaders::CompiledModule,
+    ) -> Result<(), String> {
+        let push = core::mem::size_of::<shader::UiPush>();
+        let (vs_main, fs_main) = crate::hot::pair(module, "vs_main", "fs_main", push)?;
+        crate::hot::swap_all(
+            rhi,
+            &mut [(
+                &mut self.pipeline,
+                PipelineDesc {
+                    vs_spirv: &vs_main.spirv,
+                    vs_entry: &vs_main.spirv_entry,
+                    fs_spirv: &fs_main.spirv,
+                    fs_entry: &fs_main.spirv_entry,
+                    ..pipeline_desc()
+                },
+            )],
+        )
+    }
+}
+
 /// Alpha-blended, depth-free, onto whatever the frame lands in: the UI is the
 /// last thing over the resolved scene.
 fn pipeline_desc() -> PipelineDesc<'static> {

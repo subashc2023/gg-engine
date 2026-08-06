@@ -136,7 +136,7 @@ pub struct Journal {
     game: String,
     /// Which tier this shell is, so an agent reading a record knows whether the
     /// thing it is about to suggest is even compiled in.
-    tier: &'static str,
+    tier: String,
     /// This shell's process id. One published file per directory, so a second
     /// concurrent session overwrites the first — the pid is how a reader tells
     /// whose record it is holding rather than assuming.
@@ -153,10 +153,10 @@ pub struct Journal {
 impl Journal {
     /// A journal for a session over `game`, built in `tier`.
     #[must_use]
-    pub fn new(game: impl Into<String>, tier: &'static str) -> Journal {
+    pub fn new(game: impl Into<String>, tier: impl Into<String>) -> Journal {
         Journal {
             game: game.into(),
-            tier,
+            tier: tier.into(),
             pid: std::process::id(),
             tick: 0,
             recording: None,
@@ -223,7 +223,7 @@ impl Journal {
         let mut out = String::from("{\n  \"game\": ");
         push_str_json(&mut out, &self.game);
         out.push_str(",\n  \"tier\": ");
-        push_str_json(&mut out, self.tier);
+        push_str_json(&mut out, &self.tier);
         out.push_str(",\n  \"pid\": ");
         out.push_str(&self.pid.to_string());
         out.push_str(",\n  \"tick\": ");

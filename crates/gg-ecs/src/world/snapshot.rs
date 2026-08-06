@@ -104,6 +104,17 @@ pub enum SnapshotError {
         /// Component size this build reports.
         present: usize,
     },
+    /// The image's own arithmetic does not hold — a column shorter than its
+    /// rows, a stride disagreeing with its component's size, a field past its
+    /// component's end. Decoding proves framing, not arithmetic, and a
+    /// rejuvenation handoff carries no checksum at all (§4.2.2), so this is
+    /// refused *before* the world is torn down rather than panicking half-way
+    /// through a restore.
+    #[error("snapshot image is malformed: {detail}")]
+    Malformed {
+        /// What failed to add up, and where.
+        detail: String,
+    },
 }
 
 /// One field's layout, owned.
@@ -248,6 +259,65 @@ impl Snapshot {
     pub fn dry_run(&self, world: &World) -> Result<Vec<(String, ComponentOutcome)>, SnapshotError> {
         world.check_side_tables(self)?;
         Ok(self.plan(&world.registry)?.1)
+    }
+
+    /// The image's structural arithmetic — everything `restore_archetype` later
+    /// indexes by, proven while the world is still whole. `decode` checks
+    /// framing only ("well *formed*, not well *founded*"), and the rejuvenation
+    /// handoff is a file a previous process wrote with no checksum (§4.2.2),
+    /// so without this a malformed image panics *after* `reset_storage` and the
+    /// player's world is already gone.
+    fn check_consistent(&self) -> Result<(), SnapshotError> {
+        let bad = |detail: String| Err(SnapshotError::Malformed { detail });
+        for component in &self.components {
+            for field in &component.fields {
+                if field.offset + field.size > component.size {
+                    return bad(format!(
+                        "component \"{}\" field \"{}\" spans {}..{} of a {}-byte row",
+                        component.declared_id,
+                        field.name,
+                        field.offset,
+                        field.offset + field.size,
+                        component.size
+                    ));
+                }
+            }
+        }
+        for (at, image) in self.archetypes.iter().enumerate() {
+            if image.strides.len() != image.ids.len() || image.columns.len() != image.ids.len() {
+                return bad(format!(
+                    "archetype {at} has {} ids, {} strides, {} columns",
+                    image.ids.len(),
+                    image.strides.len(),
+                    image.columns.len()
+                ));
+            }
+            if !image.ids.windows(2).all(|w| w[0] < w[1]) {
+                return bad(format!("archetype {at}'s component ids are not ascending"));
+            }
+            for (column, (&id, &stride)) in image.ids.iter().zip(&image.strides).enumerate() {
+                let Some(component) = self.components.iter().find(|c| c.id == id) else {
+                    return bad(format!(
+                        "archetype {at} column {column} holds a component the manifest omits"
+                    ));
+                };
+                if stride != component.size {
+                    return bad(format!(
+                        "archetype {at} strides \"{}\" at {stride} bytes; the manifest says {}",
+                        component.declared_id, component.size
+                    ));
+                }
+                if image.columns[column].len() != image.entities.len() * stride {
+                    return bad(format!(
+                        "archetype {at} column \"{}\" holds {} bytes for {} rows of {stride}",
+                        component.declared_id,
+                        image.columns[column].len(),
+                        image.entities.len()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// One plan and one outcome per captured component, decided once rather than
@@ -465,6 +535,17 @@ pub struct MigrationReport {
 }
 
 impl MigrationReport {
+    /// The report of a reload that never captured anything: §4.2.2's
+    /// schema-unchanged pointer swap, where the world is untouched and no
+    /// component has an outcome to name.
+    #[must_use]
+    pub fn untouched(entities: u32) -> MigrationReport {
+        MigrationReport {
+            entities,
+            components: Vec::new(),
+        }
+    }
+
     /// Did every component come back untouched? True means the restore was a
     /// pure reload of identical state — the case worth *not* logging.
     #[must_use]
@@ -552,6 +633,7 @@ impl World {
     /// module docs.
     pub fn restore(&mut self, snapshot: &Snapshot) -> Result<MigrationReport, SnapshotError> {
         self.check_side_tables(snapshot)?;
+        snapshot.check_consistent()?;
         let (plans, components) = snapshot.plan(&self.registry)?;
 
         // Before anything is torn down: a refused allocator must leave this
@@ -678,4 +760,48 @@ fn migrate_fields(old: &[FieldImage], new: &[FieldDesc]) -> (Plan, ComponentOutc
             retyped,
         },
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::World;
+
+    /// A malformed image is refused whole, and *before* the world is torn
+    /// down. `restore` used to panic after `reset_storage` when a column's
+    /// bytes disagreed with its row count — for a save or a rejuvenation
+    /// handoff, that was the player's world already gone. In-module because
+    /// the corruption has to be built directly: `decode` only proves framing,
+    /// and the handoff file carries no checksum at all (§4.2.2).
+    #[test]
+    fn a_malformed_image_is_refused_before_the_world_is_touched() {
+        let mut world = World::new();
+        let victim = world.spawn();
+        let mut snapshot = world.snapshot();
+        snapshot.components.push(ComponentImage {
+            id: ComponentId::of("test.cube"),
+            schema: SchemaHash::from_raw(1),
+            declared_id: "test.cube".to_owned(),
+            size: 8,
+            fields: Vec::new(),
+        });
+        snapshot.archetypes.push(ArchetypeImage {
+            ids: vec![ComponentId::of("test.cube")],
+            strides: vec![8],
+            entities: vec![victim],
+            // One row of a claimed 8-byte stride, four bytes present: the
+            // arithmetic `restore_archetype` would panic on mid-copy.
+            columns: vec![vec![0u8; 4]],
+        });
+
+        let before = world.canonical_hash();
+        let err = world.restore(&snapshot).unwrap_err();
+        assert!(matches!(err, SnapshotError::Malformed { .. }), "{err}");
+        assert_eq!(
+            world.canonical_hash(),
+            before,
+            "a refusal must leave the world exactly as it found it"
+        );
+    }
 }

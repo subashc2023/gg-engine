@@ -15,7 +15,7 @@
 //! reads any nonzero-but-not-2 exit as non-blocking — an agent that broke `xtask`
 //! would otherwise have disabled the gate that catches it breaking anything else.
 
-use crate::util::{cargo, run as exec, run_capture, walk_rs, workspace_root};
+use crate::util::{READY, cargo, drain, run as exec, run_capture, walk_rs, workspace_root};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -219,6 +219,7 @@ fn nightly() -> anyhow::Result<()> {
     // risk row). Nightly rather than weekly — 28 s windowless on the pin.
     crate::gpuav::run(&[])?;
     golden_suite()?;
+    winit_scan()?;
     println!(
         "xtask ci --nightly: green (windowless by construction — windowed WSI coverage is \
          `cargo xtask interactive`, manual)"
@@ -416,7 +417,117 @@ fn gpu_tests() -> anyhow::Result<()> {
     let mut cmd = cargo();
     cmd.args(["nextest", "run", "-p", "gg-debug", "--features", "tracy"]);
     lavapipe_env(&mut cmd)?;
-    exec(&mut cmd, "Tracy GPU zones on pinned lavapipe (§4.8)")
+    exec(&mut cmd, "Tracy GPU zones on pinned lavapipe (§4.8)")?;
+    // Same shape for the shader hot-reload gate (§4.4, §9): the watcher and
+    // the in-process compiler are `#[cfg]`-absent without `hot-reload`, and
+    // the offscreen renderer stands in for the manual windowed shell (§1.5).
+    let mut cmd = cargo();
+    cmd.args([
+        "nextest",
+        "run",
+        "-p",
+        "gg-render",
+        "--features",
+        "hot-reload",
+    ]);
+    lavapipe_env(&mut cmd)?;
+    exec(
+        &mut cmd,
+        "shader hot reload, offscreen on pinned lavapipe (§4.4)",
+    )
+}
+
+/// Headless *by linkage* (§1.5, §5 gate 7), proven on bytes: the compiled
+/// binary must not contain the string `winit`. Debug binaries carry the crate's
+/// path strings whenever the dependency edge exists at all, which is what makes
+/// a byte scan a linkage proof rather than a symbol lottery.
+fn assert_winit_free(exe: &std::path::Path, what: &str) -> anyhow::Result<()> {
+    let bytes = std::fs::read(exe)
+        .map_err(|e| anyhow::anyhow!("winit scan: cannot read {}: {e}", exe.display()))?;
+    let needle = b"winit";
+    anyhow::ensure!(
+        !bytes.windows(needle.len()).any(|w| w == needle),
+        "{what} links winit — must be headless by linkage (§1.5, §5 gate 7)"
+    );
+    println!("xtask: {what} is winit-free by linkage (§5 gate 7)");
+    Ok(())
+}
+
+/// Gate 7's *test binaries* half (§5): the harness scan in [`golden_suite`]
+/// covers `gg-golden`; this covers the binaries the gate names beyond it —
+/// demo 02's `gate`-feature test suite (the exact artifact class the aarch64
+/// qemu leg runs, where a winit edge would surface as an unattributed aarch64
+/// link error instead of a named gate), and `gg-tools`, whose charter claims
+/// windowless by linkage (no gg-platform, no winit) with no machine behind the
+/// sentence until here.
+fn winit_scan() -> anyhow::Result<()> {
+    // `--message-format=json` names this invocation's exact artifacts —
+    // globbing `deps/` would happily scan a stale hash-sibling built with the
+    // default features, which *does* link the app half.
+    let json = run_capture(
+        cargo().args([
+            "build",
+            "--tests",
+            "-p",
+            "demo-02-mesh",
+            "--no-default-features",
+            "--features",
+            "gate",
+            "--message-format=json",
+        ]),
+        "build demo-02-mesh [gate] test binaries",
+    )?;
+    let exes = executables(&json);
+    // A scan that scanned nothing is a green light with nothing behind it.
+    anyhow::ensure!(
+        !exes.is_empty(),
+        "winit scan: the demo-02-mesh [gate] build produced no test executables"
+    );
+    for exe in &exes {
+        let name = exe.file_name().unwrap_or_default().to_string_lossy();
+        assert_winit_free(exe, &format!("demo-02-mesh [gate] test `{name}`"))?;
+    }
+    // Its own target dir, not a convenience: `.mcp.json` serves this very repo's
+    // MCP tools from `target/debug/gg-tools.exe`, so any open Claude Code
+    // session holds that path locked and a relink into it is os error 5. A gate
+    // that goes red because the operator has a session open is a flake by
+    // design; the duplicate dep build is nightly-priced and cached after once.
+    exec(
+        cargo().args([
+            "build",
+            "-p",
+            "gg-tools",
+            "--target-dir",
+            "target/winit-scan",
+        ]),
+        "build gg-tools [winit scan]",
+    )?;
+    let tools = workspace_root()
+        .join("target/winit-scan/debug")
+        .join(if cfg!(windows) {
+            "gg-tools.exe"
+        } else {
+            "gg-tools"
+        });
+    assert_winit_free(&tools, "gg-tools")
+}
+
+/// The `executable` paths out of a `--message-format=json` build's stdout.
+fn executables(json: &str) -> Vec<std::path::PathBuf> {
+    let mut exes = Vec::new();
+    for line in json.lines() {
+        let Some(at) = line.find("\"executable\":\"") else {
+            continue;
+        };
+        let rest = &line[at + "\"executable\":\"".len()..];
+        let Some(end) = rest.find('"') else { continue };
+        // A path cannot contain `"`, so the first quote terminates; the only
+        // escapes cargo emits inside one are `\\` and `\/`.
+        exes.push(std::path::PathBuf::from(
+            rest[..end].replace("\\\\", "\\").replace("\\/", "/"),
+        ));
+    }
+    exes
 }
 
 /// Gate 5 (§5), §4.10's harness: the golden suite on the pinned lavapipe —
@@ -435,13 +546,7 @@ fn golden_suite() -> anyhow::Result<()> {
         } else {
             "gg-golden"
         });
-    let bytes = std::fs::read(&exe)?;
-    let needle = b"winit";
-    anyhow::ensure!(
-        !bytes.windows(needle.len()).any(|w| w == needle),
-        "gg-golden links winit — the harness must be headless by linkage (§1.5, §5 gate 7)"
-    );
-    println!("xtask: gg-golden is winit-free by linkage (§5 gate 7)");
+    assert_winit_free(&exe, "gg-golden")?;
 
     let mut cmd = cargo();
     cmd.args(["run", "-p", "gg-golden", "--", "run"]);
@@ -517,20 +622,13 @@ fn demo_runs() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The shell's own WSI leg: a game dylib loaded, a real window, the §4.5 v0 pass
-/// presenting (§6 M5).
-///
-/// `GG_HEADLESS` is deliberately *unset* — the shell answers it by skipping
-/// windowing entirely, so a headless run proves nothing about the swapchain path
-/// a player takes. That is precisely why this is in `interactive` and in no
-/// automated tier (§1.5).
 /// The forced-rejuvenation criterion (§6 M5): a session whose leak budget is
 /// zero rejuvenates on its first reload — snapshot, restart the host, restore,
 /// resume — and the world it comes back to is the world it left.
 ///
 /// Windowless, so this is a CI tier and not `interactive` (§1.5). The successor
 /// process inherits this pipe, which is what makes "did it come back" observable
-/// at all: `wait_with_output` returns only once the *last* process in the chain
+/// at all: draining it to EOF returns only once the *last* process in the chain
 /// has closed it.
 ///
 /// **The rewrite waits for the shell to say it is watching.** This was the push
@@ -549,43 +647,6 @@ fn demo_runs() -> anyhow::Result<()> {
 /// frames now falls *after* the rewrite, against a settle period of 40 ms
 /// (`SETTLE_QUIET`) plus a stage-and-load. If that headroom ever runs out the
 /// run says so by name below instead of coming back as a rerun.
-/// What the shell logs once its watcher exists (`app.rs`, after `Watch::new`).
-const READY: &str = "game loaded";
-
-/// Read a child stream to EOF on its own thread, signalling the first time a
-/// line contains `marker`, and hand back the whole thing ANSI-stripped.
-///
-/// Per line rather than at the end, because `tracing` writes escapes *inside* a
-/// record — a marker matched against the raw bytes would work until someone
-/// coloured the message.
-fn drain<R: std::io::Read + Send + 'static>(
-    stream: Option<R>,
-    marker: &'static str,
-    tx: std::sync::mpsc::Sender<()>,
-) -> std::thread::JoinHandle<String> {
-    std::thread::spawn(move || {
-        use std::io::BufRead as _;
-        let Some(stream) = stream else {
-            return String::new();
-        };
-        let mut log = String::new();
-        let mut seen = false;
-        for line in std::io::BufReader::new(stream)
-            .lines()
-            .map_while(Result::ok)
-        {
-            let line = crate::util::plain(line.as_bytes());
-            if !seen && line.contains(marker) {
-                seen = true;
-                let _ = tx.send(()); // the other stream may have got there first
-            }
-            log.push_str(&line);
-            log.push('\n');
-        }
-        log
-    })
-}
-
 fn rejuvenation() -> anyhow::Result<()> {
     use std::process::Stdio;
 
@@ -628,8 +689,8 @@ fn rejuvenation() -> anyhow::Result<()> {
     // a reader returns at EOF, and EOF is when the *last* holder of the pipe
     // closes it, so joining these still waits out the successor process.
     let (tx, rx) = std::sync::mpsc::channel();
-    let stdout = drain(child.stdout.take(), READY, tx.clone());
-    let stderr = drain(child.stderr.take(), READY, tx);
+    let stdout = drain(child.stdout.take(), READY.to_owned(), tx.clone());
+    let stderr = drain(child.stderr.take(), READY.to_owned(), tx);
 
     // Only a *reload* charges the leak budget, so the rewrite is the trigger and
     // there is no rejuvenation without one — but a rewrite before `Watch::new`
@@ -716,6 +777,13 @@ fn static_link() -> anyhow::Result<()> {
     )
 }
 
+/// The shell's own WSI leg: a game dylib loaded, a real window, the §4.5 v0 pass
+/// presenting (§6 M5).
+///
+/// `GG_HEADLESS` is deliberately *unset* — the shell answers it by skipping
+/// windowing entirely, so a headless run proves nothing about the swapchain path
+/// a player takes. That is precisely why this is in `interactive` and in no
+/// automated tier (§1.5).
 fn shell_run() -> anyhow::Result<()> {
     let mut build = cargo();
     build.args(["build", "-p", "demo-03-reload", "-p", "gg-runtime"]);
@@ -1573,6 +1641,32 @@ mod tests {
 
     fn violations(root: &Path) -> Vec<String> {
         super::scan(root).unwrap().0
+    }
+
+    /// Gate 7's test-binary scan finds its targets by parsing cargo's JSON
+    /// stream. The escapes are the part worth pinning: a Windows path arrives
+    /// `\\`-escaped, and a parse that returned it raw would scan a file that
+    /// does not exist — which `assert_winit_free` turns into a red gate, so the
+    /// failure mode is loud, but it would be red for the wrong reason.
+    #[test]
+    fn executables_are_read_out_of_the_json_stream_unescaped() {
+        let json = concat!(
+            r#"{"reason":"compiler-artifact","executable":null,"fresh":true}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","executable":"C:\\dev\\GGEngine\\target\\debug\\deps\\gate-1a2b.exe"}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","executable":"\/home\/x\/gg-ci\/target\/debug\/deps\/gate-1a2b"}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+        );
+        let exes = super::executables(json);
+        assert_eq!(
+            exes,
+            [
+                PathBuf::from(r"C:\dev\GGEngine\target\debug\deps\gate-1a2b.exe"),
+                PathBuf::from("/home/x/gg-ci/target/debug/deps/gate-1a2b"),
+            ]
+        );
     }
 
     /// The bans that keep game state from surviving a reload behind the host's

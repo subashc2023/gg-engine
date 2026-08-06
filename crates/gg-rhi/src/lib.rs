@@ -636,8 +636,11 @@ impl Rhi {
     /// acquire: acquire signals a semaphore that only a submit can wait on, so
     /// returning between the two would leave it signaled with no waiter — which
     /// the next frame to reuse that slot trips over as a validation error,
-    /// permanently failing the §4.3 zero-message shutdown report. Nothing may
-    /// fail in between, and after `resolve` nothing can.
+    /// permanently failing the §4.3 zero-message shutdown report. What *can*
+    /// still fail after the acquire is the device's own weather (pool OOM,
+    /// device loss) out of `record` or the submit itself; those paths hand the
+    /// orphaned semaphore to [`Rhi::drain_acquire`] before returning, so the
+    /// slot stays reusable by whatever survives the error.
     pub fn execute(
         &mut self,
         frame: FrameToken,
@@ -671,14 +674,17 @@ impl Rhi {
         };
         let acquires = self.gpu.take_acquires();
         let instruments = graph::Instruments { stamps, crumbs };
-        self.record(
+        if let Err(e) = self.record(
             slot.pool,
             slot.cmd,
             &acquires,
             &resolved,
             backbuffer,
             instruments,
-        )?;
+        ) {
+            self.drain_acquire(slot.acquire);
+            return Err(e);
+        }
 
         // Submit: wait the acquire binary (and the transfer timeline when an
         // upload has been flushed since the last frame), signal the per-image
@@ -718,14 +724,16 @@ impl Rhi {
             .signal_semaphore_infos(&signal);
         // SAFETY: queue, semaphores, and command buffer are live; the buffer
         // finished recording in record_pass.
-        unsafe {
+        if let Err(e) = unsafe {
             self.gpu.device.raw().queue_submit2(
                 self.gpu.device.graphics.raw,
                 &[submit],
                 vk::Fence::null(),
             )
+        } {
+            self.drain_acquire(slot.acquire);
+            return Err(self.gpu.explain(e));
         }
-        .map_err(|e| self.gpu.explain(e))?;
         self.transfer_waited = transfer_value;
 
         // Registered after the submit, never before: a frame returning between
@@ -771,6 +779,32 @@ impl Rhi {
                 Ok(FrameOutcome::Presented { suboptimal: true })
             }
             Err(err) => Err(self.gpu.explain(err)),
+        }
+    }
+
+    /// Consume an acquire semaphore orphaned by a failure between acquire and
+    /// submit: a binary semaphore cannot be reset from the host, so the one way
+    /// to leave the slot reusable is an empty submit that waits it out.
+    ///
+    /// Best-effort by design — the plausible causes of the failure being
+    /// recovered from (pool OOM, device loss) can fail this submit too, and
+    /// then teardown is next anyway; the warning names the semaphore the §4.3
+    /// report will otherwise blame.
+    fn drain_acquire(&self, semaphore: vk::Semaphore) {
+        let wait = [vk::SemaphoreSubmitInfo::default()
+            .semaphore(semaphore)
+            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+        let submit = vk::SubmitInfo2::default().wait_semaphore_infos(&wait);
+        // SAFETY: queue and semaphore are live; nothing rides along to record.
+        let drained = unsafe {
+            self.gpu.device.raw().queue_submit2(
+                self.gpu.device.graphics.raw,
+                &[submit],
+                vk::Fence::null(),
+            )
+        };
+        if let Err(e) = drained {
+            tracing::warn!(error = ?e, "an orphaned acquire semaphore could not be drained");
         }
     }
 

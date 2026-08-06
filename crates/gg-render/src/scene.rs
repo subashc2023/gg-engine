@@ -523,6 +523,56 @@ fn forward_desc() -> PipelineDesc<'static> {
     }
 }
 
+#[cfg(feature = "hot-reload")]
+impl ScenePass {
+    /// Rebuild the three `scene.slang` pipelines from a hot recompile (§4.4).
+    pub(crate) fn swap_shaders(
+        &mut self,
+        rhi: &mut impl crate::GpuHost,
+        module: &gg_shaders::CompiledModule,
+    ) -> Result<(), String> {
+        let push = core::mem::size_of::<shader::ScenePush>();
+        let (vs_main, fs_main) = crate::hot::pair(module, "vs_main", "fs_main", push)?;
+        let (vs_depth, fs_depth) = crate::hot::pair(module, "vs_depth", "fs_depth", push)?;
+        let (vs_shadow, _) = crate::hot::pair(module, "vs_shadow", "fs_depth", push)?;
+        crate::hot::swap_all(
+            rhi,
+            &mut [
+                (
+                    &mut self.prepass,
+                    PipelineDesc {
+                        vs_spirv: &vs_depth.spirv,
+                        vs_entry: &vs_depth.spirv_entry,
+                        fs_spirv: &fs_depth.spirv,
+                        fs_entry: &fs_depth.spirv_entry,
+                        ..prepass_desc()
+                    },
+                ),
+                (
+                    &mut self.forward,
+                    PipelineDesc {
+                        vs_spirv: &vs_main.spirv,
+                        vs_entry: &vs_main.spirv_entry,
+                        fs_spirv: &fs_main.spirv,
+                        fs_entry: &fs_main.spirv_entry,
+                        ..forward_desc()
+                    },
+                ),
+                (
+                    &mut self.shadow,
+                    PipelineDesc {
+                        vs_spirv: &vs_shadow.spirv,
+                        vs_entry: &vs_shadow.spirv_entry,
+                        fs_spirv: &fs_depth.spirv,
+                        fs_entry: &fs_depth.spirv_entry,
+                        ..shadow_desc()
+                    },
+                ),
+            ],
+        )
+    }
+}
+
 /// The shadow pass: the same geometry through the sun's projection, depth only,
 /// biased. The bias is dynamic so the CVars behind it move without a pipeline
 /// rebuild (§6 M11's exit row).

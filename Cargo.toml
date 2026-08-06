@@ -35,7 +35,6 @@ members = [
     "demos/06-lit",
     "demos/07-ui",
     "demos/08-save",
-    "demos/09-orbit",
     "demos/10-tetris",
     "demos/99-template",
     "tools/gg-golden",

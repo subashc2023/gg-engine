@@ -23,6 +23,8 @@
 pub mod content;
 pub mod cvars;
 pub mod graph;
+#[cfg(feature = "hot-reload")]
+mod hot;
 mod lighting;
 /// The overlay's luminance histogram (§6 M11).
 pub mod luminance;
@@ -164,6 +166,9 @@ pub struct Renderer {
     content: Option<Content>,
     /// Where the frame lands in the window. See [`Renderer::set_viewport`].
     viewport: Option<Viewport>,
+    /// The dev tier's shader watcher (§4.4); `None` when watching failed.
+    #[cfg(feature = "hot-reload")]
+    hot: Option<hot::Shaders>,
 }
 
 impl Renderer {
@@ -197,6 +202,8 @@ impl Renderer {
             transients: Transients::default(),
             content: None,
             viewport: None,
+            #[cfg(feature = "hot-reload")]
+            hot: hot::Shaders::new(),
         })
     }
 
@@ -364,6 +371,13 @@ impl Renderer {
         /// of tracking it.
         const ATTEMPTS: u32 = 3;
 
+        // Between frames is the safe point for a shader swap: the RHI defers
+        // pipeline destruction behind the timeline, so in-flight frames finish
+        // on the handles they recorded (§4.4).
+        #[cfg(feature = "hot-reload")]
+        if let Some(hot) = &mut self.hot {
+            hot.poll(&mut self.rhi, &mut self.pass, &mut self.scene, &mut self.ui);
+        }
         // Before `begin_frame`, not inside it: uploads go to the transfer queue
         // through the staging ring and belong to no frame slot (§4.3). Above the
         // retry as well, so a second attempt re-acquires without re-streaming.
@@ -380,6 +394,12 @@ impl Renderer {
             if !matches!(outcome, FrameOutcome::SkippedOutOfDate) {
                 break;
             }
+        }
+        // Only a presented frame closes the save-to-screen clock: a skipped one
+        // put nothing on screen, and reporting it would flatter the budget.
+        #[cfg(feature = "hot-reload")]
+        if let (Some(hot), FrameOutcome::Presented { .. }) = (&mut self.hot, &outcome) {
+            hot.presented();
         }
         Ok(outcome)
     }
@@ -604,6 +624,12 @@ pub struct OffscreenRenderer {
     extent: (u32, u32),
     content: Option<Content>,
     viewport: Option<Viewport>,
+    /// As [`Renderer`]'s: here as well because the offscreen path is the only
+    /// one an automated gate can drive (§1.5), so it is where the swap is
+    /// *proven* — `tests/hot.rs` edits a copied shader tree and reads the new
+    /// pixels back.
+    #[cfg(feature = "hot-reload")]
+    hot: Option<hot::Shaders>,
 }
 
 impl OffscreenRenderer {
@@ -638,6 +664,8 @@ impl OffscreenRenderer {
             extent,
             content: None,
             viewport: None,
+            #[cfg(feature = "hot-reload")]
+            hot: hot::Shaders::new(),
         })
     }
 
@@ -746,6 +774,12 @@ impl OffscreenRenderer {
         color: [f32; 4],
         ui: &[ui::UiVertex],
     ) -> Result<OffscreenFrame, RhiError> {
+        // Same point as the windowed frame's poll; with the blocking submit
+        // below there is never anything in flight to race the swap.
+        #[cfg(feature = "hot-reload")]
+        if let Some(hot) = &mut self.hot {
+            hot.poll(&mut self.rhi, &mut self.pass, &mut self.scene, &mut self.ui);
+        }
         stream(&mut self.content, &mut self.rhi, extracted)?;
         // One slot and a blocking submit per frame here, so nothing is in
         // flight to race either write.
@@ -843,6 +877,11 @@ impl OffscreenRenderer {
         match histogram {
             true => self.luminance.read(&self.rhi, 0)?,
             false => self.luminance.clear(),
+        }
+        // The pixels are on the host, which is this path's "presented".
+        #[cfg(feature = "hot-reload")]
+        if let Some(hot) = &mut self.hot {
+            hot.presented();
         }
         Ok(OffscreenFrame {
             pixels: self.rhi.map_buffer(self.readback)?.to_vec(),

@@ -147,6 +147,21 @@ fn texture_name(stem: &str, image: usize, role: Role) -> String {
     format!("{stem}/texture/{image}/{}", role.suffix())
 }
 
+/// Whether pack entry `name` was built from the source named `stem` — the
+/// inverse of the naming above, and the ownership test `reuse` runs against the
+/// previous pack. A bare `{stem}/` prefix match is not it: `props.gltf` and
+/// `props/chair.gltf` share that prefix, so a stem would claim its namesake
+/// directory's assets — refusing reuse forever while the hashes differ, and
+/// failing a warm build with `DuplicateId` the day the two files are identical.
+pub fn owns(stem: &str, name: &str) -> bool {
+    name.strip_prefix(stem).is_some_and(|rest| {
+        rest == "/scene"
+            || ["/mesh/", "/material/", "/texture/"]
+                .iter()
+                .any(|kind| rest.starts_with(kind))
+    })
+}
+
 /// Which of a material's four slots point at an image, and at which one.
 fn slots(material: &gltf::Material<'_>) -> Vec<(Role, usize, u32)> {
     let pbr = material.pbr_metallic_roughness();
@@ -578,6 +593,23 @@ fn visit(node: &gltf::Node<'_>, parent: DMat4, stem: &str, out: &mut Vec<Node>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cache-reuse collision: `props.gltf` and `props/chair.gltf` share the
+    /// `props/` prefix, so a prefix match handed one source the other's assets.
+    #[test]
+    fn ownership_is_by_source_not_by_prefix() {
+        assert!(owns("props", "props/scene"));
+        assert!(owns("props", "props/mesh/0.1"));
+        assert!(owns("props", "props/material/2"));
+        assert!(owns("props", "props/texture/0/albedo"));
+        assert!(!owns("props", "props/chair/scene"));
+        assert!(!owns("props", "props/chair/mesh/0.0"));
+        assert!(owns("props/chair", "props/chair/mesh/0.0"));
+        assert!(!owns("props/chair", "props/scene"));
+        // A stem that merely *starts* like another claims nothing of its
+        // namesake either direction.
+        assert!(!owns("prop", "props/scene"));
+    }
 
     /// A grid of quads, emitted in scanline order — the order that maximizes
     /// vertex cache misses, so the optimizer has something to do.

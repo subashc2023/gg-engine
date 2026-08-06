@@ -13,7 +13,8 @@
 //! device has one family (lavapipe), there is nothing to transfer and a single
 //! barrier on the transfer buffer does the whole job:
 //! [`Uploader::take_acquires`] comes back empty and the graphics side records
-//! nothing.
+//! nothing. The pair is *gated* by `cargo xtask gpu` (manual, §8): the desk
+//! GPU is the only device in the matrix whose families genuinely differ.
 //!
 //! # Nothing here is bounded by the ring
 //!

@@ -32,8 +32,11 @@ pub enum PlatformError {
 }
 
 /// True when this process runs under the headless law (§1.5).
+///
+/// Set and not `"0"`/empty: an env var is a string, and `GG_HEADLESS=0` spells
+/// headless-*off* in every shell that has tried it.
 pub fn headless() -> bool {
-    std::env::var_os("GG_HEADLESS").is_some()
+    std::env::var_os("GG_HEADLESS").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 /// Where invisible windows live (§1.5): far beyond any plausible

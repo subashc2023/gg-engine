@@ -9,10 +9,11 @@
 //! §3 called the dependency budgets "`cargo-deny`-counted" and no such count
 //! existed; cargo-deny bans crates, it does not budget them. The count is here
 //! instead, with its definition stated rather than implied: **every entry in a
-//! crate's `[dependencies]`, workspace-internal ones included** (§3 says the
-//! forced `gg-ecs-derive` leaf "counts as one"), and dev-dependencies excluded
-//! (`gg-ecs`'s own manifest already says they are outside the budget, because
-//! they are absent from every runtime graph).
+//! crate's `[dependencies]` and `[target.'cfg(…)'.dependencies]` tables,
+//! workspace-internal ones included** (§3 says the forced `gg-ecs-derive` leaf
+//! "counts as one"; a platform-gated edge is still an edge), and
+//! dev-dependencies excluded (`gg-ecs`'s own manifest already says they are
+//! outside the budget, because they are absent from every runtime graph).
 
 use std::path::Path;
 
@@ -94,7 +95,17 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 /// here on drawing would be the shell becoming the thing §3 forbids. The number
 /// is expected to come *down* at the refactor §6 M17's headroom paragraph
 /// defers — a budget that only ever rises is a ratchet, not a budget.
-const SHELL_BUDGET: usize = 1300;
+///
+/// 1300 → 1310 at the post-M18 audit, for §4.2.2's schema-unchanged pointer-swap
+/// fast path. The swap gained a second shape, and choosing between the two is
+/// the shell's one competence — "the shell chooses, never implements": the
+/// comparison lives in `gg_ecs::boundary::same_schemas`, the untouched report in
+/// `MigrationReport::untouched`, and what the shell holds is the branch, the one
+/// unsafe call, and the ordering rule the rewrite made explicit (every fallible
+/// step before any state moves). Nine lines after both extractions; raised by
+/// ten rather than golfed to exactly 1300, because a zero-headroom budget stops
+/// being a tripwire and starts being a coin flip on the next comment reflow.
+const SHELL_BUDGET: usize = 1310;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.
@@ -125,6 +136,11 @@ const DEPENDENCY_BUDGETS: &[(&str, usize)] = &[
 /// standing next to. What it protects is not the overlay — it is `gg-ui`, whose
 /// exit test was that a UI library which cannot cheaply do what 510 lines of
 /// immediate-mode drawing did is overbuilt.
+///
+/// 510 was a **total**-line measurement (§6 M13 records the M13 file as "574
+/// lines" on the same basis), so the gate compares total lines — comparing the
+/// code-line count against a total-derived cap quietly doubled the intended
+/// slack, which the post-M18 audit caught.
 const OVERLAY_BUDGET: usize = 1020;
 
 /// Where the widget vocabulary is declared, and where it is turned into
@@ -198,13 +214,13 @@ fn overlay_lines() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("no overlay at {}: {e}", path.display()))?;
     let (code, total) = count_code(&text);
     anyhow::ensure!(
-        code <= OVERLAY_BUDGET,
-        "the overlay is {code} code lines against a {OVERLAY_BUDGET}-line budget (§3) — that cap \
+        total <= OVERLAY_BUDGET,
+        "the overlay is {total} total lines against a {OVERLAY_BUDGET}-line budget (§3) — that cap \
          is 2x the M8 overlay it replaced, and exceeding it is a statement about `gg-ui` rather \
          than about the overlay: a UI library the same screen costs twice as much to draw on is \
          overbuilt (§6 M13's acceptance test)"
     );
-    println!("xtask: overlay budget {code}/{OVERLAY_BUDGET} code lines ({total} total, §3)");
+    println!("xtask: overlay budget {total}/{OVERLAY_BUDGET} total lines ({code} code, §3)");
     Ok(())
 }
 
@@ -533,11 +549,7 @@ fn dependencies() -> anyhow::Result<()> {
         let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(
             root.join("crates").join(name).join("Cargo.toml"),
         )?)?;
-        let deps = manifest
-            .get("dependencies")
-            .and_then(toml::Value::as_table)
-            .map(toml::Table::len)
-            .unwrap_or(0);
+        let deps = budgeted_dependencies(&manifest).len();
         anyhow::ensure!(
             deps <= *budget,
             "{name} declares {deps} dependencies against a {budget} budget (§3) — raising it is \
@@ -546,6 +558,31 @@ fn dependencies() -> anyhow::Result<()> {
         println!("xtask: {name} dependency budget {deps}/{budget}");
     }
     Ok(())
+}
+
+/// What the budget counts: every name in `[dependencies]` **and** in the
+/// `[target.'cfg(…)'.dependencies]` tables, deduped — a platform-gated edge is
+/// still an edge, the same reading [`declared_dependencies`] gives the
+/// unused-deps gate, and `gg-platform`'s `windows-sys` shows the idiom is
+/// already in the tree. Dev- and build-dependencies stay outside the budget
+/// (absent from every runtime graph).
+fn budgeted_dependencies(manifest: &toml::Value) -> Vec<String> {
+    let mut names: Vec<String> = manifest
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for spec in targets.values() {
+            if let Some(table) = spec.get("dependencies").and_then(toml::Value::as_table) {
+                names.extend(table.keys().cloned());
+            }
+        }
+    }
+    // One name under two cfgs is one delivery, not two.
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// §3's game-crate deny pin, which had no machine behind it: a game crate may
@@ -588,8 +625,9 @@ pub fn game_crates() -> anyhow::Result<Vec<String>> {
 }
 
 /// The same set, with the directory each was found in — what a gate that reads
-/// game *source* needs (see [`widget_provenance`]).
-fn game_crate_dirs() -> anyhow::Result<Vec<(String, std::path::PathBuf)>> {
+/// game *source* needs (see [`widget_provenance`]), and what the dist gate's
+/// run leg needs to know which demos declare an `assets/` tree.
+pub fn game_crate_dirs() -> anyhow::Result<Vec<(String, std::path::PathBuf)>> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(workspace_root().join("demos"))?.flatten() {
         let manifest = entry.path().join("Cargo.toml");
@@ -709,5 +747,32 @@ mod tests {
         let games = [("demo-07-ui".to_owned(), "widget::LABELLED".to_owned())];
         let (offenders, _) = judge_widgets(&kinds(), "widget::LABELLED => {}", &games);
         assert_eq!(offenders.len(), 2, "{offenders:?}");
+    }
+
+    /// The budget counts platform-gated edges as edges and one name under two
+    /// cfgs as one delivery — while dev- and build-dependencies stay outside it.
+    #[test]
+    fn a_target_table_edge_is_counted_once_and_dev_deps_are_not() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+            [dependencies]
+            alpha = "1"
+
+            [dev-dependencies]
+            outside = "1"
+
+            [build-dependencies]
+            also-outside = "1"
+
+            [target.'cfg(windows)'.dependencies]
+            windows-sys = "0.5"
+            alpha = "1"
+
+            [target.'cfg(unix)'.dependencies]
+            windows-sys = "0.5"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(budgeted_dependencies(&manifest), ["alpha", "windows-sys"]);
     }
 }

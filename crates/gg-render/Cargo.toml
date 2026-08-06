@@ -39,16 +39,21 @@ tracing.workspace = true
 # The window is the shell's; this crate only needs the handles a surface is
 # built from, which is what keeps `gg-platform` out of its graph.
 raw-window-handle = { workspace = true }
+# The in-process Slang compiler, for the dev tier's shader hot reload only
+# (§4.4): optional, pulled in by `hot-reload` and by nothing else, so the dist
+# gate's `gg-shaders`/`shader-slang`/`notify` bans keep proving absence.
+gg-shaders = { path = "../gg-shaders", features = ["hot-reload"], optional = true }
 
 [features]
 validation = ["gg-rhi/validation"]
 # Forwarded, not local: the query pool is the RHI's and the tier meta-features
 # in `gg-runtime` are the only place that decides it exists (§4.8).
 gpu-timings = ["gg-rhi/gpu-timings"]
-# Notice a rebuilt pack and re-upload it (§4.6). No dependency either way — it
-# is a `stat` and a re-open — so this gates the *call*, which is what makes the
-# watch absent from dist rather than switched off there.
-hot-reload = []
+# The two dev-tier reload paths this crate owns: notice a rebuilt pack and
+# re-upload it (§4.6 — a `stat` and a re-open, gating the call), and recompile
+# an edited `shaders/*.slang` in-process and rebuild its pipelines behind the
+# timeline (§4.4 — this is the half that costs a dependency).
+hot-reload = ["dep:gg-shaders"]
 
 [dev-dependencies]
 # The offscreen render test builds its world out of the render protocol's own

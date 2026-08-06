@@ -378,7 +378,10 @@ pub fn locate_entity(a: &World, b: &World) -> Option<Entity> {
     while i < ha.len() && j < hb.len() {
         let (ea, hash_a) = ha[i];
         let (eb, hash_b) = hb[j];
-        match ea.to_bits().cmp(&eb.to_bits()) {
+        // `Entity`'s own order (index-major) — the order `entity_hashes` walks.
+        // `to_bits()` is generation-major, and a merge keyed on it names the
+        // wrong entity the moment a recycled index sits across the seam.
+        match ea.cmp(&eb) {
             std::cmp::Ordering::Equal => {
                 if hash_a != hash_b {
                     return Some(ea);

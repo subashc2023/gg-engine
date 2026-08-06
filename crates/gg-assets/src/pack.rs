@@ -43,6 +43,13 @@ use bytemuck::{Pod, Zeroable};
 use memmap2::Mmap;
 use thiserror::Error;
 
+// "Little-endian" above is delivered by `bytemuck` casts, i.e. native-endian —
+// true only while every target is LE. A big-endian port would silently write
+// packs whose container fields contradict the spec (the KTX2 blobs inside are
+// explicitly LE), so it stops here instead (§4.6).
+#[cfg(target_endian = "big")]
+compile_error!("gg-pack container fields are cast, not encoded: little-endian targets only");
+
 /// The first eight bytes of every pack, at offset 0 for every version.
 pub const MAGIC: [u8; 8] = *b"GG-PACK\0";
 

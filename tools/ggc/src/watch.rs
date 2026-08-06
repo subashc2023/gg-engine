@@ -25,6 +25,11 @@ use crate::build;
 
 /// How long the tree must be quiet before a rebuild starts. Long enough to
 /// outlast an editor writing a texture, short enough to feel immediate.
+///
+/// Deliberately not `gg_core`'s 40 ms: that rule settles *one artifact* by its
+/// size and mtime holding still (outlast a linker); this one coalesces a
+/// *tree's* event burst (outlast a save). Same shape, different measurement —
+/// change one and read the other's note first (§6 M16 item 4).
 const SETTLE_QUIET: Duration = Duration::from_millis(120);
 
 /// Build once, then rebuild on every change until interrupted.

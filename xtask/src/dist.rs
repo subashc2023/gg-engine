@@ -54,6 +54,11 @@ const BANNED_DIST_CRATES: &[&str] = &[
     // publish one would be carrying a machine with nothing to report on — and
     // the file it writes names the player's paths.
     "gg-agent",
+    // The instruments' own binary (§3, CLAUDE.md's "deny.toml and xtask dist
+    // keep it there"). Out of the graph today only because nothing depends on
+    // it — this line is what makes the first dependent a red gate instead of a
+    // shipped microscope. deny.toml carries the any-tier half (empty wrappers).
+    "gg-tools",
 ];
 
 /// Byte needles no shipped binary may contain (§1.13, §5.8). The validation
@@ -70,6 +75,10 @@ const BANNED_DIST_BYTES: &[&str] = &[
     // proof; this catches the case the graph cannot see — a panel's text
     // reaching a shipped binary through some other crate's constant.
     "editor: field nudged",
+    // The agent pane's own widget id (§6 M16, §9 v1 box 7). Same argument as
+    // the editor's line above — the pane has no log lines, so its stable text
+    // is the id its prompt row is declared under.
+    "editor.agent.prompt",
 ];
 
 /// Byte needles a shipped binary must contain: the two log lines that exist only
@@ -102,20 +111,42 @@ pub fn gate() -> anyhow::Result<()> {
         "gg-runtime"
     });
     // Running it needs a game (§2: the shell is the same program in every tier
-    // and the game is what makes it a game), which has been true since demo 03
-    // existed — before that the shell ran bare and this line was a bare spawn.
+    // and the game is what makes it a game) — and §9 asks for *every* demo run
+    // headless under the exact dist configuration, so every game dylib runs
+    // here, not a representative one. The shell under GG_HEADLESS opens no
+    // window at all (§1.5), which is what lets an automated tier drive all of
+    // them; the three pre-boundary binaries (00–02) still create an invisible
+    // window when they run, so their runs stay in `xtask interactive` and they
+    // stop at build + byte checks below.
     let games = game_dylibs()?;
-    let game = games
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("no game dylib to run the dist shell over"))?;
-    exec(
-        std::process::Command::new(&exe)
-            .arg("--game")
-            .arg(game)
+    anyhow::ensure!(
+        !games.is_empty(),
+        "no game dylib to run the dist shell over"
+    );
+    let mut packs_built = false;
+    for (game, crate_dir, dylib) in &games {
+        let mut run = std::process::Command::new(&exe);
+        run.arg("--game")
+            .arg(dylib)
             .args(["--frames", "100"])
-            .env("GG_HEADLESS", "1"),
-        "run dist gg-runtime over a dist game dylib, 100 frames headless",
-    )?;
+            .env("GG_HEADLESS", "1");
+        // A demo that declares an `assets/` tree runs over its pack, the same
+        // rule as `xtask run` (§4.6): a textured demo driven packless would be
+        // a different program from the one that ships.
+        if crate_dir.join("assets").is_dir() {
+            if !packs_built {
+                crate::assets::run(&[])?;
+                packs_built = true;
+            }
+            let demo_dir = file_name(crate_dir)?;
+            run.arg("--pack")
+                .arg(workspace_root().join(format!("target/assets/{demo_dir}.ggpack")));
+        }
+        exec(
+            &mut run,
+            &format!("run dist gg-runtime over {game}, 100 frames headless"),
+        )?;
+    }
 
     // Graph absence check — the authoritative half.
     let tree = run_capture(
@@ -519,11 +550,12 @@ fn commit() -> anyhow::Result<String> {
 /// Game-code boundary row makes about dist: the artifact builds under the
 /// shipping profile, and nothing that reloads it is in its graph.
 ///
-/// The behavioural half — the dylib is loaded *once*, with no watcher behind it
-/// — is `xtask reload`'s, where a dist shell actually runs one.
-fn game_dylibs() -> anyhow::Result<Vec<std::path::PathBuf>> {
+/// The loaded-*once*, no-watcher behavioural half is `xtask reload`'s; what
+/// [`gate`] adds is each dylib actually playing 100 frames under the shipping
+/// shell (§9's "runs every demo headless").
+fn game_dylibs() -> anyhow::Result<Vec<(String, PathBuf, PathBuf)>> {
     let mut built = Vec::new();
-    for game in crate::budgets::game_crates()? {
+    for (game, crate_dir) in crate::budgets::game_crate_dirs()? {
         let tree = run_capture(
             cargo().args(["tree", "-p", &game, "-e", "normal", "--prefix", "none"]),
             &format!("cargo tree ({game} dist graph)"),
@@ -546,12 +578,13 @@ fn game_dylibs() -> anyhow::Result<Vec<std::path::PathBuf>> {
             cargo().args(["build", "-p", &game, "--profile", "dist"]),
             &format!("build {game} [dist profile]"),
         )?;
-        built.push(workspace_root().join("target/dist").join(if cfg!(windows) {
+        let dylib = workspace_root().join("target/dist").join(if cfg!(windows) {
             format!("{}.dll", game.replace('-', "_"))
         } else {
             format!("lib{}.so", game.replace('-', "_"))
-        }));
+        });
         println!("xtask dist: {game} builds as a shipping game dylib, watcher-free (§5.8)");
+        built.push((game, crate_dir, dylib));
     }
     Ok(built)
 }

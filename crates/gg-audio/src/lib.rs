@@ -47,10 +47,11 @@ pub use synth::{Mixer, Trigger, VOICES};
 /// Read here rather than taken from `gg-platform`: audio sits below windowing
 /// and must not link it — a game's sound has nothing to do with a swapchain,
 /// and the crate that owns the speakers should not be able to open a window by
-/// accident. One env var, read the same way in both places.
+/// accident. One env var, read the same way in both places — set and not
+/// `"0"`/empty, `gg-platform`'s parse exactly.
 #[must_use]
 pub fn headless() -> bool {
-    std::env::var_os("GG_HEADLESS").is_some()
+    std::env::var_os("GG_HEADLESS").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 /// Panics if this process may not open an audio device (§1.5).

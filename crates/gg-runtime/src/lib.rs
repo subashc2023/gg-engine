@@ -130,7 +130,7 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
         info!(
             version = env!("CARGO_PKG_VERSION"),
             tier = active_tier(),
-            headless = std::env::var_os("GG_HEADLESS").is_some(),
+            headless = gg_platform::headless(),
             game = %args.game.display(),
             "golden runtime online"
         );

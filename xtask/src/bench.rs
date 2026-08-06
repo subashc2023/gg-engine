@@ -79,7 +79,7 @@ fn smoke() -> anyhow::Result<()> {
 
 /// A device name that means the frame was drawn by a CPU. Recording one would
 /// archive a number that moves with an LLVM release.
-fn is_software(device: &str) -> bool {
+pub fn is_software(device: &str) -> bool {
     let lower = device.to_lowercase();
     ["llvmpipe", "lavapipe", "swiftshader", "software"]
         .iter()

@@ -32,9 +32,9 @@ use gg_ui::boundary::verb as ui;
 /// a game's character, and the editor camera has to fly a scene that has no
 /// character in it. Sharing the keys is fine and sharing the verb is not.
 ///
-/// Seven actions and, since `MAX_AXES` doubled, the look pair that used to be
-/// unaffordable — see [`crate::camera`] for what differencing the cursor instead
-/// cost while it was.
+/// Seven camera actions, the look pair a doubled `MAX_AXES` made affordable —
+/// see [`crate::camera`] for what differencing the cursor instead cost while it
+/// was not — and §6 M16 item 5's two text-editing verbs.
 pub mod verb {
     /// Along the eye's forward axis, and against it.
     pub const FORWARD: &str = "editor_forward";
@@ -122,9 +122,10 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
 /// The verb lists a shell should bind against with the editor open, and the
 /// bindings text to append to the game's own.
 ///
-/// Fifteen now — M15.1's four, the wheel's two, and §6 M15.2's seven camera
-/// verbs plus the look pair a widened `MAX_AXES` made room for; a game that
-/// declares some of them keeps its own, as it always did.
+/// Seventeen now — M15.1's four, the wheel's two, §6 M15.2's seven camera
+/// verbs plus the look pair a widened `MAX_AXES` made room for, and §6 M16
+/// item 5's text-editing pair; a game that declares some of them keeps its
+/// own, as it always did.
 ///
 /// The lists are leaked because [`Verbs`] is `&'static` by construction — the
 /// dylib's own arrays are, and there must be one type for both. It is a few

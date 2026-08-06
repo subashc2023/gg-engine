@@ -2055,8 +2055,15 @@ fn main() -> anyhow::Result<()> {
             args.iter().any(|a| a == "--json"),
         ),
         Some("load") => load(filter),
+        // What `xtask gpu` refuses a software rasterizer with: the same
+        // bring-up and naming the reference sets are keyed by, so the identity
+        // checked is the identity the suite would run under.
+        Some("backend") => {
+            println!("{}", backend_id()?);
+            Ok(())
+        }
         _ => anyhow::bail!(
-            "usage: gg-golden <run|bless|graph|verify-gates|chaos|capture|bench|load> \
+            "usage: gg-golden <run|bless|graph|verify-gates|chaos|capture|bench|load|backend> \
              [scene|seed|pack]"
         ),
     }

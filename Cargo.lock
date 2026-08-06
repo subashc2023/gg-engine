@@ -637,15 +637,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "demo-09-orbit"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "gg-ecs",
- "gg-math",
-]
-
-[[package]]
 name = "demo-10-tetris"
 version = "0.1.0"
 dependencies = [
@@ -1076,6 +1067,7 @@ dependencies = [
  "gg-extract",
  "gg-math",
  "gg-rhi",
+ "gg-shaders",
  "raw-window-handle",
  "thiserror 2.0.19",
  "tracing",

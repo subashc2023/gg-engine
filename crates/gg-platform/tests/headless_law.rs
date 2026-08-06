@@ -38,6 +38,25 @@ fn visible_window_under_gg_headless_panics() {
     );
 }
 
+/// An env var is a string: `GG_HEADLESS=0` spells headless-*off*, and a parse
+/// that read any set value as headless would silently skip the windowed path
+/// for a user who thought they had turned it back on.
+#[test]
+fn zero_and_empty_read_as_not_headless() {
+    // SAFETY: process-per-test (nextest); no other thread reads the env yet.
+    unsafe { std::env::set_var("GG_HEADLESS", "0") };
+    assert!(!gg_platform::headless(), "0 is off");
+    // SAFETY: as above.
+    unsafe { std::env::set_var("GG_HEADLESS", "") };
+    assert!(!gg_platform::headless(), "empty is off");
+    // SAFETY: as above.
+    unsafe { std::env::set_var("GG_HEADLESS", "1") };
+    assert!(gg_platform::headless());
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("GG_HEADLESS") };
+    assert!(!gg_platform::headless(), "unset is off");
+}
+
 /// A window is asked for at the size it wants and created at the size the
 /// monitor has. Windowless — the cap is arithmetic, and the only part that
 /// needs a display is the monitor it is given here as a number.

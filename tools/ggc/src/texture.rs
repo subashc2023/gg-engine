@@ -148,7 +148,8 @@ impl Role {
 /// discriminator (§4.6).
 ///
 /// **§4.6's byte-reproducibility is a same-machine property today, and this is
-/// the residual.** `intel_tex_2` links *prebuilt* ISPC kernels —
+/// the residual — recorded in §8's register, priced there, not only here.**
+/// `intel_tex_2` links *prebuilt* ISPC kernels —
 /// `CompressBlocksBC7_ispc` in `_sse2`/`_sse4`/`_avx`/`_avx2`/`_avx512*`
 /// flavours, all compiled `--opt=fast-math` — and picks one by CPUID at run
 /// time. A different SIMD width plus fast-math reassociation fits different

@@ -40,10 +40,10 @@ mod scene;
 mod ui;
 
 pub use audio::{MAX_MS, Sound, wave};
-pub use declare::{Table, entry, init, layout_of, run, verbs};
+pub use declare::{Table, assert_protocol_matches_raw, entry, init, layout_of, run, verbs};
 pub use game::{Access, BoundaryData, BoundaryError, Columns, GameWorld};
 pub use host::{SystemZone, host_api, set_logger, set_system_zone};
-pub use load::{SystemPanic, Verbs, read_verbs};
+pub use load::{SystemPanic, Verbs, read_verbs, same_schemas};
 pub use present::{Eye, Light, Model, Renderable, light};
 pub use scene::Node;
 pub use ui::{CANVAS, TEXT, Widget, state, widget, widget_id};

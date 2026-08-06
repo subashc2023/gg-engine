@@ -74,10 +74,14 @@ use crate::json::Json;
 /// What it may run is [`ALLOWED_TOOLS`]'s business.
 const TOOLS: &str = "Read,Glob,Grep,Edit,Write,Bash";
 
-/// The pre-approval, which **grants** and does not confine — `--allowedTools`
-/// adds to what `--permission-mode acceptEdits` already permits. Its whole job
-/// is that the engine's own MCP tools and the two build commands land without a
-/// first-use prompt, which from here has nowhere to appear.
+/// The pre-approval — and, under `-p` with `--permission-mode default`, the
+/// effective boundary: a print run has no prompt to fall back on, so a call
+/// this list does not name is denied rather than asked. The one thing that
+/// still runs past it is the CLI's own read-only `Bash` safelist (`git
+/// status` and kin), which grants nothing `Read`/`Grep` had not. That pairing
+/// is what "narrowed to the two build commands" rests on — `--allowedTools`
+/// alone grants and does not confine (§6 M16 item 7), and `acceptEdits` was
+/// measured waving `touch` and `git status` through with neither named here.
 const ALLOWED_TOOLS: &str = "Read,Glob,Grep,Edit,Write,Bash(cargo build *),Bash(cargo check *),\
                              mcp__gg-engine__gg_session,mcp__gg-engine__gg_last_reload";
 
@@ -120,6 +124,48 @@ pub struct Ask {
     session: Option<String>,
     /// `None` once the stream has ended, or when the request never started.
     rx: Option<Receiver<Event>>,
+    /// The turn's child, shared with the worker so dropping the `Ask` can end
+    /// it — see [`Ask::drop`].
+    live: LiveRef,
+}
+
+/// The live child, and whether the panel has already ended the turn. One lock
+/// holding both rather than a flag beside a slot: "park the child" and "the
+/// panel is gone" must be a single observation, or a child parked in the
+/// instant after the panel closed would outlive it.
+#[derive(Default)]
+struct Live {
+    child: Option<std::process::Child>,
+    ended: bool,
+}
+
+type LiveRef = std::sync::Arc<std::sync::Mutex<Live>>;
+
+/// A poisoned lock still holds the child, and killing it is more important
+/// than whatever panicked while holding the guard.
+fn locked(live: &LiveRef) -> std::sync::MutexGuard<'_, Live> {
+    live.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Kill, then reap. `kill` on an already-exited child is not an error, and
+/// `wait` is what collects the exit status either way.
+fn end(mut child: std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+impl Drop for Ask {
+    /// Closing the panel ends the turn. Without this the child outlives the
+    /// window — an agent still editing the tree with nobody watching — and an
+    /// exited one is never reaped.
+    fn drop(&mut self) {
+        let mut live = locked(&self.live);
+        live.ended = true;
+        if let Some(child) = live.child.take() {
+            end(child);
+        }
+    }
 }
 
 impl Ask {
@@ -131,6 +177,7 @@ impl Ask {
             status: Status::Idle,
             session: None,
             rx: None,
+            live: LiveRef::default(),
         }
     }
 
@@ -148,29 +195,39 @@ impl Ask {
     /// every answer twice would be a worse bug than a paragraph landing whole.
     #[must_use]
     pub fn spawn(prompt: &str, cwd: &Path, session: Option<&str>) -> Ask {
-        if std::env::var_os("GG_HEADLESS").is_some() {
+        // Set and not "0"/empty — `gg-platform`'s parse, replicated because
+        // this crate deliberately has no dependencies.
+        if std::env::var_os("GG_HEADLESS").is_some_and(|v| !v.is_empty() && v != "0") {
+            let why = "Not asked: this is a headless run (GG_HEADLESS=1). An automated tier never \
+                       calls out to an agent — the click landed and nothing was spent."
+                .to_owned();
+            // The refusal is an *event*, not only a status: the panel builds
+            // its transcript from the stream, so a refusal with no stream would
+            // never reach it and the spinner would run for the session.
+            let (tx, rx) = channel();
+            let _ = tx.send(Event::Failed(why.clone()));
             return Ask {
                 prompt: prompt.to_owned(),
-                status: Status::Failed(
-                    "Not asked: this is a headless run (GG_HEADLESS=1). An automated tier never \
-                     calls out to an agent — the click landed and nothing was spent."
-                        .to_owned(),
-                ),
+                status: Status::Failed(why),
                 session: session.map(ToOwned::to_owned),
-                rx: None,
+                rx: Some(rx),
+                live: LiveRef::default(),
             };
         }
         let (tx, rx) = channel();
         let (prompt_owned, cwd_owned) = (prompt.to_owned(), cwd.to_owned());
         let resume = session.map(ToOwned::to_owned);
-        // Detached: the panel polls, and a thread still waiting when the window
-        // closes is a `claude` that gets reaped with the process.
-        std::thread::spawn(move || run_claude(&prompt_owned, &cwd_owned, resume, &tx));
+        let live = LiveRef::default();
+        let shared = live.clone();
+        // Detached: the panel polls. The child does *not* just die with the
+        // panel — [`Ask::drop`] is what ends it.
+        std::thread::spawn(move || run_claude(&prompt_owned, &cwd_owned, resume, &tx, &shared));
         Ask {
             prompt: prompt.to_owned(),
             status: Status::Running,
             session: session.map(ToOwned::to_owned),
             rx: Some(rx),
+            live,
         }
     }
 
@@ -243,9 +300,9 @@ impl Ask {
 /// before any event, so that one case retries cold rather than wedging the panel
 /// on a conversation it cannot get back to. Only that case: a retry after text
 /// had already arrived would say everything twice.
-fn run_claude(prompt: &str, cwd: &Path, resume: Option<String>, tx: &Sender) {
+fn run_claude(prompt: &str, cwd: &Path, resume: Option<String>, tx: &Sender, live: &LiveRef) {
     let resumed = resume.is_some();
-    let first = stream(prompt, cwd, resume, tx);
+    let first = stream(prompt, cwd, resume, tx, live);
     let Some(why) = first.failure else { return };
     // Only the silent case, and only once. A retry after anything had been said
     // would say all of it twice, and a second failure is the real one.
@@ -254,7 +311,7 @@ fn run_claude(prompt: &str, cwd: &Path, resume: Option<String>, tx: &Sender) {
             name: "session".to_owned(),
             detail: "gone — starting a new one".to_owned(),
         });
-        if let Some(why) = stream(prompt, cwd, None, tx).failure {
+        if let Some(why) = stream(prompt, cwd, None, tx, live).failure {
             let _ = tx.send(Event::Failed(why));
         }
         return;
@@ -275,7 +332,10 @@ struct Ended {
     failure: Option<String>,
 }
 
-fn stream(prompt: &str, cwd: &Path, resume: Option<String>, tx: &Sender) -> Ended {
+/// The exact `claude` argv and environment, split from [`stream`] so the
+/// guarding tests pin the invocation actually spawned rather than a constant
+/// they hope is used — the "property of a string" failure §6 M16 item 7 named.
+fn invocation(prompt: &str, cwd: &Path, resume: Option<&str>) -> std::process::Command {
     let mut command = std::process::Command::new(claude_binary());
     command
         .current_dir(cwd)
@@ -285,10 +345,14 @@ fn stream(prompt: &str, cwd: &Path, resume: Option<String>, tx: &Sender) -> Ende
         .args(["--output-format", "stream-json", "--verbose"])
         .args(["--tools", TOOLS])
         .args(["--allowedTools", ALLOWED_TOOLS])
-        // Writes without asking. A permission prompt has nowhere to appear from
-        // here: there is no terminal attached, so the alternative to deciding
-        // now is hanging forever.
-        .args(["--permission-mode", "acceptEdits"])
+        // `default`, and the mode is what makes [`ALLOWED_TOOLS`] bind: `-p`
+        // has no prompt to fall back on, so whatever would ask is denied.
+        // `acceptEdits` was measured (this desk, 2026-08) approving `Bash`
+        // commands the allowance never named — `git status`, `touch` — because
+        // it waves file-touching commands through wholesale; under `default`
+        // the same probe denies them while `Edit`/`Write` and the two cargo
+        // forms still land promptless, since pre-approval is the list's job.
+        .args(["--permission-mode", "default"])
         // Explicit rather than discovered, so the engine's own tools are present
         // without the first-use approval an auto-discovered project server asks
         // for — which is a prompt with nowhere to appear, same as above.
@@ -298,8 +362,9 @@ fn stream(prompt: &str, cwd: &Path, resume: Option<String>, tx: &Sender) -> Ende
         .arg("--strict-mcp-config")
         // Not the project's settings, whose `Stop` hook is the tier that would
         // relink the running game. `CLAUDE.md` is memory rather than a setting
-        // source and still loads — checked, because a panel agent that lost the
-        // house rules would be worse than one that runs a hook.
+        // source and still loads under `user` — checked, because a panel agent
+        // that lost the house rules would be worse than one that runs a hook.
+        // (Not `""` either: measured to drop `CLAUDE.md` entirely.)
         .args(["--setting-sources", "user"])
         // The module's billing claim, made true rather than assumed. A `claude`
         // that finds this set uses the key and says so in one warning line on
@@ -307,15 +372,21 @@ fn stream(prompt: &str, cwd: &Path, resume: Option<String>, tx: &Sender) -> Ende
         // the subscription silently. It is set in some shells on this desk, and
         // a child inherits the environment of whatever terminal launched the
         // game, so the only reliable place to be sure is here.
-        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY");
+    if let Some(id) = resume {
+        command.args(["--resume", id]);
+    }
+    command
+}
+
+fn stream(prompt: &str, cwd: &Path, resume: Option<String>, tx: &Sender, live: &LiveRef) -> Ended {
+    let mut command = invocation(prompt, cwd, resume.as_deref());
+    command
         // Closed, not inherited: a `claude` that decided to read stdin would
         // otherwise be reading the terminal the *game* was launched from.
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(id) = &resume {
-        command.args(["--resume", id]);
-    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -338,15 +409,33 @@ fn stream(prompt: &str, cwd: &Path, resume: Option<String>, tx: &Sender) -> Ende
             text
         })
     });
+    let out = child.stdout.take();
+    {
+        let mut live = locked(live);
+        if live.ended {
+            // The panel closed in the instant between spawn and here.
+            end(child);
+            return Ended {
+                published: 0,
+                failure: None,
+            };
+        }
+        live.child = Some(child);
+    }
     let (mut published, mut ended) = (0usize, false);
-    if let Some(out) = child.stdout.take() {
+    if let Some(out) = out {
         for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
             for event in read_line(&line) {
                 ended |= matches!(event, Event::Done | Event::Failed(_));
                 published += 1;
                 if tx.send(event).is_err() {
-                    // The panel is gone (window closed). Nothing left to say to
-                    // it, and the child gets reaped with the process.
+                    // The panel is gone (window closed). An `acceptEdits` turn
+                    // must not keep editing a tree nobody is watching, so the
+                    // child ends with the panel — it never did die "with the
+                    // process".
+                    if let Some(child) = locked(live).child.take() {
+                        end(child);
+                    }
                     return Ended {
                         published,
                         failure: None,
@@ -355,6 +444,13 @@ fn stream(prompt: &str, cwd: &Path, resume: Option<String>, tx: &Sender) -> Ende
             }
         }
     }
+    let Some(mut child) = locked(live).child.take() else {
+        // The panel ended the turn under us; there is nobody left to report to.
+        return Ended {
+            published,
+            failure: None,
+        };
+    };
     let status = child.wait();
     let stderr = errors
         .and_then(|handle| handle.join().ok())
@@ -513,7 +609,13 @@ mod tests {
         };
         assert!(message.contains("GG_HEADLESS=1"), "{message}");
         assert!(message.contains("nothing was spent"), "{message}");
-        assert!(events.is_empty(), "nothing was spawned, so nothing streams");
+        // The refusal *streams*: the panel builds its transcript from events,
+        // so a refusal that was only a status would never reach it and the
+        // spinner would run for the session.
+        assert!(
+            matches!(events.as_slice(), [Event::Failed(why)] if why.contains("GG_HEADLESS=1")),
+            "the refusal did not arrive as an event: {events:?}"
+        );
         assert_eq!(ask.prompt(), "explain the last refusal");
     }
 
@@ -615,58 +717,85 @@ mod tests {
         assert_eq!(detail(r#"{"unknown_key":"x"}"#), "");
     }
 
+    /// The argv actually spawned, as strings. Every confinement test below
+    /// reads this rather than a constant it hopes is used — the "property of a
+    /// string" failure §6 M16 item 7 named.
+    fn argv(resume: Option<&str>) -> Vec<String> {
+        invocation("why", Path::new("."), resume)
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn has_pair(args: &[String], key: &str, value: &str) -> bool {
+        args.windows(2).any(|w| w[0] == key && w[1] == value)
+    }
+
     /// `--bare` is the flag that would move the bill from the operator's
     /// subscription to an API key this process does not have.
     #[test]
     fn nothing_here_reaches_for_bare_mode() {
-        let source = include_str!("ask.rs");
-        let flag = ["--", "bare"].concat();
-        // The module note names it, so the ban is on the *argument* form.
-        assert!(
-            !source.contains(&format!("\"{flag}\"")),
-            "`{flag}` is passed somewhere in this module"
-        );
+        let args = argv(None);
+        assert!(!args.iter().any(|a| a == "--bare"), "{args:?}");
         // The other half, and the one a real run caught: the key wins over the
         // login when it is merely *inherited*, no flag required.
         assert!(
-            source.contains(".env_remove(\"ANTHROPIC_API_KEY\")"),
+            invocation("why", Path::new("."), None)
+                .get_envs()
+                .any(|(key, value)| key == "ANTHROPIC_API_KEY" && value.is_none()),
             "an inherited key would move the bill off the subscription"
         );
     }
 
-    /// What the two lists can each actually claim. The allowance was read as a
-    /// sandbox until a real session ran `PowerShell`, which it never named.
+    /// What each layer can actually claim, all measured on the real binary:
+    /// `--tools` confines the session; the allowance pre-approves; and
+    /// `--permission-mode default` is what makes the allowance *bind* — a
+    /// print run has no prompt, so whatever would ask is denied. `acceptEdits`
+    /// here was measured running `touch` and `git status` through `Bash` with
+    /// neither in the allowance.
     #[test]
-    fn the_built_in_set_confines_and_the_allowance_only_grants() {
+    fn bash_is_narrowed_by_default_mode_and_the_allowance_together() {
+        let args = argv(None);
+        assert!(has_pair(&args, "--tools", TOOLS), "{args:?}");
+        assert!(has_pair(&args, "--allowedTools", ALLOWED_TOOLS), "{args:?}");
+        assert!(has_pair(&args, "--permission-mode", "default"), "{args:?}");
         for absent in ["WebFetch", "WebSearch", "PowerShell", "Task"] {
             assert!(!TOOLS.contains(absent), "{TOOLS} reaches {absent}");
         }
         assert!(TOOLS.contains("Edit") && TOOLS.contains("Bash"), "{TOOLS}");
-        // The allowance is pre-approval, so it names what a prompt would ask
-        // about — and narrows `Bash` to the two commands the loop needs.
         assert!(
             ALLOWED_TOOLS.contains("mcp__gg-engine__"),
             "{ALLOWED_TOOLS}"
         );
-        assert!(
-            ALLOWED_TOOLS.contains("Bash(cargo build"),
-            "{ALLOWED_TOOLS}"
-        );
+        // The two build commands are the only `Bash` forms pre-approved, so
+        // under `default` they are the only mutating commands that run.
+        let bash: Vec<&str> = ALLOWED_TOOLS
+            .split(',')
+            .filter(|t| t.starts_with("Bash("))
+            .collect();
+        assert_eq!(bash, ["Bash(cargo build *)", "Bash(cargo check *)"]);
     }
 
     /// The `Stop` hook this tree carries rebuilds the running game from inside
     /// it. Inheriting the project's settings is how that happens.
     #[test]
     fn the_projects_own_hooks_are_not_inherited() {
-        let source = include_str!("ask.rs");
+        let args = argv(None);
         assert!(
-            source.contains("\"--setting-sources\", \"user\""),
-            "the project `Stop` hook would relink the game it is running in"
+            has_pair(&args, "--setting-sources", "user"),
+            "the project `Stop` hook would relink the game it is running in: {args:?}"
         );
         assert!(
-            source.contains("--strict-mcp-config"),
-            "the operator's global MCP servers would ride along"
+            args.iter().any(|a| a == "--strict-mcp-config"),
+            "the operator's global MCP servers would ride along: {args:?}"
         );
+    }
+
+    /// The follow-up flag rides only when there is a session to follow.
+    #[test]
+    fn a_resume_is_passed_through_and_never_invented() {
+        assert!(has_pair(&argv(Some("9f-1")), "--resume", "9f-1"));
+        assert!(!argv(None).iter().any(|a| a == "--resume"));
     }
 
     #[test]

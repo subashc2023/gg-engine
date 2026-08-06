@@ -136,6 +136,27 @@ fn a_planted_divergence_is_caught_and_reported_with_its_frame_and_entity() {
     assert_eq!(clean, unplanted);
 }
 
+/// The locator merges two index-ascending lists, so its comparator must be
+/// index-major too: `to_bits()` is generation-major, and keyed on it the walk
+/// named an entity from the *other* world whenever a recycled index sat at the
+/// first difference.
+#[test]
+fn the_locator_names_the_recycled_entity_not_its_neighbour() {
+    let mut a = gg_ecs::World::new();
+    let (_, _) = (a.spawn(), a.spawn());
+    let recycled = a.spawn();
+    a.despawn(recycled);
+    let recycled = a.spawn(); // index 2 again, generation 3
+
+    let mut b = gg_ecs::World::new();
+    let (_, _) = (b.spawn(), b.spawn());
+    let gone = b.spawn();
+    b.spawn(); // index 3 — the neighbour the generation-major walk misnamed
+    b.despawn(gone); // index 2 lives only in `a`
+
+    assert_eq!(gate::locate_entity(&a, &b), Some(recycled));
+}
+
 #[test]
 fn every_chaos_seed_matches_its_checked_in_checkpoints() {
     // §5.11 v0. Generated streams, so the file holds checkpoints rather than

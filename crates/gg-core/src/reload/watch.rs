@@ -39,6 +39,10 @@ use super::{GameLib, ReloadError};
 /// is a race the fast lane loses, and losing it stages a truncated dylib and
 /// reports `file too short` for an artifact that was perfectly good a
 /// millisecond later.
+/// Deliberately not `ggc::watch`'s 120 ms: that rule waits for a *tree's*
+/// event burst to go quiet (outlast a save); this one holds one artifact's
+/// size and mtime still (outlast a linker). Same shape, different
+/// measurement — change one and read the other's note first (§6 M16 item 4).
 const SETTLE_QUIET: Duration = Duration::from_millis(40);
 
 /// How long a stubbornly-unreadable artifact is given before the wait is

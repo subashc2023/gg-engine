@@ -98,5 +98,20 @@ macro_rules! gg_game {
                 )),*])
             }
         };
+
+        // §4.2.1's fast-path == protocol derivation, in the dylib where the
+        // types exist. Emitted by the macro rather than written per crate so a
+        // game cannot declare a component the check does not cover; the name is
+        // reserved by `gg_game!` under `cfg(test)` only.
+        #[cfg(test)]
+        mod gg_fast_path_is_the_protocol {
+            #[allow(unused_imports)] // every component may be a full path
+            use super::*;
+
+            #[test]
+            fn every_declared_component_hashes_as_its_raw_bytes() {
+                $($crate::boundary::assert_protocol_matches_raw::<$component>();)*
+            }
+        }
     };
 }

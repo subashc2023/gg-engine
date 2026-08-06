@@ -691,41 +691,70 @@ impl App {
         false
     }
 
-    /// Adopt a rebuilt dylib: snapshot, register the new schemas into a *fresh*
-    /// world, restore through the migration path (§4.2.2), then swap. Fresh
-    /// rather than re-registered, because a component whose schema moved needs
-    /// its column rebuilt, and rebuilding under live rows is what
-    /// snapshot/restore exists to avoid.
+    /// Adopt a rebuilt dylib. Every fallible step runs before any state moves,
+    /// so a refusal leaves the last-good build playing an untouched session —
+    /// then one of §4.2.2's two shapes, chosen by the schema check per hashed
+    /// component: all fingerprints unchanged → the world is already the new
+    /// build's layout, so the swap is the systems-table pointer and nothing
+    /// else — state untouched, between ticks; any changed → snapshot, register
+    /// the new schemas into a *fresh* world, restore through the migration
+    /// path, then swap. Fresh rather than re-registered, because a component
+    /// whose schema moved needs its column rebuilt, and rebuilding under live
+    /// rows is what snapshot/restore exists to avoid.
     #[cfg(feature = "hot-reload")]
     fn swap(
         &mut self,
         reloaded: gg_core::reload::watch::Reloaded,
     ) -> anyhow::Result<gg_ecs::MigrationReport> {
-        let snapshot = self.world.snapshot();
-        let mut world = World::new();
-        // Every failure from here to the swap is charged to the leak budget: the
-        // image is mapped and never unloaded, so a refused adopt costs exactly
-        // what an accepted one does (§4.2.2).
-        adopt(&mut world, &reloaded.lib).map_err(|e| reloaded.lib.refuse(e))?;
-        let report = world
-            .restore(&snapshot)
-            .map_err(|e| reloaded.lib.refuse(e))?;
-        // One line per component that actually moved (§4.2.2). The reused ones
-        // are the majority of every reload, and printing them would bury the one
-        // line the reader came for.
-        for (declared, outcome) in &report.components {
-            if !matches!(outcome, ComponentOutcome::Reused) {
-                info!(component = %declared, ?outcome, "migrated");
-            }
-        }
         // Re-parsed rather than carried: an edit that appends an action moves
         // the id space, and a map bound against the old one would fire the wrong
         // verb (§4.7). Key state resets with it, which is why this is the one
-        // reload effect a player can feel.
+        // reload effect a player can feel. Into a local, not `self.input` — the
+        // migration below can still refuse, and a refusal must not have
+        // replaced the running build's map.
         // SAFETY: `reloaded.lib` is verified and never unloaded.
         let (verbs, extra) = unsafe { verbs_for(&reloaded.lib, self.editing()) };
-        self.input = bind(&format!("{}{extra}", self.bindings), &self.drive, verbs)
+        let input = bind(&format!("{}{extra}", self.bindings), &self.drive, verbs)
             .map_err(|e| reloaded.lib.refuse(e))?;
+        // SAFETY: both dylibs are verified and never unloaded.
+        let unchanged = unsafe {
+            gg_ecs::boundary::same_schemas(self.lib.components(), reloaded.lib.components())
+        };
+        let report = if unchanged {
+            // Pointer swap: the world's columns already are the new build's
+            // layout, and the registry keeps the retired build's descriptors —
+            // sound for the reason every boundary `&'static` is: a dylib is
+            // never unloaded. The audio observer's memory is kept too, because
+            // an untouched world's `seq`s carry on (§6 M18 item 2).
+            gg_ecs::MigrationReport::untouched(self.world.len())
+        } else {
+            let snapshot = self.world.snapshot();
+            let mut world = World::new();
+            // Every failure from here to the swap is charged to the leak budget:
+            // the image is mapped and never unloaded, so a refused adopt costs
+            // exactly what an accepted one does (§4.2.2).
+            adopt(&mut world, &reloaded.lib).map_err(|e| reloaded.lib.refuse(e))?;
+            let report = world
+                .restore(&snapshot)
+                .map_err(|e| reloaded.lib.refuse(e))?;
+            // One line per component that actually moved (§4.2.2). The reused
+            // ones are the majority of every reload, and printing them would
+            // bury the one line the reader came for.
+            for (declared, outcome) in &report.components {
+                if !matches!(outcome, ComponentOutcome::Reused) {
+                    info!(component = %declared, ?outcome, "migrated");
+                }
+            }
+            self.world = world;
+            // The migrated world is one the audio observer has not seen: a
+            // `Sound` the new build declares afresh comes back with `seq` at
+            // zero, and a difference is a trigger. Forgotten rather than
+            // carried, so a reload is silent at the seam instead of playing
+            // whatever the retired build's cue bank ended on (§6 M18 item 2).
+            self.audio.forget();
+            report
+        };
+        self.input = input;
         // Same move, same reason: an edit that appends a verb moves the id
         // space the UI's four names resolved to (§4.7). An edit that *deletes*
         // one leaves the UI unclickable rather than clicking the wrong thing.
@@ -737,14 +766,7 @@ impl App {
         // build produced which ticks (§4.2.2, §4.7).
         self.drive
             .open_segment(self.next_tick, self.lib.code_hash());
-        self.world = world;
         self.halted = false;
-        // The world on the other side of a migration is one the audio observer
-        // has not seen: a `Sound` the new build declares afresh comes back with
-        // `seq` at zero, and a difference is a trigger. Forgotten rather than
-        // carried, so a reload is silent at the seam instead of playing whatever
-        // the retired build's cue bank happened to end on (§6 M18 item 2).
-        self.audio.forget();
         // Staged after the swap, so a successor inherits the *migrated* world
         // rather than the one the retired dylib understood.
         if self.rejuvenate.due() {
@@ -761,6 +783,10 @@ impl App {
             // The M5 budget's clock, measured end to end: file event to the tick
             // boundary the new code first runs at.
             save_to_swap_ms = reloaded.saved_at.elapsed().as_millis(),
+            // Which §4.2.2 shape this reload took — what lets a gate insist the
+            // fast path actually ran instead of grading the 2 s bar on the slow
+            // one for every trivial edit.
+            migration = if unchanged { "pointer-swap" } else { "restore" },
             "game reloaded"
         );
         Ok(report)
@@ -881,15 +907,6 @@ impl App {
     }
 }
 
-/// The tier this shell was built as. An agent reading a record needs it: half
-/// the advice worth giving names machinery that a dist build does not have.
-#[cfg(feature = "agent")]
-const TIER: &str = if cfg!(feature = "tracy") {
-    "tier-instrumented"
-} else {
-    "tier-dev"
-};
-
 /// Where the record is published. Overridable so two sessions on one tree do not
 /// overwrite each other's — see [`gg_agent::Journal::publish`], which keys the
 /// temp file by pid but writes one final path per directory.
@@ -903,7 +920,10 @@ fn agent_dir() -> std::path::PathBuf {
 
 #[cfg(feature = "agent")]
 fn journal(args: &crate::Args, game: &str) -> gg_agent::Journal {
-    let mut journal = gg_agent::Journal::new(game, TIER);
+    // Keyed on the tier meta-features, not on `tracy`: `xtask run --tracy` adds
+    // tracy to a *dev* shell, which would otherwise publish a record claiming
+    // instruments the build does not carry (an agent reading it needs the truth).
+    let mut journal = gg_agent::Journal::new(game, format!("tier-{}", crate::active_tier()));
     // The third thing the record hands an agent: what the human just did, as
     // something replayable rather than described (§4.7).
     if let Some(path) = &args.record {

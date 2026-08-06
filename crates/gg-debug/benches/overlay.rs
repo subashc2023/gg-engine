@@ -28,6 +28,8 @@ use gg_ui::{DrawList, Scratch, Span, Stack};
 /// noise on a desktop is one-sided.
 const FRAMES: u32 = 200;
 const REPS: u32 = 15;
+/// Passes before any rep counts — caches and branch predictors.
+const WARMUP: u32 = 3;
 
 /// Inset and colour, copied from the overlay so the two shapes lay out the same
 /// panel. They are the overlay's private constants; a bench that reached for
@@ -48,8 +50,14 @@ fn passes() -> Vec<PassTiming> {
         .collect()
 }
 
+fn report(name: &str, best: Duration) -> Duration {
+    let per_frame = best.as_secs_f64() * 1e9 / f64::from(FRAMES);
+    println!("{name:<28} {best:>9.3?}  {per_frame:>9.1} ns/frame");
+    best
+}
+
 fn measure(name: &str, mut body: impl FnMut()) -> Duration {
-    for _ in 0..3 {
+    for _ in 0..WARMUP {
         body(); // warm the caches and the branch predictors
     }
     let mut best = Duration::MAX;
@@ -58,9 +66,7 @@ fn measure(name: &str, mut body: impl FnMut()) -> Duration {
         body();
         best = best.min(start.elapsed());
     }
-    let per_frame = best.as_secs_f64() * 1e9 / f64::from(FRAMES);
-    println!("{name:<28} {best:>9.3?}  {per_frame:>9.1} ns/frame");
-    best
+    report(name, best)
 }
 
 /// The row set both shapes build — the stats panel's, with the numbers moving
@@ -140,24 +146,40 @@ fn main() {
     let passes = passes();
     let bins = [7u32; gg_render::luminance::BINS];
 
+    // The two shapes **interleaved**, alternating rep by rep and each keeping
+    // its own best — `gg-ecs`'s query bench correction, inherited rather than
+    // relearned: the criterion below is a *ratio*, and two bodies timed one
+    // after another also measure when the machine was busy, so a contended
+    // stretch covering one and not the other prices the scheduler. Alternating
+    // puts both in the same weather.
     let mut list = DrawList::default();
-    let old = measure("m8: String rows + fold", || {
+    let mut scratch = Scratch::default();
+    let mut rows: Vec<(Span, u32)> = Vec::new();
+    let (mut old, mut new) = (Duration::MAX, Duration::MAX);
+    for rep in 0..WARMUP + REPS {
+        let start = Instant::now();
         for tick in 0..u64::from(FRAMES) {
             list.clear();
             m8(&mut list, tick, &passes);
             black_box(list.vertices().len());
         }
-    });
+        let t_old = start.elapsed();
 
-    let mut scratch = Scratch::default();
-    let mut rows: Vec<(Span, u32)> = Vec::new();
-    let new = measure("m13: Scratch spans + Stack", || {
+        let start = Instant::now();
         for tick in 0..u64::from(FRAMES) {
             list.clear();
             m13(&mut list, &mut scratch, &mut rows, tick, &passes);
             black_box(list.vertices().len());
         }
-    });
+        let t_new = start.elapsed();
+
+        if rep >= WARMUP {
+            old = old.min(t_old);
+            new = new.min(t_new);
+        }
+    }
+    let old = report("m8: String rows + fold", old);
+    let new = report("m13: Scratch spans + Stack", new);
 
     // The whole panel, console and histogram included, for scale. Not asserted:
     // it is the number a reader wants when deciding whether any of this matters,

@@ -25,9 +25,9 @@ pub fn run(system: bool) -> anyhow::Result<()> {
             unsafe { std::env::set_var("VK_DRIVER_FILES", &icd) };
         } else {
             println!(
-                "probe: WSL lavapipe is the system ICD, not yet a digest-pinned container \
-                 (§5.4 deferred machine — lands with the golden suite, M7, whose goldens \
-                 the pin protects); pass --system to silence this note"
+                "probe: WSL lavapipe is the system ICD, not a digest-pinned container — \
+                 §5.4's named residual: an apt Mesa upgrade can re-author the Linux golden \
+                 baseline ungated. Pass --system to silence this note"
             );
         }
     }
