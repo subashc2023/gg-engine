@@ -35,7 +35,7 @@
 //! to the game (§4.8). The sun below sweeps because a static sun makes a shadow
 //! look like a texture; the lamps flicker on a schedule for the same reason.
 
-use gg_ecs::boundary::{ActionId, AxisId, BoundaryError, Eye, GameWorld, Light, Model, log_level};
+use gg_ecs::boundary::{ActionId, AxisId, Eye, GameWorld, Light, Model, log_level};
 use gg_ecs::{Component, Entity};
 use gg_math::sim;
 
@@ -123,16 +123,6 @@ pub struct Visitor {
     pub lamps: u32,
 }
 
-/// Forward and right, in sim space. `f64` trig through `libm` (§4.2.1).
-#[must_use]
-pub fn basis(visitor: &Visitor) -> (sim::DVec3, sim::DVec3) {
-    let (sin_yaw, cos_yaw) = sim::sin_cos(f64::from(visitor.yaw));
-    let (sin_pitch, cos_pitch) = sim::sin_cos(f64::from(visitor.pitch));
-    let forward = sim::DVec3::new(-cos_pitch * sin_yaw, sin_pitch, -cos_pitch * cos_yaw);
-    let right = sim::DVec3::new(cos_yaw, 0.0, -sin_yaw);
-    (forward, right)
-}
-
 /// The direction the sun's light *travels* at `phase`, unit length.
 ///
 /// A function of the phase alone, so the same tick produces the same sun on
@@ -157,15 +147,6 @@ pub fn sun_direction(phase: u64) -> sim::Vec3 {
     )
 }
 
-/// Report a refused query and carry on — see demo 03 for why this is not a
-/// panic: the host would report the panic and hide the load-sequence bug
-/// standing behind it.
-fn report(world: &GameWorld, outcome: Result<(), BoundaryError>) {
-    if let Err(refused) = outcome {
-        world.log(log_level::ERROR, &refused.to_string());
-    }
-}
-
 /// Spawn the visitor, the atrium, the sun and the lamps if there is no visitor
 /// yet.
 ///
@@ -173,8 +154,7 @@ fn report(world: &GameWorld, outcome: Result<(), BoundaryError>) {
 /// remembering would be state outliving a tick (§4.2.2, and a grep gate).
 pub fn bootstrap(world: &mut GameWorld) {
     let mut exists = false;
-    let outcome = world.each::<&Visitor>(|_, _| exists = true);
-    report(world, outcome);
+    world.visit::<&Visitor>(|_, _| exists = true);
     if exists {
         return;
     }
@@ -198,19 +178,17 @@ pub fn bootstrap(world: &mut GameWorld) {
     // One entity for the whole room; the pack's scene says where its eighteen
     // pieces go relative to it (§4.6).
     let atrium = world.spawn();
-    let outcome = world.insert(atrium, Model::at(ATRIUM, sim::DVec3::ZERO));
-    report(world, outcome);
+    world.put(atrium, Model::at(ATRIUM, sim::DVec3::ZERO));
 
     // The sun. Spawned first of the lights, and therefore the one that casts:
     // extract keeps world iteration order and the renderer's single cascade
     // takes the first directional light it is given (§6 M11).
     let sun = world.spawn();
-    let outcome = world.insert(sun, Light::sun(sun_direction(0), SUN_COLOR, SUN_INTENSITY));
-    report(world, outcome);
+    world.put(sun, Light::sun(sun_direction(0), SUN_COLOR, SUN_INTENSITY));
 
     for (x, z) in LAMP_AT {
         let lamp = world.spawn();
-        let outcome = world.insert(
+        world.put(
             lamp,
             Light::point(
                 sim::DVec3::new(x, LAMP_HEIGHT, z),
@@ -219,7 +197,6 @@ pub fn bootstrap(world: &mut GameWorld) {
                 LAMP_RANGE,
             ),
         );
-        report(world, outcome);
     }
     world.log(log_level::INFO, "the atrium is lit");
 }
@@ -227,11 +204,10 @@ pub fn bootstrap(world: &mut GameWorld) {
 /// Turn.
 pub fn aim(world: &mut GameWorld) {
     let (x, y) = (world.axis(AIM_X), world.axis(AIM_Y));
-    let outcome = world.each::<&mut Visitor>(|_, visitor| {
+    world.visit::<&mut Visitor>(|_, visitor| {
         visitor.yaw -= x * LOOK_PER_UNIT;
         visitor.pitch = (visitor.pitch - y * LOOK_PER_UNIT).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     });
-    report(world, outcome);
 }
 
 /// Walk. Not normalized: diagonals are faster, which is a fly camera's
@@ -242,21 +218,20 @@ pub fn walk(world: &mut GameWorld) {
         f64::from(world.axis(MOVE_UP)),
         f64::from(world.axis(MOVE_FORWARD)),
     ];
-    let outcome = world.each::<&mut Visitor>(|_, visitor| {
-        let (forward, right) = basis(visitor);
+    world.visit::<&mut Visitor>(|_, visitor| {
+        let (forward, right) = sim::fly_basis(visitor.yaw, visitor.pitch);
         visitor.position = visitor.position
             + right * (axes[0] * MOVE_PER_TICK)
             + sim::DVec3::Y * (axes[1] * MOVE_PER_TICK)
             + forward * (axes[2] * MOVE_PER_TICK);
     });
-    report(world, outcome);
 }
 
 /// Advance the sun's sweep, and take the two switches.
 pub fn sky(world: &mut GameWorld) {
     let hold = world.just_pressed(HOLD);
     let lamps = world.just_pressed(LAMPS);
-    let outcome = world.each::<&mut Visitor>(|_, visitor| {
+    world.visit::<&mut Visitor>(|_, visitor| {
         if hold {
             visitor.held ^= 1;
         }
@@ -269,19 +244,17 @@ pub fn sky(world: &mut GameWorld) {
             visitor.phase = (visitor.phase + 1) % SUN_PERIOD;
         }
     });
-    report(world, outcome);
 }
 
 /// Fill the render protocol from the sim: where the eye is, and where the light
 /// comes from. Last in the table, so it sees this tick's movement.
 pub fn present(world: &mut GameWorld) {
     let mut seen: Option<(Entity, Visitor)> = None;
-    let outcome = world.each::<&Visitor>(|entity, visitor| seen = Some((entity, *visitor)));
-    report(world, outcome);
+    world.visit::<&Visitor>(|entity, visitor| seen = Some((entity, *visitor)));
     let Some((entity, visitor)) = seen else {
         return;
     };
-    let outcome = world.insert(
+    world.put(
         entity,
         Eye {
             position: visitor.position,
@@ -289,14 +262,12 @@ pub fn present(world: &mut GameWorld) {
             pitch: visitor.pitch,
         },
     );
-    report(world, outcome);
 
     let direction = sun_direction(visitor.phase);
     // Collected before writing: `each` holds the column borrow, and `insert`
     // takes the world (§4.2.2).
     let mut lights = Vec::new();
-    let outcome = world.each::<&Light>(|entity, light| lights.push((entity, *light)));
-    report(world, outcome);
+    world.visit::<&Light>(|entity, light| lights.push((entity, *light)));
     for (entity, light) in lights {
         let updated = match light.kind {
             gg_ecs::boundary::light::DIRECTIONAL => Light { direction, ..light },
@@ -309,8 +280,7 @@ pub fn present(world: &mut GameWorld) {
                 ..light
             },
         };
-        let outcome = world.insert(entity, updated);
-        report(world, outcome);
+        world.put(entity, updated);
     }
 }
 

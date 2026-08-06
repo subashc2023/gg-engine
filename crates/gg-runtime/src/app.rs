@@ -370,11 +370,13 @@ impl App {
     /// second arrow on the same pixel (§4.9). Whether it draws is the UI
     /// stage's own decision (`Prefs::cursor`, §6 M19); the shell only relays
     /// it. Applied by the windowed loop, the only place a window exists.
+    ///
+    /// Never hidden while the editor is hosting: `self.ui` is the *game's* UI,
+    /// its arrow lives inside the game pane, and the editor draws none of its
+    /// own — so obeying it would leave the panels with no cursor at all.
     pub fn pointer(&self) -> (bool, bool) {
-        (
-            self.cursor.held,
-            !self.cursor.held && self.ui.cursor_drawn(),
-        )
+        let hidden = !self.cursor.held && !self.editing() && self.ui.cursor_drawn();
+        (self.cursor.held, hidden)
     }
 
     /// Hand the pointer back, reporting where a system cursor should be warped
@@ -617,9 +619,10 @@ impl App {
                 // two different stories about one reload (§6 M16). Unconditional
                 // because `editor` implies `agent`, which is this arm's cfg.
                 reload: self.journal.last(),
-                // Never: a windowed session has the system cursor on the same
-                // pixel, and a headless one has no frame to draw into (§6
-                // M15.1). What draws its own is `gg-golden`.
+                // Never: the panels steer the system cursor rather than an
+                // arrow of their own, which is why `App::pointer` refuses to
+                // hide it while an editor is hosting. What draws its own is
+                // `gg-golden`, which has no window to put one in (§6 M15.1).
                 draw_cursor: false,
             },
         );
@@ -1065,14 +1068,12 @@ impl Editing {
         // session must not leave a scene behind for the next run to open.
         let save = args.save.clone().unwrap_or_else(|| {
             persist::scene_path(args.input.as_deref())
-                .filter(|_| args.record.is_none() && args.replay.is_none())
+                .filter(|_| crate::may_touch_project(args))
                 .unwrap_or_else(|| persist::save_path(stem))
         });
-        // Not while recording or replaying. The layout *is* hit-testing (§6
-        // M15.1), so a session that started from a file the gate never saw
-        // would land its clicks somewhere else.
-        let layout =
-            (args.record.is_none() && args.replay.is_none()).then(|| persist::layout_path(stem));
+        // The layout *is* hit-testing (§6 M15.1), so a session that started from
+        // a file the gate never saw would land its clicks somewhere else.
+        let layout = crate::may_touch_project(args).then(|| persist::layout_path(stem));
         let mut ui = gg_editor::Editor::new(args.pack.as_deref());
         if let Some(path) = &layout {
             persist::restore(&mut ui, path);
@@ -1454,15 +1455,18 @@ impl Stages for App {
             info!(tick, "editor: pointer handed back — the scene is stopped");
         }
         // The editor and the game share one physical mouse (§6 M15), and while
-        // the editor holds it the game gets a dead frame — wherever the pointer
-        // is, not merely over a panel. Hovering the viewport is not playing:
-        // raw device motion arrives whatever the pointer is over (it is a
-        // *device* delta, not a position), demo 05 binds it to `aim_x`, and a
-        // pointer crossing the pane on its way between two panels used to pan
-        // the camera as it went. Recorded before this, never after: what a
-        // replay holds is what the operator did, not what the game saw.
+        // the editor holds it the game gets a dead frame on *both* channels —
+        // the tick's input and the UI stage's — wherever the pointer is, not
+        // merely over a panel. Raw device motion arrives whatever the pointer
+        // is over (it is a *device* delta, not a position) and demo 05 binds it
+        // to `aim_x`; a press over a panel would otherwise also hit whatever
+        // game widget sits at that canvas position, both routers integrating
+        // the same stream. Read before the take below, so the press that hands
+        // the pointer over is still the editor's. Recorded before this, never
+        // after: a replay holds what the operator did, not what the game saw.
+        let dead = self.editing() && !self.cursor.held;
         #[cfg(feature = "editor")]
-        let input = match self.editor.is_some() && !self.cursor.held {
+        let input = match dead {
             true => InputFrame::default(),
             false => input,
         };
@@ -1536,8 +1540,12 @@ impl Stages for App {
             .ui_binding
             .map(|binding| UiTick::from_input(&self.input, &binding))
             .unwrap_or_default();
+        // Dead on the same terms as `TickCtx::input` above, and only for the
+        // *game's* stage: `ui_tick` still reaches the editor's own router below,
+        // which is the one the operator is pointing at.
+        let game_ui = if dead { UiTick::default() } else { ui_tick };
         let fit = self.game_fit();
-        self.ui.frame(&mut self.world, &ui_tick, fit);
+        self.ui.frame(&mut self.world, &game_ui, fit);
         // The audio tick (§6 M18 item 2). After the UI so a cue a game fires in
         // response to a click lands in the same tick as the click, and *outside*
         // the hash entirely — it takes `&World` and the compiler is what proves

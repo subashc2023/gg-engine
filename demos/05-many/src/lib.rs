@@ -26,9 +26,7 @@
 //! (§6 M10). What reaches the device is four draws — the count is a property of
 //! the *content*, not of the entity count, which is the whole point of batching.
 
-use gg_ecs::boundary::{
-    ActionId, AxisId, BoundaryError, Eye, GameWorld, Light, Model, Node, log_level,
-};
+use gg_ecs::boundary::{ActionId, AxisId, Eye, GameWorld, Light, Model, Node, log_level};
 use gg_ecs::{Component, Entity};
 use gg_math::sim;
 
@@ -137,16 +135,6 @@ pub struct Hub {
     pub spin: f64,
 }
 
-/// Forward and right, in sim space. `f64` trig through `libm` (§4.2.1).
-#[must_use]
-pub fn basis(observer: &Observer) -> (sim::DVec3, sim::DVec3) {
-    let (sin_yaw, cos_yaw) = sim::sin_cos(f64::from(observer.yaw));
-    let (sin_pitch, cos_pitch) = sim::sin_cos(f64::from(observer.pitch));
-    let forward = sim::DVec3::new(-cos_pitch * sin_yaw, sin_pitch, -cos_pitch * cos_yaw);
-    let right = sim::DVec3::new(cos_yaw, 0.0, -sin_yaw);
-    (forward, right)
-}
-
 /// Where hub `index` stands, centred on the origin.
 #[must_use]
 pub fn hub_position(index: usize) -> sim::DVec3 {
@@ -178,23 +166,13 @@ pub fn child_placement(slot: usize) -> (sim::DVec3, usize) {
     (offset, slot % MESHES.len())
 }
 
-/// Report a refused query and carry on — see demo 03 for why this is not a
-/// panic: the host would report the panic and hide the load-sequence bug
-/// standing behind it.
-fn report(world: &GameWorld, outcome: Result<(), BoundaryError>) {
-    if let Err(refused) = outcome {
-        world.log(log_level::ERROR, &refused.to_string());
-    }
-}
-
 /// Spawn the observer, the hubs and their children if there is no observer yet.
 ///
 /// Idempotent by asking the world rather than by remembering, because
 /// remembering would be state outliving a tick (§4.2.2, and a grep gate).
 pub fn bootstrap(world: &mut GameWorld) {
     let mut exists = false;
-    let outcome = world.each::<&Observer>(|_, _| exists = true);
-    report(world, outcome);
+    world.visit::<&Observer>(|_, _| exists = true);
     if exists {
         return;
     }
@@ -218,23 +196,20 @@ pub fn bootstrap(world: &mut GameWorld) {
     // than merely present (§6 M11) — and so the shadow pass has ten thousand
     // casters, which is the scale question a lit frame actually asks.
     let sun = world.spawn();
-    let outcome = world.insert(sun, Light::sun(SUN_DIRECTION, SUN_COLOR, SUN_INTENSITY));
-    report(world, outcome);
+    world.put(sun, Light::sun(SUN_DIRECTION, SUN_COLOR, SUN_INTENSITY));
 
     for index in 0..HUBS {
         let hub = world.spawn();
         // The hub's own `Model` is its transform: it has no parent, so nothing
         // derives it and this crate owns it outright.
-        let outcome = world.insert(hub, Model::at(MESHES[0], hub_position(index)));
-        report(world, outcome);
-        let outcome = world.insert(
+        world.put(hub, Model::at(MESHES[0], hub_position(index)));
+        world.put(
             hub,
             Hub {
                 angle: 0.0,
                 spin: if index % 2 == 0 { SPIN_PER_TICK } else { 0.0 },
             },
         );
-        report(world, outcome);
 
         for slot in 0..PER_HUB {
             let (offset, mesh) = child_placement(slot);
@@ -243,10 +218,8 @@ pub fn bootstrap(world: &mut GameWorld) {
             // written by the host every tick a parent moves, so anything this
             // crate put there would be overwritten — which is why it passes the
             // origin and means it.
-            let outcome = world.insert(child, Node::at(hub, offset));
-            report(world, outcome);
-            let outcome = world.insert(child, Model::at(MESHES[mesh], sim::DVec3::ZERO));
-            report(world, outcome);
+            world.put(child, Node::at(hub, offset));
+            world.put(child, Model::at(MESHES[mesh], sim::DVec3::ZERO));
         }
     }
     world.log(log_level::INFO, "the field is up");
@@ -255,11 +228,10 @@ pub fn bootstrap(world: &mut GameWorld) {
 /// Turn.
 pub fn aim(world: &mut GameWorld) {
     let (x, y) = (world.axis(AIM_X), world.axis(AIM_Y));
-    let outcome = world.each::<&mut Observer>(|_, observer| {
+    world.visit::<&mut Observer>(|_, observer| {
         observer.yaw -= x * LOOK_PER_UNIT;
         observer.pitch = (observer.pitch - y * LOOK_PER_UNIT).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     });
-    report(world, outcome);
 }
 
 /// Walk. Not normalized: diagonals are faster, which is a fly camera's
@@ -270,14 +242,13 @@ pub fn walk(world: &mut GameWorld) {
         f64::from(world.axis(MOVE_UP)),
         f64::from(world.axis(MOVE_FORWARD)),
     ];
-    let outcome = world.each::<&mut Observer>(|_, observer| {
-        let (forward, right) = basis(observer);
+    world.visit::<&mut Observer>(|_, observer| {
+        let (forward, right) = sim::fly_basis(observer.yaw, observer.pitch);
         observer.position = observer.position
             + right * (axes[0] * MOVE_PER_TICK)
             + sim::DVec3::Y * (axes[1] * MOVE_PER_TICK)
             + forward * (axes[2] * MOVE_PER_TICK);
     });
-    report(world, outcome);
 }
 
 /// Toggle the spin.
@@ -285,10 +256,9 @@ pub fn freeze(world: &mut GameWorld) {
     if !world.just_pressed(FREEZE) {
         return;
     }
-    let outcome = world.each::<&mut Observer>(|_, observer| {
+    world.visit::<&mut Observer>(|_, observer| {
         observer.frozen ^= 1;
     });
-    report(world, outcome);
 }
 
 /// Advance the hubs, and only the hubs.
@@ -298,31 +268,28 @@ pub fn freeze(world: &mut GameWorld) {
 /// subtrees whose parent's transform differs from last tick's.
 pub fn spin(world: &mut GameWorld) {
     let mut frozen = false;
-    let outcome = world.each::<&Observer>(|_, observer| frozen = observer.frozen != 0);
-    report(world, outcome);
+    world.visit::<&Observer>(|_, observer| frozen = observer.frozen != 0);
     if frozen {
         return;
     }
-    let outcome = world.each::<(&mut Hub, &mut Model)>(|_, (hub, model)| {
+    world.visit::<(&mut Hub, &mut Model)>(|_, (hub, model)| {
         if hub.spin == 0.0 {
             return;
         }
         hub.angle += hub.spin;
         model.rotation = sim::DQuat::from_axis_angle(sim::DVec3::Y, hub.angle);
     });
-    report(world, outcome);
 }
 
 /// Fill the render protocol from the sim: where the eye is. Last in the table,
 /// so it sees this tick's movement.
 pub fn present(world: &mut GameWorld) {
     let mut seen: Option<(Entity, Observer)> = None;
-    let outcome = world.each::<&Observer>(|entity, observer| seen = Some((entity, *observer)));
-    report(world, outcome);
+    world.visit::<&Observer>(|entity, observer| seen = Some((entity, *observer)));
     let Some((entity, observer)) = seen else {
         return;
     };
-    let outcome = world.insert(
+    world.put(
         entity,
         Eye {
             position: observer.position,
@@ -330,7 +297,6 @@ pub fn present(world: &mut GameWorld) {
             pitch: observer.pitch,
         },
     );
-    report(world, outcome);
 }
 
 // Order in both verb lists is the id space (§4.7); order in `systems` is the

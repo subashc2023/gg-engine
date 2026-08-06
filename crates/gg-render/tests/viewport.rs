@@ -164,8 +164,10 @@ fn the_frame_is_composed_for_the_viewport_and_not_cropped_from_the_window() {
     let alone = render((inset.width, inset.height), None);
 
     // A silhouette's worth of rounding, and no more: on the pin the composite
-    // scores 56 and 3.6 against a crop's 442 and 18.0, so both thresholds sit
-    // with room either side rather than between two neighbouring numbers.
+    // scores 0 and 0.0 against a crop's 442 and 18.0. The budget is not slack
+    // the composite needs — it is room for another driver's edge rounding, and
+    // it was wide enough to hide a lighting block projected from the surface's
+    // aspect instead of the viewport's, which is what a 0 here now pins.
     let budget = (inset.width * inset.height) as usize / 8;
     let judge = |(differing, mean): (usize, f64)| differing <= budget && mean <= MEAN_TOLERANCE;
 

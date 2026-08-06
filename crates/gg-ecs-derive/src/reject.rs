@@ -26,7 +26,7 @@ pub(crate) fn field_guard(field: &Ident, ty: &Type) -> syn::Result<proc_macro2::
             format!("field `{field}`: {reason}"),
         ));
     }
-    Ok(super::encodable_guard(field, ty))
+    Ok(super::encodable_guard(ty))
 }
 
 /// Layer 1. `None` means "nothing specific to say" — layer 2 still applies.

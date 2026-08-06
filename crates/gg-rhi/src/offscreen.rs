@@ -49,7 +49,6 @@ impl OffscreenRhi {
             return Err(RhiError::Loader("offscreen extent must be nonzero".into()));
         }
         let mut instance = Instance::new(Presentation::None)?;
-        // One slot: an offscreen execute blocks until the GPU is done with it.
         let mut gpu = match Gpu::new(&instance, None, 1) {
             Ok(g) => g,
             Err(e) => {

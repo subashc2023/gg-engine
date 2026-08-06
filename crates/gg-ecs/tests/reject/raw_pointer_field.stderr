@@ -1,0 +1,5 @@
+error: field `at`: raw pointers cannot be hashed state — an address is not a value, and the same simulation would hash differently on every run (§4.2.1). Store an index into a host-owned arena, or an `Entity`.
+  --> tests/reject/raw_pointer_field.rs:12:9
+   |
+12 |     at: *const u32,
+   |         ^

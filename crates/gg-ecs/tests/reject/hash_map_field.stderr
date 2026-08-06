@@ -1,0 +1,5 @@
+error: field `by_name`: `HashMap` iterates in randomly-seeded order, which §4.2.1 hazard 3 names as a likelier determinism break than floats. Use an `IndexMap`, a sorted `Vec`, or dense iteration.
+  --> tests/reject/hash_map_field.rs:15:14
+   |
+15 |     by_name: HashMap<u32, u32>,
+   |              ^^^^^^^

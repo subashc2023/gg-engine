@@ -243,21 +243,32 @@ const fn opaque(size: usize) -> Option<Class> {
 /// so matching is on the last path segment. That alone would accept a game's own
 /// `Vec3`; the declared size is cross-checked at the call site, which is what
 /// turns a shadowed name into an [`UnclassifiedField`] instead of a false NaN.
-fn classify(token: &str) -> Option<Class> {
+///
+/// `size` is the declaring field's byte size, consulted for exactly one case:
+/// an array whose length is a named const (`Widget::text`'s `[u8; TEXT]`) — a
+/// syntactic token cannot resolve it, so a *float-free* element takes its count
+/// from the size instead. Float elements stay holes: a guessed count could
+/// misplace a span.
+fn classify_sized(token: &str, size: Option<usize>) -> Option<Class> {
     // The derive normalizes to single spaces and the wire carries that string
     // through unchanged; stripping the rest makes `[u32 ; 4]` and `[u32;4]` one
     // token without a parser.
     let mut squeezed = String::with_capacity(token.len());
     squeezed.extend(token.chars().filter(|c| !c.is_whitespace()));
-    classify_squeezed(&squeezed)
+    classify_squeezed(&squeezed, size)
 }
 
-fn classify_squeezed(t: &str) -> Option<Class> {
+fn classify_squeezed(t: &str, size: Option<usize>) -> Option<Class> {
     if let Some(inner) = t.strip_prefix('[') {
         // `[T;N]`, and nested — the length binds last, so split from the right.
         let (elem, count) = inner.strip_suffix(']')?.rsplit_once(';')?;
-        let n: usize = count.parse().ok()?;
-        let c = classify_squeezed(elem)?;
+        let c = classify_squeezed(elem, None)?;
+        let n: usize = match count.parse() {
+            Ok(n) => n,
+            // A named length, resolvable only through the declared size, and
+            // only when zero float lanes make every count equally harmless.
+            Err(_) => size.filter(|s| c.lanes == 0 && c.size > 0 && s % c.size == 0)? / c.size,
+        };
         return Some(Class {
             lanes: c.lanes * n,
             wide: c.wide,
@@ -304,7 +315,7 @@ pub(crate) fn spans_of(
         // Size and bounds are both checks, not assumptions: a wire-declared
         // component's descriptors are a dylib's claim, and a span past the end
         // of a row would read another entity's bytes.
-        let placed = classify(field.ty)
+        let placed = classify_sized(field.ty, Some(field.size))
             .filter(|c| c.size == field.size && field.offset.saturating_add(field.size) <= size);
         match placed {
             Some(c) if c.lanes > 0 => spans.push(FloatSpan {
@@ -383,7 +394,12 @@ mod tests {
 
     use super::*;
     use crate::World;
-    use crate::boundary::{Eye, Light, Model, Node, Renderable};
+    use crate::boundary::{Eye, Light, Model, Node, Prefs, Renderable, Sound, Widget};
+
+    // The sized form with no size, which is what every literal-length token is.
+    fn classify(token: &str) -> Option<Class> {
+        classify_sized(token, None)
+    }
     use crate::hash::{ComponentId, SchemaHash};
     use crate::registry::ComponentInfo;
 
@@ -567,12 +583,18 @@ mod tests {
 
     #[test]
     fn every_engine_declared_component_classifies() {
+        // Every component `boundary` exports — a protocol added without a line
+        // here is exactly the hole this test exists to close (M19 landed
+        // `Prefs` past the older five-entry list).
         let mut world = World::new();
         world.register::<Renderable>().unwrap();
         world.register::<Eye>().unwrap();
         world.register::<Model>().unwrap();
         world.register::<Light>().unwrap();
         world.register::<Node>().unwrap();
+        world.register::<Widget>().unwrap();
+        world.register::<Sound>().unwrap();
+        world.register::<Prefs>().unwrap();
         let holes = world.registry().unclassified_fields();
         assert!(
             holes.is_empty(),
@@ -714,6 +736,17 @@ mod tests {
         let c = classify("[u32 ; 4]").unwrap();
         assert_eq!((c.lanes, c.size), (0, 16));
         assert!(classify("[Pose ; 2]").is_none());
+    }
+
+    #[test]
+    fn a_named_length_array_classifies_through_its_size_and_only_float_free() {
+        assert!(classify("[u8 ; TEXT]").is_none());
+        let c = classify_sized("[u8 ; TEXT]", Some(24)).unwrap();
+        assert_eq!((c.lanes, c.size), (0, 24));
+        // A float element must stay a hole: the count would place real spans.
+        assert!(classify_sized("[f32 ; TEXT]", Some(24)).is_none());
+        // A size the element does not divide is a lie, not a count.
+        assert!(classify_sized("[u32 ; TEXT]", Some(6)).is_none());
     }
 
     #[test]

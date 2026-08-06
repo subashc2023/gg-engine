@@ -439,7 +439,8 @@ fn scalar(context: &str, st: Option<slang::ScalarType>) -> Result<Scalar, Shader
         Some(slang::ScalarType::Int32) => Ok(Scalar::I32),
         Some(slang::ScalarType::Uint64) => Ok(Scalar::U64),
         other => Err(ShaderError::Unsupported(format!(
-            "field `{context}`: scalar type {other:?} — codegen covers 32-bit float/uint/int              and uint64_t"
+            "field `{context}`: scalar type {other:?} — codegen covers 32-bit float/uint/int \
+             and uint64_t"
         ))),
     }
 }

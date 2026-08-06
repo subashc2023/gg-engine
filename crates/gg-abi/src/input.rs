@@ -1,12 +1,12 @@
 //! The sim-visible input surface (§4.7), at the boundary because game code
 //! cannot link `gg-input`.
 //!
-//! Game crates are deny-pinned to `gg-abi`, `gg-ecs` and `gg-math` (§3) — that
-//! pin is what makes the fingerprint's scope and a dylib's possible link set the
-//! same three crates by construction. So the *shape* of an input tick lives
-//! here and `gg-input` re-exports it, while everything that decides what
-//! produced a given bit — the map, contexts, key identity, the recorder — stays
-//! host-side where it belongs.
+//! Game crates are deny-pinned to `gg-abi`, `gg-ecs`, `gg-ecs-derive` and
+//! `gg-math` (§3) — that pin is what makes the fingerprint's scope and a
+//! dylib's possible link set the same four crates by construction. So the
+//! *shape* of an input tick lives here and `gg-input` re-exports it, while
+//! everything that decides what produced a given bit — the map, contexts, key
+//! identity, the recorder — stays host-side where it belongs.
 //!
 //! **Axis values are fixed-point.** Pointer motion is the one continuous input,
 //! and a replay full of `f32` deltas would make the bit-exactness of the sim

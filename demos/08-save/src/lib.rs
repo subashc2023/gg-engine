@@ -26,8 +26,7 @@
 
 use gg_ecs::Component;
 use gg_ecs::boundary::{
-    AXIS_SCALE, ActionId, AxisId, BoundaryError, Eye, GameWorld, InputFrame, MAX_AXES, Renderable,
-    log_level,
+    AXIS_SCALE, ActionId, AxisId, Eye, GameWorld, InputFrame, MAX_AXES, Renderable, log_level,
 };
 use gg_math::sim;
 
@@ -93,15 +92,6 @@ pub struct Chest {
     _pad: u32,
 }
 
-/// Report a refused query and carry on — see demo 03 for why this is not a
-/// panic: the host would report the panic and hide the load-sequence bug
-/// standing behind it.
-fn report(world: &GameWorld, outcome: Result<(), BoundaryError>) {
-    if let Err(refused) = outcome {
-        world.log(log_level::ERROR, &refused.to_string());
-    }
-}
-
 /// Where chest `index` stands. The grid is centred on x and walks away in −z.
 #[must_use]
 pub fn chest_at(index: usize) -> sim::DVec3 {
@@ -128,8 +118,7 @@ pub fn value_of(index: usize) -> u32 {
 /// avatar already there and adds nothing.
 pub fn bootstrap(world: &mut GameWorld) {
     let mut exists = false;
-    let outcome = world.each::<&Progress>(|_, _| exists = true);
-    report(world, outcome);
+    world.visit::<&Progress>(|_, _| exists = true);
     if exists {
         return;
     }
@@ -173,11 +162,10 @@ pub fn walk(world: &mut GameWorld) {
         f64::from(world.axis(MOVE_Z)),
     ) * MOVE_PER_TICK;
     let mut carrying = false;
-    let outcome = world.each::<(&Progress, &mut Renderable)>(|_, (_, shape)| {
+    world.visit::<(&Progress, &mut Renderable)>(|_, (_, shape)| {
         shape.position += step;
         carrying = true;
     });
-    report(world, outcome);
     debug_assert!(carrying || step == sim::DVec3::ZERO);
 }
 
@@ -188,13 +176,12 @@ pub fn walk(world: &mut GameWorld) {
 /// a second archetype walk for one number.
 pub fn collect(world: &mut GameWorld) {
     let mut at = sim::DVec3::ZERO;
-    let outcome = world.each::<(&Progress, &Renderable)>(|_, (_, shape)| at = shape.position);
-    report(world, outcome);
+    world.visit::<(&Progress, &Renderable)>(|_, (_, shape)| at = shape.position);
 
     // Collected before the second walk: `each` holds the column borrow for its
     // duration, and the log lines have to come out in chest order either way.
     let mut taken: Vec<(u32, u32)> = Vec::new();
-    let outcome = world.each::<(&mut Chest, &mut Renderable)>(|_, (chest, shape)| {
+    world.visit::<(&mut Chest, &mut Renderable)>(|_, (chest, shape)| {
         if chest.open != 0 || at.distance_squared(shape.position) > REACH * REACH {
             return;
         }
@@ -202,11 +189,10 @@ pub fn collect(world: &mut GameWorld) {
         shape.color = OPENED;
         taken.push((chest.index, chest.value));
     });
-    report(world, outcome);
 
     let banking = world.just_pressed(BANK);
     let mut banked = 0;
-    let outcome = world.each::<&mut Progress>(|_, progress| {
+    world.visit::<&mut Progress>(|_, progress| {
         for (_, value) in &taken {
             progress.carried += u64::from(*value);
             progress.opened += 1;
@@ -217,7 +203,6 @@ pub fn collect(world: &mut GameWorld) {
             progress.carried = 0;
         }
     });
-    report(world, outcome);
 
     // One line per settled change, in chest order. `xtask reload --save` reads
     // exactly these: a walk that opened a different chest writes a different

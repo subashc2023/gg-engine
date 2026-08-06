@@ -631,16 +631,14 @@ fn demo_runs() -> anyhow::Result<()> {
 /// at all: draining it to EOF returns only once the *last* process in the chain
 /// has closed it.
 ///
-/// **The rewrite waits for the shell to say it is watching.** This was the push
-/// tier's one flaky gate — observed on the WSL lane at M14, where the child ran
-/// its 300k frames in 1.55 s, the rewrite landed on a 400 ms sleep, and no
-/// reload fired; the identical rerun passed at tick 88218. The sleep was the
-/// bug, and not for the reason the note here used to give: 400 ms of a 1.55 s
-/// run leaves plenty of frames, so the run was never too short — the *watcher*
-/// was not up yet, and a file event with nobody listening is not late, it is
-/// gone. `Watch::new` runs at `app.rs`'s `game loaded`, so that line is the
-/// readiness signal, and this now reads the child's output for it rather than
-/// guessing at a duration.
+/// **The rewrite waits for the shell to say it is watching.** A fixed sleep
+/// races `Watch::new`'s startup instead of bounding run length — a file event
+/// with nobody listening is not late, it is gone. This was the push tier's one
+/// flaky gate: observed on the WSL lane at M14, where the child ran its 300k
+/// frames in 1.55 s, the rewrite landed on a 400 ms sleep, and no reload fired;
+/// the identical rerun passed at tick 88218. `Watch::new` runs at `app.rs`'s
+/// `game loaded`, so that line is the readiness signal, and this reads the
+/// child's stdout for it rather than guessing at a duration.
 ///
 /// The frame count stays a bound rather than becoming wall time, because with
 /// the trigger fixed it is no longer a proxy for anything: every one of the 300k

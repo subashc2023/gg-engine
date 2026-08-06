@@ -674,7 +674,8 @@ impl Resources {
 
 fn host_visible_error(handle: BufferHandle) -> RhiError {
     RhiError::Loader(format!(
-        "buffer handle {} is not host-visible — only BufferKind::Readback, ::Dynamic and          ::Indirect are",
+        "buffer handle {} is not host-visible — only BufferKind::Readback, ::Dynamic and \
+         ::Indirect are",
         handle.0
     ))
 }

@@ -24,9 +24,7 @@
 //! by a reloadable system body in this file, not by the renderer. Edit
 //! [`TINTS`], save, and the hall changes colour without the session restarting.
 
-use gg_ecs::boundary::{
-    ActionId, AxisId, BoundaryError, Eye, GameWorld, Light, Model, Renderable, log_level,
-};
+use gg_ecs::boundary::{ActionId, AxisId, Eye, GameWorld, Light, Model, Renderable, log_level};
 use gg_ecs::{Component, Entity};
 use gg_math::sim;
 
@@ -96,33 +94,13 @@ pub struct Visitor {
     pub _pad: u32,
 }
 
-/// Forward and right, in sim space. `f64` trig through `libm` (§4.2.1).
-#[must_use]
-pub fn basis(visitor: &Visitor) -> (sim::DVec3, sim::DVec3) {
-    let (sin_yaw, cos_yaw) = sim::sin_cos(f64::from(visitor.yaw));
-    let (sin_pitch, cos_pitch) = sim::sin_cos(f64::from(visitor.pitch));
-    let forward = sim::DVec3::new(-cos_pitch * sin_yaw, sin_pitch, -cos_pitch * cos_yaw);
-    let right = sim::DVec3::new(cos_yaw, 0.0, -sin_yaw);
-    (forward, right)
-}
-
-/// Report a refused query and carry on — see demo 03 for why this is not a
-/// panic: the host would report the panic and hide the load-sequence bug
-/// standing behind it.
-fn report(world: &GameWorld, outcome: Result<(), BoundaryError>) {
-    if let Err(refused) = outcome {
-        world.log(log_level::ERROR, &refused.to_string());
-    }
-}
-
 /// Spawn the visitor and the hall if there is no visitor yet.
 ///
 /// Idempotent by asking the world rather than by remembering, because
 /// remembering would be state outliving a tick (§4.2.2, and a grep gate).
 pub fn bootstrap(world: &mut GameWorld) {
     let mut exists = false;
-    let outcome = world.each::<&Visitor>(|_, _| exists = true);
-    report(world, outcome);
+    world.visit::<&Visitor>(|_, _| exists = true);
     if exists {
         return;
     }
@@ -146,21 +124,19 @@ pub fn bootstrap(world: &mut GameWorld) {
     // relative to this; growing that into an entity per piece is M10's job, and
     // doing it here would put a transform hierarchy in a demo.
     let hall = world.spawn();
-    let outcome = world.insert(hall, Model::at(HALL, sim::DVec3::ZERO));
-    report(world, outcome);
+    world.put(hall, Model::at(HALL, sim::DVec3::ZERO));
 
     // The sun. One directional light, so the scene is lit and the shadow pass
     // has something to cast (§6 M11). Spawned in `bootstrap` like everything
     // else here — a light is a component the game declares, not a renderer
     // setting somebody edits in the engine.
     let sun = world.spawn();
-    let outcome = world.insert(sun, Light::sun(SUN_DIRECTION, SUN_COLOR, SUN_INTENSITY));
-    report(world, outcome);
+    world.put(sun, Light::sun(SUN_DIRECTION, SUN_COLOR, SUN_INTENSITY));
 
     // One box in a frame full of pack meshes, so both pipelines are exercised
     // by the thing a human actually looks at (§4.5 — they share the prepass).
     let marker = world.spawn();
-    let outcome = world.insert(
+    world.put(
         marker,
         Renderable::boxed(
             sim::DVec3::new(0.0, MARKER_SIZE as f64, 0.0),
@@ -168,18 +144,16 @@ pub fn bootstrap(world: &mut GameWorld) {
             0x00ff_e070,
         ),
     );
-    report(world, outcome);
     world.log(log_level::INFO, "the hall is open");
 }
 
 /// Turn.
 pub fn aim(world: &mut GameWorld) {
     let (x, y) = (world.axis(AIM_X), world.axis(AIM_Y));
-    let outcome = world.each::<&mut Visitor>(|_, visitor| {
+    world.visit::<&mut Visitor>(|_, visitor| {
         visitor.yaw -= x * LOOK_PER_UNIT;
         visitor.pitch = (visitor.pitch - y * LOOK_PER_UNIT).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     });
-    report(world, outcome);
 }
 
 /// Walk. Not normalized: diagonals are faster, which is a fly camera's
@@ -190,14 +164,13 @@ pub fn walk(world: &mut GameWorld) {
         f64::from(world.axis(MOVE_UP)),
         f64::from(world.axis(MOVE_FORWARD)),
     ];
-    let outcome = world.each::<&mut Visitor>(|_, visitor| {
-        let (forward, right) = basis(visitor);
+    world.visit::<&mut Visitor>(|_, visitor| {
+        let (forward, right) = sim::fly_basis(visitor.yaw, visitor.pitch);
         visitor.position = visitor.position
             + right * (axes[0] * MOVE_PER_TICK)
             + sim::DVec3::Y * (axes[1] * MOVE_PER_TICK)
             + forward * (axes[2] * MOVE_PER_TICK);
     });
-    report(world, outcome);
 }
 
 /// Cycle the hall's tint. Held on the visitor rather than read back off the
@@ -207,22 +180,20 @@ pub fn tint(world: &mut GameWorld) {
     if !world.just_pressed(TINT) {
         return;
     }
-    let outcome = world.each::<&mut Visitor>(|_, visitor| {
+    world.visit::<&mut Visitor>(|_, visitor| {
         visitor.tint = (visitor.tint + 1) % TINTS.len() as u32;
     });
-    report(world, outcome);
 }
 
 /// Fill the render protocol from the sim: where the eye is, and what the hall
 /// is wearing. Last in the table, so it sees this tick's movement.
 pub fn present(world: &mut GameWorld) {
     let mut seen: Option<(Entity, Visitor)> = None;
-    let outcome = world.each::<&Visitor>(|entity, visitor| seen = Some((entity, *visitor)));
-    report(world, outcome);
+    world.visit::<&Visitor>(|entity, visitor| seen = Some((entity, *visitor)));
     let Some((entity, visitor)) = seen else {
         return;
     };
-    let outcome = world.insert(
+    world.put(
         entity,
         Eye {
             position: visitor.position,
@@ -230,21 +201,18 @@ pub fn present(world: &mut GameWorld) {
             pitch: visitor.pitch,
         },
     );
-    report(world, outcome);
 
     let chosen = TINTS[visitor.tint as usize % TINTS.len()];
     let mut halls = Vec::new();
-    let outcome = world.each::<&Model>(|entity, model| halls.push((entity, *model)));
-    report(world, outcome);
+    world.visit::<&Model>(|entity, model| halls.push((entity, *model)));
     for (entity, model) in halls {
-        let outcome = world.insert(
+        world.put(
             entity,
             Model {
                 tint: chosen,
                 ..model
             },
         );
-        report(world, outcome);
     }
 }
 

@@ -17,6 +17,10 @@ fn forbidden_shapes_do_not_compile() {
     t.compile_fail("tests/reject/usize_field.rs");
     t.compile_fail("tests/reject/reference_field.rs");
     t.compile_fail("tests/reject/bare_enum_field.rs");
+    // The other two of layer 1's four hand-written diagnostics — the message
+    // *is* the deliverable there, so an untested one is an unproven one.
+    t.compile_fail("tests/reject/raw_pointer_field.rs");
+    t.compile_fail("tests/reject/hash_map_field.rs");
     // The same list applies above the columns: side tables shed `Pod`, not the
     // hazards (§4.2.1).
     t.compile_fail("tests/reject/side_table_usize_field.rs");

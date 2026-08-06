@@ -19,102 +19,34 @@ use std::path::Path;
 
 use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 
-/// The `gg-runtime` code-line budget (§3). Raised 300 → 500 at M5 when the shell
-/// grew the window, the renderer's three calls, live input and record/replay,
-/// 500 → 600 at M8 for the observability stack (config, the instruments, the
-/// overlay, the crash handler, the capture trigger), 600 → 1000 at M13 when
-/// the UI stage arrived: a `gg_ui::Ui` per tick, the canvas→window fit, and the
-/// verb lookup that feeds it, and 1000 → 1050 at M15.1 for client-side window
-/// decorations — the editor draws its own title bar, so the shell takes the OS
-/// frame off and routes what the bar asks (drag, resize, minimize, maximize,
-/// close) to `gg-platform`, plus the window's name. Every raise is the same
-/// argument — the shell *chooses* these and implements none of them — and every
-/// one was spent deliberately rather than discovered.
+/// The `gg-runtime` code-line budget (§3). What licenses a raise: the shell
+/// *chooses*, never *implements* — a raise must name the specific alternative
+/// home it closes (an owning crate that provably cannot see both sides of
+/// whatever decision moved here), not just claim more headroom. A budget that
+/// only ever rises is a ratchet, not a budget — §6 M17's refactor is expected
+/// to bring this number back down.
 ///
-/// That one was argued rather than taken: the alternative homes were both worse.
-/// `gg-editor` cannot call `gg-platform` (it would put winit in `gg-golden`,
-/// which a §1.5 gate scans the binary for), and `gg-platform` cannot name the
-/// editor's command type. The shell is the only place that has heard of both,
-/// which is what it is *for*.
+/// Two raises carry reasoning worth keeping close, because the "every other
+/// home is closed" argument is non-obvious:
+/// - **M15.1 item 4** (1100 → 1150): the shell became a library as well as a
+///   binary so the editor can open with no game at all. An application-level
+///   entry point can't own the boot/loop/project-dispatch sequence without
+///   reimplementing the shell's own outer loop, and §2 allows exactly one of
+///   those.
+/// - **§6 M16** (1160 → 1300), the largest raise: the seam *record* — a
+///   reload's pre-migration state hash and retired code hash on one side, the
+///   migration report and first post-swap tick on the other — can only be
+///   taken where both sides of the swap are visible, which is the shell and
+///   nothing else.
 ///
-/// 1050 → 1100 at M15.2 for play mode: the captured world a stop returns to,
-/// and the three states around it. Argued on the same test, and it is the one
-/// raise where *both* other homes are closed by a rule rather than by taste.
-/// `gg-editor` is dev-only by §3's deny pin while `--play` is unconditional in
-/// every tier (§6 M14) — a shipping binary must be able to enter and leave play
-/// mode, so the code cannot live in a crate dist does not link. And `gg-ecs`,
-/// which owns snapshots, deliberately does not log: it carries no `tracing` and
-/// has a five-dependency budget, while `changed`/`identical` on the stop line
-/// are exactly what `xtask reload --save` and `--editor` read to grade the
-/// round trip. Holding encoded bytes and saying what happened to them is
-/// therefore the host's, and the shell still *implements* neither the snapshot
-/// nor the restore — it calls two `World` methods, which is the same shape
-/// every raise above it has.
+/// The two most recent raises hold deliberate headroom rather than golfing to
+/// the exact line count, because a zero-headroom budget is a coin flip on the
+/// next comment reflow rather than a tripwire: the post-M18 audit (1300 →
+/// 1310, §4.2.2's pointer-swap fast path) and the §6 M15.2 post-close pair
+/// (1310 → 1335, `game_fit` and `opening_scene`) each left ~10 spare lines.
 ///
-/// 1100 → 1150 at M15.1 item 4, and this is the raise least like the others,
-/// so it is argued twice. Roughly half of it is not new behaviour at all: the
-/// shell became a **library** as well as a binary, because the editor can be
-/// opened with no game and the thing that opens it is an application rather than
-/// a command line. That costs an entry point with its own contract, a `session`
-/// that *returns* a value where `main` used to fall off the end, and a public
-/// argument parser — the same code, spent on being callable. §6 M15.1 item 4
-/// predicted the launcher's lines would be the application's, and they are: the
-/// application is under forty.
-///
-/// The other half is "no project" as a mode. The absence itself is the loader's
-/// (`GameLib::absent`, `Watch::absent`) precisely so it is not a branch in every
-/// method here; what is left is the branch that reaches for it, the project list
-/// the picker draws, and the pick coming back out. The loop that acts on that
-/// pick is deliberately *here* and not in the application: an application that
-/// knew to boot, then loop, then map a project onto arguments would be
-/// reimplementing the shell's outer sequence, which is the second host §2 has
-/// exactly one of.
-/// 1150 → 1160 at §6 M18 item 2, for audio — the smallest raise on this list and
-/// the plainest instance of its one argument. The shell holds a
-/// `gg_audio::Audio`, builds it with the constructor that is silent under §1.5,
-/// calls `tick` once beside the UI's frame, and tells it to forget on the three
-/// places a world discontinues under it: a reload's migrated world, and play
-/// mode's two stops. It implements no audio and knows no cue.
-///
-/// The alternative home is closed the same way play mode's was. `gg-audio` reads
-/// `&World` and cannot see a reload or a stop; the shell is the only thing that
-/// has heard of both, which is what it is for.
-///
-/// 1160 → 1300 at §6 M16, the largest raise on this list and the one most owed an
-/// argument, because M16 is the milestone where §3's thinness is easiest to
-/// spend. What it buys is the seam *record*: the shell holds both sides of a
-/// reload and nothing else does — the retired build's code hash and the
-/// pre-migration state hash on one side, the migration report and the tick the
-/// new code first runs at on the other — so an observation that needs both has to
-/// be taken where the swap happens. `gg-agent` owns the shape and the file; this
-/// is the conversion into it, which is the same "calls two methods and says what
-/// happened" as the raise above.
-///
-/// What it deliberately does not buy is the panel. That is `gg-editor`'s, which
-/// is host UI with its own crate and its own dependency budget, and a raise spent
-/// here on drawing would be the shell becoming the thing §3 forbids. The number
-/// is expected to come *down* at the refactor §6 M17's headroom paragraph
-/// defers — a budget that only ever rises is a ratchet, not a budget.
-///
-/// 1300 → 1310 at the post-M18 audit, for §4.2.2's schema-unchanged pointer-swap
-/// fast path. The swap gained a second shape, and choosing between the two is
-/// the shell's one competence — "the shell chooses, never implements": the
-/// comparison lives in `gg_ecs::boundary::same_schemas`, the untouched report in
-/// `MigrationReport::untouched`, and what the shell holds is the branch, the one
-/// unsafe call, and the ordering rule the rewrite made explicit (every fallible
-/// step before any state moves). Nine lines after both extractions; raised by
-/// ten rather than golfed to exactly 1300, because a zero-headroom budget stops
-/// being a tripwire and starts being a coin flip on the next comment reflow.
-///
-/// 1310 → 1335 at the §6 M15.2 post-close pair, and both additions are branch
-/// points by the same test. The widget-path viewport fit is `game_fit`: *which*
-/// `Fit` the game's UI composes under is decided by whether an editor exists,
-/// which is shell state — the arithmetic went to `gg_ui::Fit::inside`. The
-/// editor opening Stopped over a preloaded scene is `opening_scene` plus the
-/// `opened`/`paused` construction: *when* the probe applies (live sessions
-/// only, `--load` first) is the shell's ordering rule — *where* a scene lives
-/// went to `gg_editor::persist::scene_path`. Fifteen lines after those
-/// extractions; ten of headroom on top, for the tripwire reason above.
+/// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
+/// (play mode), M18 item 2 (audio) — each argued the same way as above.
 const SHELL_BUDGET: usize = 1335;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry

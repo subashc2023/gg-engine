@@ -137,7 +137,8 @@ fn tools() -> Value {
             "description": "What the last hot reload did: accepted or refused, the refusal's \
                             name if refused, the canonical state hash either side of it, which \
                             components migrated, and how long save-to-behaviour took against the \
-                            two-second budget. Ask this before diagnosing a failed edit.",
+                            budget `xtask reload` asserts (§9). Ask this before diagnosing a \
+                            failed edit.",
             "inputSchema": no_arguments,
         },
     ])
@@ -214,7 +215,8 @@ fn last_reload(record: &str) -> String {
     } else {
         format!(
             "The last reload was ACCEPTED at tick {}, restoring {} entities.\n\nState hash {} → \
-             {}. Save to behaviour: {} ms against a 2000 ms budget (within_budget {}).",
+             {}. Save to behaviour: {} ms against the budget `xtask reload` asserts (§9) \
+             (within_budget {}).",
             field("tick"),
             field("entities"),
             field("state_before"),

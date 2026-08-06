@@ -101,6 +101,7 @@ pub fn gg_ecs::GameWorld<'a>::spawn(&mut self) -> gg_abi::entity::Entity
 pub fn gg_ecs::GameWorld<'a>::spawn_with<T: gg_ecs::component::Component>(&mut self, T) -> gg_abi::entity::Entity
 pub const fn gg_ecs::GameWorld<'a>::tick(&self) -> u64
 pub const fn gg_ecs::GameWorld<'a>::tick_hz(&self) -> u32
+pub fn gg_ecs::GameWorld<'a>::visit<D: gg_ecs::boundary::BoundaryData>(&mut self, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::boundary::BoundaryData>::Item))
 impl core::fmt::Debug for gg_ecs::GameWorld<'_>
 pub fn gg_ecs::GameWorld<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[repr(C)] pub struct gg_ecs::boundary::Light
@@ -1023,6 +1024,7 @@ pub fn gg_ecs::GameWorld<'a>::spawn(&mut self) -> gg_abi::entity::Entity
 pub fn gg_ecs::GameWorld<'a>::spawn_with<T: gg_ecs::component::Component>(&mut self, T) -> gg_abi::entity::Entity
 pub const fn gg_ecs::GameWorld<'a>::tick(&self) -> u64
 pub const fn gg_ecs::GameWorld<'a>::tick_hz(&self) -> u32
+pub fn gg_ecs::GameWorld<'a>::visit<D: gg_ecs::boundary::BoundaryData>(&mut self, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::boundary::BoundaryData>::Item))
 impl core::fmt::Debug for gg_ecs::GameWorld<'_>
 pub fn gg_ecs::GameWorld<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct gg_ecs::MigrationReport

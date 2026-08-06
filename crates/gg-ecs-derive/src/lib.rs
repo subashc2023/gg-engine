@@ -174,7 +174,6 @@ fn expand_component(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream
     }
 
     let type_name = name.to_string();
-    let n = fields.len();
     let guards = guard_block(&checks);
     Ok(quote! {
         #guards
@@ -189,7 +188,6 @@ fn expand_component(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream
             fn state_hash(&self, h: &mut ::gg_ecs::StateHasher) {
                 // Declaration order, field by field — never raw memory, so
                 // padding cannot reach the hash (§4.2.1 hazard 4).
-                let _ = #n;
                 #(#hashes)*
             }
         }
@@ -263,7 +261,7 @@ fn normalize_type(ty: &Type) -> String {
 /// A *call*, not a top-level item: these are collected into a single anonymous
 /// `const _` per derive by [`guard_block`], so two components with a field of
 /// the same name in one module do not collide.
-fn encodable_guard(_field: &Ident, ty: &Type) -> proc_macro2::TokenStream {
+fn encodable_guard(ty: &Type) -> proc_macro2::TokenStream {
     quote_spanned! { ty.span() =>
         field_type_must_have_a_defined_encoding::<#ty>();
     }

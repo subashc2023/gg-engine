@@ -368,12 +368,9 @@ impl Editor {
             }
         }
 
-        // The title, and nothing else. What used to run along here — the tick,
-        // the entity count, the session's tallies — was a status bar wearing a
-        // title bar's clothes, and every number in it has a home that answers
-        // the question it was asked from: the tick is the F1 overlay's (§4.8),
-        // the entity count is the tree's own header, and the tallies belong
-        // beside the save path in `perf`.
+        // Only the title — every other number has a home that answers the
+        // question it was asked from: tick → F1 overlay (§4.8), entity count →
+        // tree header, tallies → `perf`.
         let left = self.menus.right() + 6.0;
         let room = (self.transport(0).x - 3.0 - left).max(0.0);
         let title = fit_text(frame.title, (room / EM) as usize);
@@ -460,9 +457,8 @@ impl Editor {
         self.plate(head, HEADER, HEADER);
         let pages = self.scan.total.div_ceil(self.per_page).max(1);
         let page = self.first_row / self.per_page.max(1) + 1;
-        // The entity count, which used to be in the title bar. It belongs to
-        // whichever panel answers "what is in this world", and this is that
-        // panel — a number in a title bar is a number nobody asked.
+        // The entity count belongs to whichever panel answers "what is in
+        // this world" — this one.
         self.label(
             Rect::new(
                 head.x + 2.0,
@@ -799,9 +795,7 @@ impl Editor {
                 )
             })
             .collect();
-        // Every entry, and the bar says how many there are: the footer this
-        // replaces ("12 of 400 entries") was the panel apologizing for a list
-        // it would not let anyone reach.
+        // Every entry; the bar says how many.
         let rows = lines.len().div_ceil(columns).max(1);
         let scroll = self.scrollable(Pane::Assets, body, rows as f32 * PITCH);
         self.list.push_clip(scroll.view);
@@ -1258,9 +1252,6 @@ impl Editor {
     }
 }
 
-/// The tree's list, under its header — the part that scrolls. Shared with
-/// [`crate::Editor::place`], which sizes the fetch off it before anything is
-/// drawn.
 /// How many characters fit across `width`.
 fn columns(width: f32) -> usize {
     ((width / EM) as usize).max(8)
@@ -1367,6 +1358,9 @@ fn prompt(reload: Option<&gg_agent::Seam>, fix: bool) -> Option<String> {
     })
 }
 
+/// The tree's list, under its header — the part that scrolls. Shared with
+/// [`crate::Editor::place`], which sizes the fetch off it before anything is
+/// drawn.
 pub(crate) fn tree_list(body: Rect) -> Rect {
     Rect::new(
         body.x + 2.0,

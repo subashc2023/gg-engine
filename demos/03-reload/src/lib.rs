@@ -24,9 +24,7 @@
 //! That is the affordance the finding asked for, spelled as a verb the player
 //! already has.
 
-use gg_ecs::boundary::{
-    ActionId, AxisId, BoundaryError, Eye, GameWorld, Light, Renderable, log_level,
-};
+use gg_ecs::boundary::{ActionId, AxisId, Eye, GameWorld, Light, Renderable, log_level};
 use gg_ecs::{Component, Entity};
 use gg_math::sim;
 
@@ -163,29 +161,6 @@ pub struct Shot {
     pub _pad: u32,
 }
 
-/// Forward and right, in sim space. `f64` trig through `libm` (§4.2.1): the same
-/// bits on every target in the contract, which a `glam` basis would not be.
-#[must_use]
-pub fn basis(player: &Player) -> (sim::DVec3, sim::DVec3) {
-    let (sin_yaw, cos_yaw) = sim::sin_cos(f64::from(player.yaw));
-    let (sin_pitch, cos_pitch) = sim::sin_cos(f64::from(player.pitch));
-    let forward = sim::DVec3::new(-cos_pitch * sin_yaw, sin_pitch, -cos_pitch * cos_yaw);
-    let right = sim::DVec3::new(cos_yaw, 0.0, -sin_yaw);
-    (forward, right)
-}
-
-/// Report a refused query and carry on.
-///
-/// The host refuses one only when this build asks for a component it never
-/// registered, which is a load-sequence bug rather than a gameplay condition.
-/// Logging beats panicking: the shim would report the panic by name and halt the
-/// sim, hiding the far more interesting failure standing right behind it.
-fn report(world: &GameWorld, outcome: Result<(), BoundaryError>) {
-    if let Err(refused) = outcome {
-        world.log(log_level::ERROR, &refused.to_string());
-    }
-}
-
 /// Wipe the world on `restart`. First in the table, so `bootstrap` refills it in
 /// the same tick — see the module docs on why that is the point.
 pub fn restart(world: &mut GameWorld) {
@@ -193,17 +168,13 @@ pub fn restart(world: &mut GameWorld) {
         return;
     }
     let mut doomed = Vec::new();
-    let outcome = world.each::<&Player>(|entity, _| doomed.push(entity));
-    report(world, outcome);
-    let outcome = world.each::<&Cube>(|entity, _| doomed.push(entity));
-    report(world, outcome);
-    let outcome = world.each::<&Shot>(|entity, _| doomed.push(entity));
-    report(world, outcome);
+    world.visit::<&Player>(|entity, _| doomed.push(entity));
+    world.visit::<&Cube>(|entity, _| doomed.push(entity));
+    world.visit::<&Shot>(|entity, _| doomed.push(entity));
     // The floor carries no gameplay component at all, so a sweep by gameplay
     // type would leave one behind per restart. Entities land here twice; the
     // second despawn is a no-op.
-    let outcome = world.each::<&Renderable>(|entity, _| doomed.push(entity));
-    report(world, outcome);
+    world.visit::<&Renderable>(|entity, _| doomed.push(entity));
     for entity in doomed {
         world.despawn(entity);
     }
@@ -217,8 +188,7 @@ pub fn restart(world: &mut GameWorld) {
 /// a tick, which §4.2.2 forbids and the grep gates enforce.
 pub fn bootstrap(world: &mut GameWorld) {
     let mut exists = false;
-    let outcome = world.each::<&Player>(|_, _| exists = true);
-    report(world, outcome);
+    world.visit::<&Player>(|_, _| exists = true);
     if exists {
         return;
     }
@@ -241,8 +211,7 @@ pub fn bootstrap(world: &mut GameWorld) {
     // else here — a light is a component the game declares, not a renderer
     // setting somebody edits in the engine.
     let sun = world.spawn();
-    let outcome = world.insert(sun, Light::sun(SUN_DIRECTION, SUN_COLOR, SUN_INTENSITY));
-    report(world, outcome);
+    world.put(sun, Light::sun(SUN_DIRECTION, SUN_COLOR, SUN_INTENSITY));
 
     let floor = world.spawn();
     if let Err(refused) = world.insert(
@@ -274,11 +243,10 @@ pub fn bootstrap(world: &mut GameWorld) {
 /// the Ugly Game is played, not inspected.
 pub fn aim(world: &mut GameWorld) {
     let (x, y) = (world.axis(AIM_X), world.axis(AIM_Y));
-    let outcome = world.each::<&mut Player>(|_, player| {
+    world.visit::<&mut Player>(|_, player| {
         player.yaw -= x * LOOK_PER_UNIT;
         player.pitch = (player.pitch - y * LOOK_PER_UNIT).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     });
-    report(world, outcome);
 }
 
 /// Walk. Not normalized: diagonals are faster, which is a fly camera's
@@ -289,12 +257,11 @@ pub fn walk(world: &mut GameWorld) {
         f64::from(world.axis(MOVE_UP)),
         f64::from(world.axis(MOVE_FORWARD)),
     ];
-    let outcome = world.each::<&mut Player>(|_, player| {
-        let (forward, right) = basis(player);
+    world.visit::<&mut Player>(|_, player| {
+        let (forward, right) = sim::fly_basis(player.yaw, player.pitch);
         let up = sim::DVec3::new(0.0, 1.0, 0.0);
         player.position += (forward * axes[2] + right * axes[0] + up * axes[1]) * MOVE_PER_TICK;
     });
-    report(world, outcome);
 }
 
 /// Fire: the best-aligned cube inside the cone dies, and a tracer marks the shot
@@ -306,14 +273,14 @@ pub fn shoot(world: &mut GameWorld) {
     let Some(player) = the_player(world) else {
         return;
     };
-    let (forward, _) = basis(&player);
+    let (forward, _) = sim::fly_basis(player.yaw, player.pitch);
     let eye = player.position;
 
     // Best alignment, not nearest: two cubes on the same line should both be
     // hittable by walking, and picking by distance would make the far one
     // unreachable forever.
     let mut best: Option<(Entity, sim::DVec3, f64)> = None;
-    let outcome = world.each::<&Cube>(|entity, cube| {
+    world.visit::<&Cube>(|entity, cube| {
         let Some(direction) = (cube.position - eye).try_normalize() else {
             return;
         };
@@ -322,7 +289,6 @@ pub fn shoot(world: &mut GameWorld) {
             best = Some((entity, cube.position, aligned));
         }
     });
-    report(world, outcome);
 
     let tracer = world.spawn();
     if let Err(refused) = world.insert(
@@ -353,7 +319,7 @@ pub fn spawn(world: &mut GameWorld) {
     if count >= MAX_CUBES {
         return;
     }
-    let (forward, _) = basis(&player);
+    let (forward, _) = sim::fly_basis(player.yaw, player.pitch);
     let tick = world.tick();
     place(
         world,
@@ -366,13 +332,12 @@ pub fn spawn(world: &mut GameWorld) {
 /// Age the tracers out.
 pub fn fade(world: &mut GameWorld) {
     let mut spent = Vec::new();
-    let outcome = world.each::<&mut Shot>(|entity, shot| {
+    world.visit::<&mut Shot>(|entity, shot| {
         shot.ticks_left = shot.ticks_left.saturating_sub(1);
         if shot.ticks_left == 0 {
             spent.push(entity);
         }
     });
-    report(world, outcome);
     for entity in spent {
         world.despawn(entity);
     }
@@ -390,22 +355,20 @@ pub fn fade(world: &mut GameWorld) {
 /// into the world (§4.2.2) and `insert` is a host call.
 pub fn present(world: &mut GameWorld) {
     let mut eye = None;
-    let outcome = world.each::<&Player>(|entity, player| eye = Some((entity, *player)));
-    report(world, outcome);
+    world.visit::<&Player>(|entity, player| eye = Some((entity, *player)));
     if let Some((entity, player)) = eye {
         let seen = Eye {
             position: player.position,
             yaw: player.yaw,
             pitch: player.pitch,
         };
-        let outcome = world.insert(entity, seen);
-        report(world, outcome);
+        world.put(entity, seen);
         // The crosshair, and it rides on the player's own entity: a first-person
         // player is not drawn, so its `Renderable` is free for the one thing a
         // cone-of-fire game cannot be played without. There is no UI layer until
         // M13 and this needs none — a small box, one metre ahead, in world space.
-        let (forward, _) = basis(&player);
-        let outcome = world.insert(
+        let (forward, _) = sim::fly_basis(player.yaw, player.pitch);
+        world.put(
             entity,
             Renderable::boxed(
                 player.position + forward * CROSSHAIR_DISTANCE,
@@ -413,24 +376,19 @@ pub fn present(world: &mut GameWorld) {
                 0x00ff_f0c0,
             ),
         );
-        report(world, outcome);
     }
 
     let mut cubes = Vec::new();
-    let outcome = world.each::<&Cube>(|entity, cube| cubes.push((entity, *cube)));
-    report(world, outcome);
+    world.visit::<&Cube>(|entity, cube| cubes.push((entity, *cube)));
     for (entity, cube) in cubes {
         let look = Renderable::boxed(cube.position, sim::Vec3::splat(cube.scale), wheel(cube.hue));
-        let outcome = world.insert(entity, look);
-        report(world, outcome);
+        world.put(entity, look);
     }
 
     let mut shots = Vec::new();
-    let outcome = world.each::<&Shot>(|entity, shot| shots.push((entity, *shot)));
-    report(world, outcome);
+    world.visit::<&Shot>(|entity, shot| shots.push((entity, *shot)));
     for (entity, shot) in shots {
-        let outcome = world.insert(entity, beam(&shot));
-        report(world, outcome);
+        world.put(entity, beam(&shot));
     }
 }
 
@@ -507,8 +465,7 @@ fn place(world: &mut GameWorld, position: sim::DVec3, order: u64, tick: u64) {
 /// any borrow into the world (§4.2.2).
 fn the_player(world: &mut GameWorld) -> Option<Player> {
     let mut found = None;
-    let outcome = world.each::<&Player>(|_, player| found = Some(*player));
-    report(world, outcome);
+    world.visit::<&Player>(|_, player| found = Some(*player));
     found
 }
 
@@ -516,11 +473,10 @@ fn the_player(world: &mut GameWorld) -> Option<Player> {
 /// are the same question and two passes could answer it twice differently.
 fn cube_extremes(world: &mut GameWorld) -> (usize, u64) {
     let (mut count, mut highest) = (0usize, 0u64);
-    let outcome = world.each::<&Cube>(|_, cube| {
+    world.visit::<&Cube>(|_, cube| {
         count += 1;
         highest = highest.max(cube.order);
     });
-    report(world, outcome);
     (count, highest)
 }
 

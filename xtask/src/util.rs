@@ -162,6 +162,22 @@ pub fn field_u64(line: &str, name: &str) -> anyhow::Result<u64> {
     Ok(digits.parse()?)
 }
 
+/// A cdylib's file name as cargo spells it on this host: `<stem>.dll` on
+/// Windows, `lib<stem>.dylib` on macOS, `lib<stem>.so` elsewhere.
+///
+/// `stem` is the *library* name (underscores), not the package name — the two
+/// differ for every `demo-NN-name` crate. One home because this was written
+/// twice and the copies had already drifted apart on macOS.
+pub fn dylib_name(stem: &str) -> String {
+    if cfg!(windows) {
+        format!("{stem}.dll")
+    } else if cfg!(target_os = "macos") {
+        format!("lib{stem}.dylib")
+    } else {
+        format!("lib{stem}.so")
+    }
+}
+
 /// All `.rs` files under `dir`, skipping `target/` — fuel for the §3 greps.
 pub fn walk_rs(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {

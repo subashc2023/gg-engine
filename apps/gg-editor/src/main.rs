@@ -46,12 +46,9 @@ fn main() -> anyhow::Result<()> {
             // stream was recorded against (§4.7), and the shell drops it there.
             "--record" => args.record = Some(std::path::PathBuf::from(value()?)),
             "--replay" => args.replay = Some(std::path::PathBuf::from(value()?)),
+            // The parse itself is the shell's, for the reason `SET_FLAG` above is.
             "--editor-extent" => {
-                let text = value()?;
-                let (w, h) = text
-                    .split_once(['x', 'X'])
-                    .with_context(|| format!("--editor-extent wants <w>x<h>, got `{text}`"))?;
-                args.editor_extent = Some((w.trim().parse()?, h.trim().parse()?));
+                args.editor_extent = Some(gg_runtime::parse_extent(&value()?)?);
             }
             other => anyhow::bail!(
                 "unknown argument `{other}`: the launcher takes --frames, --record, --replay, \

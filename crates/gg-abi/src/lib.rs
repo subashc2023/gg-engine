@@ -68,23 +68,18 @@ pub use verb::{VerbName, VerbsTable};
 /// a type in this crate — adding a field, reordering one, widening an integer.
 /// A dylib whose [`AbiInfo::host_api_version`] differs is refused by number with
 /// a named error, before its tables are read.
-// v2: `ComponentLayout` gained the declared id string (§4.2.2 host-side
-// registration needs to name persisted identity, not the Rust type).
-// v3: `gg_game_verbs` — the action and axis names, which the host needs to
-// parse an action map and to check a replay's id space (§4.7).
-// v4: `MAX_AXES` 8 → 16, which widens `InputFrame` and so the value every
-// system is handed each tick. The one v-line here that is a constant rather
-// than a symbol, and it is exactly why the rule says *any* change.
+// v4: `MAX_AXES` 8 → 16 — proof the rule covers a widened constant, not only
+// a type. Earlier bumps were ordinary type/symbol changes; git carries them.
 pub const HOST_API_VERSION: u32 = 4;
 
 /// Bytes in a boundary fingerprint: a blake3 output, named here so the host and
 /// the dylib agree on the width without `gg-abi` depending on a hash.
 pub const FINGERPRINT_BYTES: usize = 32;
 
-// `BOUNDARY_FINGERPRINT` and its hex form, computed by `build.rs` over the three
+// `BOUNDARY_FINGERPRINT` and its hex form, computed by `build.rs` over the four
 // boundary crates' source and the toolchain version. Generated rather than
 // written because a hand-maintained fingerprint is a fingerprint that stops
-// moving; see build.rs for the scope and why it is those three crates.
+// moving; see build.rs for the scope and why it is those four crates.
 include!(concat!(env!("OUT_DIR"), "/fingerprint.rs"));
 
 /// What a game dylib says about itself, before it is trusted with anything.

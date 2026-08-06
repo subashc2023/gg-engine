@@ -61,6 +61,21 @@ const BANNED_DIST_CRATES: &[&str] = &[
     "gg-tools",
 ];
 
+/// Which of [`BANNED_DIST_CRATES`] (plus `extra`) appear in a `cargo tree
+/// --prefix none` dump. First whitespace token per line only: the version and
+/// source that follow must not match a crate name by accident.
+fn tree_offenders(tree: &str, extra: &[&'static str]) -> Vec<&'static str> {
+    BANNED_DIST_CRATES
+        .iter()
+        .chain(extra)
+        .copied()
+        .filter(|c| {
+            tree.lines()
+                .any(|l| l.split_whitespace().next() == Some(*c))
+        })
+        .collect()
+}
+
 /// Byte needles no shipped binary may contain (§1.13, §5.8). The validation
 /// layer name earns its place from a feature default: `gg-rhi` is
 /// `default = ["validation", "gpu-timings"]`, so dist safety rests entirely on
@@ -169,14 +184,7 @@ pub fn gate() -> anyhow::Result<()> {
         ]),
         "cargo tree (dist graph)",
     )?;
-    let offenders: Vec<&str> = BANNED_DIST_CRATES
-        .iter()
-        .copied()
-        .filter(|c| {
-            tree.lines()
-                .any(|l| l.split_whitespace().next() == Some(*c))
-        })
-        .collect();
+    let offenders = tree_offenders(&tree, &[]);
     anyhow::ensure!(
         offenders.is_empty(),
         "dist graph contains banned crates {offenders:?} (§5.8, §1.13)"
@@ -240,15 +248,7 @@ pub fn gate() -> anyhow::Result<()> {
             ]),
             &format!("cargo tree ({demo} dist graph)"),
         )?;
-        let offenders: Vec<&str> = BANNED_DIST_CRATES
-            .iter()
-            .chain(&["gg-shaders", "shader-slang"])
-            .copied()
-            .filter(|c| {
-                tree.lines()
-                    .any(|l| l.split_whitespace().next() == Some(*c))
-            })
-            .collect();
+        let offenders = tree_offenders(&tree, &["gg-shaders", "shader-slang"]);
         anyhow::ensure!(
             offenders.is_empty(),
             "{demo} dist graph contains banned crates {offenders:?} (§5.8, §4.4)"
@@ -332,7 +332,8 @@ pub fn gate() -> anyhow::Result<()> {
 
     anyhow::ensure!(
         recorder_seen,
-        "no dist binary carried the input recorder — the presence check (§5.8) matched nothing,          which is a vacuous pass, not a green one"
+        "no dist binary carried the input recorder — the presence check (§5.8) matched nothing, \
+         which is a vacuous pass, not a green one"
     );
 
     println!("xtask dist: gate green (lab equipment absent, SPIR-V and the recorder present)");
@@ -565,15 +566,7 @@ fn game_dylibs() -> anyhow::Result<Vec<(String, PathBuf, PathBuf)>> {
             cargo().args(["tree", "-p", &game, "-e", "normal", "--prefix", "none"]),
             &format!("cargo tree ({game} dist graph)"),
         )?;
-        let offenders: Vec<&str> = BANNED_DIST_CRATES
-            .iter()
-            .chain(&["gg-shaders", "shader-slang"])
-            .copied()
-            .filter(|c| {
-                tree.lines()
-                    .any(|l| l.split_whitespace().next() == Some(*c))
-            })
-            .collect();
+        let offenders = tree_offenders(&tree, &["gg-shaders", "shader-slang"]);
         anyhow::ensure!(
             offenders.is_empty(),
             "game crate {game} links {offenders:?} (§5.8) — a game dylib that carried the watcher \
@@ -583,11 +576,9 @@ fn game_dylibs() -> anyhow::Result<Vec<(String, PathBuf, PathBuf)>> {
             cargo().args(["build", "-p", &game, "--profile", "dist"]),
             &format!("build {game} [dist profile]"),
         )?;
-        let dylib = workspace_root().join("target/dist").join(if cfg!(windows) {
-            format!("{}.dll", game.replace('-', "_"))
-        } else {
-            format!("lib{}.so", game.replace('-', "_"))
-        });
+        let dylib = workspace_root()
+            .join("target/dist")
+            .join(crate::util::dylib_name(&game.replace('-', "_")));
         println!("xtask dist: {game} builds as a shipping game dylib, watcher-free (§5.8)");
         built.push((game, crate_dir, dylib));
     }

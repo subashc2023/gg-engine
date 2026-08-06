@@ -17,6 +17,7 @@
 mod mcp;
 mod shadow_bias;
 mod shadow_fit;
+mod shadow_image;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()

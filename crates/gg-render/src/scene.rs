@@ -573,9 +573,9 @@ impl ScenePass {
     }
 }
 
-/// The shadow pass: the same geometry through the sun's projection, depth only,
-/// biased. The bias is dynamic so the CVars behind it move without a pipeline
-/// rebuild (§6 M11's exit row).
+/// The shadow pass: the same geometry through the sun's projection, depth only
+/// and **unbiased** — see [`crate::shadow_draws`] for why the rasterizer does
+/// not do it.
 fn shadow_desc() -> PipelineDesc<'static> {
     PipelineDesc {
         name: "scene.shadow",

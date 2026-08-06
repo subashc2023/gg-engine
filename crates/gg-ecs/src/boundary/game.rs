@@ -304,6 +304,20 @@ impl<'a> GameWorld<'a> {
             skip += written;
         }
     }
+
+    /// [`each`](Self::each), logging a refusal instead of returning it — the
+    /// [`put`](Self::put)/[`insert`](Self::insert) pair, for queries.
+    ///
+    /// Six game crates carried the same four-line `fn report` shim over `each`
+    /// because there is nothing a system can do with the error: a refused query
+    /// names a component this build declared and the host never registered, so
+    /// the only correct response is to say so and carry on. [`each`](Self::each)
+    /// stays for the caller that genuinely wants to branch.
+    pub fn visit<D: BoundaryData>(&mut self, body: impl FnMut(Entity, D::Item<'_>)) {
+        if let Err(refused) = self.each::<D>(body) {
+            self.log(crate::boundary::log_level::ERROR, &refused.to_string());
+        }
+    }
 }
 
 impl core::fmt::Debug for GameWorld<'_> {

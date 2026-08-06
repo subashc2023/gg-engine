@@ -8,13 +8,14 @@
 //!
 //! # Why it lives in `gg-ecs`
 //!
-//! Not preference — arithmetic. A game crate may link `gg-abi`, `gg-ecs` and
-//! `gg-math` and nothing else (§3's deny pin, which is what makes the
-//! fingerprint's scope and a dylib's link set the same list). `gg-abi` is
-//! `no_std` and sits *below* [`Component`](crate::Component), so it cannot
-//! assemble a table keyed on component identity; `gg-core` may not depend on
-//! `gg-ecs` at all (§3's closed charter, and the reason `GameLib::load` takes
-//! the table as an argument). That leaves one crate, and it is this one.
+//! Not preference — arithmetic. A game crate may link `gg-abi`, `gg-ecs`,
+//! `gg-ecs-derive` and `gg-math` and nothing else (§3's deny pin, which is
+//! what makes the fingerprint's scope and a dylib's link set the same list).
+//! `gg-abi` is `no_std` and sits *below* [`Component`](crate::Component), so
+//! it cannot assemble a table keyed on component identity; `gg-core` may not
+//! depend on `gg-ecs` at all (§3's closed charter, and the reason
+//! `GameLib::load` takes the table as an argument). That leaves one crate,
+//! and it is this one.
 //!
 //! It is not a widening of §7's non-goals: no scheduler, no system graph. The
 //! table's order *is* the execution order, chosen by the game and read by the

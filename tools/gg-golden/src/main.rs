@@ -54,6 +54,21 @@ fn readback_buffer(
     })?)
 }
 
+/// Every scene ends here: a reference rendered by a device that complained or
+/// leaked is not a reference, so teardown accounting is part of the render, not
+/// a separate check (§4.3, §5.4). One home so the citation and the wording
+/// cannot drift between scenes.
+fn ensure_clean(report: &gg_rhi::ShutdownReport) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        report.clean(),
+        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
+        report.validation_messages,
+        report.leaked_allocations.len(),
+        report.leaked_allocations,
+    );
+    Ok(())
+}
+
 /// One golden scene: how to render it and how strictly to judge it.
 struct Scene {
     name: &'static str,
@@ -457,14 +472,7 @@ fn render_mesh_of(sim: demo_02_mesh::sim::Sim) -> Render {
     }
     let pixels = rhi.map_buffer(dest)?.to_vec();
 
-    let report = rhi.shutdown();
-    anyhow::ensure!(
-        report.clean(),
-        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
-        report.validation_messages,
-        report.leaked_allocations.len(),
-        report.leaked_allocations,
-    );
+    ensure_clean(&rhi.shutdown())?;
     Ok(Capture {
         pixels,
         extent,
@@ -671,14 +679,7 @@ fn render_hall() -> Render {
          judging a half-resident frame would make the reference a race"
     );
     let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
-    let report = renderer.shutdown();
-    anyhow::ensure!(
-        report.clean(),
-        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
-        report.validation_messages,
-        report.leaked_allocations.len(),
-        report.leaked_allocations,
-    );
+    ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
         pixels: frame.pixels,
         extent,
@@ -783,14 +784,7 @@ fn render_atrium_at(phase: u64) -> Render {
         "the atrium's sun casts, so the graph must have run a shadow pass: {:?}",
         frame.order
     );
-    let report = renderer.shutdown();
-    anyhow::ensure!(
-        report.clean(),
-        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
-        report.validation_messages,
-        report.leaked_allocations.len(),
-        report.leaked_allocations,
-    );
+    ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
         pixels: frame.pixels,
         extent,
@@ -910,14 +904,7 @@ fn render_field() -> Render {
     );
 
     let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
-    let report = renderer.shutdown();
-    anyhow::ensure!(
-        report.clean(),
-        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
-        report.validation_messages,
-        report.leaked_allocations.len(),
-        report.leaked_allocations,
-    );
+    ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
         pixels: frame.pixels,
         extent,
@@ -1002,14 +989,7 @@ fn render_boxes_from(view: gg_render::View) -> Render {
         let _capture = gg_debug::capture::frame();
         renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?
     };
-    let report = renderer.shutdown();
-    anyhow::ensure!(
-        report.clean(),
-        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
-        report.validation_messages,
-        report.leaked_allocations.len(),
-        report.leaked_allocations,
-    );
+    ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
         pixels: frame.pixels,
         extent,
@@ -1059,14 +1039,7 @@ fn render_ui_at(
             vertices,
         )?
     };
-    let report = renderer.shutdown();
-    anyhow::ensure!(
-        report.clean(),
-        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
-        report.validation_messages,
-        report.leaked_allocations.len(),
-        report.leaked_allocations,
-    );
+    ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
         pixels: frame.pixels,
         extent,
@@ -1548,14 +1521,7 @@ fn render_triangle_scaled(scale: f32) -> Render {
     }
     let pixels = rhi.map_buffer(dest)?.to_vec();
 
-    let report = rhi.shutdown();
-    anyhow::ensure!(
-        report.clean(),
-        "unclean render: {} validation message(s), {} leak(s) {:?} (§4.3, §5.4)",
-        report.validation_messages,
-        report.leaked_allocations.len(),
-        report.leaked_allocations,
-    );
+    ensure_clean(&rhi.shutdown())?;
     Ok(Capture {
         pixels,
         extent,

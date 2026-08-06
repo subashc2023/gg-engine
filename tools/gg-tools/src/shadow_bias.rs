@@ -45,6 +45,8 @@ use gg_extract::Extracted;
 use gg_math::sim;
 use gg_render::{OffscreenRenderer, View, cvars};
 
+use crate::shadow_image::{BACKGROUND, DISAGREEMENT, luminance as luminance_of, near_edge};
+
 /// Frame size. Small on purpose: the metric counts *fractions* of scene pixels,
 /// and 320x240 is already tens of thousands of them.
 const EXTENT: (u32, u32) = (320, 240);
@@ -88,19 +90,6 @@ const NORMAL_BIASES: &[f64] = &[0.0, 0.5, 1.0, 1.5, 2.0, 3.0];
 
 /// The `r.shadow_depth_bias` values swept, in shadow texels.
 const DEPTH_BIASES: &[f64] = &[0.0, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5];
-
-/// Output levels of disagreement that count as one. A single PCF tap is 1/9 of
-/// the sun's contribution, which at this scene's contrast is roughly 20 levels;
-/// 8 catches half a tap and stays well clear of tonemapper rounding.
-const DISAGREEMENT: i32 = 8;
-
-/// Below this in both legs the pixel is background, not surface.
-const BACKGROUND: i32 = 4;
-
-/// Reference-luminance range across a 3x3 window that marks a shadow (or
-/// geometric) edge. Well above the couple of levels a smooth gradient moves and
-/// well under the ~190 a shadow boundary does.
-const EDGE_GRADIENT: i32 = 20;
 
 /// Pixels of dilation around each edge. The test leg's kernel is 1.5 texels of
 /// 39 mm, and at this framing the ground runs 2-4 cm a pixel — so a boundary's
@@ -306,9 +295,6 @@ fn scene(direction: [f64; 3]) -> anyhow::Result<World> {
 }
 
 /// One render, reduced to per-pixel output luminance.
-///
-/// Post-tonemap and therefore not linear, which is fine and is the point: the
-/// question is what a viewer would see disagree, not what the radiance was.
 fn luminance(renderer: &mut OffscreenRenderer, world: &World) -> anyhow::Result<Vec<i32>> {
     let view = View {
         // Steep, so the whole visible ground is inside the cascade rather than
@@ -324,56 +310,19 @@ fn luminance(renderer: &mut OffscreenRenderer, world: &World) -> anyhow::Result<
         frame.order.iter().any(|name| name.starts_with("shadow")),
         "no shadow pass ran — the sweep would be measuring two identical unlit frames"
     );
-    Ok(frame
-        .pixels
-        .chunks_exact(4)
-        .map(|p| {
-            // Rec. 709 weights on the 8-bit output, in fixed point so the metric
-            // has no float rounding of its own to explain.
-            (2126 * i32::from(p[0]) + 7152 * i32::from(p[1]) + 722 * i32::from(p[2])) / 10000
-        })
-        .collect())
+    Ok(luminance_of(&frame.pixels))
 }
 
 /// Which pixels a comparison is allowed to judge: surface, and clear of any
 /// edge in the reference. See the module header for why the mask is taken from
 /// the reference and not from the test or from their difference.
 fn judged_mask(reference: &[i32]) -> Vec<bool> {
-    let (w, h) = (EXTENT.0 as usize, EXTENT.1 as usize);
-    let at = |x: usize, y: usize| reference[y * w + x];
-    let mut edge = vec![false; reference.len()];
-    for y in 0..h {
-        for x in 0..w {
-            let (mut lo, mut hi) = (i32::MAX, i32::MIN);
-            for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
-                for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
-                    lo = lo.min(at(nx, ny));
-                    hi = hi.max(at(nx, ny));
-                }
-            }
-            edge[y * w + x] = hi - lo > EDGE_GRADIENT;
-        }
-    }
-    // Separable dilation: a square structuring element is two 1-D max passes,
-    // which is the difference between this being instant and being quadratic.
-    let mut wide = vec![false; edge.len()];
-    for y in 0..h {
-        for x in 0..w {
-            let lo = x.saturating_sub(EDGE_DILATE);
-            let hi = (x + EDGE_DILATE).min(w - 1);
-            wide[y * w + x] = edge[y * w + lo..=y * w + hi].iter().any(|e| *e);
-        }
-    }
-    let mut mask = vec![false; edge.len()];
-    for y in 0..h {
-        for x in 0..w {
-            let lo = y.saturating_sub(EDGE_DILATE);
-            let hi = (y + EDGE_DILATE).min(h - 1);
-            let dilated = (lo..=hi).any(|ny| wide[ny * w + x]);
-            mask[y * w + x] = !dilated && at(x, y) >= BACKGROUND;
-        }
-    }
-    mask
+    let dilated = near_edge(reference, EXTENT, EDGE_DILATE);
+    reference
+        .iter()
+        .zip(&dilated)
+        .map(|(&l, &near)| !near && l >= BACKGROUND)
+        .collect()
 }
 
 /// `(acne, leak, mean_delta)` over the judged pixels.

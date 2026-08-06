@@ -17,13 +17,11 @@
 //!   what play is *for*. It is also what makes shared keys safe: demo 05 binds
 //!   `W` as well, and while the scene is stopped its systems are not running to
 //!   read it.
-//! - **Look is a raw device delta, not the pointer's.** It was the pointer's
-//!   through M15.2, because `MAX_AXES` was 8 and demo 05's five plus the
-//!   editor's cursor pair left no room for a second motion pair — a camera that
-//!   fitted only by breaking the demo it was built to inspect. The cost was the
-//!   residual M15.2 named: the OS stops the cursor at the window edge, so a drag
-//!   that reached one stopped turning while the hand kept moving. A wider cap
-//!   (`gg_abi::MAX_AXES`) buys the pair, and a device delta has no edge to reach.
+//! - **Look is a raw device delta, not the pointer's.** A steered pointer stops
+//!   at the window edge, so a drag that reached it would stop turning while the
+//!   hand kept moving; a device delta has no edge to reach. Needs its own axis
+//!   pair alongside whatever the game declares, which `gg_abi::MAX_AXES` (§4.7)
+//!   is wide enough to hold.
 
 use crate::host::verb;
 use gg_ecs::boundary::Eye;

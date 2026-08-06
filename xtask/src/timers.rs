@@ -27,12 +27,15 @@ use std::path::PathBuf;
 const TIERS: &[(&str, &str, &str)] = &[
     (
         "nightly",
-        "<CalendarTrigger><StartBoundary>2026-01-01T03:00:00</StartBoundary><Enabled>true</Enabled>         <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>",
+        "<CalendarTrigger><StartBoundary>2026-01-01T03:00:00</StartBoundary><Enabled>true</Enabled>\
+         <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>",
         "*-*-* 03:00:00",
     ),
     (
         "weekly",
-        "<CalendarTrigger><StartBoundary>2026-01-04T04:00:00</StartBoundary><Enabled>true</Enabled>         <ScheduleByWeek><DaysOfWeek><Sunday /></DaysOfWeek><WeeksInterval>1</WeeksInterval>         </ScheduleByWeek></CalendarTrigger>",
+        "<CalendarTrigger><StartBoundary>2026-01-04T04:00:00</StartBoundary><Enabled>true</Enabled>\
+         <ScheduleByWeek><DaysOfWeek><Sunday /></DaysOfWeek><WeeksInterval>1</WeeksInterval>\
+         </ScheduleByWeek></CalendarTrigger>",
         "Sun *-*-* 04:00:00",
     ),
 ];

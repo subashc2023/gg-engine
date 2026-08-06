@@ -12,12 +12,10 @@
 //!
 //! # Why this is a library as well as a binary
 //!
-//! §6 M15.1 item 4: the editor can be opened with no game, and what opens it is
-//! an application (`apps/gg-editor`) rather than a command line naming a dylib.
-//! That application drives *this* shell rather than holding a second copy of it,
-//! so everything below is reachable as [`run`] and `main` is the argv in front of
-//! it. The §3 line budget counts the same code either way — a launcher's own
-//! lines are the application's.
+//! `apps/gg-editor` (§6 M15.1 item 4) opens the editor with no game by driving
+//! this shell as [`run`] rather than holding a second copy of it, so `main` is
+//! just the argv in front of it — and §3's line budget counts a launcher's own
+//! lines as the application's, not the shell's.
 
 use std::path::PathBuf;
 
@@ -102,11 +100,21 @@ pub struct Args {
 /// load. A plain run loads nothing it was not told to.
 #[cfg(feature = "editor")]
 pub(crate) fn opening_scene(args: &Args) -> Option<PathBuf> {
-    let live = args.record.is_none() && args.replay.is_none() && args.load.is_none();
+    let live = may_touch_project(args) && args.load.is_none();
     (args.editor && live)
         .then(|| gg_editor::persist::scene_path(args.input.as_deref()))
         .flatten()
         .filter(|scene| scene.is_file())
+}
+
+/// Whether this run may read or write the project's own files — its scene, its
+/// dock layout (§6 M15.1, M15.2). False under `--record` and `--replay`: a
+/// blessed stream must land its clicks against the layout the gate recorded
+/// with, and must leave no `scene.ggsave` behind for the next run to open. One
+/// spelling, because a drift between two *is* that leak.
+#[cfg(feature = "editor")]
+pub(crate) fn may_touch_project(args: &Args) -> bool {
+    args.record.is_none() && args.replay.is_none()
 }
 
 /// One spelling of the handoff flag: [`Args`] parses it and
@@ -281,6 +289,15 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     Ok(next)
 }
 
+/// `--editor-extent`'s value. Public because the launcher takes the same flag
+/// (§6 M15.1 item 4) and two spellings of one parse would drift.
+pub fn parse_extent(text: &str) -> anyhow::Result<(u32, u32)> {
+    let (w, h) = text
+        .split_once(['x', 'X'])
+        .with_context(|| format!("--editor-extent wants <w>x<h>, got `{text}`"))?;
+    Ok((w.trim().parse()?, h.trim().parse()?))
+}
+
 /// The command line, as [`Args`].
 pub fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
     let mut args = Args::default();
@@ -307,13 +324,7 @@ pub fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
                 );
                 args.editor = true;
             }
-            "--editor-extent" => {
-                let text = value()?;
-                let (w, h) = text
-                    .split_once(['x', 'X'])
-                    .with_context(|| format!("--editor-extent wants <w>x<h>, got `{text}`"))?;
-                args.editor_extent = Some((w.trim().parse()?, h.trim().parse()?));
-            }
+            "--editor-extent" => args.editor_extent = Some(parse_extent(&value()?)?),
             "--leak-budget" => args.leak_budget = Some(value()?.parse()?),
             "--pack" => args.pack = Some(PathBuf::from(value()?)),
             other => anyhow::bail!("unknown argument `{other}`"),

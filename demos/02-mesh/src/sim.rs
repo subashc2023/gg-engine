@@ -109,8 +109,8 @@ impl CameraRig {
         pitch: -0.36,
     };
 
-    /// Forward and right, in sim space. `f64` trig through `libm`: the same
-    /// bits on every target in the contract, which a `glam` basis would not be.
+    /// Forward and right, in sim space — [`sim::fly_basis`], which is where the
+    /// `libm` trio lives for every camera in the tree.
     ///
     /// The render half builds its view matrix from the same yaw and pitch with
     /// SIMD `f32` glam, and the two bases differ in the last few bits. That is
@@ -118,11 +118,7 @@ impl CameraRig {
     /// *goes*, the renderer decides what it *sees*, and only the former is
     /// hashed.
     pub fn basis(&self) -> (sim::DVec3, sim::DVec3) {
-        let (sin_yaw, cos_yaw) = sim::sin_cos(f64::from(self.yaw));
-        let (sin_pitch, cos_pitch) = sim::sin_cos(f64::from(self.pitch));
-        let forward = sim::DVec3::new(-cos_pitch * sin_yaw, sin_pitch, -cos_pitch * cos_yaw);
-        let right = sim::DVec3::new(cos_yaw, 0.0, -sin_yaw);
-        (forward, right)
+        sim::fly_basis(self.yaw, self.pitch)
     }
 }
 

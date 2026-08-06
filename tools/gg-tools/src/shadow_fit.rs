@@ -31,6 +31,8 @@ use gg_extract::Extracted;
 use gg_math::sim;
 use gg_render::{OffscreenRenderer, View, cvars};
 
+use crate::shadow_image::{BACKGROUND, DISAGREEMENT, luminance, near_edge};
+
 const EXTENT: (u32, u32) = (640, 480);
 
 /// Cascade counts swept. 1 is the pre-cascade engine — one slab over the whole
@@ -51,15 +53,6 @@ const TEST_SIZE: i64 = 2048;
 /// scene before the texels get interesting. [`has_a_shadow`] is the assertion.
 const REFERENCE_DISTANCE: f64 = 6.0;
 const REFERENCE_SIZE: i64 = 4096;
-
-/// Luminance levels of disagreement that count as one, matching `shadow-bias`.
-const DISAGREEMENT: i32 = 8;
-
-/// Below this in both legs the pixel is background rather than surface.
-const BACKGROUND: i32 = 4;
-
-/// Reference 3x3 luminance range that marks a shadow or geometric edge.
-const EDGE_GRADIENT: i32 = 20;
 
 /// Pixels either side of an edge. `boundary` is measured *inside* this band and
 /// `seam` strictly outside it — the whole point is to separate the two failures.
@@ -233,14 +226,9 @@ fn render(renderer: &mut OffscreenRenderer, world: &World) -> anyhow::Result<Fra
         frame.order.iter().any(|name| name.starts_with("shadow")),
         "no shadow pass ran — there would be nothing to measure"
     );
-    let luminance = frame
-        .pixels
-        .chunks_exact(4)
-        .map(|p| (2126 * i32::from(p[0]) + 7152 * i32::from(p[1]) + 722 * i32::from(p[2])) / 10000)
-        .collect();
     Ok(Frame {
+        luminance: luminance(&frame.pixels),
         pixels: frame.pixels,
-        luminance,
     })
 }
 
@@ -250,39 +238,13 @@ fn render(renderer: &mut OffscreenRenderer, world: &World) -> anyhow::Result<Fra
 /// a staircase is itself high-gradient, so a band defined from the test leg
 /// would move with the artifact it is trying to bracket.
 fn bands(reference: &[i32]) -> (Vec<bool>, Vec<bool>) {
-    let (w, h) = (EXTENT.0 as usize, EXTENT.1 as usize);
-    let at = |x: usize, y: usize| reference[y * w + x];
-    let mut edge = vec![false; reference.len()];
-    for y in 0..h {
-        for x in 0..w {
-            let (mut lo, mut hi) = (i32::MAX, i32::MIN);
-            for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
-                for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
-                    lo = lo.min(at(nx, ny));
-                    hi = hi.max(at(nx, ny));
-                }
-            }
-            edge[y * w + x] = hi - lo > EDGE_GRADIENT;
-        }
-    }
-    let mut wide = vec![false; edge.len()];
-    for y in 0..h {
-        for x in 0..w {
-            let lo = x.saturating_sub(EDGE_BAND);
-            let hi = (x + EDGE_BAND).min(w - 1);
-            wide[y * w + x] = edge[y * w + lo..=y * w + hi].iter().any(|e| *e);
-        }
-    }
-    let (mut near, mut clear) = (vec![false; edge.len()], vec![false; edge.len()]);
-    for y in 0..h {
-        for x in 0..w {
-            let lo = y.saturating_sub(EDGE_BAND);
-            let hi = (y + EDGE_BAND).min(h - 1);
-            let dilated = (lo..=hi).any(|ny| wide[ny * w + x]);
-            let surface = at(x, y) >= BACKGROUND;
-            near[y * w + x] = dilated && surface;
-            clear[y * w + x] = !dilated && surface;
-        }
+    let dilated = near_edge(reference, EXTENT, EDGE_BAND);
+    let mut near = vec![false; reference.len()];
+    let mut clear = vec![false; reference.len()];
+    for (i, (&l, &edge)) in reference.iter().zip(&dilated).enumerate() {
+        let surface = l >= BACKGROUND;
+        near[i] = edge && surface;
+        clear[i] = !edge && surface;
     }
     (near, clear)
 }

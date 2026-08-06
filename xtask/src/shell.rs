@@ -666,11 +666,7 @@ fn dylib(dir: &str, stem: &str) -> PathBuf {
     workspace_root()
         .join("target")
         .join(dir)
-        .join(if cfg!(windows) {
-            format!("{stem}.dll")
-        } else {
-            format!("lib{stem}.so")
-        })
+        .join(crate::util::dylib_name(stem))
 }
 
 /// Build the shell and the game for one tier, and stage both under
@@ -856,11 +852,7 @@ fn with_an_extra_field(source: &str) -> anyhow::Result<String> {
 }
 
 fn dylib_name(kind: &Kind) -> String {
-    if cfg!(windows) {
-        format!("{}.dll", kind.lib)
-    } else {
-        format!("lib{}.so", kind.lib)
-    }
+    crate::util::dylib_name(kind.lib)
 }
 
 /// Build a variant of demo 03 — its source with one edit applied — as a
@@ -1144,7 +1136,10 @@ fn latency() -> anyhow::Result<()> {
     )?;
     anyhow::ensure!(
         small <= BUDGET_MS,
-        "at roughly twice demo 03's size the loop takes {small} ms against M5's {BUDGET_MS} ms          budget. The fixes are compile-side and none of them is an architecture change (§6 M5):          split the game across several dylibs behind the same table, a dev-profile codegen          backend, a faster linker, or keep the fast-iteration systems in a small crate."
+        "at roughly twice demo 03's size the loop takes {small} ms against M5's {BUDGET_MS} ms \
+         budget. The fixes are compile-side and none of them is an architecture change (§6 M5): \
+         split the game across several dylibs behind the same table, a dev-profile codegen \
+         backend, a faster linker, or keep the fast-iteration systems in a small crate."
     );
     let fat = best_under(
         "the fat point's loop",
@@ -1154,7 +1149,8 @@ fn latency() -> anyhow::Result<()> {
     )?;
     anyhow::ensure!(
         fat <= FAT_CEILING_MS,
-        "the fat point cost {fat} ms against a {FAT_CEILING_MS} ms ceiling — that is a toolchain          or machine event, not a project one"
+        "the fat point cost {fat} ms against a {FAT_CEILING_MS} ms ceiling — that is a toolchain \
+         or machine event, not a project one"
     );
     Ok(())
 }
@@ -3122,9 +3118,6 @@ fn editor() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// How many of `wanted`, in order, `log` gets through. A partial count is the
-/// useful answer: it names how far a session got before its clicks stopped
-/// landing where the script meant.
 /// The project the launcher gate opens, and the crate that builds it.
 const LAUNCHER_PROJECT: &str = "05-many";
 
@@ -3325,6 +3318,9 @@ fn captured_entities(log: &str) -> anyhow::Result<u64> {
     Ok(count)
 }
 
+/// How many of `wanted`, in order, `log` gets through. A partial count is the
+/// useful answer: it names how far a session got before its clicks stopped
+/// landing where the script meant.
 fn reaches(log: &str, wanted: &[&str]) -> usize {
     let mut at = 0;
     for line in log.lines() {

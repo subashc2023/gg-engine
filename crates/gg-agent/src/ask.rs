@@ -17,35 +17,28 @@
 //!
 //! # A stream, and the same session
 //!
-//! Two things were measured on the first real session and both were the panel's
-//! fault rather than the model's. A question that ran fourteen tools showed a
-//! spinner for a minute because the answer was collected with `Output::output`,
-//! which returns when the process *exits*; and "Hello" cost thirty seconds
-//! because every question was a cold `claude` with no memory of the last one.
-//!
-//! So: `--output-format stream-json`, read line by line and published as
-//! [`Event`]s while the turn is still running, and `--resume` on every question
-//! after the first. The session id arrives in the stream's own first line, which
-//! is why capturing it costs nothing extra. Reading the stream needs a JSON
-//! reader; [`crate::json`] is that, beside the writer, rather than a dependency
-//! this crate's manifest says it does not have.
+//! `--output-format stream-json`, read line by line and published as [`Event`]s
+//! while the turn is still running (collecting via `Output::output` instead
+//! waits for process *exit*, which stalled a fourteen-tool question for a full
+//! minute behind a spinner). `--resume` carries every question after the first
+//! into the same session (a cold `claude` per question made even "Hello" cost
+//! thirty seconds). The session id arrives in the stream's own first line, so
+//! capturing it costs nothing extra. Reading the stream needs a JSON reader;
+//! [`crate::json`] is that, beside the writer, rather than a dependency this
+//! crate's manifest says it does not have.
 //!
 //! # What it must not inherit
 //!
-//! A `claude` started in this tree picks up the project's settings, and this
-//! project's `Stop` hook is `cargo xtask ci --fast`. That hook cannot run from
-//! here by construction: `xtask.exe` is the *parent* of the running game, so the
-//! hook's first act is to relink a binary its own process tree holds open. The
-//! third measured failure was a turn that answered in eight seconds and then
-//! spent seventy more watching the agent try to diagnose that lock — with every
-//! process-inspection command it reached for denied, because none of them are
-//! granted. `--setting-sources user` is why it no longer inherits it.
-//!
-//! Two more came with the operator's own config, both invisible: unrelated MCP
-//! servers (an editor, a note-taker, a video suite — sixty-odd tools of context
-//! on every question, and the larger half of a cold start), and a built-in set
-//! that included a shell and a subagent spawner. `--strict-mcp-config` and
-//! [`TOOLS`] cut both.
+//! `--setting-sources user`: a `claude` started in this tree otherwise picks up
+//! the project's own settings, whose `Stop` hook (`cargo xtask ci --fast`)
+//! cannot run from here — `xtask.exe` is the *parent* of the running game, so
+//! the hook's first act is to relink a binary its own process tree holds open
+//! (once cost a turn seventy seconds past its answer, watching the agent probe
+//! a lock it had no permission to inspect). `--strict-mcp-config` and [`TOOLS`]
+//! cut the operator's own config the same way: unrelated MCP servers (an
+//! editor, a note-taker, a video suite — sixty-odd tools of cold-start context)
+//! and a built-in shell/subagent-spawner pair, neither of which this process
+//! may ever reach.
 //!
 //! # Never from an automated run
 //!

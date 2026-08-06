@@ -766,6 +766,25 @@ macro_rules! sim_vec_ops {
 sim_types!(f32, Vec2, Vec3, Vec4, Quat, Mat3, Mat4);
 sim_types!(f64, DVec2, DVec3, DVec4, DQuat, DMat3, DMat4);
 
+/// A fly camera's `(forward, right)` at `yaw`/`pitch`, in sim space.
+///
+/// Yaw about world +Y, then pitch about the rotated right axis, never roll — the
+/// one order `gg_render::View::rotation` builds it in, so a pick and a picture
+/// cannot disagree about which way the eye faces. `f64` trig through `libm`
+/// (§4.2.1): the same bits on every target in the contract, which a `glam` basis
+/// would not be.
+///
+/// Every fly-camera demo and the editor's pick ray call this, so the blessed
+/// replays pin the arithmetic — an edit here moves hashes in five demos at once.
+#[must_use]
+pub fn fly_basis(yaw: f32, pitch: f32) -> (DVec3, DVec3) {
+    let (sin_yaw, cos_yaw) = sin_cos(f64::from(yaw));
+    let (sin_pitch, cos_pitch) = sin_cos(f64::from(pitch));
+    let forward = DVec3::new(-cos_pitch * sin_yaw, sin_pitch, -cos_pitch * cos_yaw);
+    let right = DVec3::new(cos_yaw, 0.0, -sin_yaw);
+    (forward, right)
+}
+
 /// A deterministic random source, sized and shaped to live *in* the world
 /// (§6 M18).
 ///

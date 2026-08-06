@@ -1,27 +1,14 @@
 //! What the player asked the host for — the fourth protocol on the §4.2.2
-//! boundary, arriving at §6 M19.
+//! boundary, arriving at §6 M19. Same shape as [`Sound`](super::Sound): a game
+//! crate may not link the crates that own the window or the speakers (§3's
+//! deny pin), so a preference crosses as an ordinary component the game
+//! declares and a menu it draws writes. The host reads it every tick and
+//! **writes nothing back** — CVars, not this, are where a machine's own
+//! settings (vsync, shadow quality, the overlay) live (§4.8) — so a silent
+//! headless replay and a loud windowed run hash alike (§5.6c).
 //!
-//! The shape is [`Sound`](super::Sound)'s exactly: a game crate may not link
-//! the crates that own the window or the speakers (§3's deny pin), so a
-//! preference crosses as an ordinary component the game declares and the host
-//! reads. The host **writes nothing back** — a preference's effect is an arrow
-//! picture and a loudness, both outside the world and outside the hash, so a
-//! silent headless replay and a loud windowed run are the same run (§5.6c, the
-//! same argument `audio` makes).
-//!
-//! # What this is not, and §4.8's line
-//!
-//! CVars stay host-only. The machine's settings — vsync, shadow quality, the
-//! debug overlay — belong to the machine and to the operator's console, and a
-//! game still cannot name the registry. What crosses here is the subset that is
-//! the *player's*: how their session looks and sounds, settable from a menu the
-//! game draws, replay-safe by construction because the clicks that set it are
-//! ordinary recorded input and the component is ordinary hashed state.
-//!
-//! # A zeroed `Prefs` is the default twice over
-//!
-//! `World::restore` zeroes a retyped field (§4.2.2), so every field's zero must
-//! mean "what the engine does anyway": [`cursor::SOFTWARE`] is 0, and a
+//! `World::restore` zeroes a retyped field (§4.2.2), so every field's zero
+//! must mean "what the engine does anyway": [`cursor::SOFTWARE`] is 0, and a
 //! [`quiet`](Prefs::quiet) of 0 is full volume. A migration cannot flip a
 //! player's cursor or mute their game.
 
@@ -66,9 +53,8 @@ pub struct Prefs {
 }
 
 impl Prefs {
-    /// The master gain this asks for, `0.0..=1.0` — the host-side reading of
-    /// [`quiet`](Prefs::quiet), here so the host and a game's volume readout
-    /// cannot round differently.
+    /// The master gain this asks for, `0.0..=1.0` — what `gg-audio` reads to
+    /// mix every playing [`Sound`](super::Sound).
     #[must_use]
     pub fn volume(&self) -> f32 {
         1.0 - self.quiet.min(QUIET_MAX) as f32 / QUIET_MAX as f32

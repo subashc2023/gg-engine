@@ -548,8 +548,7 @@ impl Uploader {
             // reserved: no batch owns it, nothing is ever read from it, and no
             // wait can release it. Once everything below has retired — nothing
             // in flight past `tail`, current batch empty — the cursor passes it
-            // in one step instead of charging it to this batch, which is what
-            // used to refuse a wrapping stage outright.
+            // in one step instead of charging it to this batch.
             if self.tail == self.head && self.batch_start == self.head {
                 self.tail = start;
                 self.batch_start = start;

@@ -75,7 +75,8 @@ pub struct World {
     side_tables: SideTables,
     /// Entity index → location. Sparse: `None` for dead or never-used indices.
     locations: Vec<Option<Location>>,
-    /// Reused across structural changes so archetype moves do not allocate.
+    /// Reused across structural changes to avoid a fresh buffer per move;
+    /// `move_row` still allocates `carried` plus a `to_vec` per shared column.
     scratch: Vec<u8>,
 }
 

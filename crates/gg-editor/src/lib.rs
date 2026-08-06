@@ -25,8 +25,8 @@
 //! Text is the one thing *not* laid out in those units. The panels are set in
 //! §4.9's rented face at [`ROW`] pixels per em of scale and emitted in device
 //! pixels ([`Editor::text`]), so the tables are the canvas's and the glyphs are
-//! the screen's. Scaling a 5×7 bitmap by 3 instead is what made a 1080p editor
-//! look like a 360p one, which is the complaint that opened this work.
+//! the screen's — magnifying a 5×7 bitmap by scale instead would keep every
+//! glyph's on-screen size fixed at the source resolution regardless of DPI.
 //!
 //! # The title bar is the toolbar
 //!
@@ -50,10 +50,12 @@
 //! the same final hash — rests on exactly that split, plus the fact that every
 //! editor input is an ordinary verb through the ordinary action map (§4.7).
 //!
-//! # Why there is no text entry
+//! # Where text may be typed, and where it may not
 //!
-//! See [`value`]: keystrokes outside the action map are not in a replay, so the
-//! inspector edits by clicking. Every panel state — selection, step size, how
+//! Exactly one place: the agent panel's prompt (§6 M16), whose keystrokes cross
+//! as recorded text and two appended verbs, so a typed session replays character
+//! for character. The inspector has none — see [`value`] — and that is what keeps
+//! an *edit* replayable. Every panel state either way — selection, step size, how
 //! far a pane is scrolled, which pane is docked where — is a pure function of
 //! the replayed input stream and therefore reproduces without being hashed.
 
@@ -421,17 +423,13 @@ static SCALE: gg_core::cvar::CVar = gg_core::cvar::CVar::new_int(
 /// Integer, always: glyph coverage is sampled nearest, so a fractional scale
 /// puts a rectangle's edge and a stem's edge on different sub-pixels.
 ///
-/// **Auto follows the monitor's DPI and not its resolution**, which is the
-/// third answer this rule has had and the first one that is about eyesight
-/// rather than arithmetic. M15 took the largest scale still leaving 640×360, so
-/// every window was the same picture magnified. M15.1 took the smallest scale
-/// fitting a 960×540 ceiling, which is the same error one step further out: at
-/// 4K it lands on 5.7→6, so a monitor with four times the pixels showed the
-/// same twenty rows in glyphs four pixels taller. A row's *physical* size is
-/// what an operator complains about, and the number the desktop already knows
-/// for that is the scale factor. [`PER_DPI`] rows of it, and the window is only
-/// ever a cap: it may shrink the scale so a small one still has [`MIN`] units
-/// of working area, never grow it. `d.editor_scale` overrules the whole thing,
+/// **Auto follows the monitor's DPI and not its resolution.** A row's
+/// *physical* size is what an operator complains about, and the desktop's own
+/// scale factor is the number that tracks it — the window extent does not,
+/// since the same logical layout at four times the pixels is four times the
+/// row, not the same row. [`PER_DPI`] rows of it, and the window is only ever
+/// a cap: it may shrink the scale so a small one still has [`MIN`] units of
+/// working area, never grow it. `d.editor_scale` overrules the whole thing,
 /// because "what fits" and "what I can read" are different opinions and only
 /// one of them is the machine's.
 ///
@@ -698,8 +696,8 @@ pub struct Editor {
     /// The editor is the first UI in the engine to set text at the *surface's*
     /// resolution rather than the canvas's: a logical unit is `fit.scale`
     /// pixels, so glyphs are rasterized at [`Editor::px`] and emitted through a
-    /// device-space transform. Magnifying `gg_ui::font`'s 5×7 bitmap by the
-    /// scale instead is what made a 4K editor a 640×360 one with bigger pixels.
+    /// device-space transform — magnifying `gg_ui::font`'s 5×7 bitmap by scale
+    /// instead would keep every glyph fixed at the source resolution.
     fonts: Fonts,
     face: FaceId,
     /// Pixels per em the resident glyphs were rasterized at. A changed scale

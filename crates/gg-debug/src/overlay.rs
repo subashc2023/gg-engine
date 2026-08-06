@@ -1,12 +1,9 @@
 //! The debug overlay (§4.8): frame stats, per-pass GPU milliseconds, memory,
 //! and the CVar console — immediate mode, on `gg-ui`.
 //!
-//! §6 M13's acceptance test. M8 built this on the draw layer alone and hand-rolled
-//! everything above it: rows were a `Vec<(String, u32)>` of `format!`ed lines and
-//! a fold to find the widest, positions were `PAD * 2.0 + i as f32 * line`. Both
-//! are now [`Scratch`] and [`Stack`], which is the criterion in its concrete form
-//! — the layer either does this cheaply or it is overbuilt — and costs the
-//! overlay ten heap allocations a frame less than it used to (`tests/no_alloc`).
+//! §6 M13's acceptance test: [`Scratch`] and [`Stack`] hold every row, so the
+//! layer either does this cheaply or it is overbuilt — `tests/no_alloc` is the
+//! criterion in its concrete form.
 //!
 //! It reads what the frame already measured rather than measuring again: the
 //! pass rows are the same [`PassTiming`]s Tracy's GPU zones are fed, so the two

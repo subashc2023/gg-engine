@@ -768,12 +768,9 @@ mod tests {
     use super::*;
     use crate::World;
 
-    /// A malformed image is refused whole, and *before* the world is torn
-    /// down. `restore` used to panic after `reset_storage` when a column's
-    /// bytes disagreed with its row count — for a save or a rejuvenation
-    /// handoff, that was the player's world already gone. In-module because
-    /// the corruption has to be built directly: `decode` only proves framing,
-    /// and the handoff file carries no checksum at all (§4.2.2).
+    /// Must refuse a malformed image before `reset_storage` runs — a save or
+    /// rejuvenation handoff carries no checksum (§4.2.2). In-module because
+    /// the corruption has to be built directly: `decode` only proves framing.
     #[test]
     fn a_malformed_image_is_refused_before_the_world_is_touched() {
         let mut world = World::new();

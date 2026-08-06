@@ -59,7 +59,11 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
         "cargo build (shell)",
     )?;
 
-    let dylib = root.join("target/debug").join(dylib_name(&package));
+    // Package name → library stem: cargo underscores it, and the artifact is
+    // named after the lib, not the package.
+    let dylib = root
+        .join("target/debug")
+        .join(util::dylib_name(&package.replace('-', "_")));
     anyhow::ensure!(
         dylib.is_file(),
         "{} is not there — is `crate-type = [\"cdylib\", \"rlib\"]` set? (§4.2.2)",
@@ -153,15 +157,4 @@ fn shell_binary(root: &Path) -> PathBuf {
     } else {
         "gg-runtime"
     })
-}
-
-fn dylib_name(package: &str) -> String {
-    let stem = package.replace('-', "_");
-    if cfg!(windows) {
-        format!("{stem}.dll")
-    } else if cfg!(target_os = "macos") {
-        format!("lib{stem}.dylib")
-    } else {
-        format!("lib{stem}.so")
-    }
 }

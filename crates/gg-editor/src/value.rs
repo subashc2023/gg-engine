@@ -10,12 +10,15 @@
 //!
 //! # Why every edit is a nudge
 //!
-//! There is no text entry anywhere in this crate. Typing would mean routing
-//! keystrokes outside the action map — the path `gg_debug`'s console takes —
-//! and those are not in a replay (§4.7). A recorded editor session that
-//! replayed to a different world would fail §6 M15's fourth exit row, so the
-//! inspector edits by clicking `-` and `+` and nothing else. The cost is real
-//! and is the right price: reaching 100.0 takes ten clicks at step 10.
+//! The inspector has no text entry. Typing straight off the keyboard would mean
+//! keystrokes outside the action map — the path `gg_debug`'s console takes — and
+//! those are not in a replay (§4.7); a recorded editor session that replayed to
+//! a different world would fail §6 M15's fourth exit row. The one place text is
+//! typed is the agent panel's prompt (`chat`), sound for the opposite reason:
+//! printable input rides the replay's own text channel. Nothing routes that
+//! channel into a field, so the inspector edits by `-` and `+` and nothing else.
+//! The cost is real and is the right price: reaching 100.0 takes ten clicks at
+//! step 10.
 
 use gg_ecs::component::FieldDesc;
 

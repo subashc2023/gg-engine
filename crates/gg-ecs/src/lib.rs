@@ -99,5 +99,5 @@ pub use world::snapshot::{ComponentOutcome, MigrationReport, Snapshot, SnapshotE
 pub use world::{World, WorldError};
 
 /// The derives (§4.2, §4.2.1), re-exported so game crates name `gg-ecs` alone
-/// and the §4.2.2 boundary deny pin stays a three-crate list.
+/// and the §4.2.2 boundary deny pin stays a four-crate list.
 pub use gg_ecs_derive::{Component, SideTable, StateHash};

@@ -227,26 +227,38 @@ impl ReloadError {
     /// budget that could not see them would never come due.
     #[must_use]
     pub fn leaked_bytes(&self) -> u64 {
+        // Exhaustive like `kind()`: a new post-mapping variant must charge its
+        // bytes here or fail to compile, not silently report zero.
         match self {
             Self::HostApiMismatch { leaked, .. }
             | Self::Fingerprint { leaked, .. }
             | Self::MissingSymbol { leaked, .. }
             | Self::Adoption { leaked, .. }
             | Self::FpEnv { leaked, .. } => *leaked,
-            _ => 0,
+            // Nothing was mapped: the open/read failed, or no dylib was involved.
+            Self::Open { .. }
+            | Self::Unreadable { .. }
+            | Self::Rejuvenate { .. }
+            | Self::Handoff { .. }
+            | Self::Staging { .. } => 0,
         }
     }
 
     /// Attach the leak to a refusal raised by a path that also serves the
     /// nothing-was-loaded cases ([`verify`], [`GameLib::linked`]).
     fn leaking(mut self, bytes: u64) -> Self {
-        if let Self::HostApiMismatch { leaked, .. }
-        | Self::Fingerprint { leaked, .. }
-        | Self::MissingSymbol { leaked, .. }
-        | Self::Adoption { leaked, .. }
-        | Self::FpEnv { leaked, .. } = &mut self
-        {
-            *leaked = bytes;
+        match &mut self {
+            Self::HostApiMismatch { leaked, .. }
+            | Self::Fingerprint { leaked, .. }
+            | Self::MissingSymbol { leaked, .. }
+            | Self::Adoption { leaked, .. }
+            | Self::FpEnv { leaked, .. } => *leaked = bytes,
+            // The nothing-was-loaded cases the shared raising path serves.
+            Self::Open { .. }
+            | Self::Unreadable { .. }
+            | Self::Rejuvenate { .. }
+            | Self::Handoff { .. }
+            | Self::Staging { .. } => {}
         }
         self
     }

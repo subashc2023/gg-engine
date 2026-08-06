@@ -14,7 +14,7 @@
 
 use demo_03_reload::{
     AIM_CONE, Cube, FIRE, MAX_CUBES, Player, RESTART, SPAWN, START_CUBES, START_POSITION, Shot,
-    TRACER_TICKS, basis,
+    TRACER_TICKS,
 };
 use gg_ecs::boundary::{
     self, AXIS_SCALE, AbiInfo, ActionId, ComponentsTable, Eye, HostApiV1, InputFrame, MAX_AXES,
@@ -158,7 +158,7 @@ fn firing_down_the_ring_kills_exactly_the_cube_under_the_crosshair() {
     let mut game = Game::load();
     game.step(InputFrame::default());
     let (_, player) = game.player();
-    let (forward, _) = basis(&player);
+    let (forward, _) = gg_math::sim::fly_basis(player.yaw, player.pitch);
 
     // Which cube *should* die, computed here from the same rule the system
     // uses — so a changed cone or a changed opening ring moves both together.
@@ -288,7 +288,7 @@ fn walking_goes_where_the_axes_point_and_aiming_stops_at_the_pole() {
     let (_, player) = game.player();
     assert_eq!(player.pitch, demo_03_reload::PITCH_LIMIT);
     // ...and the basis is still a basis at the limit.
-    let (forward, right) = basis(&player);
+    let (forward, right) = gg_math::sim::fly_basis(player.yaw, player.pitch);
     assert!(forward.cross(right).length() > 0.5);
 }
 

@@ -31,8 +31,8 @@
 
 use gg_ecs::Component;
 use gg_ecs::boundary::{
-    AXIS_SCALE, BoundaryError, Eye, GameWorld, InputFrame, MAX_AXES, Renderable, Widget, log_level,
-    state, widget, widget_id,
+    AXIS_SCALE, Eye, GameWorld, InputFrame, MAX_AXES, Renderable, Widget, log_level, state, widget,
+    widget_id,
 };
 use gg_math::sim;
 
@@ -143,15 +143,6 @@ pub struct Settings {
     pub difficulty: u32,
 }
 
-/// Report a refused query and carry on — see demo 03 for why this is not a
-/// panic: the host would report the panic and hide the load-sequence bug
-/// standing behind it.
-fn report(world: &GameWorld, outcome: Result<(), BoundaryError>) {
-    if let Err(refused) = outcome {
-        world.log(log_level::ERROR, &refused.to_string());
-    }
-}
-
 /// `"on"` or `"off"`.
 #[must_use]
 pub fn switch(value: u32) -> &'static str {
@@ -164,8 +155,7 @@ pub fn switch(value: u32) -> &'static str {
 /// remembering would be state outliving a tick (§4.2.2, and a grep gate).
 pub fn bootstrap(world: &mut GameWorld) {
     let mut exists = false;
-    let outcome = world.each::<&Settings>(|_, _| exists = true);
-    report(world, outcome);
+    world.visit::<&Settings>(|_, _| exists = true);
     if exists {
         return;
     }
@@ -211,18 +201,17 @@ pub fn bootstrap(world: &mut GameWorld) {
 /// lag, and it is uniform, which is all a replay needs.
 pub fn interact(world: &mut GameWorld) {
     let mut clicked = 0u64;
-    let outcome = world.each::<&Widget>(|_, w| {
+    world.visit::<&Widget>(|_, w| {
         if w.state & state::CLICKED != 0 {
             clicked = w.id;
         }
     });
-    report(world, outcome);
     if clicked == 0 {
         return;
     }
 
     let mut said = None;
-    let outcome = world.each::<&mut Settings>(|_, s| {
+    world.visit::<&mut Settings>(|_, s| {
         match clicked {
             MENU => s.open ^= 1,
             CLOSE => s.open = 0,
@@ -241,7 +230,6 @@ pub fn interact(world: &mut GameWorld) {
             _ => format!("difficulty {}", DIFFICULTIES[s.difficulty as usize]),
         });
     });
-    report(world, outcome);
     if let Some(line) = said {
         world.log(log_level::INFO, &line);
     }
@@ -251,14 +239,13 @@ pub fn interact(world: &mut GameWorld) {
 pub fn simulate(world: &mut GameWorld) {
     let tick = world.tick();
     let mut step = 0;
-    let outcome = world.each::<&mut Settings>(|_, s| {
+    world.visit::<&mut Settings>(|_, s| {
         step = u64::from(s.difficulty) + 1;
         s.score += step;
     });
-    report(world, outcome);
 
     let mut index = 0u64;
-    let outcome = world.each::<&mut Renderable>(|_, r| {
+    world.visit::<&mut Renderable>(|_, r| {
         // A function of the tick alone, through `sim` trig, so the drift is
         // reproducible rather than merely smooth (§4.2.1).
         let phase = (tick + index * ORBIT / CUBES) % ORBIT;
@@ -267,15 +254,13 @@ pub fn simulate(world: &mut GameWorld) {
         r.position = sim::DVec3::new(cos * 1.4, sin * 0.5, -1.0 + sin * 1.4);
         index += 1;
     });
-    report(world, outcome);
 }
 
 /// Rewrite every widget from the settings. Last in the table, so the frame the
 /// host draws is this tick's.
 pub fn present(world: &mut GameWorld) {
     let mut settings = None;
-    let outcome = world.each::<&Settings>(|_, s| settings = Some(*s));
-    report(world, outcome);
+    world.visit::<&Settings>(|_, s| settings = Some(*s));
     let Some(s) = settings else {
         return;
     };
@@ -286,7 +271,7 @@ pub fn present(world: &mut GameWorld) {
     let vsync = format!("vsync       {}", switch(s.vsync));
     let invert = format!("invert y    {}", switch(s.invert));
     let difficulty = format!("difficulty  {}", DIFFICULTIES[s.difficulty as usize]);
-    let outcome = world.each::<&mut Widget>(|_, w| {
+    world.visit::<&mut Widget>(|_, w| {
         let Some(item) = LAYOUT.iter().find(|i| i.id == w.id) else {
             return;
         };
@@ -310,7 +295,6 @@ pub fn present(world: &mut GameWorld) {
             _ => {}
         }
     });
-    report(world, outcome);
 }
 
 /// Centre of a [`LAYOUT`] row, in canvas units — where [`session`] aims.

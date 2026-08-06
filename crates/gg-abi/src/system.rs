@@ -17,10 +17,11 @@ use crate::input::InputFrame;
 
 /// What a system is handed each tick.
 ///
-/// Both input frames travel **by value**: 80 bytes beats a pointer whose
-/// lifetime the dylib would have to be trusted with, and carrying the previous
-/// frame is what lets the generated wrappers answer `just_pressed` without the
-/// game retaining state across ticks — which the §4.2.2 rules forbid anyway.
+/// Both input frames travel **by value**, sized by `MAX_AXES` rather than a
+/// byte count worth pinning here — cheaper than a pointer whose lifetime the
+/// dylib would have to be trusted with — and carrying the previous frame is
+/// what lets the generated wrappers answer `just_pressed` without the game
+/// retaining state across ticks, which the §4.2.2 rules forbid anyway.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct TickCtx {

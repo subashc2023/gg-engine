@@ -189,12 +189,11 @@ fn component(v: sim::DVec3, axis: usize) -> f64 {
 ///
 /// Shared with [`crate::camera`] rather than written twice, because a pick and
 /// a picture disagreeing about which way the operator is facing is a bug with no
-/// symptom except "it selects the wrong thing near the edges".
+/// symptom except "it selects the wrong thing near the edges" — and off
+/// [`sim::fly_basis`] rather than another copy of the trig, so the editor's idea
+/// of forward is the demos' to the bit.
 pub(crate) fn basis(yaw: f32, pitch: f32) -> (sim::DVec3, sim::DVec3, sim::DVec3) {
-    let (sin_yaw, cos_yaw) = sim::sin_cos(f64::from(yaw));
-    let (sin_pitch, cos_pitch) = sim::sin_cos(f64::from(pitch));
-    let forward = sim::DVec3::new(-cos_pitch * sin_yaw, sin_pitch, -cos_pitch * cos_yaw);
-    let right = sim::DVec3::new(cos_yaw, 0.0, -sin_yaw);
+    let (forward, right) = sim::fly_basis(yaw, pitch);
     (right, right.cross(forward), forward)
 }
 

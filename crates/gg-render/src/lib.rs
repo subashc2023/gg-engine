@@ -465,59 +465,42 @@ impl Renderer {
         let ui_push = self.ui.push(extent);
 
         let mut frame = self.transients.frame(&mut self.rhi, extent)?;
-        let backbuffer = frame.backbuffer();
-        let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT)?;
-        let depth = frame.depth_at("scene.depth", view_extent)?;
-        let shadows = shadow_maps(&mut frame, sun)?;
-        let shadow_textures: Vec<TextureIndex> =
-            shadows.iter().filter_map(|id| frame.texture(*id)).collect();
-        let grid = histogram
-            .then(|| frame.color_at("luminance.grid", luminance::GRID, SCENE_FORMAT))
-            .transpose()?;
-        let post_push = self.pass.post_push(&frame, scene)?;
-
-        let prepass_draws = prepass_draws(&self.pass, &self.scene);
-        let shadow_draws: Vec<Vec<DrawSpec<'_>>> = (0..shadows.len())
-            .map(|cascade| shadow_draws(&self.pass, &self.scene, cascade))
-            .collect();
-        let shadow_slices: Vec<&[DrawSpec<'_>]> = shadow_draws.iter().map(Vec::as_slice).collect();
-        let forward_draws = forward_draws(&self.pass, &self.scene);
-        let post_draws = [self.pass.post_draw(&post_push)];
-        let samples = [scene];
-        let forward_samples: Vec<graph::ResourceId> = shadows.clone();
-        let mut declared = scene_graph(&SceneFrame {
-            backbuffer,
-            scene,
-            depth,
-            shadows: &shadows,
-            clear: color,
-            viewport: self.viewport,
-            prepass_draws: &prepass_draws,
-            shadow_draws: &shadow_slices,
-            forward_draws: &forward_draws,
-            post_draws: &post_draws,
-            samples: &samples,
-            forward_samples: &forward_samples,
-        });
+        let att = scene_attachments(&mut frame, view_extent, sun, histogram)?;
+        let post_push = self.pass.post_push(&frame, att.scene)?;
+        let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push);
         let ui_draws: Vec<DrawSpec<'_>> = self.ui.draw(&ui_push).into_iter().collect();
-        if !ui_draws.is_empty() {
-            declared.push(ui_pass(backbuffer, &ui_draws));
-        }
-        let downsample_draws = [self.pass.downsample_draw(&post_push)];
-        if let Some(grid) = grid {
-            let into = frame.readback_buffer("render.luminance", self.luminance.buffer(slot));
-            declared.extend(luminance_passes(grid, into, &samples, &downsample_draws));
+        let luminance = att.grid.map(|grid| {
+            (
+                grid,
+                frame.readback_buffer("render.luminance", self.luminance.buffer(slot)),
+            )
+        });
+        let shadow_slices = draws.shadow_slices();
+        let declared = declare_frame(
+            &att,
+            &draws,
+            &shadow_slices,
+            &FramePlan {
+                clear: color,
+                viewport: self.viewport,
+                ui: &ui_draws,
+                readback: None,
+                luminance,
+            },
+        );
+        if luminance.is_some() {
             self.luminance.mark(slot);
         }
         let compiled = frame.compile(&declared)?;
         // After `compile`, which is where the graph hands the RHI back — and
         // before `execute`, which is the only thing that lets the GPU see it.
-        self.lighting.write(
+        write_lighting(
+            &mut self.lighting,
             &mut self.rhi,
             slot,
-            view.view_projection(view_extent),
-            &extracted.lights,
-            &shadow_textures,
+            view,
+            &att,
+            extracted,
         )?;
         self.rhi.execute(token, &compiled.passes())
     }
@@ -535,43 +518,39 @@ impl Renderer {
         // the next frame's lights will be is not knowable here.
         let sun = self.lighting.sun();
         let view_extent = view_extent(self.viewport, extent);
+        // Before the frame takes the RHI; the buffer below is named, never
+        // written — nothing here is submitted.
+        let slot = GraphContext::frame_slot(&self.rhi);
+        let histogram = luminance::Luminance::enabled();
         let mut frame = self.transients.frame(&mut self.rhi, extent)?;
-        let backbuffer = frame.backbuffer();
-        let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT)?;
-        let depth = frame.depth_at("scene.depth", view_extent)?;
-        let shadows = shadow_maps(&mut frame, sun)?;
-        let post_push = self.pass.post_push(&frame, scene)?;
-        let prepass_draws = prepass_draws(&self.pass, &self.scene);
-        let shadow_draws: Vec<Vec<DrawSpec<'_>>> = (0..shadows.len())
-            .map(|cascade| shadow_draws(&self.pass, &self.scene, cascade))
-            .collect();
-        let shadow_slices: Vec<&[DrawSpec<'_>]> = shadow_draws.iter().map(Vec::as_slice).collect();
-        let forward_draws = forward_draws(&self.pass, &self.scene);
-        let post_draws = [self.pass.post_draw(&post_push)];
-        let samples = [scene];
-        let forward_samples: Vec<graph::ResourceId> = shadows.clone();
-        let mut declared = scene_graph(&SceneFrame {
-            backbuffer,
-            scene,
-            depth,
-            shadows: &shadows,
-            clear: [0.0; 4],
-            viewport: self.viewport,
-            prepass_draws: &prepass_draws,
-            shadow_draws: &shadow_slices,
-            forward_draws: &forward_draws,
-            post_draws: &post_draws,
-            samples: &samples,
-            forward_samples: &forward_samples,
-        });
+        let att = scene_attachments(&mut frame, view_extent, sun, histogram)?;
+        let post_push = self.pass.post_push(&frame, att.scene)?;
+        let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push);
         // The UI pass as the *last* frame declared it: what the next one draws
         // is not knowable here, and a dump that always omitted it would print a
         // graph the screen never runs.
         let ui_push = self.ui.push(extent);
         let ui_draws: Vec<DrawSpec<'_>> = self.ui.draw(&ui_push).into_iter().collect();
-        if !ui_draws.is_empty() {
-            declared.push(ui_pass(backbuffer, &ui_draws));
-        }
+        // Declared but not marked: no submit means no readback to wait on.
+        let luminance = att.grid.map(|grid| {
+            (
+                grid,
+                frame.readback_buffer("render.luminance", self.luminance.buffer(slot)),
+            )
+        });
+        let shadow_slices = draws.shadow_slices();
+        let declared = declare_frame(
+            &att,
+            &draws,
+            &shadow_slices,
+            &FramePlan {
+                clear: [0.0; 4],
+                viewport: self.viewport,
+                ui: &ui_draws,
+                readback: None,
+                luminance,
+            },
+        );
         Ok(frame.compile(&declared)?.dump())
     }
 
@@ -806,57 +785,31 @@ impl OffscreenRenderer {
         self.ui.write(&mut self.rhi, 0, ui)?;
         let ui_push = self.ui.push(self.extent);
         let mut frame = self.transients.frame(&mut self.rhi, self.extent)?;
-        let backbuffer = frame.backbuffer();
-        let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT)?;
-        let depth = frame.depth_at("scene.depth", view_extent)?;
-        let shadows = shadow_maps(&mut frame, sun)?;
-        let shadow_textures: Vec<TextureIndex> =
-            shadows.iter().filter_map(|id| frame.texture(*id)).collect();
-        let grid = histogram
-            .then(|| frame.color_at("luminance.grid", luminance::GRID, SCENE_FORMAT))
-            .transpose()?;
+        let att = scene_attachments(&mut frame, view_extent, sun, histogram)?;
         let into = frame.readback_buffer("render.offscreen.readback", self.readback);
-        let post_push = self.pass.post_push(&frame, scene)?;
-
-        let prepass_draws = prepass_draws(&self.pass, &self.scene);
-        let shadow_draws: Vec<Vec<DrawSpec<'_>>> = (0..shadows.len())
-            .map(|cascade| shadow_draws(&self.pass, &self.scene, cascade))
-            .collect();
-        let shadow_slices: Vec<&[DrawSpec<'_>]> = shadow_draws.iter().map(Vec::as_slice).collect();
-        let forward_draws = forward_draws(&self.pass, &self.scene);
-        let post_draws = [self.pass.post_draw(&post_push)];
-        let samples = [scene];
-        let forward_samples: Vec<graph::ResourceId> = shadows.clone();
-        let mut declared = scene_graph(&SceneFrame {
-            backbuffer,
-            scene,
-            depth,
-            shadows: &shadows,
-            clear: color,
-            viewport: self.viewport,
-            prepass_draws: &prepass_draws,
-            shadow_draws: &shadow_slices,
-            forward_draws: &forward_draws,
-            post_draws: &post_draws,
-            samples: &samples,
-            forward_samples: &forward_samples,
-        });
+        let post_push = self.pass.post_push(&frame, att.scene)?;
+        let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push);
         let ui_draws: Vec<DrawSpec<'_>> = self.ui.draw(&ui_push).into_iter().collect();
-        if !ui_draws.is_empty() {
-            declared.push(ui_pass(backbuffer, &ui_draws));
-        }
-        // Readback last, so the image judged is the one the screen would get —
-        // UI included (§4.10).
-        declared.push(graph::readback_pass(backbuffer, into));
-        let downsample_draws = [self.pass.downsample_draw(&post_push)];
-        if let Some(grid) = grid {
-            let grid_into = frame.readback_buffer("render.luminance", self.luminance.buffer(0));
-            declared.extend(luminance_passes(
+        let luminance = att.grid.map(|grid| {
+            (
                 grid,
-                grid_into,
-                &samples,
-                &downsample_draws,
-            ));
+                frame.readback_buffer("render.luminance", self.luminance.buffer(0)),
+            )
+        });
+        let shadow_slices = draws.shadow_slices();
+        let declared = declare_frame(
+            &att,
+            &draws,
+            &shadow_slices,
+            &FramePlan {
+                clear: color,
+                viewport: self.viewport,
+                ui: &ui_draws,
+                readback: Some(into),
+                luminance,
+            },
+        );
+        if luminance.is_some() {
             self.luminance.mark(0);
         }
 
@@ -864,13 +817,7 @@ impl OffscreenRenderer {
         let dump = compiled.dump();
         let passes = compiled.passes();
         let order = passes.iter().map(|p| p.name.to_string()).collect();
-        self.lighting.write(
-            &mut self.rhi,
-            0,
-            view.view_projection(self.extent),
-            &extracted.lights,
-            &shadow_textures,
-        )?;
+        write_lighting(&mut self.lighting, &mut self.rhi, 0, view, &att, extracted)?;
         self.rhi.execute(&passes)?;
         // A blocking submit, so unlike the windowed path this is current rather
         // than two frames old.
@@ -938,9 +885,6 @@ fn stream(
     Ok(())
 }
 
-/// Boxes then pack meshes, as one list. Two pipelines inside one pass rather
-/// than a pass each: they write the same attachments, so a second prepass would
-/// be a second set of derived barriers around no new resource.
 /// One line per frame naming what batching bought: entities extracted, of which
 /// culled, staged as instances, issued as draws. On a target of its own and at
 /// `debug`, exactly like the per-tick hash (§5.6c) — a human's terminal must not
@@ -963,6 +907,9 @@ fn report_draws(scene: &ScenePass, extracted: &Extracted) {
     }
 }
 
+/// Boxes then pack meshes, as one list. Two pipelines inside one pass rather
+/// than a pass each: they write the same attachments, so a second prepass would
+/// be a second set of derived barriers around no new resource.
 fn prepass_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass) -> Vec<DrawSpec<'a>> {
     let mut draws = pass.draws(pass.prepass);
     draws.extend(scene.draws(scene.prepass()));
@@ -975,17 +922,6 @@ fn forward_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass) -> Vec<DrawSpec<'a
     draws
 }
 
-/// The same geometry through the sun's projection. Both pipelines, one pass: a
-/// second shadow pass per pass-that-casts would be a second set of derived
-/// barriers around one attachment.
-///
-/// **Unbiased**, and that is the fix rather than an omission (§6 M11's exit
-/// row). Rasterizer depth bias corrects the wrong end — it moves the depth the
-/// map *records*, so one receiver's bias follows the caster onto every other
-/// receiver behind it — and it is not portable: for a float depth attachment the
-/// constant term is scaled by an implementation-dependent `r`, which would make
-/// a blessed reference (§4.10) a property of the driver. Both jobs are done at
-/// the lookup instead, in `include/pbr.slang`.
 /// Whether `instance` can cast into `cascade`, for a sun travelling `direction`.
 ///
 /// A **cylinder** test, not a sphere one, and the difference is the whole point:
@@ -1032,10 +968,188 @@ fn shadow_maps(
         .collect()
 }
 
+/// The same geometry through the sun's projection. Both pipelines, one pass: a
+/// second shadow pass per pass-that-casts would be a second set of derived
+/// barriers around one attachment.
+///
+/// **Unbiased**, and that is the fix rather than an omission (§6 M11's exit
+/// row). Rasterizer depth bias corrects the wrong end — it moves the depth the
+/// map *records*, so one receiver's bias follows the caster onto every other
+/// receiver behind it — and it is not portable: for a float depth attachment the
+/// constant term is scaled by an implementation-dependent `r`, which would make
+/// a blessed reference (§4.10) a property of the driver. Both jobs are done at
+/// the lookup instead, in `include/pbr.slang`.
 fn shadow_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass, cascade: usize) -> Vec<DrawSpec<'a>> {
     let mut draws = pass.shadow_draws(cascade);
     draws.extend(scene.shadow_draws(cascade));
     draws
+}
+
+/// Every attachment a frame allocates, and the extent they were sized from.
+///
+/// `view_extent` rides along rather than being recomputed by each caller: the
+/// lighting block's projection has to be the one the attachments and the
+/// shell's culling frustum agree on, and the entry points that each picked it
+/// by hand had already drifted apart on it.
+struct SceneAttachments {
+    /// What the projection, the frustum and the scene attachments agree on —
+    /// the *viewport's* extent, never the surface's. See [`view_extent`].
+    view_extent: (u32, u32),
+    backbuffer: graph::ResourceId,
+    scene: graph::ResourceId,
+    depth: graph::ResourceId,
+    /// One per cascade, nearest first; empty when nothing casts (§6 M15.3).
+    shadows: Vec<graph::ResourceId>,
+    /// `shadows` as bindless slots, for the lighting block.
+    shadow_textures: Vec<TextureIndex>,
+    /// The luminance target, when `r.histogram` is on (§6 M11).
+    grid: Option<graph::ResourceId>,
+}
+
+/// Acquire them, in the order the graph dump lists resources.
+fn scene_attachments(
+    frame: &mut graph::Frame<'_>,
+    view_extent: (u32, u32),
+    sun: Option<lighting::Sun>,
+    histogram: bool,
+) -> Result<SceneAttachments, RhiError> {
+    let backbuffer = frame.backbuffer();
+    let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT)?;
+    let depth = frame.depth_at("scene.depth", view_extent)?;
+    let shadows = shadow_maps(frame, sun)?;
+    let shadow_textures = shadows.iter().filter_map(|id| frame.texture(*id)).collect();
+    let grid = histogram
+        .then(|| frame.color_at("luminance.grid", luminance::GRID, SCENE_FORMAT))
+        .transpose()?;
+    Ok(SceneAttachments {
+        view_extent,
+        backbuffer,
+        scene,
+        depth,
+        shadows,
+        shadow_textures,
+        grid,
+    })
+}
+
+/// One frame's draw lists. Owned because [`SceneFrame`] and the [`Declared`]s
+/// built from it borrow them until the graph is compiled.
+struct SceneDraws<'a> {
+    prepass: Vec<DrawSpec<'a>>,
+    /// One list per cascade, in `shadows` order.
+    shadow: Vec<Vec<DrawSpec<'a>>>,
+    forward: Vec<DrawSpec<'a>>,
+    post: [DrawSpec<'a>; 1],
+    /// The luminance resample — the post draw without the curve (§6 M11).
+    downsample: [DrawSpec<'a>; 1],
+    /// What the post and resample passes sample.
+    samples: [graph::ResourceId; 1],
+}
+
+impl<'a> SceneDraws<'a> {
+    fn build(
+        pass: &'a BoxPass,
+        scene: &'a ScenePass,
+        att: &SceneAttachments,
+        post_push: &'a post_shader::PostPush,
+    ) -> Self {
+        SceneDraws {
+            prepass: prepass_draws(pass, scene),
+            shadow: (0..att.shadows.len())
+                .map(|cascade| shadow_draws(pass, scene, cascade))
+                .collect(),
+            forward: forward_draws(pass, scene),
+            post: [pass.post_draw(post_push)],
+            downsample: [pass.downsample_draw(post_push)],
+            samples: [att.scene],
+        }
+    }
+
+    /// The per-cascade view [`SceneFrame`] takes. Handed back rather than held
+    /// because it borrows `self`, and a struct cannot borrow its own field.
+    fn shadow_slices(&self) -> Vec<&[DrawSpec<'a>]> {
+        self.shadow.iter().map(Vec::as_slice).collect()
+    }
+}
+
+/// The three things the entry points genuinely differ on, once the graph itself
+/// does not.
+struct FramePlan<'a> {
+    clear: [f32; 4],
+    viewport: Option<Viewport>,
+    /// Empty declares no UI pass at all.
+    ui: &'a [DrawSpec<'a>],
+    /// Where the finished backbuffer is copied — the offscreen path's present.
+    readback: Option<graph::ResourceId>,
+    /// The luminance grid and the buffer it lands in (§6 M11).
+    luminance: Option<(graph::ResourceId, graph::ResourceId)>,
+}
+
+/// A whole frame in submission order: §4.5's scene graph, the UI layer over it,
+/// the readback where a present would be, then the luminance pair.
+///
+/// One function because the entry points had each assembled this by hand, and
+/// hand-copied assembly is what let the projection they lit by diverge from the
+/// one their attachments were sized for.
+fn declare_frame<'a>(
+    att: &'a SceneAttachments,
+    draws: &'a SceneDraws<'a>,
+    shadow_slices: &'a [&'a [DrawSpec<'a>]],
+    plan: &FramePlan<'a>,
+) -> Vec<Declared<'a>> {
+    let mut declared = scene_graph(&SceneFrame {
+        backbuffer: att.backbuffer,
+        scene: att.scene,
+        depth: att.depth,
+        shadows: &att.shadows,
+        clear: plan.clear,
+        viewport: plan.viewport,
+        prepass_draws: &draws.prepass,
+        shadow_draws: shadow_slices,
+        forward_draws: &draws.forward,
+        post_draws: &draws.post,
+        samples: &draws.samples,
+        forward_samples: &att.shadows,
+    });
+    if !plan.ui.is_empty() {
+        declared.push(ui_pass(att.backbuffer, plan.ui));
+    }
+    // After the UI, so the image judged is the one the screen would get (§4.10).
+    if let Some(into) = plan.readback {
+        declared.push(graph::readback_pass(att.backbuffer, into));
+    }
+    if let Some((grid, into)) = plan.luminance {
+        declared.extend(luminance_passes(
+            grid,
+            into,
+            &draws.samples,
+            &draws.downsample,
+        ));
+    }
+    declared
+}
+
+/// Stage the lighting block, projected by the extent the attachments were sized
+/// from.
+///
+/// Takes the attachments rather than an extent so there is no second number to
+/// pass wrongly: `ugly.slang` reads exactly this matrix for the box prepass and
+/// the forward pass, and under a viewport the surface's aspect is not it.
+fn write_lighting(
+    lighting: &mut lighting::Lighting,
+    rhi: &mut impl GpuHost,
+    slot: u64,
+    view: &View,
+    att: &SceneAttachments,
+    extracted: &Extracted,
+) -> Result<(), RhiError> {
+    lighting.write(
+        rhi,
+        slot,
+        view.view_projection(att.view_extent),
+        &extracted.lights,
+        &att.shadow_textures,
+    )
 }
 
 /// The boxes, and the four pipelines that draw them: prepass, shadow, forward,
@@ -1812,15 +1926,6 @@ mod tests {
         );
     }
 
-    /// The whole path with no window in it, through the whole graph: a game
-    /// component, extract's narrowing, the push constants, a depth prepass, the
-    /// forward pass over its result, the fullscreen resolve, and pixels back
-    /// through §4.5's readback pass (§1.5 — the only rendering an automated tier
-    /// is allowed to do).
-    ///
-    /// This is the v1 pass list end to end. The shell runs the same four minus
-    /// the readback, and the shell is windowed and therefore manual — so this is
-    /// where the derived barriers between prepass, forward and post are proven.
     /// One red box, dead ahead, and a sun to see it by.
     fn one_lit_box(sun: bool) -> Extracted {
         use gg_ecs::World;
@@ -1862,6 +1967,15 @@ mod tests {
         extracted
     }
 
+    /// The whole path with no window in it, through the whole graph: a game
+    /// component, extract's narrowing, the push constants, a depth prepass, the
+    /// forward pass over its result, the fullscreen resolve, and pixels back
+    /// through §4.5's readback pass (§1.5 — the only rendering an automated tier
+    /// is allowed to do).
+    ///
+    /// This is the v1 pass list end to end. The shell runs the same four minus
+    /// the readback, and the shell is windowed and therefore manual — so this is
+    /// where the derived barriers between prepass, forward and post are proven.
     #[test]
     fn the_v1_pass_list_puts_a_declared_box_on_the_target() {
         const EXTENT: (u32, u32) = (64, 64);
