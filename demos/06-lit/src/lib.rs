@@ -256,11 +256,7 @@ pub fn present(world: &mut GameWorld) {
     };
     world.put(
         entity,
-        Eye {
-            position: visitor.position,
-            yaw: visitor.yaw,
-            pitch: visitor.pitch,
-        },
+        Eye::at(visitor.position, visitor.yaw, visitor.pitch),
     );
 
     let direction = sun_direction(visitor.phase);

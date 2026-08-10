@@ -923,6 +923,25 @@ fn aarch64_leg() -> anyhow::Result<()> {
             ]),
             &format!("the recorded Tetris game on aarch64 under qemu ({profile} profile)"),
         )?;
+        // demo-11-platformer joins at M20, demo 10's arrangement exactly — its
+        // recorded run against the same checked-in baseline the tier gate
+        // compares, with the level arriving out of `scene.ggsave` first. The
+        // sim is f64 `+ - * /` and comparisons only (§6 M20 pull 3), so this
+        // leg is the milestone's cross-architecture claim about that
+        // arithmetic and the scene decode both.
+        exec(
+            cargo().args([
+                "nextest",
+                "run",
+                "-p",
+                "demo-11-platformer",
+                "--target",
+                "aarch64-unknown-linux-gnu",
+                "--cargo-profile",
+                profile,
+            ]),
+            &format!("the recorded platformer run on aarch64 under qemu ({profile} profile)"),
+        )?;
     }
     Ok(())
 }

@@ -145,11 +145,7 @@ pub fn bootstrap(world: &mut GameWorld) {
             Renderable::boxed(chest_at(index), sim::Vec3::new(0.4, 0.3, 0.4), SHUT),
         );
     }
-    world.spawn_with(Eye {
-        position: sim::DVec3::new(0.0, 7.0, 4.0),
-        yaw: 0.0,
-        pitch: -0.8,
-    });
+    world.spawn_with(Eye::at(sim::DVec3::new(0.0, 7.0, 4.0), 0.0, -0.8));
     world.log(log_level::INFO, "demo 08: a field of twelve chests");
 }
 

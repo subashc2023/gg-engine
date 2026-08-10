@@ -17,6 +17,16 @@ pub static FOV: CVar = CVar::new_float("r.fov", 1.0, "vertical field of view, ra
 /// a rebuild.
 pub static NEAR: CVar = CVar::new_float("r.near", 0.05, "near plane distance");
 
+/// The orthographic path's far plane (§6 M20). Perspective keeps its far at
+/// infinity (§2) and never reads this; an orthographic projection *must* pick a
+/// finite one, and with ortho depth linear in `D32_SFLOAT` a generous value
+/// costs nothing — 500 m of slab still resolves to sub-millimetres. A host
+/// knob rather than a game field because it is a clipping bound, not framing:
+/// the game's [`gg_ecs::boundary::Eye::ortho`] says how much world is *seen*,
+/// this says how deep the seen slab reaches.
+pub static ORTHO_FAR: CVar =
+    CVar::new_float("r.ortho_far", 500.0, "orthographic far plane, metres");
+
 /// Bytes of pack content one frame may copy to the device (§4.6).
 ///
 /// A knob rather than a constant because the right value is the machine's, not
@@ -167,6 +177,7 @@ pub fn register() -> Result<(), CVarError> {
     cvar::register_all(&[
         &FOV,
         &NEAR,
+        &ORTHO_FAR,
         &UPLOAD_BUDGET,
         &EXPOSURE,
         &AMBIENT,

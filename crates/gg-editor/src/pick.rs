@@ -29,9 +29,13 @@ pub(crate) struct Lens {
     right: sim::DVec3,
     up: sim::DVec3,
     forward: sim::DVec3,
-    /// `tan(fov_y / 2)`: the image plane's half-height at unit depth.
+    /// The image plane's half-height: `tan(fov_y / 2)` at unit depth for a
+    /// perspective eye, world metres at every depth for an orthographic one.
     extent: f64,
     aspect: f64,
+    /// The eye declared `Eye::ortho` (§6 M20): rays are parallel, `extent` is
+    /// metres, and depth scales nothing.
+    ortho: bool,
     /// Metres in front of the eye that the frame's near plane sits at — where a
     /// segment reaching behind the camera has to be cut.
     pub(crate) near: f64,
@@ -39,7 +43,9 @@ pub(crate) struct Lens {
 
 impl Lens {
     /// The camera at `eye` with `fov_y` radians of vertical view over `aspect`,
-    /// clipped at `near`.
+    /// clipped at `near` — or, when `eye.ortho` is nonzero, the orthographic
+    /// camera that same eye is (§6 M20), where `fov_y` goes unread exactly as
+    /// the renderer leaves it unread.
     ///
     /// `aspect` is the *rendered* rectangle's, not the pane's: the two differ by
     /// the rounding `viewport_rect` does, and the picture was drawn with the
@@ -48,26 +54,42 @@ impl Lens {
     /// console last moved it.
     pub(crate) fn new(eye: Eye, fov_y: f64, aspect: f64, near: f64) -> Lens {
         let (right, up, forward) = basis(eye.yaw, eye.pitch);
+        let ortho = eye.ortho > 0.0;
         Lens {
             origin: eye.position,
             right,
             up,
             forward,
-            // `gg_math::sim` and not `std`, per §3's ban: this decides which
-            // entity a click selects and a libm the two hosts disagree about
-            // would decide it differently.
-            extent: sim::tan(fov_y * 0.5),
+            extent: match ortho {
+                true => f64::from(eye.ortho),
+                // `gg_math::sim` and not `std`, per §3's ban: this decides which
+                // entity a click selects and a libm the two hosts disagree about
+                // would decide it differently.
+                false => sim::tan(fov_y * 0.5),
+            },
             aspect,
+            ortho,
             near,
         }
     }
 
     /// The ray through `at` — a position **inside** the viewport in `[0, 1]`,
     /// `(0, 0)` at its top-left corner.
+    ///
+    /// Orthographic rays all travel `forward`; what varies with `at` is where
+    /// they start. The perspective shape is the reverse — one origin, a fan of
+    /// directions — and everything downstream takes either, because a ray is a
+    /// ray.
     pub(crate) fn ray(&self, at: (f64, f64)) -> Ray {
         let x = (at.0 * 2.0 - 1.0) * self.extent * self.aspect;
         // Flipped: `at` counts down the pane and the camera's up axis counts up.
         let y = (1.0 - at.1 * 2.0) * self.extent;
+        if self.ortho {
+            return Ray {
+                origin: self.origin + self.right * x + self.up * y,
+                direction: self.forward,
+            };
+        }
         let direction = self.forward + self.right * x + self.up * y;
         Ray {
             origin: self.origin,
@@ -83,11 +105,17 @@ impl Lens {
     ///
     /// The depth is returned rather than used: a point at or behind the eye has
     /// no position on the pane at all, and which of `near`, "skip it" or "cut
-    /// the segment here" is right belongs to whoever is drawing.
+    /// the segment here" is right belongs to whoever is drawing. An
+    /// orthographic pane position ignores depth — parallel projection is what
+    /// that means — but the depth still orders and still cuts.
     pub(crate) fn project(&self, point: sim::DVec3) -> ((f64, f64), f64) {
         let to = point - self.origin;
         let depth = to.dot(self.forward);
-        let scale = self.extent * depth;
+        let scale = self.extent
+            * match self.ortho {
+                true => 1.0,
+                false => depth,
+            };
         let at = (
             (to.dot(self.right) / (scale * self.aspect) + 1.0) * 0.5,
             (1.0 - to.dot(self.up) / scale) * 0.5,
@@ -100,9 +128,15 @@ impl Lens {
     ///
     /// What sizes a gizmo that has to stay the same size on screen however far
     /// away the thing it is attached to is — the alternative being a handle that
-    /// is a pixel wide across a room and fills the window up close.
+    /// is a pixel wide across a room and fills the window up close. Under an
+    /// orthographic eye the answer never depended on `depth`, which is the same
+    /// fact as the renderer's equal-width boxes.
     pub(crate) fn metres_per_unit(&self, depth: f64, height: f64) -> f64 {
-        2.0 * self.extent * depth / height.max(1.0)
+        let reach = match self.ortho {
+            true => self.extent,
+            false => self.extent * depth,
+        };
+        2.0 * reach / height.max(1.0)
     }
 
     /// `from` moved along the segment to `to` until it is `near` in front of the
@@ -306,6 +340,48 @@ mod tests {
                 "{point:?} landed at {along:?}"
             );
         }
+    }
+
+    /// The orthographic lens (§6 M20): rays are parallel — one direction, a
+    /// plane of origins — and the projection is its inverse from an off-centre,
+    /// turned camera, exactly as the perspective round trip is checked.
+    #[test]
+    fn an_orthographic_lens_casts_parallel_rays_and_projects_back() {
+        let eye = Eye {
+            ortho: 4.5,
+            ..Eye::at(sim::DVec3::new(-3.0, 12.0, 40.0), 0.7, -0.35)
+        };
+        let lens = Lens::new(eye, FOV, 16.0 / 9.0, NEAR);
+        let (centre, corner) = (lens.ray((0.5, 0.5)), lens.ray((0.9, 0.1)));
+        assert!(
+            (centre.direction - corner.direction).length() < 1e-12,
+            "every ray travels the same way"
+        );
+        assert!(
+            (corner.origin - centre.origin).length() > 1.0,
+            "and they differ by where they start"
+        );
+        for point in [
+            sim::DVec3::new(0.0, 0.0, 0.0),
+            sim::DVec3::new(-9.0, 14.0, 20.0),
+            sim::DVec3::new(4.0, 11.0, 33.0),
+        ] {
+            let (at, depth) = lens.project(point);
+            assert!(depth > 0.0, "{point:?} is in front of the camera");
+            let along = lens.ray(at);
+            let landed = along.origin + along.direction * depth;
+            assert!(
+                (landed - point).length() < 1e-9,
+                "{point:?} landed at {landed:?}"
+            );
+        }
+        // A gizmo under this lens is the same size at any depth — the pick-side
+        // statement of "no foreshortening", and what keeps a handle grabbable
+        // on whatever slab the operator parked furthest away.
+        assert_eq!(
+            lens.metres_per_unit(2.0, 360.0),
+            lens.metres_per_unit(200.0, 360.0)
+        );
     }
 
     /// A segment reaching behind the camera is cut at the near plane and not at

@@ -195,11 +195,7 @@ pub fn present(world: &mut GameWorld) {
     };
     world.put(
         entity,
-        Eye {
-            position: visitor.position,
-            yaw: visitor.yaw,
-            pitch: visitor.pitch,
-        },
+        Eye::at(visitor.position, visitor.yaw, visitor.pitch),
     );
 
     let chosen = TINTS[visitor.tint as usize % TINTS.len()];

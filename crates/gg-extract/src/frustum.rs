@@ -6,18 +6,17 @@
 //! arithmetic in `f64` for a decision that is a `bool` — and a bounding volume
 //! is a *local* quantity, exactly like a half-extent (§1.4).
 //!
-//! # Five planes, not six
+//! # Five planes, or six
 //!
-//! The far plane is at infinity (§2, Math row: reverse-Z with an infinite far
-//! plane), and the constraint it would impose — `z_clip >= 0` — is satisfied by
-//! every point in front of the eye. Extracting it anyway yields a degenerate
-//! plane with a zero normal, which normalizes to `NaN` and quietly rejects
-//! everything. So there are five, and this comment is why.
-//!
-//! That is an assumption about the *caller's* matrix, so it is checked rather
-//! than trusted: a projection with a finite far — an orthographic one — trips a
-//! debug assertion instead of silently producing a culler that keeps everything
-//! past its own far plane (§6 M18).
+//! The perspective far plane is at infinity (§2, Math row: reverse-Z with an
+//! infinite far plane), and the constraint it would impose — `z_clip >= 0` — is
+//! satisfied by every point in front of the eye. Extracting it anyway yields a
+//! degenerate plane with a zero normal, which normalizes to `NaN` and quietly
+//! rejects everything. An orthographic projection (§6 M20) takes a *finite* far,
+//! and dropping that one keeps every instance behind it — a hole no picture
+//! shows, because more is drawn rather than less (§6 M18 item 8). So the count
+//! is read off the matrix: a far row with no normal is the infinite case and
+//! contributes no plane, one with a normal is a sixth plane like any other.
 //!
 //! # Spheres, not boxes
 //!
@@ -43,12 +42,16 @@ impl Plane {
     }
 }
 
-/// The camera-relative view frustum, as five inward half-spaces.
+/// The camera-relative view frustum, as five or six inward half-spaces.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Frustum {
-    planes: [Plane; 5],
+    planes: [Plane; 6],
+    /// Live planes in `planes` — 5 for an infinite far, 6 for a finite one. The
+    /// slot past `count` is never read, so it holds the degenerate plane rather
+    /// than a sentinel.
+    count: usize,
     /// Set by [`Frustum::UNBOUNDED`] — a frustum that keeps everything, for
-    /// hosts and tests that do not cull. A flag rather than five planes placed
+    /// hosts and tests that do not cull. A flag rather than planes placed
     /// at infinity, because a plane at infinity is exactly the degenerate case
     /// the module doc warns about.
     unbounded: bool,
@@ -61,26 +64,19 @@ impl Frustum {
         planes: [Plane {
             normal: render::Vec3::ZERO,
             distance: 0.0,
-        }; 5],
+        }; 6],
+        count: 0,
         unbounded: true,
     };
 
-    /// The five planes of a camera-relative view-projection matrix, by the
-    /// Gribb–Hartmann rows.
+    /// The planes of a camera-relative view-projection matrix, by the
+    /// Gribb–Hartmann rows — five for a perspective matrix (far at infinity),
+    /// six for an orthographic one (finite far). See the module's *Five planes,
+    /// or six* note for how the matrix itself is what decides.
     ///
     /// `view_projection` must be the *camera-relative* one — the eye at the
     /// origin — which is the only kind this engine builds (see
     /// [`gg_math::render::perspective_reverse_z`] and `gg-render`'s `View`).
-    ///
-    /// # Panics
-    ///
-    /// In debug builds, if the projection's far plane is **finite** — see the
-    /// module's *Five planes* note. Dropping a real far plane keeps every
-    /// instance behind it, which is a hole no test looks for and no picture
-    /// shows; §6 M18 named it as the third thing a game asked for that the
-    /// engine could not do, and a milestone rather than a field on `Eye` is
-    /// where an orthographic camera arrives (§6 M15.2). Until then the trap is
-    /// loud instead of latent.
     #[must_use]
     pub fn from_view_projection(view_projection: render::Mat4) -> Frustum {
         let m = render::rows(view_projection);
@@ -104,28 +100,37 @@ impl Frustum {
                 a[3] + sign * b[3],
             ]
         };
-        // The far plane, named only to prove it is the degenerate one the
-        // five-plane story requires. Vulkan clips to `0 <= z <= w`, so the far
-        // constraint `z >= 0` is row 2 on its own rather than a combination of
-        // two: `perspective_reverse_z` leaves it `[0, 0, 0, near]` — no normal at
-        // all — while `orthographic_reverse_z` puts `1 / (far - near)` there,
-        // which for any range a camera would use is orders of magnitude above
-        // this.
-        debug_assert!(
-            render::Vec3::new(m[2][0], m[2][1], m[2][2]).length_squared() <= 1e-12,
-            "the far plane is finite, so this is not a projection this culler can \
-             build from — five planes assume the infinite far §2 locks"
-        );
+        // The far constraint — Vulkan clips to `0 <= z <= w`, so `z >= 0` is
+        // row 2 on its own rather than a combination of two (the OpenGL-shaped
+        // `m[3] + m[2]` is for a `[-w, w]` clip range this engine does not
+        // use). `perspective_reverse_z` leaves the row `[0, 0, 0, near]` — no
+        // normal at all, the degenerate plane the module doc warns about —
+        // while `orthographic_reverse_z` puts `1 / (far - near)` there, orders
+        // of magnitude above this threshold for any range a camera would use.
+        let finite_far = render::Vec3::new(m[2][0], m[2][1], m[2][2]).length_squared() > 1e-12;
         Frustum {
             planes: [
                 plane(combine(m[3], m[0], true)),  // left
                 plane(combine(m[3], m[0], false)), // right
                 plane(combine(m[3], m[1], true)),  // bottom
                 plane(combine(m[3], m[1], false)), // top
-                // Near: Vulkan's `z <= w`. Its partner `z >= 0` is the far
-                // plane, which is row 2 alone and is at infinity.
+                // Near: Vulkan's `z <= w`.
                 plane(combine(m[3], m[2], false)),
+                // Far: row 2 alone, normalized only when it exists — slot 5 is
+                // never read in the five-plane case, and normalizing a zero
+                // normal is the NaN the count exists to avoid.
+                match finite_far {
+                    true => plane(m[2]),
+                    false => Plane {
+                        normal: render::Vec3::ZERO,
+                        distance: 0.0,
+                    },
+                },
             ],
+            count: match finite_far {
+                true => 6,
+                false => 5,
+            },
             unbounded: false,
         }
     }
@@ -147,7 +152,7 @@ impl Frustum {
         if self.unbounded || !radius.is_finite() {
             return true;
         }
-        self.planes
+        self.planes[..self.count]
             .iter()
             .all(|plane| plane.distance_to(center) >= -radius)
     }
@@ -164,22 +169,62 @@ mod tests {
         Frustum::from_view_projection(render::perspective_reverse_z(FRAC_PI_3, 1.0, 0.1))
     }
 
-    /// §6 M18's third gap, made loud. The shadow atlas's own projection is the
-    /// nearest finite-far matrix this tree holds, and building a culler from it
-    /// silently kept everything past `far` — a hole that shows in no picture,
-    /// because nothing has ever asked for a second projection.
-    ///
-    /// Compiled out where the assertion is, rather than left passing vacuously:
-    /// the dist profile has no debug assertions and the aarch64 leg runs it, so
-    /// a `should_panic` that survived there would be a test asserting nothing.
-    /// The check is deliberately debug-only — the contract can only be broken by
-    /// new code, and new code is run in a tier that has it.
-    #[cfg(debug_assertions)]
+    /// A 16 m half-extent slab from 0.1 to 200 m — an orthographic camera's
+    /// frustum, which is a box.
+    fn ortho() -> Frustum {
+        Frustum::from_view_projection(render::orthographic_reverse_z(16.0, 16.0, 0.1, 200.0))
+    }
+
+    /// §6 M18's third gap, closed rather than fenced: the five-plane culler
+    /// silently kept everything past a finite far, then M18 item 8 made that a
+    /// debug panic, and this is the test the defect never had — a point beyond
+    /// `far` is *culled*. The near assertion is what makes it a far-plane test:
+    /// a culler that rejected the whole axis would pass the first line too.
     #[test]
-    #[should_panic(expected = "the far plane is finite")]
-    fn a_finite_far_plane_is_refused_rather_than_dropped() {
-        let _ =
-            Frustum::from_view_projection(render::orthographic_reverse_z(16.0, 16.0, 0.1, 200.0));
+    fn an_orthographic_frustum_has_a_far_plane_and_it_culls() {
+        let f = ortho();
+        assert!(
+            !f.contains(render::Vec3::new(0.0, 0.0, -250.0), 0.0),
+            "past far"
+        );
+        assert!(
+            f.contains(render::Vec3::new(0.0, 0.0, -150.0), 0.0),
+            "inside"
+        );
+        // And the plane is where the matrix put it, not merely somewhere: a
+        // sphere centred 10 m past it that reaches back in is kept.
+        assert!(f.contains(render::Vec3::new(0.0, 0.0, -210.0), 10.001));
+        assert!(!f.contains(render::Vec3::new(0.0, 0.0, -210.0), 9.999));
+    }
+
+    /// The four side planes of an orthographic frustum are parallel to the view
+    /// axis: the box is as wide at 150 m as at 1 m, where a perspective frustum
+    /// this test would forgive opens with depth.
+    #[test]
+    fn an_orthographic_frustum_is_a_box_not_a_pyramid() {
+        let f = ortho();
+        for depth in [-1.0, -150.0] {
+            assert!(
+                f.contains(render::Vec3::new(15.9, 0.0, depth), 0.0),
+                "at {depth}"
+            );
+            assert!(
+                !f.contains(render::Vec3::new(16.1, 0.0, depth), 0.0),
+                "at {depth}"
+            );
+        }
+        // A perspective frustum at 150 m is far wider than 16 m — the claim
+        // above discriminates, or this test would pass against five planes.
+        assert!(frustum().contains(render::Vec3::new(16.1, 0.0, -150.0), 0.0));
+    }
+
+    /// Behind the near plane is still out — the sixth plane must not have
+    /// displaced the fifth.
+    #[test]
+    fn an_orthographic_frustum_still_clips_at_the_near_plane() {
+        let f = ortho();
+        assert!(!f.contains(render::Vec3::new(0.0, 0.0, 0.0), 0.05));
+        assert!(f.contains(render::Vec3::new(0.0, 0.0, -0.2), 0.0));
     }
 
     #[test]
@@ -228,10 +273,12 @@ mod tests {
 
     #[test]
     fn the_planes_are_normalized_so_a_radius_is_in_metres() {
-        let f = frustum();
-        for plane in &f.planes {
-            assert!((plane.normal.length() - 1.0).abs() < 1e-5, "{plane:?}");
+        for f in [frustum(), ortho()] {
+            for plane in &f.planes[..f.count] {
+                assert!((plane.normal.length() - 1.0).abs() < 1e-5, "{plane:?}");
+            }
         }
+        let f = frustum();
         // A sphere centred exactly on the near plane's outside, of radius equal
         // to its distance, must just touch: that only holds in metres.
         let on_axis = render::Vec3::new(0.0, 0.0, 0.0);

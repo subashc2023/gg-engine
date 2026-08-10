@@ -187,11 +187,7 @@ pub fn bootstrap(world: &mut GameWorld) {
             0x0058_86b0,
         ));
     }
-    world.spawn_with(Eye {
-        position: sim::DVec3::new(0.0, 0.6, 3.2),
-        yaw: 0.0,
-        pitch: -0.1,
-    });
+    world.spawn_with(Eye::at(sim::DVec3::new(0.0, 0.6, 3.2), 0.0, -0.1));
     world.log(log_level::INFO, "demo 07: hud up, menu closed");
 }
 

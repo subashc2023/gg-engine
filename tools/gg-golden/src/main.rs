@@ -339,6 +339,27 @@ const SCENES: &[Scene] = &[
         },
         render: render_tetris,
     },
+    Scene {
+        name: "platformer",
+        // §6 M20's level under the orthographic camera — the roster's only
+        // ortho subject, and its world is the checked-in `scene.ggsave` seen
+        // through the `Eye` the scene itself holds, so an authored level moves
+        // this reference rather than diverging from it. What it guards that no
+        // unit test can: the ortho projection as a picture (equal-width slabs
+        // at every depth), the box-shaped cascade fit over a flat playfield
+        // (§6 M15.3's open question), and the sixth frustum plane's restraint —
+        // `verify-gates` proves the same plane can *fail* by pulling it inside
+        // the playfield. Judged like `mesh`: flat colours, but every contact
+        // edge carries the shadow kernel's texels.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.25,
+        },
+        render: render_platformer,
+    },
 ];
 
 /// Render demo 02's scene — the same buffers, the same upload path through
@@ -995,6 +1016,106 @@ fn render_boxes_from(view: gg_render::View) -> Render {
         extent,
         graph: frame.dump,
     })
+}
+
+/// Where `verify-gates` pulls the platformer's far plane: the eye stands
+/// [`demo_11_platformer::CAMERA_BACK`] metres out of the z = 0 playfield, so a
+/// far short of that distance culls every slab through the sixth plane alone
+/// and leaves the sky.
+const PLATFORMER_EATEN_FAR: f32 = 10.0;
+
+fn render_platformer() -> Render {
+    render_platformer_far(None)
+}
+
+/// Demo 11's level under the orthographic camera (§6 M20).
+///
+/// Everything is the scene's own data: the slabs, the goal, the player's
+/// opening pose, the sun, and the `Eye` — half-height, position and all — are
+/// read out of `scene.ggsave`, the file the shell loads and the editor
+/// authors, so this reference moves with the level. `far` overrides
+/// `r.ortho_far`'s default: `verify-gates` passes [`PLATFORMER_EATEN_FAR`] to
+/// prove the sixth plane is load-bearing in the picture — M18 item 8's defect
+/// class, expressed as pixels.
+fn render_platformer_far(far: Option<f32>) -> Render {
+    use gg_ecs::boundary::Renderable;
+
+    let extent = BOXES_EXTENT;
+    let (world, eye) = platformer_world()?;
+    let mut view = gg_render::View {
+        yaw: eye.yaw,
+        pitch: eye.pitch,
+        ortho: eye.ortho,
+        ..gg_render::View::default()
+    };
+    anyhow::ensure!(
+        view.ortho > 0.0,
+        "the scene's eye is not orthographic — zero means perspective (§6 M20), and this scene \
+         exists to gate the other projection"
+    );
+    if let Some(far) = far {
+        view.ortho_far = far;
+    }
+    let mut extracted = gg_extract::Extracted::default();
+    extracted.clear(eye.position, view.frustum(extent));
+    extracted.append::<Renderable>(&world)?;
+    extracted.append_lights(&world)?;
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(
+        device = %renderer.device().chosen,
+        culled = extracted.culled,
+        "offscreen device"
+    );
+    let frame = {
+        let _capture = gg_debug::capture::frame();
+        renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?
+    };
+    ensure_clean(&renderer.shutdown())?;
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
+
+/// The checked-in level as a world: every name its manifest carries —
+/// the host's five protocol registrations plus demo 11's seven and `Sound` —
+/// then the save loaded clean, exactly as the shell opens it (§6 M20 item 3).
+fn platformer_world() -> anyhow::Result<(gg_ecs::World, gg_ecs::boundary::Eye)> {
+    use gg_ecs::boundary::{Eye, Light, Model, Renderable, Sound, Widget};
+
+    let path = demo_11_platformer::session::scene_path();
+    let bytes = std::fs::read(&path).map_err(|e| {
+        anyhow::anyhow!(
+            "no level at {} ({e}) — the checked-in scene is the platformer's stage",
+            path.display()
+        )
+    })?;
+    let save = gg_ecs::Save::decode(&bytes)?;
+    let mut world = gg_ecs::World::new();
+    world.register::<Renderable>()?;
+    world.register::<Eye>()?;
+    world.register::<Model>()?;
+    world.register::<Light>()?;
+    world.register::<Widget>()?;
+    world.register::<Sound>()?;
+    world.register::<demo_11_platformer::Player>()?;
+    world.register::<demo_11_platformer::Solid>()?;
+    world.register::<demo_11_platformer::Goal>()?;
+    world.register::<demo_11_platformer::Run>()?;
+    world.register::<demo_11_platformer::Rig>()?;
+    world.register::<demo_11_platformer::Cue>()?;
+    world.register::<demo_11_platformer::Hud>()?;
+    let report = world.load(&save)?;
+    anyhow::ensure!(
+        report.is_clean(),
+        "the scene did not load clean against this build: {report:?}"
+    );
+    let query = gg_ecs::Query::<&Eye>::new()?;
+    let mut eye = None;
+    world.each_ref(&query, |_, e: &Eye| eye = Some(*e));
+    let eye = eye.ok_or_else(|| anyhow::anyhow!("the scene holds no eye to see it through"))?;
+    Ok((world, eye))
 }
 
 /// The UI scenes' extent. Small on purpose: what they gate is glyph coverage
@@ -1685,6 +1806,39 @@ fn verify_gates() -> anyhow::Result<()> {
         drift.dssim_worst,
         drift.mean_bias(),
         drift.region_bias
+    );
+
+    // §6 M20: the finite-far culler proven able to fail, as pixels. The sixth
+    // plane exists only for the orthographic path, and M18 item 8's defect
+    // class — a culler quietly wrong — has two directions: eating too much
+    // shows in a picture, keeping too much never does (the frustum unit tests
+    // hold that side). So the deformation eats: the far plane pulled inside
+    // the playfield must take the level with it, and the exact gate must say
+    // so rather than shrug. A suite whose ortho scene kept rendering with its
+    // culler broken would be the M18 hole re-opened.
+    let policy = SCENES
+        .iter()
+        .find(|s| s.name == "platformer")
+        .map(|s| s.policy)
+        .ok_or_else(|| anyhow::anyhow!("the platformer scene left the roster"))?;
+    let level = render_platformer()?;
+    let eaten = render_platformer_far(Some(PLATFORMER_EATEN_FAR))?;
+    let culled = compare::compare(&eaten.pixels, &level.pixels, level.extent, policy)?;
+    anyhow::ensure!(
+        matches!(culled.verdict(policy), Verdict::Fail),
+        "the far plane was pulled to {PLATFORMER_EATEN_FAR} m — inside the playfield — and the \
+         picture forgave it: {} differing pixel(s) against {}, worst-window DSSIM {:.5}. Either \
+         the sixth plane stopped culling or the level stopped being in frame; both are the \
+         culler no longer load-bearing in this reference.",
+        culled.diff_pixels,
+        policy.max_diff_pixels,
+        culled.dssim_worst,
+    );
+    println!(
+        "gg-golden: the far plane at {PLATFORMER_EATEN_FAR} m takes the level with it — {} \
+         pixel(s) moved, worst-window DSSIM {:.5} — rejected, so the ortho culler can fail (§6 \
+         M20)",
+        culled.diff_pixels, culled.dssim_worst
     );
     Ok(())
 }

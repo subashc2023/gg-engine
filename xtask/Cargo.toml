@@ -53,6 +53,15 @@ demo-08-save = { path = "../demos/08-save", default-features = false }
 # three tier legs. That makes it the only `gg_game!` in this binary's graph, and
 # a second one linked the same way would collide on its fixed extern names.
 demo-10-tetris = { path = "../demos/10-tetris" }
+# M20 (§6): the recorded platformer session — demo 10's arrangement, resolved
+# around the collision its comment names: the `game` feature stays *off*, so no
+# second set of `gg_game_*` symbols links here, and `session::Entry` takes the
+# four exports out of the **built dylib** instead (libloading below) — the
+# host's own road to the same declared tables (§4.2.2).
+demo-11-platformer = { path = "../demos/11-platformer", default-features = false }
+# The loader for exactly that: `shell::platformer_entry` resolves demo 11's
+# entry points from the artifact, the way `gg-runtime` does.
+libloading.workspace = true
 # M5 (§5.6c): the curated demo-03 stream is authored here and driven through the
 # real shell, so xtask needs the two constants the shell's replay header is
 # built from — the tick rate and the Determinism Contract version. Nothing else

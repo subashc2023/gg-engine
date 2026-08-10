@@ -95,23 +95,35 @@ pub struct View {
     pub yaw: f32,
     /// Rotation about the camera's right axis, radians.
     pub pitch: f32,
-    /// Vertical field of view, radians.
+    /// Vertical field of view, radians. Unread while `ortho` is nonzero.
     pub fov_y: f32,
     /// Near plane. With reverse-Z and an infinite far plane this is the *only*
     /// depth-precision knob there is (§2, Math row).
     pub near: f32,
+    /// Vertical half-height of an orthographic view, metres — `0.0` renders
+    /// perspective (§6 M20). Mirrors [`gg_ecs::boundary::Eye`]'s field of the
+    /// same name, and zero-means-perspective is that field's migration
+    /// contract, not a convenience.
+    pub ortho: f32,
+    /// The orthographic far plane, metres. Unread while `ortho` is zero —
+    /// perspective's far is at infinity (§2) and a finite far is the price of
+    /// parallel rays, paid here and in the frustum's sixth plane.
+    pub ortho_far: f32,
 }
 
 impl Default for View {
-    /// Not a constant: `fov_y` and `near` are CVars (§4.8), so *rebuilding* a
-    /// `View` each frame is how a console edit reaches the screen — and a caller
-    /// that keeps one instead has pinned them, deliberately.
+    /// Not a constant: `fov_y`, `near` and `ortho_far` are CVars (§4.8), so
+    /// *rebuilding* a `View` each frame is how a console edit reaches the
+    /// screen — and a caller that keeps one instead has pinned them,
+    /// deliberately.
     fn default() -> Self {
         View {
             yaw: 0.0,
             pitch: 0.0,
             fov_y: cvars::FOV.float() as f32,
             near: cvars::NEAR.float() as f32,
+            ortho: 0.0,
+            ortho_far: cvars::ORTHO_FAR.float() as f32,
         }
     }
 }
@@ -143,7 +155,18 @@ impl View {
             rotation * render::Vec3::NEG_Z,
             rotation * render::Vec3::Y,
         );
-        render::perspective_reverse_z(self.fov_y, aspect, self.near) * view
+        // The second projection path (§6 M20): both are reverse-Z with the same
+        // clear and compare, so the branch ends at the matrix — no pass knows.
+        let projection = match self.ortho > 0.0 {
+            true => render::orthographic_reverse_z(
+                self.ortho * aspect,
+                self.ortho,
+                self.near,
+                self.ortho_far.max(self.near * 2.0),
+            ),
+            false => render::perspective_reverse_z(self.fov_y, aspect, self.near),
+        };
+        projection * view
     }
 }
 
@@ -2037,6 +2060,90 @@ mod tests {
         assert!(
             renderer.shutdown().clean(),
             "no leaks, no validation messages"
+        );
+    }
+
+    /// The second projection path (§6 M20), end to end: the same two boxes
+    /// through the same passes, and the only thing that changed is the matrix.
+    ///
+    /// The claim is orthography itself — no foreshortening. Two identical boxes,
+    /// one 5 m out and one 50 m out, cover the same number of columns under an
+    /// orthographic view; the same scene under the perspective view is rendered
+    /// too and asserted *unequal*, because a measurement that cannot tell the
+    /// two projections apart would pass whatever the branch did. The extract is
+    /// culled by the view's own frustum, so the six-plane culler and the shadow
+    /// fit's box-shaped slice both run inside this test rather than beside it.
+    #[test]
+    fn an_orthographic_view_draws_without_foreshortening() {
+        use gg_ecs::World;
+        use gg_ecs::boundary::{Light, Renderable};
+        use gg_math::sim;
+
+        const EXTENT: (u32, u32) = (64, 64);
+        let mut world = World::new();
+        world.register::<Renderable>().unwrap();
+        world.register::<Light>().unwrap();
+        for (x, z, color) in [(-1.5, -5.0, 0x00ff_0000), (1.5, -50.0, 0x0000_ff00)] {
+            let e = world.spawn();
+            world
+                .insert(
+                    e,
+                    Renderable::boxed(sim::DVec3::new(x, 0.0, z), sim::Vec3::splat(1.0), color),
+                )
+                .unwrap();
+        }
+        let light = world.spawn();
+        world
+            .insert(
+                light,
+                Light::sun(sim::Vec3::new(0.2, -0.4, -1.0), 0x00ff_ffff, 3.0),
+            )
+            .unwrap();
+
+        // Middle row, columns where each box's colour dominates. The specular
+        // term whitens both a little, so dominance and not purity is the test.
+        let widths = |pixels: &[u8]| {
+            let (mut red, mut green) = (0u32, 0u32);
+            for x in 0..EXTENT.0 {
+                let i = ((EXTENT.1 / 2 * EXTENT.0 + x) * 4) as usize;
+                let [r, g] = [u32::from(pixels[i]), u32::from(pixels[i + 1])];
+                if r > 0x10 && r > g * 2 {
+                    red += 1;
+                } else if g > 0x10 && g > r * 2 {
+                    green += 1;
+                }
+            }
+            (red, green)
+        };
+        let render = |view: View| {
+            let mut extracted = Extracted::default();
+            extracted
+                .transforms::<Renderable>(&world, sim::DVec3::ZERO, view.frustum(EXTENT))
+                .unwrap();
+            extracted.append_lights(&world).unwrap();
+            let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
+            let frame = renderer
+                .frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])
+                .unwrap();
+            assert!(renderer.shutdown().clean(), "no leaks, no messages");
+            widths(&frame.pixels)
+        };
+
+        let flat = View {
+            ortho: 4.0,
+            ..View::default()
+        };
+        let (red, green) = render(flat);
+        assert!(red > 8, "the near box is there: {red} columns");
+        assert!(
+            red.abs_diff(green) <= 1,
+            "ten times the distance, the same width: {red} vs {green}"
+        );
+
+        let (red, green) = render(View::default());
+        assert!(
+            red > green * 2,
+            "perspective forgets how to foreshorten: {red} vs {green}"
         );
     }
 

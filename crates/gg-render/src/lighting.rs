@@ -309,6 +309,18 @@ fn fit(
 )]
 fn slice_sphere(view: &View, extent: (u32, u32), slice_near: f32, slice_far: f32) -> (f32, f32) {
     let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
+    // An orthographic view's slice is a box, not a pyramid slice (§6 M20): the
+    // half-extents are the view's own and depth adds nothing, so the sphere is
+    // centred mid-slab and reaches a corner. What the sun *does* with a fit
+    // this shape over a flat playfield is the M20 golden's question to answer.
+    if view.ortho > 0.0 {
+        let (half_h, half_v) = (view.ortho * aspect, view.ortho);
+        let half_depth = (slice_far - slice_near) * 0.5;
+        return (
+            (slice_near + slice_far) * 0.5,
+            (half_h * half_h + half_v * half_v + half_depth * half_depth).sqrt(),
+        );
+    }
     let half_v = (view.fov_y * 0.5).tan();
     let half_h = half_v * aspect;
     let spread = half_h * half_h + half_v * half_v;
@@ -537,6 +549,8 @@ mod tests {
             pitch,
             fov_y: 1.0,
             near: 0.05,
+            ortho: 0.0,
+            ortho_far: 500.0,
         }
     }
 

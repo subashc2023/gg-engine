@@ -357,11 +357,7 @@ pub fn present(world: &mut GameWorld) {
     let mut eye = None;
     world.visit::<&Player>(|entity, player| eye = Some((entity, *player)));
     if let Some((entity, player)) = eye {
-        let seen = Eye {
-            position: player.position,
-            yaw: player.yaw,
-            pitch: player.pitch,
-        };
+        let seen = Eye::at(player.position, player.yaw, player.pitch);
         world.put(entity, seen);
         // The crosshair, and it rides on the player's own entity: a first-person
         // player is not drawn, so its `Renderable` is free for the one thing a

@@ -64,12 +64,15 @@ impl<'m> gg_ecs::boundary::Columns<'m>
 pub const fn gg_ecs::boundary::Columns<'m>::is_empty(&self) -> bool
 pub const fn gg_ecs::boundary::Columns<'m>::len(&self) -> usize
 #[repr(C)] pub struct gg_ecs::boundary::Eye
+pub gg_ecs::boundary::Eye::ortho: f32
 pub gg_ecs::boundary::Eye::pitch: f32
 pub gg_ecs::boundary::Eye::position: gg_math::sim::DVec3
+pub gg_ecs::boundary::Eye::reserved: u32
 pub gg_ecs::boundary::Eye::yaw: f32
 impl gg_ecs::boundary::Eye
 pub const gg_ecs::boundary::Eye::ORIGIN: gg_ecs::boundary::Eye
 pub fn gg_ecs::boundary::Eye::at(gg_math::sim::DVec3, f32, f32) -> Self
+pub fn gg_ecs::boundary::Eye::flat(gg_math::sim::DVec3, f32) -> Self
 pub fn gg_ecs::boundary::Eye::of(&gg_ecs::world::World) -> core::result::Result<gg_ecs::boundary::Eye, gg_ecs::view::AliasError>
 impl bytemuck::pod::Pod for gg_ecs::boundary::Eye
 impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Eye

@@ -91,18 +91,25 @@ pub struct Args {
     pub pack: Option<PathBuf>,
 }
 
-/// The save an editor session opens from (§6 M15.2 post-close), found rather
-/// than named — `gg_editor::persist::scene_path` says where, this says *when*:
-/// live editor sessions only. The probe is implicit, so a recorded or replayed
-/// session refuses it — a scene appearing beside the project later must not
-/// diverge a stream blessed without one — and `--load` stays the explicit
-/// spelling that works everywhere, taking precedence so the two cannot both
-/// load. A plain run loads nothing it was not told to.
-#[cfg(feature = "editor")]
+/// Where a project keeps its opening scene: `scene.ggsave` beside the action
+/// map, so a project is still the directory `xtask run` points at (§6 M15.2
+/// post-close). The one spelling — the editor's save button writes here and
+/// [`opening_scene`] reads here, and a drift between the two would leak a scene
+/// one session wrote past the next one's probe.
+pub(crate) fn scene_path(input: Option<&std::path::Path>) -> Option<PathBuf> {
+    Some(input?.parent()?.join("scene.ggsave"))
+}
+
+/// The save a live session opens from, found rather than named. Editor-only
+/// until §6 M20 pull 2 made the scene the *project's* data: a game whose level
+/// is checked in as `scene.ggsave` must open it in every tier, dist included,
+/// or the level would be lab equipment. The probe stays implicit, so a recorded
+/// or replayed session still refuses it — a scene appearing beside the project
+/// later must not diverge a stream blessed without one — and `--load` stays the
+/// explicit spelling, taking precedence so the two cannot both load.
 pub(crate) fn opening_scene(args: &Args) -> Option<PathBuf> {
     let live = may_touch_project(args) && args.load.is_none();
-    (args.editor && live)
-        .then(|| gg_editor::persist::scene_path(args.input.as_deref()))
+    live.then(|| scene_path(args.input.as_deref()))
         .flatten()
         .filter(|scene| scene.is_file())
 }
@@ -110,9 +117,7 @@ pub(crate) fn opening_scene(args: &Args) -> Option<PathBuf> {
 /// Whether this run may read or write the project's own files — its scene, its
 /// dock layout (§6 M15.1, M15.2). False under `--record` and `--replay`: a
 /// blessed stream must land its clicks against the layout the gate recorded
-/// with, and must leave no `scene.ggsave` behind for the next run to open. One
-/// spelling, because a drift between two *is* that leak.
-#[cfg(feature = "editor")]
+/// with, and must leave no `scene.ggsave` behind for the next run to open.
 pub(crate) fn may_touch_project(args: &Args) -> bool {
     args.record.is_none() && args.replay.is_none()
 }
@@ -214,9 +219,9 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     if let Some(path) = &args.load {
         app.load_save(path)?;
     }
-    // The project's opening scene (§6 M15.2 post-close): the world as data, so
-    // the editor opens Stopped at the save's tick with no game code run.
-    #[cfg(feature = "editor")]
+    // The project's opening scene (§6 M15.2 post-close; §6 M20 pull 2): the
+    // world as data — the editor opens Stopped at the save's tick with no game
+    // code run, and a plain run opens the level the project checked in.
     if let Some(scene) = opening_scene(args) {
         info!(scene = %scene.display(), "opening scene");
         app.load_save(&scene)?;

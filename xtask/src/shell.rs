@@ -242,6 +242,28 @@ pub fn bless(commit: &str) -> anyhow::Result<()> {
         tetris.change_count(),
         sequence.len(),
     );
+    let entry = platformer_entry()?;
+    let frames = demo_11_platformer::session::frames(&entry)?;
+    let opening = demo_11_platformer::session::opening_tick()?;
+    let mut platformer = platformer_stream(&frames, opening);
+    platformer.set_engine_commit(commit);
+    std::fs::write(platformer_path(), platformer.encode())?;
+    // Demo 10's pattern: the per-tick baseline beside it, authored by the same
+    // code the aarch64 leg reads it with — here over the checked-in scene, so
+    // re-authoring the level is what re-authors both files.
+    let sequence = demo_11_platformer::session::hash_sequence(&entry, &frames)?;
+    std::fs::write(
+        demo_11_platformer::session::baseline_path(),
+        demo_11_platformer::session::encode_baseline(&sequence),
+    )?;
+    println!(
+        "xtask replay: blessed {} ({} ticks, {} change records) and its {}-tick baseline at \
+         {commit}",
+        demo_11_platformer::session::NAME,
+        platformer.ticks(),
+        platformer.change_count(),
+        sequence.len(),
+    );
     Ok(())
 }
 
@@ -335,6 +357,143 @@ pub fn check_tetris() -> anyhow::Result<()> {
     println!(
         "xtask replay: {} matches its script ({} ticks, blessed at {})",
         demo_10_tetris::session::NAME,
+        decoded.ticks(),
+        decoded.meta().engine_commit,
+    );
+    Ok(())
+}
+
+/// Demo 11's verbs, in the id order `gg_game!` declares them (§4.7) — and,
+/// unlike demo 10's, an axis: a platformer is steered, so its frames carry a
+/// `move` value and the stream must declare the slot. The host's appended UI
+/// verbs are absent the way `check_verbs` accepts.
+const PLATFORMER_ACTIONS: &[&str] = &["jump", "restart"];
+const PLATFORMER_AXES: &[&str] = &["move"];
+
+/// Demo 11's entry points, resolved out of the **built dev dylib** — the
+/// host's own road to the declared tables (§4.2.2). This binary cannot link
+/// them: demo 10 already owns the fixed `gg_game_*` names in this graph (see
+/// Cargo.toml), which is exactly why `session::Entry` exists.
+fn platformer_entry() -> anyhow::Result<demo_11_platformer::session::Entry> {
+    // Once per process: the loaded copy below is leaked, so a second call
+    // would copy onto its own locked staging file — a retrying gate (`feel`'s
+    // clock resamples) must reuse the entry, not reload it.
+    static ENTRY: std::sync::OnceLock<demo_11_platformer::session::Entry> =
+        std::sync::OnceLock::new();
+    if let Some(entry) = ENTRY.get() {
+        return Ok(*entry);
+    }
+    exec(
+        cargo().args(["build", "-p", "demo-11-platformer"]),
+        "build demo-11-platformer [dev]",
+    )?;
+    // A staged copy, never cargo's own output: a loaded DLL is locked on
+    // Windows, and holding `target/debug`'s artifact would fail every later
+    // `cargo build` of this crate — in this process, a parallel gate, or the
+    // user's own session — with LNK1104.
+    let built = dylib("debug", "demo_11_platformer");
+    let dir = workspace_root().join("target/entry");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(built.file_name().unwrap_or_default());
+    std::fs::copy(&built, &path)?;
+    // SAFETY: the artifact was built from this same working tree one line up,
+    // so the signatures are this build's own; the session's `assemble` refuses
+    // a foreign `AbiInfo` before anything is called. The library is leaked —
+    // a game dylib is never unloaded (§4.2.2) — so the pointers stay valid for
+    // the process.
+    unsafe {
+        let lib = libloading::Library::new(&path)
+            .map_err(|e| anyhow::anyhow!("loading {} failed: {e}", path.display()))?;
+        let entry = demo_11_platformer::session::Entry {
+            abi: *lib.get(b"gg_game_abi")?,
+            init: *lib.get(b"gg_game_init")?,
+            components: *lib.get(b"gg_game_components")?,
+            systems: *lib.get(b"gg_game_systems")?,
+        };
+        std::mem::forget(lib);
+        Ok(*ENTRY.get_or_init(|| entry))
+    }
+}
+
+/// The recorded full run as a replay file — `demo_11_platformer::session`'s
+/// frames, so this file, the demo's own tests and the baseline are one script.
+///
+/// # Errors
+///
+/// If the bot cannot finish the level the checked-in scene holds.
+pub fn platformer_replay() -> anyhow::Result<Replay> {
+    let entry = platformer_entry()?;
+    let frames = demo_11_platformer::session::frames(&entry)?;
+    let opening = demo_11_platformer::session::opening_tick()?;
+    Ok(platformer_stream(&frames, opening))
+}
+
+/// Any of demo 11's scripts as a stream the shell can replay, indexed from the
+/// scene's own tick: a replayed session is handed `--load scene.ggsave`
+/// explicitly (record/replay never probe, §6 M20 item 3), which resumes the
+/// world at the save's tick, and the seek expects the frames there.
+fn platformer_stream(frames: &[InputFrame], opening: u64) -> Replay {
+    let mut meta = ReplayMeta::new(
+        gg_math::DETERMINISM_CONTRACT,
+        "curated",
+        gg_core::DEFAULT_TICK_HZ,
+        PLATFORMER_ACTIONS,
+        PLATFORMER_AXES,
+    );
+    meta.engine_commit = "generated".to_owned();
+    let mut recorder = Recorder::new(meta);
+    for (offset, frame) in frames.iter().enumerate() {
+        recorder.record(opening + offset as u64, *frame);
+    }
+    recorder.finish()
+}
+
+pub fn platformer_path() -> PathBuf {
+    workspace_root()
+        .join("tests/replays")
+        .join(format!("{}.ggrp", demo_11_platformer::session::NAME))
+}
+
+/// The level every platformer gate hands the shell — replayed sessions never
+/// probe, so the scene is always this explicit spelling.
+fn platformer_scene() -> anyhow::Result<String> {
+    let scene = workspace_root().join("demos/11-platformer/scene.ggsave");
+    anyhow::ensure!(
+        scene.is_file(),
+        "no level at {} — the checked-in scene is the platformer's stage",
+        scene.display()
+    );
+    Ok(scene.display().to_string())
+}
+
+/// The checked-in platformer stream is still the script, byte for byte —
+/// `check_tetris`'s reasoning verbatim, including the encoding-version split.
+pub fn check_platformer() -> anyhow::Result<()> {
+    let path = platformer_path();
+    let on_disk = std::fs::read(&path)
+        .map_err(|e| anyhow::anyhow!("no platformer stream at {} ({e})", path.display()))?;
+    let decoded = Replay::decode(&on_disk)?;
+    let mut fresh = platformer_replay()?;
+    fresh.set_engine_commit(&decoded.meta().engine_commit);
+    anyhow::ensure!(
+        fresh.encode() != decoded.encode() || fresh.encode() == on_disk,
+        "{} is the stream `demo_11_platformer::session::frames()` still produces, written in an \
+         older encoding — `cargo xtask replay --bless` re-authors it at the current \
+         `gg_input::replay::FORMAT`",
+        path.display(),
+    );
+    anyhow::ensure!(
+        fresh.encode() == on_disk,
+        "{} is not what `demo_11_platformer::session::frames()` produces today ({} ticks on disk, \
+         {} from the script) — the recording and the script (or the scene it plays) have come \
+         apart, and `cargo xtask replay --bless` is the reviewed act that re-joins them",
+        path.display(),
+        decoded.ticks(),
+        fresh.ticks(),
+    );
+    println!(
+        "xtask replay: {} matches its script ({} ticks, blessed at {})",
+        demo_11_platformer::session::NAME,
         decoded.ticks(),
         decoded.meta().engine_commit,
     );
@@ -809,6 +968,13 @@ const DEMO_10: &Kind = &Kind {
     features: &["game"],
 };
 
+const DEMO_11: &Kind = &Kind {
+    dir: "demos/11-platformer",
+    lib: "demo_11_platformer",
+    beside: &["session.rs"],
+    features: &["game"],
+};
+
 /// A demo's `lib.rs`, which every variant below is an edit of.
 fn game_source(kind: &Kind) -> anyhow::Result<String> {
     Ok(std::fs::read_to_string(
@@ -999,8 +1165,14 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--tetris") {
         tetris()?;
     }
+    if only("--platformer") {
+        platformer()?;
+    }
     if only("--rules") {
         rules()?;
+    }
+    if only("--feel") {
+        feel()?;
     }
     if only("--best") {
         best()?;
@@ -2103,6 +2275,103 @@ fn tetris() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// §6 M20's exit row through the shell: **a recorded full run — restart, a real
+/// death, spawn to goal — replays bit-identically under dev, instrumented and
+/// dist-verify**, over the checked-in scene.
+///
+/// The tetris gate's three claims, plus the one only this demo can make: the
+/// scene crossed as **data**. The stream is replayed with `--load` because
+/// record/replay never probe (§6 M20 item 3), so a run that reaches the goal
+/// proves the level arrived from the file — a session that opened on a bare
+/// world has nothing to stand on and its player is dead in the first two
+/// seconds, which "platformer: fell" happening *exactly once* rules out.
+fn platformer() -> anyhow::Result<()> {
+    let replay = platformer_path();
+    anyhow::ensure!(
+        replay.is_file(),
+        "no platformer stream at {} — `cargo xtask replay --bless` authors it",
+        replay.display()
+    );
+    let replay = replay.display().to_string();
+    let scene = platformer_scene()?;
+    let baseline = demo_11_platformer::session::parse_baseline(&std::fs::read_to_string(
+        demo_11_platformer::session::baseline_path(),
+    )?)
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let wanted = demo_11_platformer::session::LOG;
+
+    // `--frames` bounds the run to the baseline's ticks: the stream's tick
+    // span counts from 0 but the scene resumes at its own tick, and the tick
+    // past the last recorded frame would be one idle tick nobody blessed.
+    let ticks = baseline.len().to_string();
+
+    let mut runs: Vec<(&str, Vec<(u64, String)>)> = Vec::new();
+    for tier in HASHED_TIERS {
+        let (host, game) = stage_game(tier, "demo-11-platformer", "demo_11_platformer")?;
+        let log = play(
+            &host,
+            &game,
+            &["--replay", &replay, "--load", &scene, "--frames", &ticks],
+            true,
+        )?;
+        let at = reaches(&log, wanted);
+        anyhow::ensure!(
+            at == wanted.len(),
+            "[{}] the replayed run reached {at} of {} milestones — expected {wanted:?} in order; \
+             a session that spawned beside the goal, or one handed no scene, looks exactly like \
+             a shorter prefix of this:\n{log}",
+            tier.name,
+            wanted.len(),
+        );
+        // Each milestone exactly once: a second "fell" is a run that lost the
+        // level, a second "goal" is a clock that failed to stop, a second
+        // "restarted" is a stream this recording never held.
+        for once in wanted {
+            let count = log.lines().filter(|l| l.contains(once)).count();
+            anyhow::ensure!(
+                count == 1,
+                "[{}] `{once}` appears {count} times — one recorded run, one of each",
+                tier.name
+            );
+        }
+
+        let seq = sequence(&log)?;
+        anyhow::ensure!(
+            seq.len() == baseline.len(),
+            "[{}] the shell ran {} ticks and the baseline holds {}",
+            tier.name,
+            seq.len(),
+            baseline.len()
+        );
+        let (here, there) = (
+            quiet_ticks(seq.iter().map(|(_, h)| h.as_str())),
+            quiet(&baseline),
+        );
+        anyhow::ensure!(
+            here == there,
+            "[{}] the shell's world stood still on {here:?} and the in-process baseline's on \
+             {there:?} — the two harnesses did not play the same run",
+            tier.name,
+        );
+        runs.push((tier.name, seq));
+    }
+
+    for pair in runs.windows(2) {
+        if let Some(found) = divergence(&pair[0], &pair[1]) {
+            anyhow::bail!("§6 M20: {found}");
+        }
+    }
+    println!(
+        "xtask reload: demo 11's recorded run — restart, one death, spawn to goal over {} ticks, \
+         the level arriving as `--load` data — replayed identically under dev, instrumented and \
+         dist-verify, standing still on the same ticks as the baseline the aarch64 leg compares \
+         against (§6 M20)",
+        runs[0].1.len(),
+    );
+    Ok(())
+}
+
 /// Ticks of the endless stream the rule change is measured over. The swap is
 /// aimed at a tick ([`RULES_SWAPS`]) and lands it plus however far the replay
 /// raced while the sighting crossed a pipe, so the margin is bought in ticks: a
@@ -2382,6 +2651,221 @@ fn rules_once() -> anyhow::Result<u128> {
         at_swap.occupied,
         at_swap.lines,
         clear - swap - 1,
+    );
+    Ok(total)
+}
+
+/// Ticks of demo 11's patrol the feel retune is measured over — long enough to
+/// hold every [`FEEL_SWAPS`] aim in its first half.
+const FEEL_TICKS: usize = 4_000;
+
+/// Ticks to aim the feel swap at, [`RULES_SWAPS`]' way: anchored on the tick's
+/// own hash line, so no wall time is priced. Each sits in one of the patrol's
+/// grounded walking stretches (`session::walking`), because a swap that lands
+/// mid-air is uninformative — the constant bites immediately and a surviving
+/// world cannot be told from a rebuilt one — and where the swap *lands* is
+/// still the machine's, so the gate checks and swings again rather than
+/// assuming.
+const FEEL_SWAPS: [u64; 3] = [601, 1_101, 1_621];
+
+/// The feel edit: how hard the world pulls (§6 M20 pull 4).
+///
+/// Chosen by the same criterion as demo 10's scoring table, with the platformer
+/// twist: gravity runs **every tick** and still changes nothing while the
+/// player is grounded — the pull is applied, the ground resolves it away, and
+/// the resolved state is bit-identical under any sane constant. It is *latent
+/// on the ground and decisive in the air*, so the swapped run keeps matching
+/// the unswapped one across the boundary for exactly as long as the player is
+/// standing, and parts on the first airborne tick after the next jump — a tick
+/// the in-process script names independently.
+fn with_a_heavier_pull(source: &str) -> anyhow::Result<String> {
+    let anchor = "pub const GRAVITY: f64 = 0.010;";
+    anyhow::ensure!(
+        source.contains(anchor),
+        "demo 11's gravity is not where this gate expected it — the feel edit is a text edit, so \
+         a rename here is a gate to re-point rather than one that quietly stops retuning anything"
+    );
+    Ok(source.replace(anchor, "pub const GRAVITY: f64 = 0.016;"))
+}
+
+/// §6 M20's reload row: **a feel constant retuned under a run in progress
+/// reloads with the player intact, inside §9's two seconds, and the runs part
+/// only where the arc does.**
+///
+/// The subject is demo 11's patrol — walk, turn, a full jump every cycle — and
+/// the edit is one line: gravity, heavier. The three claims are `rules`'s with
+/// the platformer's own middle: identical *through* the swap and across every
+/// grounded tick after it (a player that had been rebuilt, reset or teleported
+/// would part at the swap tick), then different from the first tick the player
+/// integrates airborne under the new pull — the jump tick itself is exempt
+/// because its gravity is resolved away on the ground and its velocity is the
+/// jump's own constant. Nothing in the schema moved, so the reload must report
+/// no migration. Budget and retry semantics are [`rules`]'s verbatim.
+fn feel() -> anyhow::Result<()> {
+    let total = best_under(
+        "the feel edit's save-to-new-gravity",
+        BUDGET_MS,
+        WALL_CLOCK_TRIES,
+        feel_once,
+    )?;
+    anyhow::ensure!(
+        total <= BUDGET_MS,
+        "the retune reached the running game in {total} ms at its best over {WALL_CLOCK_TRIES} \
+         attempts against §9's {BUDGET_MS} ms — the per-attempt rebuild/swap breakdown is in the \
+         lines above"
+    );
+    Ok(())
+}
+
+/// One full run of the feel gate: every correctness assertion, then the
+/// measured save-to-new-gravity total in milliseconds — the verdict is
+/// [`feel`]'s.
+fn feel_once() -> anyhow::Result<u128> {
+    let source = game_source(DEMO_11)?;
+    let edited = with_a_heavier_pull(&source)?;
+
+    let frames = demo_11_platformer::session::endless(FEEL_TICKS);
+    let progress = demo_11_platformer::session::progress(&platformer_entry()?, &frames)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let opening = progress.first().map(|(t, _)| *t).unwrap_or(0);
+    // State at the end of absolute tick `t`.
+    let at = |t: u64| {
+        progress
+            .get(usize::try_from(t - opening).unwrap_or(usize::MAX))
+            .map(|(_, p)| *p)
+    };
+
+    let dir = workspace_root().join("target/feel");
+    std::fs::create_dir_all(&dir)?;
+    let stream = dir.join("patrol.ggrp");
+    std::fs::write(&stream, platformer_stream(&frames, opening).encode())?;
+    let stream = stream.display().to_string();
+    let scene = platformer_scene()?;
+
+    write_variant(DEMO_11, "feel", &source)?;
+    let before = dir.join("before.bin");
+    std::fs::copy(build_variant(DEMO_11, "feel")?, &before)?;
+
+    write_variant(DEMO_11, "feel", &edited)?;
+    let started = std::time::Instant::now();
+    let built = build_variant(DEMO_11, "feel")?;
+    let rebuild_ms = started.elapsed().as_millis();
+    let after = dir.join("after.bin");
+    std::fs::copy(&built, &after)?;
+
+    exec(
+        cargo().args(["build", "-p", "gg-runtime"]),
+        "build the shell [dev]",
+    )?;
+    let host = exe("debug", "gg-runtime");
+    let game = dir.join(dylib_name(DEMO_11));
+
+    std::fs::copy(&before, &game)?;
+    // `--frames` for the platformer gate's reason: the bounded run is the
+    // blessed one.
+    let ticks = FEEL_TICKS.to_string();
+    let args = [
+        "--replay",
+        stream.as_str(),
+        "--load",
+        scene.as_str(),
+        "--frames",
+        ticks.as_str(),
+    ];
+    let untouched = sequence(&play(&host, &game, &args, true)?)?;
+
+    let mut taken = None;
+    for aim in FEEL_SWAPS {
+        std::fs::copy(&before, &game)?;
+        let marker = format!("tick={aim} hash=");
+        let log = reload_after(&game, &after, &args, &marker, 0)?;
+        let swapped = sequence(&log)?;
+        let reloaded = log
+            .lines()
+            .find(|l| l.contains("game reloaded"))
+            .unwrap_or_default();
+        let swap = crate::util::field_u64(reloaded, "tick")?;
+        let swap_ms = u128::from(crate::util::field_u64(reloaded, "save_to_swap_ms")?);
+
+        // Not `matches("migrated")`: `--load`'s own "save loaded" line carries
+        // a `migrated=false` field, and a substring count would trip on it.
+        anyhow::ensure!(
+            log.lines()
+                .filter(|l| l.contains("migrated") && !l.contains("save loaded"))
+                .count()
+                == 0,
+            "the reload migrated a component — gravity is code, and nothing in demo 11's schema \
+             moved:\n{log}"
+        );
+        anyhow::ensure!(
+            untouched.len() == swapped.len() && untouched.len() == FEEL_TICKS,
+            "the two runs are {} and {} ticks of a {FEEL_TICKS}-tick stream",
+            untouched.len(),
+            swapped.len()
+        );
+        anyhow::ensure!(
+            swap < opening + FEEL_TICKS as u64 / 2,
+            "the swap landed at tick {swap} of {FEEL_TICKS} — past halfway is a machine this \
+             stream is too short for, and the next failure it caused would be a confusing one"
+        );
+
+        // Mid-patrol, on the ground, run still going: the configuration the
+        // claim is about. Anywhere else is uninformative, not red.
+        let Some(state) = at(swap) else {
+            anyhow::bail!("the swap landed at tick {swap}, past the stream");
+        };
+        anyhow::ensure!(state.deaths == 0, "the patrol died before tick {swap}");
+        anyhow::ensure!(!state.finished, "the patrol finished before tick {swap}");
+        if !state.grounded {
+            println!(
+                "xtask: the swap landed at tick {swap} with the player airborne — swinging again"
+            );
+            continue;
+        }
+
+        // Where the pull first *can* show: the tick after the next airborne
+        // tick — the jump tick's own gravity is resolved away on the ground
+        // and its velocity is JUMP_VELOCITY either way.
+        let arc = (swap..opening + FEEL_TICKS as u64)
+            .find(|&t| at(t).is_some_and(|p| !p.grounded))
+            .ok_or_else(|| anyhow::anyhow!("the patrol never left the ground after tick {swap}"))?;
+        taken = Some((swap, swap_ms, arc + 1, swapped));
+        break;
+    }
+    let (swap, swap_ms, arc, swapped) = taken.ok_or_else(|| {
+        anyhow::anyhow!(
+            "every one of {} attempts landed the swap mid-air, which is a coincidence worth \
+             looking at rather than retrying further",
+            FEEL_SWAPS.len()
+        )
+    })?;
+
+    let parted = untouched
+        .iter()
+        .zip(&swapped)
+        .find(|(a, b)| a.1 != b.1)
+        .map(|(a, _)| a.0)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the two runs never parted — a gravity the reload did not pick up makes this gate \
+                 a comparison of a sequence with itself"
+            )
+        })?;
+    anyhow::ensure!(
+        parted == arc,
+        "the runs parted at tick {parted}; the first airborne integration after the swap at \
+         {swap} is tick {arc}. Earlier means the swap itself moved the world — the player did \
+         not cross intact. Later means the retuned gravity never ran."
+    );
+
+    let total = rebuild_ms + swap_ms;
+    println!(
+        "xtask reload: demo 11's gravity was retuned under a run in progress — a new build \
+         swapped in at tick {swap} with the player on the ground, hashing identically to the \
+         unswapped run through that tick and the {} after it, and differently from the first \
+         airborne tick at {arc} on: {total} ms save to new feel (rebuild {rebuild_ms} + swap \
+         {swap_ms}, budget {BUDGET_MS}) (§6 M20)",
+        arc - swap - 1,
     );
     Ok(total)
 }

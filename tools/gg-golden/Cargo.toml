@@ -50,6 +50,10 @@ demo-06-lit = { path = "../../demos/06-lit", default-features = false }
 # this binary's `extern "C"` names — which is precisely why demo 10's widget
 # list is a function and not a system's private loop.
 demo-10-tetris = { path = "../../demos/10-tetris", default-features = false }
+# Demo 11 supplies its component types and the scene's path, which is all the
+# `platformer` scene needs: the level is the checked-in `scene.ggsave`, loaded
+# as data (§6 M20). Without `game`, demo 04's reason again.
+demo-11-platformer = { path = "../../demos/11-platformer", default-features = false }
 gg-scene = { path = "../../crates/gg-scene" }
 gg-input = { path = "../../crates/gg-input" }
 # The capture trigger (§4.8). `gg-debug` is winit-free by its own dependency

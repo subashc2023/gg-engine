@@ -39,6 +39,7 @@ pub static gg_render::cvars::EXPOSURE: gg_core::cvar::CVar
 pub static gg_render::cvars::FOV: gg_core::cvar::CVar
 pub static gg_render::cvars::HISTOGRAM: gg_core::cvar::CVar
 pub static gg_render::cvars::NEAR: gg_core::cvar::CVar
+pub static gg_render::cvars::ORTHO_FAR: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_BLEND: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_CASCADES: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_DEPTH_BIAS: gg_core::cvar::CVar
@@ -164,6 +165,8 @@ pub gg_render::SceneFrame::viewport: core::option::Option<gg_rhi::graph::Viewpor
 pub struct gg_render::View
 pub gg_render::View::fov_y: f32
 pub gg_render::View::near: f32
+pub gg_render::View::ortho: f32
+pub gg_render::View::ortho_far: f32
 pub gg_render::View::pitch: f32
 pub gg_render::View::yaw: f32
 impl gg_render::View

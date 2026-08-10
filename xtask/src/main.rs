@@ -69,7 +69,7 @@ fn usage() -> anyhow::Result<()> {
          probe [--system]                                 capability table vs pinned lavapipe (spike 2)\n\
          shaders [--check]                                offline shader build + codegen (in-process Slang)\n\
          dist                                             dist gate: build+run tier-dist, symbol absence, crash symbolization (§5.8)\n\
-         reload [--cross-tier|--segments|--chaos|--latency|--ui|--save|--editor|--launcher|--tetris|--rules|--best]  the gates that need the shell over a game dylib; no flag runs the set\n\
+         reload [--cross-tier|--segments|--chaos|--latency|--ui|--save|--editor|--launcher|--tetris|--platformer|--rules|--feel|--best]  the gates that need the shell over a game dylib; no flag runs the set\n\
          bench [--record]                                 smoke on lavapipe; --record archives real numbers per machine (§4.11)\n\
          gpu [--adapter <name>]                           manual real-GPU leg: offscreen suites + golden on the desk's driver, windowless (§4.3, §8)\n\
          gpuav [--adapter <name>]                         GPU-assisted validation: instrumented shaders, offscreen only (§5 gate 4)\n\

@@ -73,6 +73,10 @@ fn check() -> anyhow::Result<()> {
     // also runs under qemu (§6 M18). What only this side can check is that the
     // checked-in stream is still the script that baseline was taken from.
     crate::shell::check_tetris()?;
+    // Demo 11's, the same arrangement (§6 M20) — and its script plays the
+    // checked-in scene, so this also catches a re-authored level nobody
+    // re-blessed the recording over.
+    crate::shell::check_platformer()?;
     println!("xtask replay: baselines live in {}", dir.display());
     Ok(())
 }

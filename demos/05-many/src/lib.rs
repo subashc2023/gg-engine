@@ -291,11 +291,7 @@ pub fn present(world: &mut GameWorld) {
     };
     world.put(
         entity,
-        Eye {
-            position: observer.position,
-            yaw: observer.yaw,
-            pitch: observer.pitch,
-        },
+        Eye::at(observer.position, observer.yaw, observer.pitch),
     );
 }
 

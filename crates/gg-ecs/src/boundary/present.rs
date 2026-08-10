@@ -205,7 +205,7 @@ impl Light {
     }
 }
 
-/// Where the game is looked at from.
+/// Where the game is looked at from — and, since §6 M20, *how*.
 ///
 /// Yaw and pitch rather than a quaternion: the host builds a fly camera's basis
 /// from them in one order (Y then X, never roll), and a quaternion here would
@@ -225,6 +225,17 @@ pub struct Eye {
     pub yaw: f32,
     /// Rotation about the camera's right axis, radians.
     pub pitch: f32,
+    /// Vertical half-height of an **orthographic** view, in metres — how much
+    /// world the window shows, which is framing and therefore the game's
+    /// (§6 M20). `0.0` is perspective, and that zero is a migration contract
+    /// rather than a convenience: `World::restore` zero-fills a field an older
+    /// world never held, so every world that predates this field reopens
+    /// perspective — exactly what it was. Sim state like the rest of the eye:
+    /// a zoom is a hashed, replayed fact.
+    pub ortho: f32,
+    /// Padding, spelled out — `Pod` refuses a struct with holes in it, and
+    /// naming the hole keeps the layout a visible edit (as [`Light::reserved`]).
+    pub reserved: u32,
 }
 
 impl Eye {
@@ -234,10 +245,12 @@ impl Eye {
         position: sim::DVec3::ZERO,
         yaw: 0.0,
         pitch: 0.0,
+        ortho: 0.0,
+        reserved: 0,
     };
 
-    /// An eye at `position`, looking along `yaw`/`pitch` in radians. Spelled
-    /// once here so a game does not repeat a three-field literal, on the same
+    /// A perspective eye at `position`, looking along `yaw`/`pitch` in radians.
+    /// Spelled once here so a game does not repeat the literal, on the same
     /// reasoning as [`Renderable::boxed`] — and because the M12 template
     /// criterion counts every line of ceremony a game pays (§6 M12).
     #[must_use]
@@ -246,6 +259,24 @@ impl Eye {
             position,
             yaw,
             pitch,
+            ortho: 0.0,
+            reserved: 0,
+        }
+    }
+
+    /// An orthographic eye at `position`, looking straight down -Z over
+    /// `half_height` metres of vertical view — the 2D game's camera (§6 M20).
+    /// The half-*height*, with width following the window's aspect, because a
+    /// platformer meets a wider window with more world and never with a
+    /// stretch.
+    #[must_use]
+    pub fn flat(position: sim::DVec3, half_height: f32) -> Self {
+        Eye {
+            position,
+            yaw: 0.0,
+            pitch: 0.0,
+            ortho: half_height,
+            reserved: 0,
         }
     }
 
@@ -289,7 +320,7 @@ mod tests {
         // to either one is a visible edit rather than a silent layout move.
         assert_eq!(size_of::<Renderable>(), 72);
         assert_eq!(align_of::<Renderable>(), 8);
-        assert_eq!(size_of::<Eye>(), 32);
+        assert_eq!(size_of::<Eye>(), 40);
         assert_eq!(align_of::<Eye>(), 8);
         assert_eq!(size_of::<Model>(), 80);
         assert_eq!(align_of::<Model>(), 8);

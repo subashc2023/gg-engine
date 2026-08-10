@@ -11,12 +11,15 @@
 //!                                   8x-denser reference and print the plateau
 //!   gg-tools shadow-fit             what the single cascade's radius costs the
 //!                                   picture, per radius, against a tight leg
+//!   gg-tools shadow-flat            the flat camera's contact band (§6 M20):
+//!                                   band vs shade over bias and fit
 //!   gg-tools mcp                    serve a running session's reload record to
 //!                                   an agent over MCP on stdio (§6 M16)
 
 mod mcp;
 mod shadow_bias;
 mod shadow_fit;
+mod shadow_flat;
 mod shadow_image;
 
 fn main() -> anyhow::Result<()> {
@@ -39,11 +42,12 @@ fn main() -> anyhow::Result<()> {
     match command {
         "shadow-bias" => shadow_bias::run(rest),
         "shadow-fit" => shadow_fit::run(rest),
+        "shadow-flat" => shadow_flat::run(rest),
         "mcp" => mcp::run(rest),
         other => {
             anyhow::bail!(
-                "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, mcp. \
-                 A new instrument is a new subcommand here, not a new crate"
+                "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
+                 shadow-flat, mcp. A new instrument is a new subcommand here, not a new crate"
             )
         }
     }

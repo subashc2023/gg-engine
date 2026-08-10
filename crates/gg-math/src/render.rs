@@ -50,15 +50,17 @@ pub fn perspective_reverse_z(vertical_fov: f32, aspect_ratio: f32, near: f32) ->
     camera::rh::proj::vulkan::perspective_infinite_reverse(vertical_fov, aspect_ratio, near)
 }
 
-/// The shadow map's projection (§6 M11): right-handed Y-up view space in,
-/// Vulkan NDC out, **reverse-Z with a finite far plane** — `near` maps to depth
-/// 1 and `far` to depth 0.
+/// The engine's other projection: right-handed Y-up view space in, Vulkan NDC
+/// out, **reverse-Z with a finite far plane** — `near` maps to depth 1 and
+/// `far` to depth 0. Born as the shadow map's (§6 M11); since §6 M20 also the
+/// camera's, when a game declares an orthographic `Eye`.
 ///
 /// Finite rather than infinite, unlike [`perspective_reverse_z`], and that is
-/// the difference worth naming: a directional light has no position, so its
-/// depth range is a *choice* — the slab of the world the cascade covers. An
-/// infinite far plane would put every unlit metre of the scene into the same
-/// depth budget as the metre the shadow is being tested at.
+/// the difference worth naming: parallel rays have no position for depth to
+/// diverge from, so the depth range is a *choice* — the slab of the world the
+/// cascade (or the playfield) covers. An infinite far plane would put every
+/// unlit metre of the scene into the same depth budget as the metre the shadow
+/// is being tested at.
 ///
 /// Reverse-Z is not an optimisation here but a compatibility requirement: the
 /// shadow map is compared against with the same `GREATER_OR_EQUAL` and cleared

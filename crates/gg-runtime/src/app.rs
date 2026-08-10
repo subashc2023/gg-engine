@@ -1067,7 +1067,7 @@ impl Editing {
         // name `--save` and replays keep the out-of-tree default — a replayed
         // session must not leave a scene behind for the next run to open.
         let save = args.save.clone().unwrap_or_else(|| {
-            persist::scene_path(args.input.as_deref())
+            crate::scene_path(args.input.as_deref())
                 .filter(|_| crate::may_touch_project(args))
                 .unwrap_or_else(|| persist::save_path(stem))
         });
@@ -1610,6 +1610,10 @@ impl Stages for App {
         self.view = View {
             yaw: eye.yaw,
             pitch: eye.pitch,
+            // The projection is the eye's (§6 M20): zero is perspective, and an
+            // editor camera latched from an ortho game carries the game's flat
+            // view with it — which is what makes authoring in-plane.
+            ortho: eye.ortho,
             ..View::default()
         };
         // The frustum crosses from the renderer, which owns the projection, to

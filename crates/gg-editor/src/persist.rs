@@ -57,17 +57,6 @@ pub fn layout_path(stem: &str) -> PathBuf {
     Path::new(DIR).join(format!("{stem}.layout"))
 }
 
-/// Where a project keeps its opening scene: `scene.ggsave` beside the action
-/// map, so a project is still the directory `xtask run` points at (§6 M15.2
-/// post-close). In the *tree*, unlike everything above — a scene is the
-/// project's data, not a session's working copy. A path, not a promise: the
-/// host is what requires it to exist, and only in a live session — the probe
-/// is implicit, so a recorded or replayed run must not see it.
-#[must_use]
-pub fn scene_path(input: Option<&Path>) -> Option<PathBuf> {
-    Some(input?.parent()?.join("scene.ggsave"))
-}
-
 /// Restore `editor`'s layout from `path`, if there is one this build can read.
 ///
 /// Total by construction — every way it can fail leaves the default tree, which

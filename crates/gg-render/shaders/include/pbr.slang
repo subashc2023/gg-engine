@@ -60,8 +60,9 @@ static const uint MAX_CASCADES = 4;
 // How far the receiver-plane extrapolation below is allowed to lean, in NDC
 // depth per unit of shadow uv. The slab `Sun::of` fits spans 2*radius across
 // the map and 4*radius through it, so this quantity is tan(incidence)/2 for any
-// radius — 4.0 is 83 degrees. Past that the derivative is more likely to be a
-// screen-space silhouette than a surface, and the normal offset carries it.
+// radius — 4.0 is 83 degrees. Past that the receiver is nearly parallel to the
+// light and a tap's depth is not the plane's to predict; the normal offset
+// carries what this declines to.
 static const float SHADOW_PLANE_SLOPE_LIMIT = 4.0;
 
 // Dielectric reflectance at normal incidence — 4%, the value [Bur12] and every
@@ -169,6 +170,12 @@ Light load_light(uint64_t frame_address, uint index)
 struct Surface
 {
     float3 normal;    // unit, camera-relative world space, after normal mapping
+    float3 plane;     // the *geometric* normal — the receiver plane the shadow
+                      // extrapolation leans on. A normal map perturbs shading,
+                      // not the surface the shadow map rasterized, and a plane
+                      // taken from the mapped normal re-acnes every mapped
+                      // receiver. `make_surface` defaults it to `normal`;
+                      // a mapped pass overrides it with the vertex normal.
     float3 diffuse;   // albedo scaled by (1 - metallic): a metal has no diffuse lobe
     float3 f0;        // specular reflectance at normal incidence
     float alpha;      // roughness^2, the [Bur12] remap
@@ -180,6 +187,7 @@ Surface make_surface(float3 normal, float3 base_color, float metallic, float rou
 {
     Surface s;
     s.normal = normal;
+    s.plane = normal;
     // Metal/rough: a metal's specular colour *is* its base colour, and it has no
     // diffuse lobe at all — the two interpolate on `metallic` rather than
     // branching, which is what makes a half-metal legal instead of undefined.
@@ -294,41 +302,40 @@ float3 to_light_clip(Frame frame, Cascade cascade, float3 world, float3 normal)
     return mul(cascade.view_projection, float4(world + normal * offset, 1.0)).xyz;
 }
 
-// The receiver's own depth gradient in shadow-map uv — [Isi06]'s 2x2 solve.
-//
-// Screen-space derivatives give dz/dx and duv/dx; the inverse of the uv-by-screen
-// Jacobian turns those into dz/du and dz/dv, which is what lets each PCF tap
+// The receiver's own depth gradient in shadow-map uv — what lets each PCF tap
 // compare against the *plane the fragment lies in* rather than against the
 // fragment's single depth. That is the acne the kernel itself manufactures: a tap
 // a texel away is looking at a part of the same surface that is legitimately
 // nearer the light, and without this it reads as an occluder.
 //
-// Must be called from uniform control flow — which with cascades means called for
-// *every* cascade and then selected, never called for the chosen one. Two
-// fragments of one quad can land in different cascades, and a derivative taken
-// after that branch reads whatever the helper lanes held.
-float2 receiver_plane_slope(float2 uv, float z)
+// Analytic, from the surface normal — not [Isi06]'s screen-derivative solve. A
+// derivative is a quad's, not a surface's: wherever one 2x2 quad straddles two
+// surfaces — every contact corner, every silhouette — it reports a plane
+// belonging to neither, and the flat camera (§6 M20) renders that as a dark
+// band at the player's feet, two rows tall because a quad is, bias-proof
+// because no offset fixes a wrong plane. The normal is the surface's own on
+// exactly those fragments, needs no uniform control flow, and costs three dots.
+//
+// The projection's linear rows are an orthographic slab's — scaled rotation
+// rows, mutually orthogonal — so the inverse-transpose that carries a plane
+// normal into clip space is each row over its own squared length, no matrix
+// inverse anywhere. With that normal m: m . dclip = 0, and uv = clip.xy / 2 +
+// 1/2 makes the tap extrapolation dz/duv = -2 m.xy / m.z.
+float2 receiver_plane_slope(Cascade cascade, float3 normal)
 {
-    // All four before any branch, and the degenerate case selected rather than
-    // returned early: the rule this function's contract states applies to it as
-    // well, and a `ddx` after an `if` reads whatever the helper lanes held.
-    float2 duvdx = ddx(uv);
-    float2 duvdy = ddy(uv);
-    float dzdx = ddx(z);
-    float dzdy = ddy(z);
-    // Degenerate where the surface is edge-on to the *camera*: the quad's two
-    // derivatives are parallel and the slope they imply is noise, not a plane.
-    // Divided by a floored magnitude so the arithmetic below stays finite; the
-    // select is what discards it.
-    float det = duvdx.x * duvdy.y - duvdx.y * duvdy.x;
-    bool usable = abs(det) >= 1e-12;
-    float2 solved = float2(duvdy.y * dzdx - duvdx.y * dzdy,
-                           duvdx.x * dzdy - duvdy.x * dzdx) /
-                    (usable ? det : 1.0);
-    float2 slope = usable ? solved : float2(0.0, 0.0);
-    // Clamped, because at a screen-space silhouette the derivative straddles two
-    // surfaces and reports a plane belonging to neither — unclamped, that is a
-    // tap depth far enough off to punch a lit hole through a real shadow.
+    float3 r0 = cascade.view_projection[0].xyz;
+    float3 r1 = cascade.view_projection[1].xyz;
+    float3 r2 = cascade.view_projection[2].xyz;
+    float3 m = float3(dot(r0, normal) / dot(r0, r0),
+                      dot(r1, normal) / dot(r1, r1),
+                      dot(r2, normal) / dot(r2, r2));
+    // Edge-on to the light m.z vanishes: the floor keeps the division finite,
+    // and the clamp below is what actually rules out there, as it always has.
+    float mz = (m.z < 0.0 ? -1.0 : 1.0) * max(abs(m.z), 1e-8);
+    float2 slope = -2.0 * m.xy / mz;
+    // Clamped, because a receiver nearly parallel to the light has more depth
+    // per uv than any extrapolation should claim to know — unclamped, that is
+    // a tap depth far enough off to punch a lit hole through a real shadow.
     float magnitude = length(slope);
     return magnitude > SHADOW_PLANE_SLOPE_LIMIT ? slope * (SHADOW_PLANE_SLOPE_LIMIT / magnitude)
                                                 : slope;
@@ -379,7 +386,15 @@ float pcf(Frame frame, uint texture, float3 clip, float2 slope,
             // Reverse-Z: nearer compares *greater*. A fragment is lit when it is
             // at least as near the light as whatever the map recorded — measured
             // where the tap is, along the plane, not where the fragment is.
-            lit += clip.z + dot(offset, slope) >= caster ? 1.0 : 0.0;
+            //
+            // One-sided on purpose: the plane may promise a tap is *nearer*
+            // (excusing the receiver's own up-slope, the acne the kernel
+            // manufactures) but never farther, because nothing farther from the
+            // light than the fragment can occlude it — a farther prediction
+            // only manufactures shadow. Two-sided, the overshoot past the
+            // neighbouring surface at a concave corner was half of §6 M20's
+            // contact band (`gg-tools shadow-flat` is the measurement).
+            lit += clip.z + max(dot(offset, slope), 0.0) >= caster ? 1.0 : 0.0;
         }
     }
     return lit / 9.0;
@@ -395,14 +410,14 @@ float pcf(Frame frame, uint texture, float3 clip, float2 slope,
 // one of them. So the projection happens here, per fragment, per cascade — which
 // is also what lets the normal offset use the chosen cascade's own texel size.
 //
-// # The two phases, which are not stylistic
-//
-// Phase one runs over **every** cascade under uniform control flow, because
-// `receiver_plane_slope` takes screen-space derivatives and neighbouring
-// fragments may choose differently. Phase two selects and filters, and may
-// diverge freely — `pcf` samples at an explicit LOD and takes no derivatives.
+// Nothing here takes a screen-space derivative — the receiver plane comes off
+// the normal — so the per-fragment cascade choice and everything after it may
+// diverge freely; `pcf` samples at an explicit LOD.
+// `normal` drives the normal-offset bias (the shading normal, as the offset has
+// always been scaled); `plane` is the geometric normal the receiver-plane
+// extrapolation is taken from — see `Surface::plane` for why they may differ.
 float sun_shadow(uint64_t frame_address, Frame frame, float3 world, float3 normal,
-                 Texture2D<float4> textures[], SamplerState samplers[])
+                 float3 plane, Texture2D<float4> textures[], SamplerState samplers[])
 {
     // Uniform across the whole draw: it comes out of the frame block, so this
     // branch never splits a quad.
@@ -417,12 +432,12 @@ float sun_shadow(uint64_t frame_address, Frame frame, float3 world, float3 norma
     [ForceUnroll]
     for (uint i = 0; i < MAX_CASCADES; ++i)
     {
-        // Clamped rather than skipped: the loop bound has to be the compile-time
-        // maximum for the derivatives inside to be uniform, so an unused cascade
-        // recomputes the last live one instead of branching around it.
+        // Clamped rather than skipped: the loop is unrolled to the compile-time
+        // maximum, so an unused slot recomputes the last live cascade instead
+        // of reading past the block.
         Cascade c = load_cascade(frame_address, min(i, frame.cascade_count - 1));
         clip[i] = to_light_clip(frame, c, world, normal);
-        slope[i] = receiver_plane_slope(clip[i].xy * 0.5 + 0.5, clip[i].z);
+        slope[i] = receiver_plane_slope(c, plane);
         texture[i] = c.texture;
     }
 
@@ -492,7 +507,8 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world,
             if (!shadowed_sun_seen)
             {
                 shadowed_sun_seen = true;
-                radiance *= sun_shadow(frame_address, frame, world, s.normal, textures, samplers);
+                radiance *= sun_shadow(frame_address, frame, world, s.normal, s.plane,
+                                       textures, samplers);
             }
         }
         else

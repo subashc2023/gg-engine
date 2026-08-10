@@ -1,0 +1,14 @@
+# Demo 11's bindings (§4.7). By *physical* key position, so this file means
+# the same thing on AZERTY as on QWERTY.
+#
+# The arrow cluster doubles the WASD verbs (§6 M19's rule: a scheme where W
+# and Up disagree is worse than one that departs from a default), and Space
+# doubles jump because a platformer without Space-to-jump fights every thumb
+# that ever played one.
+
+[game.actions]
+jump = ["Space", "W", "Up"]
+restart = ["R"]
+
+[game.axes]
+move = ["+D", "-A", "+Right", "-Left"]

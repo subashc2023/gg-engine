@@ -166,6 +166,10 @@ float4 fs_main(VOut i) : SV_Target
 
     Surface s = make_surface(apply_normal_map(i.normal, i.tangent, normal_sample), base,
                              mr.g * push.metallic, mr.r * push.roughness, occlusion);
+    // The receiver plane stays the geometry's: the shadow map rasterized the
+    // mesh, not the normal map, and a plane taken from the mapped normal
+    // re-acnes every mapped receiver.
+    s.plane = normalize(i.normal);
     // Radiance, unbounded above — the scene attachment is `Rgba16F` and the
     // tonemapper is what brings this into [0, 1] (§6 M11).
     return float4(shade_all(push.frame, frame, s, i.world, g_textures, g_samplers), 1.0);
