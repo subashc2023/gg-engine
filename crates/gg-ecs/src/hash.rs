@@ -34,9 +34,14 @@ const DOMAIN_CANONICAL: &[u8] = b"gg-ecs/canonical-state/v1\0";
 pub struct ComponentId(u64);
 
 impl ComponentId {
-    /// Hash a declared component id string. `const`-callable is deliberately
-    /// *not* offered: the derive calls this at registration, and a `const`
-    /// blake3 would be a second implementation to keep bit-identical.
+    /// Hash a declared component id string — the definition of the id, and
+    /// what [`Registry::register`](crate::Registry::register) checks the
+    /// derive's folded constant against.
+    ///
+    /// Still not `const`: a `const` blake3 would be the second implementation
+    /// this crate refuses to keep bit-identical by hand. Folding the *same*
+    /// blake3 at expansion time is how [`Component::COMPONENT_ID`] gets a
+    /// constant without one — see [`component_id_of!`](crate::component_id_of).
     #[must_use]
     pub fn of(declared: &str) -> Self {
         let mut h = blake3::Hasher::new();
@@ -109,6 +114,14 @@ impl SideTableId {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
+    }
+
+    /// Reconstruct from raw bits — what
+    /// [`side_table_id_of!`](crate::side_table_id_of) expands to, and the only
+    /// way to name a [`SideTableId`] in a constant.
+    #[must_use]
+    pub const fn from_raw(bits: u64) -> Self {
+        Self(bits)
     }
 }
 

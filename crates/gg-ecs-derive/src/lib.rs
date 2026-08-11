@@ -1,8 +1,13 @@
 //! `gg-ecs-derive` (§4.2, §4.2.1) — the derives `gg-ecs` cannot host itself,
 //! because a `proc-macro = true` crate may export nothing else.
 //!
-//! Use them through `gg_ecs`, which re-exports all three; naming this crate
+//! Use them through `gg_ecs`, which re-exports every one; naming this crate
 //! directly from a game crate would trip the §4.2.2 boundary deny pin.
+//!
+//! Three derives and two function-like macros. The macros exist because §4.2's
+//! ids are folded here at expansion time and `ComponentId::of` is not `const`,
+//! so a hand-written impl has no other way to name the constant the trait now
+//! requires.
 
 use proc_macro::TokenStream;
 use quote::{quote, quote_spanned};
@@ -23,6 +28,40 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
     expand_component(&input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
+}
+
+/// `component_id_of!("declared-id")` — the same fold the `Component` derive
+/// performs, as a constant expression (§4.2).
+///
+/// The escape hatch that keeps [`Component`](macro@Component) hand-implementable:
+/// `ComponentId::of` is a blake3 and so not `const`, which would otherwise make
+/// `COMPONENT_ID` a constant no hand-written impl could name. Rare by design —
+/// the derive is the path — but a trait nothing outside this crate can
+/// implement is a different trait than the one §4.2 describes.
+#[proc_macro]
+pub fn component_id_of(input: TokenStream) -> TokenStream {
+    let declared = parse_macro_input!(input as LitStr);
+    if declared.value().is_empty() {
+        return syn::Error::new(declared.span(), "id must not be empty")
+            .into_compile_error()
+            .into();
+    }
+    let bits = component_id_bits(&declared.value());
+    quote! { ::gg_ecs::ComponentId::from_raw(#bits) }.into()
+}
+
+/// `side_table_id_of!("declared-id")` — [`component_id_of!`] under §4.2.1's
+/// side-table domain, for a [`SideTable`](macro@SideTable) written by hand.
+#[proc_macro]
+pub fn side_table_id_of(input: TokenStream) -> TokenStream {
+    let declared = parse_macro_input!(input as LitStr);
+    if declared.value().is_empty() {
+        return syn::Error::new(declared.span(), "id must not be empty")
+            .into_compile_error()
+            .into();
+    }
+    let bits = side_table_id_bits(&declared.value());
+    quote! { ::gg_ecs::SideTableId::from_raw(#bits) }.into()
 }
 
 /// `#[derive(StateHash)]` — the protocol encoding alone, for a type hashed as
@@ -138,6 +177,35 @@ fn declared_id(input: &DeriveInput, attr_name: &str) -> syn::Result<LitStr> {
     })
 }
 
+/// `ComponentId::of`'s construction, performed here at expansion time (§4.2).
+///
+/// The duplication is the domain string and the truncation, not the hash: this
+/// crate depends on the same pinned `blake3`, so there is no second
+/// implementation to keep bit-identical — which is the objection
+/// [`gg_ecs::ComponentId::of`]'s doc raises against a `const fn` and the reason
+/// this is a proc macro instead. What *could* still drift is the domain
+/// separator below, so `Registry::register` recomputes the id the ordinary way
+/// and refuses a disagreement: the check is total across every component any
+/// build registers, and costs the hash that used to happen there anyway.
+fn component_id_bits(declared: &str) -> u64 {
+    folded_id(b"gg-ecs/component-id/v1\0", declared) // hash.rs's DOMAIN_COMPONENT_ID
+}
+
+/// As [`component_id_bits`], under §4.2.1's other namespace — the domains are
+/// separate so that promoting a side table to a component moves its id loudly.
+fn side_table_id_bits(declared: &str) -> u64 {
+    folded_id(b"gg-ecs/side-table-id/v1\0", declared) // hash.rs's DOMAIN_SIDE_TABLE_ID
+}
+
+fn folded_id(domain: &[u8], declared: &str) -> u64 {
+    let mut h = blake3::Hasher::new();
+    h.update(domain);
+    h.update(declared.as_bytes());
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&h.finalize().as_bytes()[..8]);
+    u64::from_le_bytes(out)
+}
+
 fn expand_component(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let id = declared_id(input, "component")?;
     let fields = named_fields(input, "Component")?;
@@ -175,11 +243,14 @@ fn expand_component(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream
 
     let type_name = name.to_string();
     let guards = guard_block(&checks);
+    let id_bits = component_id_bits(&id.value());
     Ok(quote! {
         #guards
 
         impl #impl_generics ::gg_ecs::Component for #name #ty_generics #where_clause {
             const DECLARED_ID: &'static str = #id;
+            const COMPONENT_ID: ::gg_ecs::ComponentId =
+                ::gg_ecs::ComponentId::from_raw(#id_bits);
             const TYPE_NAME: &'static str = #type_name;
             const FIELDS: &'static [::gg_ecs::FieldDesc] = &[#(#descs),*];
         }
@@ -208,11 +279,14 @@ fn expand_side_table(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     // The encoding is the `StateHash` derive's, unchanged — a side table is
     // hashed state that happens to be registered by name.
     let state_hash = expand_state_hash(input, "SideTable")?;
+    let id_bits = side_table_id_bits(&id.value());
     Ok(quote! {
         #state_hash
 
         impl ::gg_ecs::SideTable for #name {
             const DECLARED_ID: &'static str = #id;
+            const SIDE_TABLE_ID: ::gg_ecs::SideTableId =
+                ::gg_ecs::SideTableId::from_raw(#id_bits);
             const TYPE_NAME: &'static str = #type_name;
         }
     })

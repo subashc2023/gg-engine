@@ -258,6 +258,14 @@ pub mod aim {
         bar(editor, 49.0, 12.0)
     }
 
+    /// The gizmo-mode chip in the viewport's corner (§6 M20 item 10).
+    #[must_use]
+    pub fn tool(editor: &Editor) -> Option<(f32, f32)> {
+        editor
+            .pane_body(Pane::Viewport)
+            .map(|body| centre(panels::tool_chip(body)))
+    }
+
     /// A pane's tab — what a click brings up and a drag re-docks.
     #[must_use]
     pub fn tab(editor: &Editor, pane: Pane) -> Option<(f32, f32)> {

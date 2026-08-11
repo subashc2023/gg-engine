@@ -46,6 +46,7 @@ const GRAIN: WidgetId = WidgetId::new("editor.nudge.step");
 const SPAWN: WidgetId = WidgetId::new("editor.tree.spawn");
 const COPY: WidgetId = WidgetId::new("editor.tree.duplicate");
 const KILL: WidgetId = WidgetId::new("editor.tree.delete");
+const TOOL: WidgetId = WidgetId::new("editor.gizmo.tool");
 
 /// How far in front of the camera a spawned entity lands, in metres. Far enough
 /// to see whole at the default field of view, near enough that its gizmo arms
@@ -519,20 +520,21 @@ impl Editor {
     /// build that was compiled against none of the game's types can still
     /// restructure its world.
     fn structure(&mut self, world: &mut gg_ecs::World, head: Rect) {
+        let eye =
+            self.eye(gg_ecs::boundary::Eye::of(world).unwrap_or(gg_ecs::boundary::Eye::ORIGIN));
+        let (right, _, forward) = crate::pick::basis(eye.yaw, eye.pitch);
         if self.button(SPAWN, head_button(head, 4), "+", false) {
             self.history.edit(world);
-            // In front of the camera being looked through, at a fixed distance,
-            // in the one shape the host knows how to draw. A spawn that produced
-            // an entity with nothing on it would be a button whose whole effect
-            // is a row appearing in a list — and over a game that never declared
-            // `Renderable` this *introduces* it, which the save policy permits
-            // (a save may gain, never lose) and the tree shows.
-            let eye =
-                self.eye(gg_ecs::boundary::Eye::of(world).unwrap_or(gg_ecs::boundary::Eye::ORIGIN));
-            let (_, _, forward) = crate::pick::basis(eye.yaw, eye.pitch);
+            // In front of the camera being looked through, at the depth the
+            // operator is working at, in the one shape the host knows how to
+            // draw. A spawn that produced an entity with nothing on it would be
+            // a button whose whole effect is a row appearing in a list — and
+            // over a game that never declared `Renderable` this *introduces* it,
+            // which the save policy permits (a save may gain, never lose) and
+            // the tree shows.
             let entity = world.spawn();
             let box_ = gg_ecs::boundary::Renderable::boxed(
-                eye.position + forward * SPAWN_AT,
+                eye.position + forward * self.working_depth(world, eye.position, forward),
                 gg_math::sim::Vec3::splat(0.5),
                 SPAWN_INK,
             );
@@ -558,6 +560,17 @@ impl Editor {
             self.history.edit(world);
             match world.duplicate(entity) {
                 Some(copy) => {
+                    // One nudge grain to the camera's right (§6 M20 item 10). A
+                    // copy exactly on top of its original is invisible, and the
+                    // pick's lowest-index tie-break hands the next click back to
+                    // the *original* — so the button reads as doing nothing
+                    // while the world fills with stacked boxes. One grain and
+                    // not an arbitrary offset because the result must still be a
+                    // value the nudge bar could have typed.
+                    let grain = crate::STEPS.get(self.step).copied().unwrap_or(1.0);
+                    if let Some(box_) = world.get_mut::<gg_ecs::boundary::Renderable>(copy) {
+                        box_.position += right * grain;
+                    }
                     self.selected = Some(copy);
                     self.lane = None;
                     self.edits += 1;
@@ -581,6 +594,57 @@ impl Editor {
             self.selected = None;
             self.lane = None;
             self.gizmo = None;
+        }
+    }
+
+    /// How far in front of the camera a spawn lands, in metres (§6 M20 item 10).
+    ///
+    /// The selection's own depth, so a new box arrives beside the thing being
+    /// worked on rather than in a plane of its own. Failing that — and **only**
+    /// under a flat eye — the mean depth of everything there is: an orthographic
+    /// camera's distance frames nothing, so `SPAWN_AT` metres in front of one is
+    /// a number with no meaning, and over demo 11 it put every new platform nine
+    /// metres out of the level and in front of the player. A perspective eye with
+    /// nothing selected keeps [`SPAWN_AT`], where the distance *is* the framing.
+    fn working_depth(
+        &self,
+        world: &gg_ecs::World,
+        from: gg_math::sim::DVec3,
+        forward: gg_math::sim::DVec3,
+    ) -> f64 {
+        let along = |at: gg_math::sim::DVec3| (at - from).dot(forward);
+        if let Some(depth) = self
+            .selected
+            .and_then(|entity| world.get::<gg_ecs::boundary::Renderable>(entity))
+            .map(|box_| along(box_.position))
+            .filter(|depth| *depth > 0.0)
+        {
+            return depth;
+        }
+        let flat = self
+            .eye(gg_ecs::boundary::Eye::of(world).unwrap_or(gg_ecs::boundary::Eye::ORIGIN))
+            .ortho
+            > 0.0;
+        let Some(query) = flat
+            .then(gg_ecs::Query::<&gg_ecs::boundary::Renderable>::new)
+            .and_then(Result::ok)
+        else {
+            return SPAWN_AT;
+        };
+        let (mut sum, mut seen) = (0.0, 0u32);
+        world.each_ref(&query, |_, box_: &gg_ecs::boundary::Renderable| {
+            let depth = along(box_.position);
+            // In front only: a box behind the camera is not what the operator
+            // is looking at, and averaging it in would drag the answer through
+            // the eye and out the other side.
+            if depth > 0.0 {
+                sum += depth;
+                seen += 1;
+            }
+        });
+        match seen {
+            0 => SPAWN_AT,
+            _ => sum / f64::from(seen),
         }
     }
 
@@ -631,6 +695,14 @@ impl Editor {
             &format!("viewport {tag}"),
             ACCENT,
         );
+        // The gizmo's mode, beside the tag and clickable (§6 M20 item 10). A
+        // key alone would be a mode with no way to discover it or to see which
+        // one is current, and the arms of the three tools are the same picture.
+        let chip = tool_chip(body);
+        if chip.right() <= body.right() - 1.0 && self.button(TOOL, chip, self.tool.label(), false) {
+            self.tool = self.tool.next();
+            tracing::info!(tool = self.tool.label(), "editor: tool");
+        }
     }
 
     /// The project picker, in the game pane, with no game behind it (§6 M15.1
@@ -1408,6 +1480,15 @@ pub(crate) fn nudge_rect(body: Rect) -> Rect {
         (body.w - 4.0).max(0.0),
         10.0,
     )
+}
+
+/// The gizmo-mode chip, beside the viewport's own tag in its top-left corner
+/// (§6 M20 item 10). A function rather than four numbers at the call site so a
+/// script can aim at it — `session::aim::tool` is its only other reader, and a
+/// second copy of the arithmetic is a script that clicks where the chip was.
+pub(crate) fn tool_chip(body: Rect) -> Rect {
+    let tag = (17.0 * EM).min(body.w - 2.0);
+    Rect::new(body.x + 3.0 + tag, body.y + 1.0, 5.0 * EM, 9.0)
 }
 
 /// Rows a pane has room for — what an unscrolled panel truncates to.

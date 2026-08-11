@@ -17,6 +17,8 @@ impl gg_ecs::StateHash for Unfingerprinted {
 
 impl gg_ecs::Component for Unfingerprinted {
     const DECLARED_ID: &'static str = "unfingerprinted";
+    // Stated, so the error below is about the schema and only the schema.
+    const COMPONENT_ID: gg_ecs::ComponentId = gg_ecs::component_id_of!("unfingerprinted");
     const TYPE_NAME: &'static str = "Unfingerprinted";
 }
 

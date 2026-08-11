@@ -34,7 +34,10 @@ use gg_ui::boundary::verb as ui;
 ///
 /// Seven camera actions, the look pair a doubled `MAX_AXES` made affordable —
 /// see [`crate::camera`] for what differencing the cursor instead cost while it
-/// was not — and §6 M16 item 5's two text-editing verbs.
+/// was not — §6 M16 item 5's two text-editing verbs, and §6 M20 item 10's
+/// [`PAN`], [`FRAME`] and [`TOOL`], which are what an *orthographic* scene is
+/// authored with: a fly camera's six directions describe a way of moving that
+/// a flat view has no use for.
 pub mod verb {
     /// Along the eye's forward axis, and against it.
     pub const FORWARD: &str = "editor_forward";
@@ -61,6 +64,18 @@ pub mod verb {
     pub const LOOK_X: &str = "editor_look_x";
     /// See [`LOOK_X`].
     pub const LOOK_Y: &str = "editor_look_y";
+    /// Held while a drag slides the camera across the view plane.
+    ///
+    /// Turns by the same raw device pair as [`LOOK`] rather than a second one:
+    /// a pan and a look are one gesture with a different button, and a third
+    /// axis pair would spend `MAX_AXES` headroom to say the same numbers.
+    pub const PAN: &str = "editor_pan";
+    /// Put the selection in the middle of the view, at a size that fits it —
+    /// and, under an orthographic eye, level. The way back from a camera flown
+    /// somewhere there is nothing to see.
+    pub const FRAME: &str = "editor_frame";
+    /// Cycle the gizmo: move → scale → turn (`crate::Tool`).
+    pub const TOOL: &str = "editor_tool";
     /// Delete the character before the caret in the focused text field.
     ///
     /// A *verb* and not a character, which is the split the text channel rests
@@ -117,15 +132,24 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // binds either — and if one ever does it keeps its own, like `W` above.
     (verb::TEXT_BACK, "Backspace", true),
     (verb::TEXT_SEND, "Enter", true),
+    // The navigation a *flat* scene needs (§6 M20 item 10). Appended after
+    // everything above for the reason that rule keeps earning: `check_verbs`
+    // (§4.7) forgives an append and nothing else, so a session recorded before
+    // these three still replays, with their bits zero and their behaviour
+    // therefore absent. Reordering this table would invalidate every checked-in
+    // editor recording at once.
+    (verb::PAN, "Mouse3", true),
+    (verb::FRAME, "F", true),
+    (verb::TOOL, "G", true),
 ];
 
 /// The verb lists a shell should bind against with the editor open, and the
 /// bindings text to append to the game's own.
 ///
-/// Seventeen now — M15.1's four, the wheel's two, §6 M15.2's seven camera
-/// verbs plus the look pair a widened `MAX_AXES` made room for, and §6 M16
-/// item 5's text-editing pair; a game that declares some of them keeps its
-/// own, as it always did.
+/// Twenty now — M15.1's four, the wheel's two, §6 M15.2's seven camera
+/// verbs plus the look pair a widened `MAX_AXES` made room for, §6 M16
+/// item 5's text-editing pair, and §6 M20 item 10's pan, frame and tool; a
+/// game that declares some of them keeps its own, as it always did.
 ///
 /// The lists are leaked because [`Verbs`] is `&'static` by construction — the
 /// dylib's own arrays are, and there must be one type for both. It is a few
@@ -191,6 +215,9 @@ mod tests {
                 verb::LOOK,
                 verb::TEXT_BACK,
                 verb::TEXT_SEND,
+                verb::PAN,
+                verb::FRAME,
+                verb::TOOL,
             ]
         );
         assert_eq!(
@@ -216,6 +243,9 @@ mod tests {
         assert!(bindings.contains("ui_y = [\"PointerY\"]"));
         assert!(bindings.contains("editor_look_y = [\"MouseY\"]"));
         assert!(bindings.contains("editor_forward = [\"W\"]"));
+        // The pan shares the look's axis pair rather than asking for a third:
+        // one gesture, two buttons (§6 M20 item 10).
+        assert!(bindings.contains("editor_pan = [\"Mouse3\"]"));
         assert_eq!(verbs.axes.len(), game.axes.len() + 4);
         assert!(
             gg_ui::boundary::binding(&verbs).is_some(),
@@ -266,6 +296,9 @@ mod tests {
                 verb::LOOK,
                 verb::TEXT_BACK,
                 verb::TEXT_SEND,
+                verb::PAN,
+                verb::FRAME,
+                verb::TOOL,
             ],
             axes: &[ui::X, ui::Y, verb::LOOK_X, verb::LOOK_Y],
         };

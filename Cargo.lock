@@ -969,6 +969,7 @@ dependencies = [
 name = "gg-ecs-derive"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "proc-macro2",
  "quote",
  "syn 3.0.3",

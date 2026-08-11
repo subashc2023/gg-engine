@@ -1669,6 +1669,21 @@ fn rewrite_once_watching(
     if nudge_ms > 0 {
         std::thread::sleep(std::time::Duration::from_millis(nudge_ms));
     }
+    // The race named rather than left to surface as a missing reload. Every
+    // caller here bets that a `--frames` run outlasts the nudge plus the
+    // watcher's debounce, and that bet is in *ticks* against a requirement in
+    // *wall time* — so it is the fastest machine that breaks it, and it breaks
+    // silently: the rewrite reaches an exited process and the gate reports only
+    // that no reload happened. Cost is one `try_wait` per gate.
+    if let Some(status) = child.try_wait()? {
+        anyhow::bail!(
+            "the run ended ({status}) {nudge_ms} ms after `{marker}`, before the rewrite was even \
+             copied — this gate's `--frames` count is a wall-clock window and this machine ran \
+             through it. Raise the count; the reload is not what failed.\n{}{}",
+            stdout.join().unwrap_or_default(),
+            stderr.join().unwrap_or_default()
+        );
+    }
     std::fs::copy(replacement, game)?;
     let status = child.wait()?;
     let log = format!(
@@ -1908,6 +1923,20 @@ fn agent_loop(before: &Path, after: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Frames the agent gate's sessions run for — a **wall-clock window**, not a
+/// tick count: the rewrite lands 400 ms after the ready line and the watcher's
+/// debounce is another 120 ms (see [`segments`]), so a run that ends inside
+/// ~520 ms is one the rewrite arrives too late for.
+///
+/// It has to be sized on the *fastest* host in the matrix, which is not this
+/// desk. 60000 frames of plain demo 03 is 1.34 s here and **0.34 s** on the WSL
+/// lane — around 45k against 176k ticks a second — so the number that read as a
+/// comfortable 2.5x margin was a 200 ms deficit one host over, and the leg
+/// failed the first Linux nightly that reached it. `--latency` shares the shape
+/// and survives by accident: its variant game carries 25 generated systems, so
+/// the same 60000 frames cost it far more wall time.
+const AGENT_FRAMES: u32 = 300_000;
+
 /// A dev shell over `game` with `replacement` written under it partway through,
 /// publishing its record into `dir`. Returns `(log, record)`.
 ///
@@ -1921,12 +1950,11 @@ fn agent_session(game: &Path, replacement: &Path, dir: &Path) -> anyhow::Result<
         "build the shell [dev]",
     )?;
     let _ = std::fs::remove_dir_all(dir);
+    let frames = AGENT_FRAMES.to_string();
     let mut cmd = Command::new(exe("debug", "gg-runtime"));
     cmd.arg("--game")
         .arg(game)
-        // Frame count set by wall time, not by ticks needed: the watcher's
-        // debounce alone is 120 ms (see `segments`).
-        .args(["--frames", "60000"])
+        .args(["--frames", frames.as_str()])
         .env("GG_HEADLESS", "1")
         .env("GG_AGENT_DIR", dir)
         .stdout(Stdio::piped())
@@ -2740,7 +2768,14 @@ fn rules_once() -> anyhow::Result<u128> {
 
 /// Ticks of demo 11's patrol the feel retune is measured over — long enough to
 /// hold every [`FEEL_SWAPS`] aim in its first half.
-const FEEL_TICKS: usize = 4_000;
+///
+/// 4000 held that on this desk (the swap lands around tick 1350) and did not on
+/// the WSL lane, where the same rebuild costs enough ticks to land it past 2800
+/// — caught the first time the Linux nightly reached this leg, which is where
+/// the halfway guard earns its keep: it named a stream too short for a machine
+/// rather than grading a thin margin. [`RULES_TICKS`]' length, for the reason
+/// that gate already has one.
+const FEEL_TICKS: usize = 8_000;
 
 /// Ticks to aim the feel swap at, [`RULES_SWAPS`]' way: anchored on the tick's
 /// own hash line, so no wall time is priced. Each sits in one of the patrol's

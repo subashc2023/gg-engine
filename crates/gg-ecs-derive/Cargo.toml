@@ -1,4 +1,4 @@
-# gg-ecs-derive (§3, §4.2, §4.2.1) — the two derives gg-ecs cannot host itself:
+# gg-ecs-derive (§3, §4.2, §4.2.1) — the macros gg-ecs cannot host itself:
 # proc-macro crates may export nothing but macros. A leaf with no engine deps;
 # gg-ecs re-exports both, so game crates never name this crate and the §4.2.2
 # game-crate deny pin is unaffected. syn/quote/proc-macro2 are build-time only.
@@ -16,6 +16,10 @@ name = "gg_ecs_derive"
 proc-macro = true
 
 [dependencies]
+# The same pin `gg-ecs` hashes with, and the point of sharing it: the id this
+# crate folds at expansion time and the one `ComponentId::of` computes at run
+# time must be the same bits, so they must be the same implementation (§4.2).
+blake3 = { workspace = true }
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }

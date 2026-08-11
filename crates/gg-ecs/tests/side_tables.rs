@@ -197,6 +197,32 @@ fn two_types_claiming_one_id_is_an_error_naming_both() {
     assert!(msg.contains("trade-routes"), "{msg}");
 }
 
+/// The side-table half of the folded-id check (§4.2.1). Its domain is the one
+/// thing the derive restates rather than shares, so the two namespaces are
+/// compared under one name — a domain pasted from the component branch would
+/// pass the first assertion and fail the last.
+#[test]
+fn the_folded_side_table_id_is_the_one_of_would_have_computed() {
+    assert_eq!(
+        ProductionQueue::SIDE_TABLE_ID,
+        gg_ecs::SideTableId::of(ProductionQueue::DECLARED_ID)
+    );
+    assert_eq!(
+        TradeRoutes::SIDE_TABLE_ID,
+        gg_ecs::side_table_id_of!("trade-routes")
+    );
+    assert_ne!(
+        ProductionQueue::SIDE_TABLE_ID,
+        TradeRoutes::SIDE_TABLE_ID,
+        "a fold that ignored the declared id would pass the equalities above"
+    );
+    assert_ne!(
+        gg_ecs::side_table_id_of!("production-queue").get(),
+        gg_ecs::component_id_of!("production-queue").get(),
+        "the two folds must keep §4.2.1's domains apart, as `of` does"
+    );
+}
+
 #[test]
 fn a_component_and_a_side_table_sharing_a_name_do_not_share_an_id() {
     // Different domains (§4.2.1): the two namespaces are deliberately disjoint.

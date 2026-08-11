@@ -39,6 +39,11 @@ pub trait SideTable: StateHash + Send + Sync + 'static {
     /// Persisted identity, decoupled from the Rust type path exactly as
     /// [`Component::DECLARED_ID`](crate::Component::DECLARED_ID) is.
     const DECLARED_ID: &'static str;
+    /// [`DECLARED_ID`](Self::DECLARED_ID) hashed, folded by the derive at
+    /// expansion time — the same move [`Component::COMPONENT_ID`] makes, and
+    /// for the same reason: `get`/`get_mut` below resolve a table by id on
+    /// every access, which is per system per tick.
+    const SIDE_TABLE_ID: SideTableId;
     /// The Rust type name. Diagnostics only.
     const TYPE_NAME: &'static str;
 }
@@ -138,7 +143,17 @@ pub(crate) struct SideTables {
 
 impl SideTables {
     pub(crate) fn insert<T: SideTable>(&mut self, table: T) -> Result<SideTableId, SideTableError> {
-        let id = SideTableId::of(T::DECLARED_ID);
+        let id = T::SIDE_TABLE_ID;
+        // The folded id against the run-time construction, on the one path that
+        // happens once per table — `Registry::register`'s check, for the other
+        // half of §4.2.1's namespace.
+        assert_eq!(
+            id,
+            SideTableId::of(T::DECLARED_ID),
+            "gg-ecs: `{}`'s folded side-table id disagrees with `SideTableId::of` — the derive \
+             and `hash.rs` have drifted apart, and every id this build persists is wrong",
+            T::TYPE_NAME
+        );
         match self.sorted.binary_search_by_key(&id, |(k, _)| *k) {
             Ok(at) => {
                 let existing = &self.sorted[at].1;
@@ -171,19 +186,19 @@ impl SideTables {
     }
 
     pub(crate) fn get<T: SideTable>(&self) -> Option<&T> {
-        let id = SideTableId::of(T::DECLARED_ID);
+        let id = T::SIDE_TABLE_ID;
         let at = self.sorted.binary_search_by_key(&id, |(k, _)| *k).ok()?;
         self.sorted[at].1.as_any().downcast_ref::<T>()
     }
 
     pub(crate) fn get_mut<T: SideTable>(&mut self) -> Option<&mut T> {
-        let id = SideTableId::of(T::DECLARED_ID);
+        let id = T::SIDE_TABLE_ID;
         let at = self.sorted.binary_search_by_key(&id, |(k, _)| *k).ok()?;
         self.sorted[at].1.as_any_mut().downcast_mut::<T>()
     }
 
     pub(crate) fn remove<T: SideTable>(&mut self) -> Option<T> {
-        let id = SideTableId::of(T::DECLARED_ID);
+        let id = T::SIDE_TABLE_ID;
         let at = self.sorted.binary_search_by_key(&id, |(k, _)| *k).ok()?;
         // Probe before removing: an id collision must not silently hand back
         // someone else's table, and a failed downcast after `remove` would have

@@ -98,6 +98,6 @@ pub use world::save::{Save, SaveError};
 pub use world::snapshot::{ComponentOutcome, MigrationReport, Snapshot, SnapshotError};
 pub use world::{World, WorldError};
 
-/// The derives (§4.2, §4.2.1), re-exported so game crates name `gg-ecs` alone
-/// and the §4.2.2 boundary deny pin stays a four-crate list.
-pub use gg_ecs_derive::{Component, SideTable, StateHash};
+/// The derives and the two id folds (§4.2, §4.2.1), re-exported so game crates
+/// name `gg-ecs` alone and the §4.2.2 boundary deny pin stays a four-crate list.
+pub use gg_ecs_derive::{Component, SideTable, StateHash, component_id_of, side_table_id_of};

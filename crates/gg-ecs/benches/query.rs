@@ -419,5 +419,19 @@ fn main() {
             scattered_ratio(scattered_views)
         ));
     }
+    // The bound the folded component id bought, and the only gate on this leg's
+    // *typed* number — which was printed and ungated while it sat at 17x,
+    // because term resolution hashed `DECLARED_ID` per archetype. At 4.1x it is
+    // level with the untyped column-view path above it; 8.0 is loose enough for
+    // a busy desk and nowhere near the 17x a `component_id` that hashed again
+    // would put it back at.
+    if scattered_ratio(scattered_typed) > 8.0 {
+        failures.push(format!(
+            "over {GROUPS} archetypes of {ROWS} rows, typed each() is {:.2}x the same loop over \
+             plain `Vec`s; resolving a term per archetype is meant to be a binary search, and at \
+             this ratio it is hashing something it could have folded (§4.2)",
+            scattered_ratio(scattered_typed)
+        ));
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

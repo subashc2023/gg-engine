@@ -308,6 +308,56 @@ pub struct Lane {
 /// visibly, fine enough that a colour channel does not saturate in two clicks.
 pub const STEPS: &[f64] = &[0.25, 1.0, 10.0];
 
+/// What [`STEPS`]'s three grains mean to [`Tool::Turn`]: degrees, on the same
+/// index, because one step control the operator can see beats a second one that
+/// only appears in one mode. A quarter-metre and a degree are both "the fine
+/// one" — the ratio between the entries is what the button is *for*.
+pub const ANGLES: &[f64] = &[1.0, 15.0, 45.0];
+
+/// What a gizmo drag does to the selection (§6 M20 item 10).
+///
+/// One gizmo in three modes rather than three gizmos: the arms, the arbitration
+/// and the quantization are the same geometry in all three, and only the write
+/// at the end differs. Cycled by [`host::verb::TOOL`] and by the chip in the
+/// viewport's corner, so it is reachable without knowing the key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tool {
+    /// Translate along one world axis. The mode M15.4 shipped, and the default.
+    #[default]
+    Move,
+    /// Grow or shrink `Renderable::half_extent` on one axis — what authoring a
+    /// level out of boxes is mostly made of, and the reason this enum exists.
+    Scale,
+    /// Turn about one world axis, in whole [`ANGLES`] degrees.
+    Turn,
+}
+
+impl Tool {
+    /// The three, in cycle order.
+    pub const ALL: [Tool; 3] = [Tool::Move, Tool::Scale, Tool::Turn];
+
+    /// The next one, wrapping.
+    #[must_use]
+    pub fn next(self) -> Tool {
+        match self {
+            Tool::Move => Tool::Scale,
+            Tool::Scale => Tool::Turn,
+            Tool::Turn => Tool::Move,
+        }
+    }
+
+    /// The chip's label — four characters, because the chip sits in the corner
+    /// of a pane whose whole width belongs to the game.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Tool::Move => "move",
+            Tool::Scale => "size",
+            Tool::Turn => "turn",
+        }
+    }
+}
+
 /// A dockable panel.
 ///
 /// The three that were tabs of one fixed "dock" panel through M15 are ordinary
@@ -725,6 +775,13 @@ pub struct Editor {
     /// state like every other panel field, and for the same reason: it is a pure
     /// function of the replayed input stream.
     gizmo: Option<marker::Gizmo>,
+    /// Which write a gizmo drag makes (§6 M20 item 10). Host state, like the
+    /// drag itself: the mode decides what an *input* means, and the world only
+    /// ever sees the result.
+    tool: Tool,
+    /// [`host::verb::TOOL`] last tick, so the key cycles on its press edge
+    /// rather than sixty times a second while it is held.
+    tool_was: bool,
     /// Worlds as they were before each edit (§6 M15.4 item 4) — host state,
     /// absent from the world and so from the hash, though re-applying a step
     /// writes through `World` like every other edit and is.
@@ -810,6 +867,8 @@ impl Editor {
             maximized: false,
             camera: camera::Camera::default(),
             gizmo: None,
+            tool: Tool::default(),
+            tool_was: false,
             history: history::History::default(),
             play_was: Play::default(),
             arms: [None; 3],
@@ -928,7 +987,24 @@ impl Editor {
         // tag and the shell's extract both see. It no longer reads the router's
         // pointer at all — a look drag is a device delta (`camera`) — so the
         // order against `begin` above is now free rather than load-bearing.
-        self.camera.fly(world, frame);
+        //
+        // The nav is assembled here because every part of it has an owner
+        // elsewhere: the pane is the dock's, the field of view a CVar, the
+        // selection this struct's. Built from the framing the *last* tick drew,
+        // which is the same frame of lag every hit test already has.
+        self.camera.fly(world, frame, self.nav(world));
+        // The tool cycles on the key's press edge — and unconditionally, unlike
+        // the gizmo it steers: pressing it while the scene plays should leave
+        // the mode the operator wanted waiting when they stop.
+        let cycling = frame
+            .input
+            .and_then(|input| camera::id(input, host::verb::TOOL).map(|a| input.pressed(a)))
+            .unwrap_or(false);
+        if cycling && !self.tool_was {
+            self.tool = self.tool.next();
+            tracing::info!(tool = self.tool.label(), "editor: tool");
+        }
+        self.tool_was = cycling;
         self.scan.run(world);
         self.scan
             .page(world, self.first_row, self.per_page + 1, &mut self.rows);
@@ -963,6 +1039,48 @@ impl Editor {
         }
         self.primary = tick.primary;
         self.commands
+    }
+
+    /// What the camera needs to know about the picture it is flying through
+    /// (§6 M20 item 10) — the pane's shape, the lens, and what is selected.
+    ///
+    /// The scales come out of [`pick::Lens`] rather than being derived a second
+    /// time here, for the reason the lens exists at all: a pan that moved by a
+    /// different metres-per-pixel than the picture was drawn with is a scene
+    /// that slides out from under the pointer, and nothing about either number
+    /// alone would look wrong.
+    fn nav(&self, world: &gg_ecs::World) -> camera::Nav {
+        let rendered = self.viewport_rect();
+        let (w, h) = (
+            f64::from(rendered.width.max(1)),
+            f64::from(rendered.height.max(1)),
+        );
+        let aspect = w / h;
+        let eye =
+            self.eye(gg_ecs::boundary::Eye::of(world).unwrap_or(gg_ecs::boundary::Eye::ORIGIN));
+        let fov = gg_render::cvars::FOV.float();
+        let lens = pick::Lens::new(eye, fov, aspect, gg_render::cvars::NEAR.float());
+        let target = self
+            .selected
+            .and_then(|entity| world.get::<gg_ecs::boundary::Renderable>(entity).copied());
+        // A perspective pan tracks the hand only at one depth, and this picks
+        // it: the selection's, or a room's width when there is none. Under a
+        // flat eye the argument goes unread — there is only one scale.
+        let depth = target.map_or(camera::PAN_DEPTH, |box_| {
+            lens.project(box_.position).1.max(camera::PAN_DEPTH * 0.1)
+        });
+        camera::Nav {
+            metres_per_unit: lens.metres_per_unit(depth, h),
+            aspect,
+            half_fov_tan: gg_math::sim::tan(fov * 0.5),
+            target,
+            // Only over the game: the panes tile, so a notch anywhere else is
+            // some pane's scroll and taking it here would be taking it twice.
+            wheel: match self.over_panels() {
+                true => 0,
+                false => self.wheel,
+            },
+        }
     }
 
     /// The title bar's strip, across the top of the canvas and outside the dock.
@@ -1400,6 +1518,13 @@ impl Editor {
     /// session that never touched the bar.
     pub fn take_window_command(&mut self) -> Option<WindowCommand> {
         self.window.take()
+    }
+
+    /// What a gizmo drag currently writes (§6 M20 item 10) — read by tests and
+    /// by the session gate, which cannot see the chip that says so.
+    #[must_use]
+    pub fn tool(&self) -> Tool {
+        self.tool
     }
 
     /// The selected entity, if any — read by tests and by the session gate.

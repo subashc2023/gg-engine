@@ -652,10 +652,20 @@ fn a_gizmo_drag_moves_one_axis_and_the_same_drag_back_restores_it() {
     let was = at(&world);
 
     let handle = run.handle(1).expect("the world-Y handle is up");
-    let reach = ((handle.0 - middle.0) * 6.0, (handle.1 - middle.1) * 6.0);
+    // Most of the way to the top of the pane, rather than a multiple of the
+    // arm: `Pointer::advance` clamps to the canvas, so a reach expressed in arm
+    // lengths silently stops being symmetric the moment the arm gets longer —
+    // and a clamped gesture *out* with an unclamped one *back* is a round trip
+    // that looks like a quantization bug (§6 M20 item 10).
+    let body = editor.pane_body(Pane::Viewport).expect("the game is up");
+    let reach = (0.0, -(handle.1 - body.y) * 0.8);
     // Where the first gesture leaves the pointer, which is where the second one
     // has to be told it starts from: the frames carry motion, not position.
     let ended = (handle.0 + reach.0, handle.1 + reach.1);
+    assert!(
+        ended.1 > 0.0 && ended.1 < body.bottom(),
+        "the drag leaves the canvas and clamps: {ended:?}"
+    );
     let out = [
         Act::To(handle),
         Act::Settle(4),
@@ -817,12 +827,20 @@ fn the_tree_spawns_duplicates_and_deletes_and_the_world_still_encodes() {
     let copy = run.selected().expect("a duplicate selects the copy");
     assert_ne!(copy, made, "the duplicate selected the original");
     assert_eq!(world.len(), before + 2);
+    let made_box = *world.get::<gg_ecs::boundary::Renderable>(made).unwrap();
+    let copy_box = *world
+        .get::<gg_ecs::boundary::Renderable>(copy)
+        .expect("the copy did not carry the original's components");
+    assert_eq!(copy_box.half_extent, made_box.half_extent);
+    assert_eq!(copy_box.color, made_box.color);
+    // One nudge grain to the camera's right (§6 M20 item 10), not on top of it:
+    // a copy at the original's exact position is invisible, and the pick's
+    // lowest-index tie-break hands the next click back to the original, so the
+    // button reads as inert while the world fills with stacked boxes.
     assert_eq!(
-        world
-            .get::<gg_ecs::boundary::Renderable>(copy)
-            .map(|b| b.position),
-        Some(placed_at),
-        "the copy did not carry the original's components"
+        copy_box.position - placed_at,
+        sim::DVec3::new(gg_editor::STEPS[1], 0.0, 0.0),
+        "the copy landed on top of its original"
     );
 
     stopped(&mut world, &mut run, &stream[duplicated..]);
@@ -1160,4 +1178,302 @@ fn typing(typed: &str) -> Frame<'_> {
         projects: &[],
         maximized: false,
     }
+}
+
+// ---------------------------------------- §6 M20 item 10: flat authoring ----
+
+/// Demo 11's framing, in shape: an orthographic eye out of the playfield plane
+/// and a wide slab at the origin — the level an operator is actually authoring
+/// when the gizmo has to work (§6 M20).
+fn flat_scene() -> (World, gg_ecs::Entity) {
+    let mut world = World::new();
+    let eye = world.spawn();
+    world
+        .insert(
+            eye,
+            gg_ecs::boundary::Eye::flat(sim::DVec3::new(0.0, 0.0, 14.0), 4.5),
+        )
+        .unwrap();
+    let slab = world.spawn();
+    world
+        .insert(
+            slab,
+            gg_ecs::boundary::Renderable::boxed(
+                sim::DVec3::ZERO,
+                sim::Vec3::new(3.0, 0.5, 0.5),
+                0x0080_c0ff,
+            ),
+        )
+        .unwrap();
+    (world, slab)
+}
+
+/// Pick the slab and hand back the editor with its arms up.
+fn flat_picked() -> (World, gg_ecs::Entity, Editor, (f32, f32)) {
+    let editor = placed(TARGET);
+    let middle = aim::nowhere(&editor).expect("the game is up");
+    let (mut world, slab) = flat_scene();
+    let mut run = Editor::new(None);
+    let pick = [Act::To(middle), Act::Settle(4), Act::Click, Act::Settle(3)];
+    stopped(&mut world, &mut run, &frames(&pick, CLICK, X, Y));
+    assert_eq!(run.selected(), Some(slab), "the click picked the slab");
+    (world, slab, run, middle)
+}
+
+/// A point `t` of the way from the selection's centre out along an arm.
+fn along(centre: (f32, f32), tip: (f32, f32), t: f32) -> (f32, f32) {
+    (
+        centre.0 + (tip.0 - centre.0) * t,
+        centre.1 + (tip.1 - centre.1) * t,
+    )
+}
+
+fn box_of(world: &World, entity: gg_ecs::Entity) -> gg_ecs::boundary::Renderable {
+    *world.get::<gg_ecs::boundary::Renderable>(entity).unwrap()
+}
+
+/// §6 M20 item 10: the **arm** is the grab target, not the dot at its end.
+///
+/// Through M20 only a five-unit pad at the tip was hit-tested, so a press on the
+/// visible length of a handle fell through to the pick underneath and the gizmo
+/// read as broken — which is how it read at the desk. Both halves are asserted:
+/// a press most of the way along the arm drags, and one near the centre still
+/// does not, because that is where all three arms meet and no answer to "which
+/// axis" would be right.
+#[test]
+fn a_press_along_an_arm_drags_it_and_one_at_the_meeting_point_does_not() {
+    let (mut world, slab, mut run, middle) = flat_picked();
+    let handle = run.handle(0).expect("the world-X handle is up");
+    let reach = (handle.0 - middle.0) * 5.0;
+    let grab = along(middle, handle, 0.7);
+    let drag = [
+        Act::To(grab),
+        Act::Settle(4),
+        Act::Drag((grab.0 + reach, grab.1)),
+        Act::Settle(3),
+    ];
+    stopped(
+        &mut world,
+        &mut run,
+        &gg_editor::session::frames_from(middle, &drag, CLICK, X, Y),
+    );
+    let moved = box_of(&world, slab).position;
+    assert!(
+        moved.x > 0.0,
+        "a press on the arm did not drag it: {moved:?}"
+    );
+    assert_eq!((moved.y, moved.z), (0.0, 0.0), "it moved another axis");
+
+    // And the exclusion at the centre holds: the same gesture from inside the
+    // meeting point is a *pick*, not a drag.
+    let (mut world, slab, mut run, middle) = flat_picked();
+    let handle = run.handle(0).expect("the world-X handle is up");
+    let inner = along(middle, handle, 0.15);
+    let drag = [
+        Act::To(inner),
+        Act::Settle(4),
+        Act::Drag((inner.0 + reach, inner.1)),
+        Act::Settle(3),
+    ];
+    stopped(
+        &mut world,
+        &mut run,
+        &gg_editor::session::frames_from(middle, &drag, CLICK, X, Y),
+    );
+    assert_eq!(
+        box_of(&world, slab).position,
+        sim::DVec3::ZERO,
+        "a press between the arms dragged one of them"
+    );
+}
+
+/// The chip cycles the three tools. A mode reachable only by a key is a mode an
+/// operator cannot see the state of, which is why this is a control and not
+/// only `host::verb::TOOL`.
+#[test]
+fn the_tool_chip_cycles_move_scale_turn_and_wraps() {
+    let editor = placed(TARGET);
+    let chip = aim::tool(&editor).expect("the game is up");
+    let (mut world, _) = flat_scene();
+    let mut run = Editor::new(None);
+    assert_eq!(run.tool(), gg_editor::Tool::Move, "it opens on move");
+    let mut at = (0.0, 0.0);
+    for want in [
+        gg_editor::Tool::Scale,
+        gg_editor::Tool::Turn,
+        gg_editor::Tool::Move,
+    ] {
+        let click = [Act::To(chip), Act::Settle(4), Act::Click, Act::Settle(2)];
+        stopped(
+            &mut world,
+            &mut run,
+            &gg_editor::session::frames_from(at, &click, CLICK, X, Y),
+        );
+        at = chip;
+        assert_eq!(run.tool(), want);
+    }
+}
+
+/// The scale tool writes `half_extent` and nothing else, in whole steps of the
+/// same grain the nudge bar uses — a level of boxes is authored by resizing
+/// them, and through M20 the only way to was the inspector's `+`.
+#[test]
+fn the_scale_tool_grows_one_axis_in_whole_steps_and_moves_nothing() {
+    let editor = placed(TARGET);
+    let chip = aim::tool(&editor).expect("the game is up");
+    let (mut world, slab, mut run, middle) = flat_picked();
+    let was = box_of(&world, slab);
+    let to_scale = [Act::To(chip), Act::Settle(4), Act::Click, Act::Settle(2)];
+    stopped(
+        &mut world,
+        &mut run,
+        &gg_editor::session::frames_from(middle, &to_scale, CLICK, X, Y),
+    );
+    assert_eq!(run.tool(), gg_editor::Tool::Scale);
+
+    let handle = run.handle(0).expect("the world-X handle is up");
+    let grab = along(middle, handle, 0.8);
+    let out = (grab.0 + (handle.0 - middle.0) * 4.0, grab.1);
+    let drag = [
+        Act::To(grab),
+        Act::Settle(4),
+        Act::Drag(out),
+        Act::Settle(3),
+    ];
+    stopped(
+        &mut world,
+        &mut run,
+        &gg_editor::session::frames_from(chip, &drag, CLICK, X, Y),
+    );
+    let now = box_of(&world, slab);
+    let grew = f64::from(now.half_extent.x - was.half_extent.x);
+    assert!(grew > 0.0, "the scale drag resized nothing: {now:?}");
+    let grain = gg_editor::STEPS[1];
+    assert_eq!(grew / grain, (grew / grain).round(), "unquantized: {grew}");
+    assert_eq!(now.position, was.position, "a resize moved it");
+    assert_eq!(
+        (now.half_extent.y, now.half_extent.z),
+        (was.half_extent.y, was.half_extent.z),
+        "it resized another axis"
+    );
+}
+
+/// The turn tool writes `rotation`, in whole [`gg_editor::ANGLES`] degrees about
+/// the arm's **world** axis, and touches neither position nor extent.
+#[test]
+fn the_turn_tool_rotates_about_the_arms_world_axis_in_whole_degrees() {
+    let editor = placed(TARGET);
+    let chip = aim::tool(&editor).expect("the game is up");
+    let (mut world, slab, mut run, middle) = flat_picked();
+    let was = box_of(&world, slab);
+    let mut at = middle;
+    for _ in 0..2 {
+        let click = [Act::To(chip), Act::Settle(4), Act::Click, Act::Settle(2)];
+        stopped(
+            &mut world,
+            &mut run,
+            &gg_editor::session::frames_from(at, &click, CLICK, X, Y),
+        );
+        at = chip;
+    }
+    assert_eq!(run.tool(), gg_editor::Tool::Turn);
+
+    let handle = run.handle(0).expect("the world-X handle is up");
+    let grab = along(middle, handle, 0.8);
+    let out = (grab.0 + (handle.0 - middle.0) * 4.0, grab.1);
+    let drag = [
+        Act::To(grab),
+        Act::Settle(4),
+        Act::Drag(out),
+        Act::Settle(3),
+    ];
+    stopped(
+        &mut world,
+        &mut run,
+        &gg_editor::session::frames_from(chip, &drag, CLICK, X, Y),
+    );
+    let now = box_of(&world, slab);
+    assert_ne!(now.rotation, was.rotation, "the turn drag rotated nothing");
+    assert_eq!(now.position, was.position, "a turn moved it");
+    assert_eq!(now.half_extent, was.half_extent, "a turn resized it");
+    // Whole steps of the coarse grain, or the value is one no repeated act
+    // could reach — the same claim the move tool's quantization makes.
+    let grain = gg_editor::ANGLES[1] * core::f64::consts::PI / 180.0;
+    let landed = (1..=48).any(|k| {
+        let want = sim::DQuat::from_axis_angle(sim::DVec3::X, f64::from(k) * grain);
+        (want.dot(now.rotation).abs() - 1.0).abs() < 1e-9
+    });
+    assert!(landed, "the turn was not quantized: {:?}", now.rotation);
+}
+
+/// §6 M20 item 10: a spawn lands at the depth the operator is working at.
+///
+/// Two rules, and the second is the one demo 11 needed. With something selected
+/// a new box arrives in *its* plane — asserted against a box seventeen metres
+/// out, so a build that kept `SPAWN_AT` would land it more than three times
+/// nearer. With nothing selected under a **flat** eye the plane is the scene's:
+/// an orthographic camera's distance frames nothing, so a fixed number of metres
+/// in front of one is a number with no meaning, and over demo 11 it put every
+/// new platform nine metres out of the level and in front of the player.
+#[test]
+fn a_spawn_lands_in_the_plane_being_worked_in_rather_than_at_a_fixed_distance() {
+    let editor = placed(TARGET);
+    let middle = aim::nowhere(&editor).expect("the game is up");
+    let click = |at: (f32, f32)| [Act::To(at), Act::Settle(4), Act::Click, Act::Settle(2)];
+
+    // Perspective, with a box well past `SPAWN_AT` picked out of the viewport.
+    let mut world = World::new();
+    let eye = world.spawn();
+    world.insert(eye, gg_ecs::boundary::Eye::ORIGIN).unwrap();
+    let far = world.spawn();
+    world
+        .insert(
+            far,
+            gg_ecs::boundary::Renderable::boxed(
+                sim::DVec3::new(0.0, 0.0, -17.0),
+                sim::Vec3::splat(0.5),
+                0x00ff_8000,
+            ),
+        )
+        .unwrap();
+    let mut run = Editor::new(None);
+    let acts: Vec<Act> = [
+        click(middle).as_slice(),
+        click(aim::spawn(&editor).expect("the tree is up")).as_slice(),
+    ]
+    .concat();
+    stopped(&mut world, &mut run, &frames(&acts, CLICK, X, Y));
+    let made = run.selected().expect("a spawn selects what it made");
+    let at = world
+        .get::<gg_ecs::boundary::Renderable>(made)
+        .expect("a spawn makes something the host can draw")
+        .position;
+    assert!(
+        (at.z + 17.0).abs() < 1e-9,
+        "the spawn ignored the selection: {at:?}"
+    );
+
+    // Flat, with nothing selected: the level's own plane, which is z = 0 here
+    // because the eye is fourteen metres out of it.
+    let (mut world, _slab) = flat_scene();
+    let mut run = Editor::new(None);
+    stopped(
+        &mut world,
+        &mut run,
+        &frames(
+            &click(aim::spawn(&editor).expect("the tree is up")),
+            CLICK,
+            X,
+            Y,
+        ),
+    );
+    let made = run.selected().expect("a spawn selects what it made");
+    let at = world
+        .get::<gg_ecs::boundary::Renderable>(made)
+        .unwrap()
+        .position;
+    assert!(
+        at.z.abs() < 1e-9,
+        "the spawn landed out of the plane: {at:?}"
+    );
 }

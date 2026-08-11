@@ -387,6 +387,7 @@ mod tests {
             }
             impl crate::Component for $name {
                 const DECLARED_ID: &'static str = $declared;
+                const COMPONENT_ID: crate::ComponentId = crate::component_id_of!($declared);
                 const TYPE_NAME: &'static str = stringify!($name);
                 const FIELDS: &'static [FieldDesc] = &[
                     FieldDesc {

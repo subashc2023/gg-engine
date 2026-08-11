@@ -21,7 +21,7 @@
 //! projects to a coordinate whose line would be stepped for as long as it took.
 
 use crate::pick::{EDGES, Lens, corners};
-use crate::{ACCENT, Editor, PICKED, STEPS};
+use crate::{ACCENT, ANGLES, Editor, PICKED, STEPS, Tool};
 use gg_ecs::boundary::Renderable;
 use gg_math::sim;
 use gg_ui::WidgetId;
@@ -33,9 +33,33 @@ const STROKE: f32 = 1.0;
 
 /// How long an axis handle is, in logical units — a screen length, not a world
 /// one ([`Lens::metres_per_unit`]).
-const HANDLE: f64 = 28.0;
+const HANDLE: f64 = 34.0;
 /// The grab square at a handle's tip, in logical units.
-const PAD: f32 = 5.0;
+const PAD: f32 = 7.0;
+
+/// How far out along an arm its grab band starts, as a fraction of the arm.
+///
+/// Not zero, and that is the whole of the arbitration (§6 M20 item 10): all
+/// three arms meet at the selection's centre, so a band that reached it would
+/// make every one of them cover the same pixels and the answer to "which axis"
+/// would be whichever was declared last. Starting outside the meeting point
+/// leaves three disjoint bands whenever the arms are not nearly parallel, and
+/// declaring the nearest one last settles the case where they are ([`Editor::gizmo`]).
+const BAND_FROM: f64 = 0.42;
+
+/// How far past the tip it ends — the pad is centred *on* the tip, so the band
+/// has to reach past it or the outermost half of the target would not be in it.
+const BAND_TO: f64 = 1.0 + 0.5 * (PAD as f64) / HANDLE;
+
+/// Half the grab band's width, in logical units. Wider than the drawn arm on
+/// purpose: what an operator aims at is the line they can see, and a target
+/// exactly as wide as a one-unit stroke is a target that is missed.
+const BAND: f32 = 5.0;
+
+/// The least a [`crate::Tool::Scale`] drag may leave on an axis, in metres. A
+/// zero half-extent is a box with no thickness — invisible, unpickable, and
+/// reachable by one drag too far.
+const LEAST_EXTENT: f64 = 0.05;
 
 /// What each axis is drawn in: X red, Y green, Z blue, which is the one colour
 /// convention every tool an operator has used already agrees on.
@@ -49,21 +73,34 @@ const AXES: [sim::DVec3; 3] = [sim::DVec3::X, sim::DVec3::Y, sim::DVec3::Z];
 
 const GRIP: WidgetId = WidgetId::new("editor.gizmo");
 
-/// A translate drag in progress (§6 M15.4 item 3).
+/// One handle this tick: which of [`AXES`] it is, where its tip landed on the
+/// pane, and what a metre along it covers there.
+type Arm = (usize, (f64, f64), (f64, f64));
+
+/// Logical units of drag per degree, for [`Tool::Turn`]. A screen rate and not
+/// a world one: a rotation has no metres to be measured in, and one that turned
+/// faster when zoomed out would be a different gesture at every framing.
+const UNITS_PER_DEGREE: f64 = 1.5;
+
+/// A gizmo drag in progress (§6 M15.4 item 3, §6 M20 item 10).
 #[derive(Clone, Copy)]
 pub(crate) struct Gizmo {
     entity: gg_ecs::Entity,
     /// Which of [`AXES`].
     axis: usize,
+    /// What this drag writes. Latched at the press rather than read per tick,
+    /// so cycling the tool mid-gesture cannot leave half a move and half a
+    /// rotation applied against one origin.
+    tool: Tool,
     /// The pointer where the press landed, in [`gg_input::AXIS_SCALE`]ths.
     /// Integer, for [`crate::camera`]'s reason: the differences accumulate
     /// exactly, so a replayed drag lands where the recorded one did.
     from: (i32, i32),
-    /// Where the entity was then. Every tick writes `origin + axis × quantized`
+    /// The whole box as it was then. Every tick writes `origin + quantized`
     /// rather than adding to the last one, so a drag out and back lands exactly
     /// where it started and a slow drag and a fast one over the same distance
-    /// agree.
-    origin: sim::DVec3,
+    /// agree — the property that also makes the three tools one code path.
+    origin: Renderable,
     /// What one metre along the axis covers on the pane, in logical units,
     /// resolved at the press and held for the drag. Recomputing it per tick
     /// would make the gizmo accelerate under a steady hand, since the thing it
@@ -135,17 +172,23 @@ impl Editor {
         self.list.pop_transform();
     }
 
-    /// The three axis handles on the selection, and the drag that moves it (§6
-    /// M15.4 item 3).
+    /// The three axis handles on the selection, and the drag that moves, sizes
+    /// or turns it (§6 M15.4 item 3, §6 M20 item 10).
     ///
-    /// **The write is what a nudge writes.** A drag resolves to metres along one
-    /// world axis, that is quantized to the inspector's own step, and the result
-    /// goes into `Renderable::position` through `World` like every other editor
+    /// **The write is what a nudge writes.** A drag resolves to a scalar along
+    /// one world axis, that is quantized to the inspector's own step, and the
+    /// result goes into `Renderable` through `World` like every other editor
     /// edit — hashed, replayed, and undone by the same machinery. The
     /// quantization is load-bearing rather than a nicety: the pointer is fixed
     /// point at 1/1024 (§4.7) but the camera it is projected through is *host*
     /// state, so an unquantized drag would make a hashed world value depend on a
     /// float the replay reconstructs rather than reads.
+    ///
+    /// **The arm is the target, not the dot at its end.** Through M20 only a
+    /// pad at the tip was hit-tested, which put the whole of a handle's visible
+    /// length outside the thing it looked like — the arms drew a control and
+    /// answered to a fraction of it. See [`BAND_FROM`] for how three bands that
+    /// meet at one point are arbitrated.
     ///
     /// Stopped only, on [`crate::camera`]'s rule: dragging a handle while the
     /// sim is writing the same field every tick is a fight, not an edit.
@@ -180,35 +223,57 @@ impl Editor {
         // arm's *drawn* length still shortens as it turns towards the camera,
         // which is the foreshortening that says which way it points.
         let metres = lens.metres_per_unit(depth, f64::from(view.h)) * HANDLE;
-        let mut taken = None;
+        let mut up: Vec<Arm> = Vec::new();
         for (axis, direction) in AXES.iter().enumerate() {
             let tip = box_.position + *direction * metres;
             let (uv, tip_depth) = lens.project(tip);
             let (tx, ty) = at(uv);
             let per_metre = ((tx - cx) / metres, (ty - cy) / metres);
             // An arm pointing at or away from the camera collapses onto the
-            // centre, and a pad there would sit on top of the entity and swallow
-            // every click meant for the pick beneath it — a handle with no
-            // direction on the pane is a handle there is no way to drag, so it
-            // is not offered. The tip going behind the near plane is the same
+            // centre, and a band there would sit on top of the entity and
+            // swallow every click meant for the pick beneath it — a handle with
+            // no direction on the pane is a handle there is no way to drag, so
+            // it is not offered. The tip going behind the near plane is the same
             // case seen from the other side.
             // Squared, so no root reaches this at all — §3 bans `hypot` for the
             // rounding, and the comparison never needed one.
             let span = (tx - cx) * (tx - cx) + (ty - cy) * (ty - cy);
-            let least = f64::from(PAD) * 1.5;
-            let short = span < least * least;
-            if short || tip_depth < lens.near {
+            let least = f64::from(BAND) * 2.0;
+            if span < least * least || tip_depth < lens.near {
                 continue;
             }
-            self.arm((cx, cy), (tx, ty), view, AXIS_INK[axis]);
+            up.push((axis, (tx, ty), per_metre));
+        }
+        // Declaration order *is* the arbitration: the router takes the last
+        // widget under the pointer (§4.9), so the arm the pointer is nearest
+        // goes last and wins wherever two bands still overlap. Stable, because
+        // it is a sort by one key and not a filter — all three are declared
+        // every tick, so no id appears and vanishes as the pointer moves.
+        let pointer = self.router.pointer().position();
+        let aim = (f64::from(pointer.0), f64::from(pointer.1));
+        let closest = up
+            .iter()
+            .map(|(axis, tip, _)| (*axis, to_segment(aim, (cx, cy), *tip)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(axis, _)| axis);
+        up.sort_by_key(|(axis, ..)| Some(*axis) == closest);
+
+        let mut taken = None;
+        for (axis, (tx, ty), per_metre) in up {
+            let response = self
+                .router
+                .hit(GRIP.indexed(axis as u64), band((cx, cy), (tx, ty)));
+            let lit = response.held || response.hovered;
+            let ink = match lit {
+                true => ACCENT,
+                false => AXIS_INK[axis],
+            };
+            self.arm((cx, cy), (tx, ty), view, ink);
             let pad = Rect::new(tx as f32 - PAD * 0.5, ty as f32 - PAD * 0.5, PAD, PAD);
             if let Some(slot) = self.arms.get_mut(axis) {
                 *slot = Some((tx as f32, ty as f32));
             }
-            let response = self.router.hit(GRIP.indexed(axis as u64), pad);
-            let lit = response.held || response.hovered;
-            self.list
-                .rect(pad, if lit { ACCENT } else { AXIS_INK[axis] });
+            self.list.rect(pad, ink);
             if response.held {
                 taken = Some((axis, per_metre));
             }
@@ -228,8 +293,9 @@ impl Editor {
         let grab = *self.gizmo.get_or_insert(Gizmo {
             entity,
             axis,
+            tool: self.tool,
             from: self.router.pointer().raw(),
-            origin: box_.position,
+            origin: box_,
             per_metre,
         });
         // The pointer's travel since the press, resolved onto the arm: how far
@@ -247,12 +313,11 @@ impl Editor {
             return;
         }
         let raw = (moved.0 * grab.per_metre.0 + moved.1 * grab.per_metre.1) / along;
-        let grain = STEPS.get(self.step).copied().unwrap_or(1.0);
-        let want = grab.origin + AXES[grab.axis] * ((raw / grain).round() * grain);
+        let want = shaped(&grab, raw, self.step);
         if let Some(target) = world.get_mut::<Renderable>(grab.entity)
-            && target.position != want
+            && *target != want
         {
-            target.position = want;
+            *target = want;
             self.edits += 1;
         }
     }
@@ -263,11 +328,19 @@ impl Editor {
         let Some(grab) = self.gizmo.take() else {
             return;
         };
-        let by = world
-            .get::<Renderable>(grab.entity)
-            .map_or(0.0, |box_| (box_.position - grab.origin).length());
+        // Each tool's own answer to "by how much", because a rotation has no
+        // metres and a resize's metres are not the position's.
+        let by = world.get::<Renderable>(grab.entity).map_or(0.0, |box_| {
+            let component = |v: sim::Vec3| f64::from([v.x, v.y, v.z][grab.axis.min(2)]);
+            match grab.tool {
+                Tool::Move => (box_.position - grab.origin.position).length(),
+                Tool::Scale => component(box_.half_extent) - component(grab.origin.half_extent),
+                Tool::Turn => box_.rotation.dot(grab.origin.rotation),
+            }
+        });
         tracing::info!(
             entity = grab.entity.index(),
+            tool = grab.tool.label(),
             axis = ["x", "y", "z"][grab.axis.min(2)],
             by,
             "editor: dragged"
@@ -295,6 +368,92 @@ impl Editor {
         );
         self.list.pop_transform();
     }
+}
+
+/// The grab rectangle for an arm from `centre` to `tip`: the outer part of it,
+/// inflated by [`BAND`].
+///
+/// An axis-aligned box around an oblique arm is a loose bound, and deliberately
+/// so — the router hit-tests rectangles, and tightening this to the segment
+/// would mean either a primitive `gg_ui` does not have or a hit test this crate
+/// runs behind the router's back. Loose is safe because [`BAND_FROM`] keeps the
+/// three apart and the nearest-arm sort settles what is left.
+fn band(centre: (f64, f64), tip: (f64, f64)) -> Rect {
+    let run = (tip.0 - centre.0, tip.1 - centre.1);
+    let end = |t: f64| (centre.0 + run.0 * t, centre.1 + run.1 * t);
+    let (from, to) = (end(BAND_FROM), end(BAND_TO));
+    let (x, y) = (from.0.min(to.0) as f32, from.1.min(to.1) as f32);
+    let (w, h) = ((from.0 - to.0).abs() as f32, (from.1 - to.1).abs() as f32);
+    Rect::new(x - BAND, y - BAND, w + BAND * 2.0, h + BAND * 2.0)
+}
+
+/// Squared distance from `point` to the segment `from`–`to`.
+///
+/// Squared throughout: this only ever orders three candidates against each
+/// other, and a root would add rounding to a comparison that never needed one.
+fn to_segment(point: (f64, f64), from: (f64, f64), to: (f64, f64)) -> f64 {
+    let run = (to.0 - from.0, to.1 - from.1);
+    let len = run.0 * run.0 + run.1 * run.1;
+    let reach = (point.0 - from.0, point.1 - from.1);
+    // A degenerate arm is the centre itself; the caller has already dropped
+    // those, and this keeps the division honest regardless.
+    let t = match len < f64::EPSILON {
+        true => 0.0,
+        false => ((reach.0 * run.0 + reach.1 * run.1) / len).clamp(0.0, 1.0),
+    };
+    let off = (reach.0 - run.0 * t, reach.1 - run.1 * t);
+    off.0 * off.0 + off.1 * off.1
+}
+
+/// The box a drag of `raw` metres along its arm asks for, quantized to the
+/// grain at `step`.
+///
+/// Written from the origin every tick rather than accumulated, which is what
+/// makes a drag out and back exact and a slow drag equal to a fast one — see
+/// [`Gizmo::origin`]. Splitting the three tools *here* rather than at the call
+/// site keeps that property one function's to hold.
+fn shaped(grab: &Gizmo, raw: f64, step: usize) -> Renderable {
+    let quantize = |value: f64, grain: f64| (value / grain).round() * grain;
+    let mut out = grab.origin;
+    match grab.tool {
+        Tool::Move => {
+            let grain = STEPS.get(step).copied().unwrap_or(1.0);
+            out.position = grab.origin.position + AXES[grab.axis] * quantize(raw, grain);
+        }
+        Tool::Scale => {
+            let grain = STEPS.get(step).copied().unwrap_or(1.0);
+            let was = [
+                grab.origin.half_extent.x,
+                grab.origin.half_extent.y,
+                grab.origin.half_extent.z,
+            ];
+            let want = (f64::from(was[grab.axis]) + quantize(raw, grain)).max(LEAST_EXTENT);
+            let mut half = was;
+            half[grab.axis] = want as f32;
+            out.half_extent = sim::Vec3::new(half[0], half[1], half[2]);
+        }
+        Tool::Turn => {
+            // Back out of metres into the logical units the arm is drawn in: a
+            // rotation is a screen gesture, and one whose rate came from the
+            // world would turn faster the further out the camera was.
+            let along = grab.per_metre.0 * grab.per_metre.0 + grab.per_metre.1 * grab.per_metre.1;
+            let units = raw * sim::sqrt(along);
+            let grain = ANGLES.get(step).copied().unwrap_or(15.0);
+            let degrees = quantize(units / UNITS_PER_DEGREE, grain);
+            let turn = sim::DQuat::from_axis_angle(
+                AXES[grab.axis],
+                degrees * core::f64::consts::PI / 180.0,
+            );
+            // Pre-multiplied, because [`AXES`] are **world** axes: post-
+            // multiplying would turn about the box's own, which is a second
+            // frame of reference this gizmo deliberately does not have.
+            out.rotation = turn
+                .mul(grab.origin.rotation)
+                .try_normalize()
+                .unwrap_or(grab.origin.rotation);
+        }
+    }
+    out
 }
 
 /// One edge, in device pixels, cut to `bounds` and stepped along it.

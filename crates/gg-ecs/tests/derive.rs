@@ -5,7 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use gg_ecs::{Component, Entity, StateHash, StateHasher, component_id, schema_hash};
+use gg_ecs::{Component, ComponentId, Entity, StateHash, StateHasher, component_id, schema_hash};
 use gg_math::sim;
 
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
@@ -72,6 +72,28 @@ fn hash_of(v: &impl StateHash) -> gg_ecs::CanonicalHash {
     let mut h = StateHasher::canonical();
     v.state_hash(&mut h);
     h.finish_canonical()
+}
+
+/// The derive folds the id at expansion time against its own `blake3`; this is
+/// the run-time construction it stands in for (§4.2). Two implementations of
+/// one number is the hazard `ComponentId::of`'s doc used to refuse a `const fn`
+/// over, and the answer is to check them rather than to avoid one — `Registry::
+/// register` makes the same comparison for every component any build registers.
+#[test]
+fn the_folded_id_is_the_one_of_would_have_computed() {
+    for (folded, declared) in [
+        (Position::COMPONENT_ID, Position::DECLARED_ID),
+        (Velocity::COMPONENT_ID, Velocity::DECLARED_ID),
+        (Anchor::COMPONENT_ID, Anchor::DECLARED_ID),
+        // A field-less component: the id covers the name, never the fields.
+        (Frozen::COMPONENT_ID, Frozen::DECLARED_ID),
+    ] {
+        assert_eq!(folded, ComponentId::of(declared), "{declared}");
+    }
+    // Vacuity: a fold that returned a constant would pass the loop above.
+    assert_ne!(Position::COMPONENT_ID, Velocity::COMPONENT_ID);
+    // The escape hatch and the derive are the same fold, reached two ways.
+    assert_eq!(Position::COMPONENT_ID, gg_ecs::component_id_of!("position"));
 }
 
 #[test]

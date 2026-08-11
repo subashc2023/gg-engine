@@ -155,6 +155,18 @@ impl Registry {
     /// are legitimate.
     pub fn register<T: Component>(&mut self) -> Result<ComponentId, RegistryError> {
         let id = component_id::<T>();
+        // The derive folded `id` at expansion time; this is the run-time
+        // construction it must equal (§4.2). Not a `debug_assert`: a shipping
+        // build is exactly where a persisted identity going wrong is
+        // unrecoverable, and the hash costs what registration always paid.
+        assert_eq!(
+            id,
+            ComponentId::of(T::DECLARED_ID),
+            "gg-ecs: `{}`'s folded component id disagrees with `ComponentId::of` — the derive and \
+             `hash.rs` have drifted apart on the domain separator or the truncation, and every id \
+             this build persists is wrong",
+            T::TYPE_NAME
+        );
         let info = ComponentInfo {
             id,
             schema: schema_hash::<T>(),
@@ -293,35 +305,18 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use crate::component::FieldDesc;
 
-    /// Hand-written `Component` impls, because the collision cases cannot be
-    /// produced through the derive — it would need two types to hash alike.
+    /// Two types, one declared id — the collision case. Through the derive
+    /// rather than around it: nothing here needs a hand-written impl, and one
+    /// would only be a second place for the fixture to drift from a real
+    /// component.
     macro_rules! fake_component {
         ($name:ident, $declared:expr) => {
-            #[derive(Clone, Copy)]
+            #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
+            #[component(id = $declared)]
             #[repr(C)]
             struct $name {
                 v: u32,
-            }
-            // SAFETY: `repr(C)` single `u32` — no padding, all bit patterns valid.
-            unsafe impl bytemuck::Zeroable for $name {}
-            // SAFETY: as above, plus `Copy`.
-            unsafe impl bytemuck::Pod for $name {}
-            impl crate::StateHash for $name {
-                fn state_hash(&self, h: &mut StateHasher) {
-                    h.u32(self.v);
-                }
-            }
-            impl Component for $name {
-                const DECLARED_ID: &'static str = $declared;
-                const TYPE_NAME: &'static str = stringify!($name);
-                const FIELDS: &'static [FieldDesc] = &[FieldDesc {
-                    name: "v",
-                    ty: "u32",
-                    offset: 0,
-                    size: 4,
-                }];
             }
         };
     }
@@ -356,32 +351,43 @@ mod tests {
         assert!(msg.contains("alpha"), "{msg}");
     }
 
+    /// The check that keeps the derive's folded id honest, shown able to fail
+    /// (§5) — the drift it exists for is a domain separator edited in `hash.rs`
+    /// and not in the derive, which no test could reach by construction. A
+    /// hand-written impl stating the wrong constant reaches the same branch.
+    #[test]
+    #[should_panic(expected = "folded component id disagrees")]
+    fn a_folded_id_that_is_not_the_hash_is_refused_at_registration() {
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, crate::StateHash)]
+        #[repr(C)]
+        struct Forged {
+            v: u32,
+        }
+        impl Component for Forged {
+            const DECLARED_ID: &'static str = "forged";
+            // Deliberately not `component_id_of!("forged")`.
+            const COMPONENT_ID: ComponentId = ComponentId::from_raw(0xdead_beef);
+            const TYPE_NAME: &'static str = "Forged";
+            const FIELDS: &'static [crate::component::FieldDesc] = &[crate::component::FieldDesc {
+                name: "v",
+                ty: "u32",
+                offset: 0,
+                size: 4,
+            }];
+        }
+
+        let _ = Registry::new().register::<Forged>();
+    }
+
     #[test]
     fn an_over_aligned_component_is_refused_by_name() {
-        #[derive(Clone, Copy)]
+        // Over-alignment is the registry's to refuse, not the derive's, so this
+        // reaches it the way a game would.
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
+        #[component(id = "wide")]
         #[repr(C, align(32))]
         struct Wide {
             v: [u64; 4],
-        }
-        // SAFETY: `repr(C, align(32))` over `[u64; 4]` is 32 bytes of payload
-        // in a 32-byte allocation — no padding, all bit patterns valid.
-        unsafe impl bytemuck::Zeroable for Wide {}
-        // SAFETY: as above, plus `Copy`.
-        unsafe impl bytemuck::Pod for Wide {}
-        impl crate::StateHash for Wide {
-            fn state_hash(&self, h: &mut StateHasher) {
-                self.v.state_hash(h);
-            }
-        }
-        impl Component for Wide {
-            const DECLARED_ID: &'static str = "wide";
-            const TYPE_NAME: &'static str = "Wide";
-            const FIELDS: &'static [FieldDesc] = &[FieldDesc {
-                name: "v",
-                ty: "[u64; 4]",
-                offset: 0,
-                size: 32,
-            }];
         }
 
         let err = Registry::new().register::<Wide>().unwrap_err();

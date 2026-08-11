@@ -69,6 +69,12 @@ pub trait Component: bytemuck::Pod + crate::StateHash + Send + Sync + 'static {
     /// The declared id string. Persisted identity; changing it is a schema
     /// change and the migration path treats it as one.
     const DECLARED_ID: &'static str;
+    /// [`DECLARED_ID`](Self::DECLARED_ID) hashed, folded by the derive at
+    /// expansion time so a lookup is a constant and not a blake3 (§4.2).
+    /// [`Registry::register`](crate::Registry::register) proves it equals
+    /// [`ComponentId::of`] on every registration; nothing else should hash an
+    /// id that is already known.
+    const COMPONENT_ID: ComponentId;
     /// The Rust type name. Diagnostics only — never hashed, never persisted,
     /// so refactors stay free.
     const TYPE_NAME: &'static str;
@@ -76,16 +82,18 @@ pub trait Component: bytemuck::Pod + crate::StateHash + Send + Sync + 'static {
     const FIELDS: &'static [FieldDesc];
 }
 
-/// A component's stable id (§4.2).
+/// A component's stable id (§4.2) — a constant read, not a hash.
 ///
-/// Recomputed per call rather than cached in a `const`: blake3 is not
-/// `const`-callable, and a second `const`-capable implementation kept
-/// bit-identical to the first is a determinism hazard bought for nothing. The
-/// registry hashes each type once at registration and looks ids up from there,
-/// so this is not on any hot path.
+/// It was a hash per call until the query micro priced it: `read_of`/`write_of`
+/// resolve a term *per matched archetype*, so a pass over 256 small archetypes
+/// paid 512 blake3s to look up ids it knew before the pass began. The derive
+/// folds the same construction at expansion time against the same pinned
+/// blake3, and [`Registry::register`](crate::Registry::register) proves the two
+/// agree — so the determinism hazard the old note feared (a second
+/// implementation) is neither taken nor left unchecked.
 #[must_use]
 pub fn component_id<T: Component>() -> ComponentId {
-    ComponentId::of(T::DECLARED_ID)
+    T::COMPONENT_ID
 }
 
 /// A component's layout fingerprint (§4.2).
