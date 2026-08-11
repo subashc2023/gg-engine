@@ -103,16 +103,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     println!();
     println!("  fit at shipping bias (normal {SHIP_NORMAL} / depth {SHIP_DEPTH}):");
-    println!("    size  dist casc | band px  shade px");
-    println!("    ---------------+------------------");
+    println!("    size  dist casc | band px  dark px  shade px");
+    println!("    ---------------+---------------------------");
     for &(size, distance, cascades) in FIT_LEGS {
         set(size, distance, cascades, SHIP_NORMAL, SHIP_DEPTH);
         let frame = render(&mut renderer, &world)?;
         let lum = luminance(&frame);
-        let (band, shade) = (band_rows(&lum), shade_pixels(&lum));
+        let ((band, dark), shade) = (band_rows(&lum), shade_pixels(&lum));
         let ship = size == SHIP_SIZE && distance == SHIP_DISTANCE && cascades == SHIP_CASCADES;
         println!(
-            "    {size:>5} {distance:>5} {cascades:>4} | {band:>7}  {shade:>8}{}",
+            "    {size:>5} {distance:>5} {cascades:>4} | {band:>7}  {dark:>7}  {shade:>8}{}",
             if ship { "   <- shipping" } else { "" }
         );
         if ship {
@@ -129,16 +129,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     println!(
         "  bias at shipping fit ({SHIP_SIZE} over {SHIP_DISTANCE} m, {SHIP_CASCADES} cascades):"
     );
-    println!("    normal depth | band px  shade px");
-    println!("    -------------+------------------");
+    println!("    normal depth | band px  dark px  shade px");
+    println!("    -------------+---------------------------");
     let mut cells = Vec::new();
     for &normal in NORMAL_BIASES {
         for &depth in DEPTH_BIASES {
             set(SHIP_SIZE, SHIP_DISTANCE, SHIP_CASCADES, normal, depth);
             let frame = render(&mut renderer, &world)?;
             let lum = luminance(&frame);
-            let (band, shade) = (band_rows(&lum), shade_pixels(&lum));
-            println!("    {normal:>6} {depth:>5} | {band:>7}  {shade:>8}");
+            let ((band, dark), shade) = (band_rows(&lum), shade_pixels(&lum));
+            println!("    {normal:>6} {depth:>5} | {band:>7}  {dark:>7}  {shade:>8}");
             cells.push((normal, depth, band, shade));
         }
     }
@@ -266,30 +266,45 @@ fn row(y: f64) -> usize {
     ((0.5 - (y - EYE[1]) / (2.0 * HALF_HEIGHT)) * f64::from(EXTENT.1)) as usize
 }
 
-/// Worst run of dark rows walking up the player's front face from the contact.
+/// False shadow on the player's front face: the worst *contiguous* run of dark
+/// rows up from the contact, and the worst count of dark rows anywhere in the
+/// scanned span. The face is convex-lit, so the truth of both is zero.
 ///
-/// Judged per column over the middle of the face against that column's own
-/// mid-face median, so face shading (which varies with nothing here) is its own
-/// baseline and the number needs no cross-leg reference.
-fn band_rows(lum: &[i32]) -> usize {
+/// Judged per column against that column's own **upper**-face median, so face
+/// shading is its own baseline and no cross-leg reference is needed. Two
+/// corrections the post-M20 audit forced, both of which made the old number read
+/// *clean exactly when things were worst*:
+///
+/// - the baseline window used to sit **inside** the scanned span, so a band tall
+///   enough to matter darkened the median it was being measured against. It now
+///   sits above the scan's ceiling, disjoint by construction and asserted so.
+/// - a contiguous run alone reports 1 for a full-face stipple, which is the
+///   expected failure at zero bias. The total is what distinguishes "bias does
+///   not help" from "this metric cannot see what bias changed".
+fn band_rows(lum: &[i32]) -> (usize, usize) {
     let w = EXTENT.0 as usize;
-    let (top, bottom) = (row(2.0 * PLAYER_HALF[1]), row(0.0));
-    let mut worst = 0;
+    let (ceiling, bottom) = (row(1.3 * PLAYER_HALF[1]), row(0.0));
+    let (base_top, base_bottom) = (row(1.9 * PLAYER_HALF[1]), row(1.55 * PLAYER_HALF[1]));
+    debug_assert!(
+        base_bottom < ceiling,
+        "the baseline window must sit above the scanned span, or it measures itself"
+    );
+    let (mut worst, mut spread) = (0, 0);
     for c in col(-0.6 * PLAYER_HALF[0])..=col(0.6 * PLAYER_HALF[0]) {
-        let mut interior: Vec<i32> = (row(1.4 * PLAYER_HALF[1])..row(0.6 * PLAYER_HALF[1]))
-            .map(|r| lum[r * w + c])
-            .collect();
+        let mut interior: Vec<i32> = (base_top..base_bottom).map(|r| lum[r * w + c]).collect();
         interior.sort_unstable();
         let median = interior[interior.len() / 2];
-        let mut dark = 0;
+        let dark = |r: usize| lum[r * w + c] < median - DISAGREEMENT;
+        let mut run = 0;
         let mut r = bottom - 1;
-        while r > top && lum[r * w + c] < median - DISAGREEMENT {
-            dark += 1;
+        while r > ceiling && dark(r) {
+            run += 1;
             r -= 1;
         }
-        worst = worst.max(dark);
+        worst = worst.max(run);
+        spread = spread.max((ceiling + 1..bottom).filter(|&r| dark(r)).count());
     }
-    worst
+    (worst, spread)
 }
 
 /// Shadowed pixels in the backdrop window left of the player, judged against

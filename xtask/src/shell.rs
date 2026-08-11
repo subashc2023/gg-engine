@@ -909,6 +909,21 @@ fn sequence(log: &str) -> anyhow::Result<Vec<(u64, String)>> {
     Ok(out)
 }
 
+/// The tick a log line landed on: the first hashed tick at or after it.
+///
+/// A milestone is logged from inside the tick's own systems and the shell's hash
+/// line for that tick follows it, so "at or after" is the tick it belongs to.
+fn logged_at(log: &str, needle: &str) -> Option<u64> {
+    let mut seen = false;
+    for line in log.lines() {
+        seen |= line.contains(needle);
+        if seen && line.contains("gg::hash") {
+            return crate::util::field_u64(line, "tick").ok();
+        }
+    }
+    None
+}
+
 /// Where two sequences first disagree, named the way §5.6 requires — a bare
 /// "hashes differ" on tick 9,000 is a wasted day.
 fn divergence(a: &(&str, Vec<(u64, String)>), b: &(&str, Vec<(u64, String)>)) -> Option<String> {
@@ -2301,6 +2316,38 @@ fn platformer() -> anyhow::Result<()> {
 
     let wanted = demo_11_platformer::session::LOG;
 
+    // The ticks the in-process run puts the two events on, read off the same
+    // bot over the same scene the shell is about to be handed. Both must exist:
+    // a run that neither died nor finished would otherwise tie to the shell by
+    // `None == None`, which is the vacuity this replaced.
+    let entry = platformer_entry()?;
+    let frames = demo_11_platformer::session::frames(&entry).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let progress = demo_11_platformer::session::progress(&entry, &frames)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (fell_at, goal_at) = match (
+        progress
+            .iter()
+            .find(|(_, p)| p.deaths == 1)
+            .map(|(t, _)| *t),
+        progress.iter().find(|(_, p)| p.finished).map(|(t, _)| *t),
+    ) {
+        (Some(fell), Some(goal)) => (fell, goal),
+        (fell, goal) => anyhow::bail!(
+            "the in-process run died at {fell:?} and finished at {goal:?} — the bot no longer \
+             plays this level to the end, so there is nothing for the shell to agree with"
+        ),
+    };
+
+    // The action map beside the scene: `scene_path` hangs the probe off
+    // `--input`'s own directory, so a run given no map probes nothing.
+    let input = workspace_root()
+        .join("demos/11-platformer/input.toml")
+        .display()
+        .to_string();
+    let probe = workspace_root().join("target/platformer");
+    std::fs::create_dir_all(&probe)?;
+    let probe = probe.join("probe.ggrp").display().to_string();
+
     // `--frames` bounds the run to the baseline's ticks: the stream's tick
     // span counts from 0 but the scene resumes at its own tick, and the tick
     // past the last recorded frame would be one idle tick nobody blessed.
@@ -2344,16 +2391,51 @@ fn platformer() -> anyhow::Result<()> {
             seq.len(),
             baseline.len()
         );
-        let (here, there) = (
-            quiet_ticks(seq.iter().map(|(_, h)| h.as_str())),
-            quiet(&baseline),
-        );
+        // The probe itself, gated at last (post-M20 audit). Item 3 moved
+        // `opening_scene` out of the editor and into every live session in every
+        // tier and proved it by hand — but every gate over this demo hands the
+        // scene across with `--load`, so putting the `cfg(feature = "editor")`
+        // back would have left the whole tree green while `xtask run
+        // 11-platformer` and dist quietly lost the level. Both directions, per
+        // tier: a live session opens it uninvited and `bootstrap` stands down;
+        // a recorded one deals from code and never reads it (a scene appearing
+        // beside a project must not diverge a stream blessed without one).
+        let live = play(&host, &game, &["--input", &input, "--frames", "30"], false)?;
         anyhow::ensure!(
-            here == there,
-            "[{}] the shell's world stood still on {here:?} and the in-process baseline's on \
-             {there:?} — the two harnesses did not play the same run",
+            live.contains("opening scene") && !live.contains("platformer: ready"),
+            "[{}] a live session beside `scene.ggsave` must open it before tick 0 and leave \
+             `bootstrap` standing down:\n{live}",
             tier.name,
         );
+        let dealt = play(
+            &host,
+            &game,
+            &["--input", &input, "--record", &probe, "--frames", "30"],
+            false,
+        )?;
+        anyhow::ensure!(
+            !dealt.contains("opening scene") && dealt.contains("platformer: ready"),
+            "[{}] a recorded session must deal from `bootstrap` and leave the scene \
+             unread:\n{dealt}",
+            tier.name,
+        );
+
+        // The tie to the in-process run, and it has to be a shape demo 11
+        // *has*. Tetris ties by quiet ticks; this world's rig eases every tick
+        // and its baseline holds none, so that same comparison here is
+        // `[] == []` — green against any run of the right length (post-M20
+        // audit). Where the death and the goal land is the shape this run has,
+        // and both are the bot's own doing over the loaded level: re-author the
+        // scene and they move.
+        for (needle, want) in [(wanted[1], fell_at), (wanted[2], goal_at)] {
+            let got = logged_at(&log, needle);
+            anyhow::ensure!(
+                got == Some(want),
+                "[{}] `{needle}` landed on tick {got:?} where the in-process run puts it at \
+                 {want} — the shell and the baseline did not play the same run",
+                tier.name,
+            );
+        }
         runs.push((tier.name, seq));
     }
 
@@ -2365,8 +2447,9 @@ fn platformer() -> anyhow::Result<()> {
     println!(
         "xtask reload: demo 11's recorded run — restart, one death, spawn to goal over {} ticks, \
          the level arriving as `--load` data — replayed identically under dev, instrumented and \
-         dist-verify, standing still on the same ticks as the baseline the aarch64 leg compares \
-         against (§6 M20)",
+         dist-verify, dying at {fell_at} and finishing at {goal_at} exactly where the baseline \
+         the aarch64 leg reads puts them; and in each tier the scene loaded a live session \
+         uninvited and stayed unread under `--record` (§6 M20)",
         runs[0].1.len(),
     );
     Ok(())

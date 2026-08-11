@@ -78,9 +78,10 @@ struct Frame
 {
     // The camera's own projection, here rather than in a push block because the
     // box pass has one push per box and no room for another 64 bytes under
-    // Vulkan's guaranteed 128. The pack pass does not read it: its instances
-    // carry the finished object-to-clip product for the bit-exactness reason
-    // `scene.slang` gives.
+    // Vulkan's guaranteed 128. The pack pass does not *transform* by it — its
+    // instances carry the finished object-to-clip product for the bit-exactness
+    // reason `scene.slang` gives — but both passes read row 2 in `shade_all`,
+    // which is where the view vector learns the projection has no eye point.
     float4x4 view_projection;
     float3 ambient;            // linear rgb, a flat term standing in for GI (P1)
     uint light_count;
@@ -481,13 +482,21 @@ float sun_shadow(uint64_t frame_address, Frame frame, float3 world, float3 norma
     return lit;
 }
 
-// Every light in the frame, over one surface. `world` is camera-relative, so the
-// eye is the origin and the view vector is just its negation — which is the same
-// property that lets a camera 10^12 m out render without jitter (§1.4).
+// Every light in the frame, over one surface. `world` is camera-relative, so under
+// perspective the eye is the origin and the view vector is just its negation — the
+// same property that lets a camera 10^12 m out render without jitter (§1.4).
 float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world,
                  Texture2D<float4> textures[], SamplerState samplers[])
 {
-    float3 to_eye = normalize(-world);
+    // Orthographic has no eye point: every view ray is the camera's axis, so the
+    // negation above would turn depth into a specular slide across the screen —
+    // foreshortening in the shading, under the one projection that has none. The
+    // matrix decides, as it does for the culler (`gg_extract::frustum`'s *Five
+    // planes, or six*): row 2 is `backward / depth` under
+    // `orthographic_reverse_z` and exactly zero under `perspective_reverse_z`,
+    // which is `[0, 0, 0, near]` by construction rather than by rounding.
+    float3 axis = frame.view_projection[2].xyz;
+    float3 to_eye = dot(axis, axis) > 1e-12 ? normalize(axis) : normalize(-world);
     // Ambient is flat and occluded, and it is a placeholder saying so: real
     // indirect light is an irradiance probe or a lightmap, and both are P1. What
     // it buys today is that an unlit face is dim rather than pure black.

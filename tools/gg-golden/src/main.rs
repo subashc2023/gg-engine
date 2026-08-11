@@ -76,7 +76,7 @@ struct Scene {
     render: fn() -> Render,
 }
 
-/// The roster. Thirteen scenes across six sources — four demos, the engine's own
+/// The roster. Sixteen scenes across six sources — seven demos, the engine's own
 /// v1 pass list, two replay-driven captures, and the UI layer — each with its
 /// own policy, because "how strictly" is a property of what the frame contains
 /// and not of the harness (§4.10 per-test config).

@@ -153,6 +153,7 @@ fn push() -> anyhow::Result<()> {
     tracy_stays_on_loopback()?;
     exec(cargo().args(["deny", "check"]), "cargo deny check")?;
     greps()?;
+    line_endings()?;
     allowlist_crosscheck()?;
     crate::budgets::check()?;
     crate::public_api::check()?;
@@ -1164,6 +1165,61 @@ fn greps() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Working-tree bytes must be the bytes git holds (§9: nothing about CI may live
+/// only in machine state git does not have).
+///
+/// `.gitattributes` pins `eol=lf`, but an attribute governs *checkout* — it does
+/// not reach back into a file some editor or generator later rewrote with CRLF,
+/// and nothing noticed when 42 of them had been. It is not tidiness: `xtask
+/// shaders` folds every file under `shaders/include/` into each module's source
+/// hash, so one CRLF `pbr.slang` makes the checked-in codegen a fixed point of
+/// *this tree* and stale in every clone — green here, red in the weekly
+/// fresh-clone gate a week later, which is where it was in fact found.
+fn line_endings() -> anyhow::Result<()> {
+    let listing = run_capture(
+        std::process::Command::new("git")
+            .current_dir(workspace_root())
+            .args(["ls-files", "--eol"]),
+        "git ls-files --eol",
+    )?;
+    let wrong = crlf_offenders(&listing);
+    anyhow::ensure!(
+        wrong.is_empty(),
+        "{} file(s) carry CRLF where git holds LF. Rewrite them with LF — git will not do it \
+         for you, because `eol=lf` decides what a checkout writes and not what already sits in \
+         the tree — then re-run `cargo xtask shaders` if any of them is a shader, since the \
+         codegen's source hash is taken over these bytes:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+    println!("xtask: line endings are the ones git holds");
+    Ok(())
+}
+
+/// The offending paths in a `git ls-files --eol` listing, as a function of the
+/// listing so the gate can be pointed at a planted one (`mod tests`) and not only
+/// at a clean tree — §5's "reject a plant" criterion, as [`scan`] gets.
+///
+/// Rows read `i/lf  w/crlf  attr/text=auto eol=lf \t path`. The worktree column
+/// is the one a clean filter would have to undo; binaries read `w/-text`.
+fn crlf_offenders(listing: &str) -> Vec<&str> {
+    let mut wrong: Vec<&str> = listing
+        .lines()
+        // The *last* tab: the flag columns are space-separated in practice, but
+        // splitting on the first tab would hand the path column back as a flag if
+        // a git version ever tabbed between them.
+        .filter_map(|line| line.rsplit_once('\t'))
+        .filter(|(flags, _)| {
+            flags
+                .split_whitespace()
+                .any(|f| f == "w/crlf" || f == "w/mixed")
+        })
+        .map(|(_, path)| path.trim())
+        .collect();
+    wrong.sort_unstable();
+    wrong
+}
+
 /// The §3 greps as a function of a source tree, so the gate can be *pointed at*
 /// a tree with each violation deliberately planted (`mod tests`) rather than
 /// only ever at a clean one. A gate that has never once been red is a gate
@@ -1642,6 +1698,29 @@ fn allowlist_crosscheck() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+
+    /// The line-ending gate, planted red and green. The real listing this was
+    /// written against had 42 offenders and one of them was a shader, which is
+    /// how the checked-in codegen came to be a fixed point of one machine.
+    #[test]
+    fn the_line_ending_gate_names_crlf_and_forgives_lf_and_binaries() {
+        let listing = "i/lf    w/lf     attr/text=auto eol=lf \tcrates/gg-ecs/src/lib.rs\n\
+                       i/lf    w/crlf   attr/text=auto eol=lf \tcrates/gg-render/shaders/include/pbr.slang\n\
+                       i/      w/-text  attr/binary          \ttests/gg-images/lavapipe-windows/field.png\n\
+                       i/lf    w/mixed  attr/text=auto eol=lf \tdeny.toml\n";
+        assert_eq!(
+            super::crlf_offenders(listing),
+            ["crates/gg-render/shaders/include/pbr.slang", "deny.toml"],
+            "CRLF and mixed are named; LF and binary are not"
+        );
+        assert!(
+            super::crlf_offenders("i/lf\tw/lf\tattr/text=auto eol=lf\tsrc/lib.rs\n").is_empty(),
+            "a clean tree is clean"
+        );
+        // Vacuity: an empty listing must not read as "nothing wrong" by accident
+        // of the parse — it reads that way by there being nothing to read.
+        assert!(super::crlf_offenders("").is_empty());
+    }
 
     /// A throwaway source tree. Named after the test, and nextest gives each
     /// test its own process, so two of these never collide.

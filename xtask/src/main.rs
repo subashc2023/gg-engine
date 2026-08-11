@@ -46,6 +46,7 @@ fn main() {
         Some("dx") => dx::run(&rest),
         Some("gpu") => gpu::run(&rest),
         Some("gpuav") => gpuav::run(&rest),
+        Some("fresh") => fresh::run(&rest),
         Some("backlog") => backlog::run(),
         _ => usage(),
     };
@@ -69,7 +70,11 @@ fn usage() -> anyhow::Result<()> {
          probe [--system]                                 capability table vs pinned lavapipe (spike 2)\n\
          shaders [--check]                                offline shader build + codegen (in-process Slang)\n\
          dist                                             dist gate: build+run tier-dist, symbol absence, crash symbolization (§5.8)\n\
-         reload [--cross-tier|--segments|--chaos|--latency|--ui|--save|--editor|--launcher|--tetris|--platformer|--rules|--feel|--best]  the gates that need the shell over a game dylib; no flag runs the set\n\
+         reload [--cross-tier|--segments|--chaos|--latency|--ui|--save|--editor|--launcher|--tetris|--platformer|--rules|--feel|--best|--agent]  the gates that need the shell over a game dylib; no flag runs the set\n\
+         fresh [--clone|--canary]                         the weekly repository gates on demand: pristine-clone rebuild, cargo update canary (§5, §9)\n\
+         replay [--bless]                                 §5.6 determinism material: the curated replay's hashes vs its baseline; --bless re-authors both\n\
+         public-api [--bless]                             §5.10 surface gate for the five frozen crates, on the pinned nightly\n\
+         timers [--status|--install|--uninstall]          the scheduled nightly/weekly tiers; --install changes the machine\n\
          bench [--record]                                 smoke on lavapipe; --record archives real numbers per machine (§4.11)\n\
          gpu [--adapter <name>]                           manual real-GPU leg: offscreen suites + golden on the desk's driver, windowless (§4.3, §8)\n\
          gpuav [--adapter <name>]                         GPU-assisted validation: instrumented shaders, offscreen only (§5 gate 4)\n\

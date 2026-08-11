@@ -21,6 +21,24 @@
 
 use crate::util::{cargo, run as exec, run_capture, workspace_root};
 
+/// The weekly repository gates, on demand; no flag runs both.
+///
+/// They are reachable through `ci --weekly` too, but only *behind* a full
+/// nightly — and what these two report is most often "not committed yet"
+/// (see [`clone_gate`]), whose fix is a commit and wants re-checking in
+/// minutes rather than hours.
+pub fn run(args: &[&str]) -> anyhow::Result<()> {
+    let picked = |flag: &str| args.contains(&flag);
+    let all = !picked("--clone") && !picked("--canary");
+    if all || picked("--clone") {
+        clone_gate()?;
+    }
+    if all || picked("--canary") {
+        update_canary()?;
+    }
+    Ok(())
+}
+
 /// `xtask ci` from a pristine clone of **HEAD**, in a scratch directory.
 ///
 /// HEAD and not the working tree, deliberately: the question is whether *what

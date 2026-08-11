@@ -112,8 +112,10 @@ impl Frustum {
             planes: [
                 plane(combine(m[3], m[0], true)),  // left
                 plane(combine(m[3], m[0], false)), // right
-                plane(combine(m[3], m[1], true)),  // bottom
-                plane(combine(m[3], m[1], false)), // top
+                // Top before bottom, unlike X: row 1 carries Vulkan's Y flip
+                // (`-1/half_height`), so `m[3] + m[1]` is the *upper* bound.
+                plane(combine(m[3], m[1], true)),  // top
+                plane(combine(m[3], m[1], false)), // bottom
                 // Near: Vulkan's `z <= w`.
                 plane(combine(m[3], m[2], false)),
                 // Far: row 2 alone, normalized only when it exists — slot 5 is
@@ -142,11 +144,14 @@ impl Frustum {
     /// known yet must not vanish while it streams in (§4.6).
     ///
     /// P1: the short-circuiting `all` looks cheaper than it is. A variant that
-    /// evaluated all five distances up front — *and* a needless `sqrt` on each —
-    /// ran the extract bench's serial narrow leg at 8.2 ns/entity against 9.5,
-    /// because a world spread across the frustum mispredicts the early exit
-    /// every few rows. Found by accident while falsifying that bench's gates,
-    /// and not yet measured without the `sqrt`, which is what would settle it.
+    /// evaluated every plane's distance up front — *and* a needless `sqrt` on
+    /// each, needless because [`Frustum::from_view_projection`] normalizes once
+    /// at construction — ran the extract bench's serial narrow leg at
+    /// 8.2 ns/entity against 9.5, because a world spread across the frustum
+    /// mispredicts the early exit every few rows. Found by accident while
+    /// falsifying that bench's gates, and not yet measured without the `sqrt`,
+    /// which is what would settle it. That bench's frustum is perspective, so it
+    /// prices the five-plane case only.
     #[must_use]
     pub fn contains(&self, center: render::Vec3, radius: f32) -> bool {
         if self.unbounded || !radius.is_finite() {
@@ -164,7 +169,7 @@ mod tests {
 
     use super::*;
 
-    /// 90° vertical fov, square, near 0.1 — a frustum whose planes sit at 45°.
+    /// 60° vertical fov, square, near 0.1 — side planes 30° off the view axis.
     fn frustum() -> Frustum {
         Frustum::from_view_projection(render::perspective_reverse_z(FRAC_PI_3, 1.0, 0.1))
     }
@@ -213,8 +218,10 @@ mod tests {
                 "at {depth}"
             );
         }
-        // A perspective frustum at 150 m is far wider than 16 m — the claim
-        // above discriminates, or this test would pass against five planes.
+        // The control: at 150 m a perspective frustum is far wider than 16 m, so
+        // the rejections above are the box's parallel sides and not "any frustum
+        // rejects 16.1". It says nothing about the far plane — both depths here
+        // sit inside it, and proving *that* is the test above.
         assert!(frustum().contains(render::Vec3::new(16.1, 0.0, -150.0), 0.0));
     }
 

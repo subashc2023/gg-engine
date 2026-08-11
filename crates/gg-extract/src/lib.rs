@@ -1010,6 +1010,36 @@ mod tests {
         assert_eq!(out.culled, 1);
     }
 
+    /// The sixth plane doing its job in a real extract, not only in `Frustum`'s
+    /// own tests (post-M20 audit). The exit row asks for the finite-far culler
+    /// *proven able to fail*; `gg-golden`'s `verify-gates` proves it in pixels
+    /// and this proves it in the instance list, which is where a five-plane
+    /// regression would first show as "nothing was ever dropped".
+    #[test]
+    fn an_orthographic_extract_drops_what_is_past_its_far_plane() {
+        // A 16 m box from 0.1 to 60 m: the middle entity is beyond far and
+        // dead ahead, so no side plane can take the credit for removing it.
+        let ortho =
+            Frustum::from_view_projection(render::orthographic_reverse_z(16.0, 16.0, 0.1, 60.0));
+        let world = world_with(&[
+            sim::DVec3::new(0.0, 0.0, -10.0),
+            sim::DVec3::new(0.0, 0.0, -600.0),
+            sim::DVec3::new(0.0, 0.0, -50.0),
+        ]);
+        let mut out = Extracted::default();
+        out.transforms::<Body>(&world, sim::DVec3::ZERO, ortho)
+            .unwrap();
+        assert_eq!(out.instances.len(), 2);
+        assert_eq!(out.culled, 1, "the far plane dropped it");
+
+        // And the same world under the infinite far keeps all three, so the
+        // count above is the sixth plane's doing and not the box's width.
+        let mut wide = Extracted::default();
+        wide.transforms::<Body>(&world, sim::DVec3::ZERO, looking_forward())
+            .unwrap();
+        assert_eq!(wide.culled, 0, "perspective has no far plane to fail on");
+    }
+
     #[test]
     fn culling_removes_instances_without_reordering_the_survivors() {
         // The property golden images depend on: the culled list must be a

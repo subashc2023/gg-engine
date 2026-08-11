@@ -2147,6 +2147,85 @@ mod tests {
         );
     }
 
+    /// Orthography in the *shading* and not only in the outline (post-M20 audit).
+    ///
+    /// The same box at 5 m and at 50 m must render the same pixels: under a
+    /// projection with no eye point every view ray is the camera's axis, so
+    /// nothing about a surface's appearance may depend on how far down that axis
+    /// it sits. The defect this pins is `to_eye = normalize(-world)` — true only
+    /// of an eye at the origin — which swings ~19° between these two depths and
+    /// slides the specular lobe with it, foreshortening the shading under the one
+    /// projection that has none. Sibling to
+    /// [`an_orthographic_view_draws_without_foreshortening`], which makes the
+    /// same claim about geometry; this one is why that test could stop measuring
+    /// *dominance* instead of colour.
+    #[test]
+    fn an_orthographic_view_shades_a_box_the_same_at_any_depth() {
+        use gg_ecs::World;
+        use gg_ecs::boundary::{Light, Renderable};
+        use gg_math::sim;
+
+        const EXTENT: (u32, u32) = (64, 64);
+        let render = |z: f64| {
+            let mut world = World::new();
+            world.register::<Renderable>().unwrap();
+            world.register::<Light>().unwrap();
+            let box_ = world.spawn();
+            world
+                .insert(
+                    box_,
+                    Renderable::boxed(
+                        sim::DVec3::new(0.0, 0.0, z),
+                        sim::Vec3::splat(1.0),
+                        0x00c0_c0c0,
+                    ),
+                )
+                .unwrap();
+            let light = world.spawn();
+            world
+                .insert(
+                    light,
+                    Light::sun(sim::Vec3::new(0.2, -0.4, -1.0), 0x00ff_ffff, 3.0),
+                )
+                .unwrap();
+            let view = View {
+                ortho: 4.0,
+                ..View::default()
+            };
+            let mut extracted = Extracted::default();
+            extracted
+                .transforms::<Renderable>(&world, sim::DVec3::ZERO, view.frustum(EXTENT))
+                .unwrap();
+            extracted.append_lights(&world).unwrap();
+            let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
+            let frame = renderer
+                .frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])
+                .unwrap();
+            assert!(renderer.shutdown().clean(), "no leaks, no messages");
+            frame.pixels
+        };
+
+        let near = render(-5.0);
+        let far = render(-50.0);
+
+        // Not vacuous in either direction: the box is actually on screen, and it
+        // is *specular* — two black squares would compare equal and prove nothing
+        // about the term the view vector reaches.
+        let lit = near.chunks_exact(4).filter(|p| p[0] > 0x40).count();
+        assert!(lit > 100, "the box is drawn and lit: {lit} pixels");
+
+        let worst = near
+            .iter()
+            .zip(&far)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            worst <= 1,
+            "ten times the distance, the same shading: worst channel differs by {worst}"
+        );
+    }
+
     /// A frame nothing casts in declares no shadow pass — so the graph is the
     /// frame rather than a superset of every frame, and an unlit scene does not
     /// allocate a shadow map to clear and never read.
