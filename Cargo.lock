@@ -1165,12 +1165,14 @@ name = "gg-tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "demo-05-many",
  "gg-core",
  "gg-ecs",
  "gg-extract",
  "gg-input",
  "gg-math",
  "gg-render",
+ "gg-scene",
  "png",
  "serde_json",
  "tracing-subscriber",

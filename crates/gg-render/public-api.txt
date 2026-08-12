@@ -154,6 +154,7 @@ pub fn gg_render::OffscreenRenderer::samples(&self) -> gg_rhi::resource::Samples
 pub fn gg_render::OffscreenRenderer::scenes(&self) -> &dyn gg_extract::Scenes
 pub fn gg_render::OffscreenRenderer::set_ui_atlas(&mut self, &gg_render::ui::Coverage<'_>) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_render::OffscreenRenderer::set_viewport(&mut self, core::option::Option<gg_rhi::graph::Viewport>)
+pub fn gg_render::OffscreenRenderer::shadow_cull(&self) -> gg_render::ShadowCull
 pub fn gg_render::OffscreenRenderer::shutdown(self) -> gg_rhi::ShutdownReport
 pub fn gg_render::OffscreenRenderer::view_extent(&self) -> (u32, u32)
 pub struct gg_render::Renderer
@@ -177,6 +178,7 @@ pub fn gg_render::Renderer::samples(&self) -> gg_rhi::resource::Samples
 pub fn gg_render::Renderer::scenes(&self) -> &dyn gg_extract::Scenes
 pub fn gg_render::Renderer::set_ui_atlas(&mut self, &gg_render::ui::Coverage<'_>) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_render::Renderer::set_viewport(&mut self, core::option::Option<gg_rhi::graph::Viewport>)
+pub fn gg_render::Renderer::shadow_cull(&self) -> gg_render::ShadowCull
 pub fn gg_render::Renderer::shutdown(self) -> gg_rhi::ShutdownReport
 pub fn gg_render::Renderer::view_extent(&self) -> (u32, u32)
 pub struct gg_render::SceneFrame<'a>
@@ -195,6 +197,11 @@ pub gg_render::SceneFrame::scene_ms: core::option::Option<gg_render::graph::Reso
 pub gg_render::SceneFrame::shadow_draws: &'a [&'a [gg_rhi::DrawSpec<'a>]]
 pub gg_render::SceneFrame::shadows: &'a [gg_render::graph::ResourceId]
 pub gg_render::SceneFrame::viewport: core::option::Option<gg_rhi::graph::Viewport>
+pub struct gg_render::ShadowCull
+pub gg_render::ShadowCull::drawn: u32
+pub gg_render::ShadowCull::dropped: u32
+pub gg_render::ShadowCull::rejected: u32
+pub gg_render::ShadowCull::views: u32
 pub struct gg_render::View
 pub gg_render::View::aa: bool
 pub gg_render::View::fov_y: f32

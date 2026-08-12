@@ -46,6 +46,7 @@ use gg_rhi::{
 };
 
 use crate::content::Content;
+use crate::cull;
 use crate::shaders_gen::scene as shader;
 use crate::{GpuHost, SCENE_FORMAT, View, srgb_to_linear};
 
@@ -84,6 +85,13 @@ struct GpuInstance {
 
 const _: () = assert!(core::mem::size_of::<GpuInstance>() == 128);
 
+impl GpuInstance {
+    /// The camera-relative centre, as the cull wants it.
+    fn offset_vec(&self) -> render::Vec3 {
+        render::Vec3::new(self.offset[0], self.offset[1], self.offset[2])
+    }
+}
+
 /// Instances one frame may draw, per frame-in-flight slot.
 ///
 /// A budget rather than a growable buffer: reallocating mid-graph would orphan
@@ -96,8 +104,19 @@ const MAX_INSTANCES: usize = 64 * 1024;
 /// counts *meshes on screen* rather than objects.
 const MAX_BATCHES: usize = 4 * 1024;
 
+/// Indirect commands one frame may hold: the batches, plus one per surviving
+/// (batch, shadow view) pair (§6 M32).
+///
+/// Four times the batch cap rather than `MAX_BATCHES * (1 + MAX_CASCADES +
+/// MAX_LAMPS * FACES)`, which would be 56× for a worst case the cull exists to
+/// prevent — a frame where every batch reaches every one of four cascades and
+/// forty-eight lamp faces has already lost. [`ScenePass::cull`] degrades into
+/// the uncompacted draw rather than dropping one, so the ceiling costs frame
+/// time and never a shadow.
+const MAX_COMMANDS: usize = MAX_BATCHES * 4;
+
 const INSTANCE_SLOT_BYTES: u64 = (MAX_INSTANCES * core::mem::size_of::<GpuInstance>()) as u64;
-const COMMAND_SLOT_BYTES: u64 = (MAX_BATCHES * core::mem::size_of::<IndirectCommand>()) as u64;
+const COMMAND_SLOT_BYTES: u64 = (MAX_COMMANDS * core::mem::size_of::<IndirectCommand>()) as u64;
 
 /// One instance's *place* in the draw order, before sorting and batching.
 ///
@@ -112,6 +131,9 @@ struct Keyed {
     mesh: u64,
     /// Index into [`ScenePass::built`], which stays in extract order.
     at: u32,
+    /// The instance's world-space bounding radius, carried through the sort so
+    /// that batching can union it without a second pass over extract's array.
+    radius: f32,
 }
 
 /// One draw: a run of instances that share a mesh.
@@ -119,6 +141,56 @@ struct Batch {
     push: shader::ScenePush,
     indices: BufferHandle,
     /// Byte offset of this batch's command, absolute within the buffer.
+    command_offset: u64,
+    /// The sphere bounding every instance in the run, camera-relative — the
+    /// bounds §6 M15.3 said a batch did not have, and without which a shadow
+    /// view had nothing to reject (§6 M32).
+    ///
+    /// A sphere about the *mean* of the instance centres rather than about the
+    /// first: a run of a thousand shrubs down one edge of a level bounds to a
+    /// sphere centred on the row, where growing one from whichever shrub sorted
+    /// first would bound to nearly twice the radius.
+    centre: render::Vec3,
+    radius: f32,
+    /// How many instances the run holds. Where they *sit* is the batch's own
+    /// `push.instance_base` and its chunks' ranges; a third copy of the same
+    /// offset was one to keep in step for nothing.
+    count: u32,
+    /// The mesh's index count, so a compacted draw can write its own command
+    /// without reading the batch's back out of the buffer.
+    index_count: u32,
+    /// This batch's slice of [`ScenePass::chunks`].
+    chunk_first: u32,
+    chunk_count: u32,
+}
+
+/// Instances per chunk — the second level of the cull, under the batch and over
+/// the instance (§6 M32).
+///
+/// One sphere over a whole batch is too coarse to *do* anything on its own: a
+/// mesh scattered across a level bounds to the level, so every view says
+/// `Partial` and pays for every instance one at a time. That cost is invisible
+/// on a software rasterizer, where the draws it saves dwarf it, and plainly
+/// visible on a real one — the 4090 ran the cull at a net *loss* until this
+/// existed, because 3 485 instances against 28 views is a hundred thousand
+/// sphere tests a frame.
+///
+/// The instances are in draw order, which is depth order within a mesh, so a
+/// chunk is a shell at roughly one distance from the eye rather than a compact
+/// blob. That is weaker than a spatial sort would give and is still enough: a
+/// lamp reaching six metres rejects every shell that is not at its own distance,
+/// which is most of them.
+const CHUNK: usize = 128;
+
+/// One batch through one shadow view: the same geometry, its own instances.
+///
+/// Separate from [`Batch`] rather than a mutated copy of it for the reason §6
+/// M15.3 gave for the cascade push array — the forward and prepass draws borrow
+/// the batch's own push, and a frame rewriting it per view would be rewriting
+/// what those two still point at.
+struct ViewDraw {
+    push: shader::ScenePush,
+    indices: BufferHandle,
     command_offset: u64,
 }
 
@@ -148,20 +220,24 @@ pub(crate) struct ScenePass {
     built: Vec<GpuInstance>,
     staged: Vec<GpuInstance>,
     batches: Vec<Batch>,
-    /// One push per batch per cascade, parallel to `batches` (§6 M15.3). Held
-    /// beside the batch's own rather than replacing it: the forward and prepass
-    /// draws borrow that one, and rewriting it per cascade would rewrite what
-    /// they are still pointing at.
-    shadow_pushes: Vec<Vec<shader::ScenePush>>,
-    /// The same, one list per lamp face (§6 M31), flat as `lamp * 6 + face`.
-    ///
-    /// Uncalled, exactly as `shadow_pushes` is: a batch still has no bounds, so
-    /// this pass draws every batch into every face the way it already draws
-    /// every batch into every cascade. That is §6 M15.3's standing P2 arriving
-    /// with a larger multiplier rather than a new defect — six faces per lamp
-    /// against four cascades — and it is what `gg-tools lamps` prices for a
-    /// scene whose casters come out of a pack.
-    lamp_pushes: Vec<Vec<shader::ScenePush>>,
+    /// Each instance's bounding sphere, in `staged` order and covering the main
+    /// region only — what [`ScenePass::cull`] tests when a batch straddles a
+    /// view. Compacted copies are appended past the end of this and never read
+    /// back through it.
+    spheres: Vec<(render::Vec3, f32)>,
+    /// `(centre, radius, first, count)` per chunk, in batch order.
+    chunks: Vec<(render::Vec3, f32, u32, u32)>,
+    /// One view's surviving instance indices, reused across views. Held so the
+    /// fit test runs *once* per instance and the decision to compact is taken
+    /// after the count is known rather than during the copy.
+    survivors: Vec<u32>,
+    /// The draws that reach each cascade, one list per cascade (§6 M15.3).
+    shadow_views: Vec<Vec<ViewDraw>>,
+    /// The same per lamp face (§6 M31), flat as `lamp * 6 + face`.
+    lamp_views: Vec<Vec<ViewDraw>>,
+    /// What the cull came to this frame, for the overlay and `gg-tools lamps` —
+    /// a cull nothing reports is a cull nobody can tell stopped working.
+    cull: cull::ShadowCull,
     written: Vec<IndirectCommand>,
     /// This frame's lighting block, patched into every batch's push.
     frame: DeviceAddress,
@@ -220,9 +296,13 @@ impl ScenePass {
             built: Vec::new(),
             staged: Vec::new(),
             batches: Vec::new(),
+            spheres: Vec::new(),
+            chunks: Vec::new(),
+            survivors: Vec::new(),
             written: Vec::new(),
-            shadow_pushes: Vec::new(),
-            lamp_pushes: Vec::new(),
+            shadow_views: Vec::new(),
+            lamp_views: Vec::new(),
+            cull: cull::ShadowCull::default(),
             frame: 0,
         })
     }
@@ -247,20 +327,21 @@ impl ScenePass {
         view: &View,
         content: Option<&Content>,
         frame: DeviceAddress,
-        cascades: usize,
-        lamp_faces: usize,
+        sun: Option<&crate::lighting::Sun>,
+        lamps: &crate::lamp::Lamps,
     ) -> Result<(), RhiError> {
         self.frame = frame;
-        self.shadow_pushes.resize_with(cascades, Vec::new);
-        self.shadow_pushes.truncate(cascades);
-        self.lamp_pushes.resize_with(lamp_faces, Vec::new);
-        self.lamp_pushes.truncate(lamp_faces);
         self.keyed.clear();
         self.built.clear();
         self.staged.clear();
+        self.spheres.clear();
+        self.chunks.clear();
         self.batches.clear();
         self.written.clear();
+        self.cull = cull::ShadowCull::default();
         let Some(content) = content else {
+            self.shadow_views.clear();
+            self.lamp_views.clear();
             return Ok(());
         };
         let view_projection = view.view_projection(extent);
@@ -304,6 +385,7 @@ impl ScenePass {
                     key: sort_key(instance.asset, instance.offset),
                     mesh: instance.asset,
                     at: (self.built.len() - 1) as u32,
+                    radius: instance.radius,
                 });
             }
         }
@@ -316,6 +398,10 @@ impl ScenePass {
         {
             gg_core::zone!("scene.batch");
             self.batch(content);
+        }
+        {
+            gg_core::zone!("scene.cull");
+            self.cull(sun, lamps);
         }
         gg_core::zone!("scene.stage");
         self.stage(rhi, slot)
@@ -362,6 +448,33 @@ impl ScenePass {
             let map = |id, fallback: TextureIndex| {
                 content.texture(id).map_or(fallback, |t| t.index).get()
             };
+            let first = self.staged.len() as u32;
+            let chunk_first = self.chunks.len() as u32;
+            let sphere = |keyed: &Keyed, built: &[GpuInstance]| {
+                (built[keyed.at as usize].offset_vec(), keyed.radius)
+            };
+            // Chunk bounds first, then the batch's as the union of theirs — one
+            // walk of the instances rather than one per level.
+            for base in (start..end).step_by(CHUNK) {
+                let stop = (base + CHUNK).min(end);
+                let (centre, radius) = bound(
+                    self.keyed[base..stop]
+                        .iter()
+                        .map(|k| sphere(k, &self.built)),
+                );
+                self.chunks.push((
+                    centre,
+                    radius,
+                    first + (base - start) as u32,
+                    (stop - base) as u32,
+                ));
+            }
+            let chunk_count = self.chunks.len() as u32 - chunk_first;
+            let (centre, radius) = bound(
+                self.chunks[chunk_first as usize..]
+                    .iter()
+                    .map(|&(c, r, ..)| (c, r)),
+            );
             self.batches.push(Batch {
                 push: shader::ScenePush::new(
                     // Patched in `stage`, once the slot's byte offset is known.
@@ -385,6 +498,12 @@ impl ScenePass {
                 indices,
                 command_offset: (self.written.len() * core::mem::size_of::<IndirectCommand>())
                     as u64,
+                centre,
+                radius,
+                count: (end - start) as u32,
+                index_count: resident.index_count,
+                chunk_first,
+                chunk_count,
             });
             self.written.push(IndirectCommand {
                 index_count: resident.index_count,
@@ -398,8 +517,179 @@ impl ScenePass {
                 let at = self.keyed[slot].at as usize;
                 let instance = self.built[at];
                 self.staged.push(instance);
+                self.spheres
+                    .push((instance.offset_vec(), self.keyed[slot].radius));
             }
             start = end;
+        }
+    }
+
+    /// Build each shadow view's draw list out of the batches that reach it
+    /// (§6 M32).
+    ///
+    /// This is what §6 M15.3 deferred and §6 M31 inherited with a six-times
+    /// multiplier: before it, every batch was drawn into every cascade and every
+    /// lamp face, because a batch had no bounds to reject it by. Now it has one,
+    /// and each (batch, view) pair takes one of three roads —
+    ///
+    /// - **Outside**: no draw at all, which is the case that pays.
+    /// - **Inside**: the batch's own instance range and its own command, reused
+    ///   untouched. No walk, no copy, no second command — a cascade holding the
+    ///   whole level costs exactly what it cost before.
+    /// - **Partial**: the survivors compacted into a fresh range with a command
+    ///   of their own. [`ScenePush::instance_base`](shader::ScenePush) already
+    ///   existed for the batch's own offset, so a compacted range needs no
+    ///   shader change to draw through.
+    ///
+    /// Runs before [`ScenePass::stage`] because it appends to both streams that
+    /// call writes.
+    fn cull(&mut self, sun: Option<&crate::lighting::Sun>, lamps: &crate::lamp::Lamps) {
+        // Taken and put back so the per-view list being filled is not a borrow
+        // of `self` while the compaction writes `self.staged`.
+        let mut shadow = core::mem::take(&mut self.shadow_views);
+        let cascades = sun.map_or(&[][..], crate::lighting::Sun::cascades);
+        shadow.resize_with(cascades.len(), Vec::new);
+        shadow.truncate(cascades.len());
+        if let Some(sun) = sun {
+            let basis = cull::Basis::of(sun);
+            for (index, (draws, cascade)) in shadow.iter_mut().zip(cascades).enumerate() {
+                let view = cull::View::Slab { cascade, basis };
+                self.cull_view(view, index as u32, draws);
+            }
+        }
+        self.shadow_views = shadow;
+
+        let mut lamp_views = core::mem::take(&mut self.lamp_views);
+        let faces = lamps.lamps().len() * crate::lamp::FACES;
+        lamp_views.resize_with(faces, Vec::new);
+        lamp_views.truncate(faces);
+        for (index, draws) in lamp_views.iter_mut().enumerate() {
+            let lamp = &lamps.lamps()[index / crate::lamp::FACES];
+            let view = cull::View::Face {
+                lamp,
+                face: index % crate::lamp::FACES,
+            };
+            // The index space is the shader's, cascades first — `LAMP_VIEW_BASE`
+            // in `pbr.slang` is the other half of this sentence.
+            let shadow_view = (crate::lighting::MAX_CASCADES + index) as u32;
+            self.cull_view(view, shadow_view, draws);
+        }
+        self.lamp_views = lamp_views;
+        self.cull.views = (cascades.len() + faces) as u32;
+    }
+
+    /// One view's draws, appending whatever compaction it needs to `staged` and
+    /// `written`.
+    fn cull_view(&mut self, view: cull::View<'_>, shadow_view: u32, draws: &mut Vec<ViewDraw>) {
+        draws.clear();
+        for index in 0..self.batches.len() {
+            let batch = &self.batches[index];
+            let (centre, radius, count) = (batch.centre, batch.radius, batch.count);
+            let whole = ViewDraw {
+                push: shader::ScenePush {
+                    shadow_view,
+                    ..batch.push
+                },
+                indices: batch.indices,
+                command_offset: batch.command_offset,
+            };
+            match view.fit(centre, radius) {
+                cull::Fit::Outside => {
+                    self.cull.rejected += count;
+                    self.cull.dropped += 1;
+                }
+                cull::Fit::Inside => {
+                    self.cull.drawn += count;
+                    draws.push(whole);
+                }
+                // Either budget exhausted: draw the batch whole. A frame that
+                // ran out of room to be precise renders the right picture and
+                // costs what it used to, which is the only degradation this pass
+                // is allowed — the alternative drops a shadow.
+                cull::Fit::Partial
+                    if self.staged.len() + count as usize > MAX_INSTANCES
+                        || self.written.len() == MAX_COMMANDS =>
+                {
+                    tracing::warn!(
+                        instances = self.staged.len(),
+                        commands = self.written.len(),
+                        instance_cap = MAX_INSTANCES,
+                        command_cap = MAX_COMMANDS,
+                        "shadow cull out of room — drawing a batch uncompacted rather than \
+                         dropping it; raise the budget"
+                    );
+                    self.cull.drawn += count;
+                    draws.push(whole);
+                }
+                cull::Fit::Partial => {
+                    // Which of them survive, before deciding whether moving them
+                    // is worth it. One fit test per instance either way.
+                    self.survivors.clear();
+                    let chunks = batch.chunk_first as usize
+                        ..(batch.chunk_first + batch.chunk_count) as usize;
+                    for chunk in chunks {
+                        let (centre, radius, first, count) = self.chunks[chunk];
+                        let range = first..first + count;
+                        match view.fit(centre, radius) {
+                            // The level this exists for: a shell of the batch
+                            // that this view cannot see costs one test, not a
+                            // hundred and twenty-eight.
+                            cull::Fit::Outside => continue,
+                            cull::Fit::Inside => self.survivors.extend(range),
+                            cull::Fit::Partial => {
+                                for at in range {
+                                    let (centre, radius) = self.spheres[at as usize];
+                                    if view.fit(centre, radius) != cull::Fit::Outside {
+                                        self.survivors.push(at);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let kept = self.survivors.len() as u32;
+                    if kept == 0 {
+                        self.cull.rejected += count;
+                        self.cull.dropped += 1;
+                        continue;
+                    }
+                    // Keeping nearly all of it: draw the batch whole. Copying
+                    // eight hundred instances to avoid rasterizing twenty is a
+                    // loss twice over — the copy costs more than the draw saved,
+                    // and the compacted range costs instance budget the *next*
+                    // view then has to do without. A batch spanning a level is
+                    // never wholly inside a cascade, so without this rule the
+                    // common case is a full copy per view that rejects nothing.
+                    if kept * 4 >= count * 3 {
+                        self.cull.drawn += count;
+                        draws.push(whole);
+                        continue;
+                    }
+                    let first = self.staged.len();
+                    for at in 0..self.survivors.len() {
+                        let instance = self.staged[self.survivors[at] as usize];
+                        self.staged.push(instance);
+                    }
+                    self.cull.rejected += count - kept;
+                    self.cull.drawn += kept;
+                    let batch = &self.batches[index];
+                    let command_offset =
+                        (self.written.len() * core::mem::size_of::<IndirectCommand>()) as u64;
+                    self.written.push(IndirectCommand {
+                        index_count: batch.index_count,
+                        instance_count: kept,
+                        ..Default::default()
+                    });
+                    draws.push(ViewDraw {
+                        push: shader::ScenePush {
+                            shadow_view,
+                            instance_base: first as u32,
+                            ..batch.push
+                        },
+                        indices: batch.indices,
+                        command_offset,
+                    });
+                }
+            }
         }
     }
 
@@ -427,26 +717,17 @@ impl ScenePass {
             batch.push.instances = base;
             batch.command_offset += command_offset;
         }
-        // After the patch above, never before it: a cascade copy taken while
-        // `instances` was still the placeholder would draw the shadow pass
+        // The view draws were built before this call and carry the same two
+        // placeholders, so they take the same patch. Never before it: a copy
+        // taken while `instances` was still zero would draw the shadow pass
         // through address zero.
-        for (index, pushes) in self.shadow_pushes.iter_mut().enumerate() {
-            pushes.clear();
-            pushes.extend(self.batches.iter().map(|batch| {
-                let mut push = batch.push;
-                push.shadow_view = index as u32;
-                push
-            }));
-        }
-        // Lamp faces continue the same index space — cascades first, then faces
-        // — because `vs_shadow` takes one number and branches on it.
-        for (index, pushes) in self.lamp_pushes.iter_mut().enumerate() {
-            pushes.clear();
-            pushes.extend(self.batches.iter().map(|batch| {
-                let mut push = batch.push;
-                push.shadow_view = (crate::lighting::MAX_CASCADES + index) as u32;
-                push
-            }));
+        let views = self
+            .shadow_views
+            .iter_mut()
+            .chain(self.lamp_views.iter_mut());
+        for draw in views.flatten() {
+            draw.push.instances = base;
+            draw.command_offset += command_offset;
         }
         Ok(())
     }
@@ -457,67 +738,76 @@ impl ScenePass {
     /// a bias the pipeline did not declare, and none of these declare one
     /// (`crate::shadow_draws` has the argument).
     pub(crate) fn draws(&self, pipeline: PipelineHandle) -> Vec<DrawSpec<'_>> {
-        self.draws_with(
-            pipeline,
-            &self.batches.iter().map(|b| &b.push).collect::<Vec<_>>(),
-        )
+        self.batches
+            .iter()
+            .map(|batch| self.spec(pipeline, &batch.push, batch.indices, batch.command_offset))
+            .collect()
     }
 
-    /// The same batches through one cascade's projection (§6 M15.3).
-    ///
-    /// A parallel push array rather than a mutated one: the batch's own push is
-    /// what the forward and prepass draws borrow, and a frame that rewrote it per
-    /// cascade would be rewriting what those two are still pointing at.
+    /// The batches that reach cascade `cascade` (§6 M15.3, culled at §6 M32).
     pub(crate) fn shadow_draws(&self, cascade: usize) -> Vec<DrawSpec<'_>> {
-        let pushes = self
-            .shadow_pushes
+        let draws = self
+            .shadow_views
             .get(cascade)
             .map_or(&[][..], Vec::as_slice);
-        self.draws_with(self.shadow, &pushes.iter().collect::<Vec<_>>())
+        draws
+            .iter()
+            .map(|d| self.spec(self.shadow, &d.push, d.indices, d.command_offset))
+            .collect()
     }
 
-    /// The same batches through one lamp face, landing in that face's tile.
+    /// The batches that reach one lamp face, landing in that face's tile.
     ///
     /// The tile is the *draw's* rectangle rather than the pass's: six faces of
     /// eight lamps share one atlas and one pass, so a pass-level viewport could
     /// only ever have named one of them (§6 M31).
     pub(crate) fn lamp_draws(&self, face: usize, tile: Viewport) -> Vec<DrawSpec<'_>> {
-        let pushes = self.lamp_pushes.get(face).map_or(&[][..], Vec::as_slice);
-        let mut draws = self.draws_with(self.shadow, &pushes.iter().collect::<Vec<_>>());
-        for draw in &mut draws {
-            draw.viewport = Some(tile);
-        }
+        let draws = self.lamp_views.get(face).map_or(&[][..], Vec::as_slice);
         draws
-    }
-
-    fn draws_with<'a>(
-        &'a self,
-        pipeline: PipelineHandle,
-        pushes: &[&'a shader::ScenePush],
-    ) -> Vec<DrawSpec<'a>> {
-        self.batches
             .iter()
-            .zip(pushes)
-            .map(|(batch, push)| DrawSpec {
-                pipeline,
-                depth_bias: None,
-                viewport: None,
-                push_constants: bytemuck::bytes_of(*push),
-                // Unread: the indirect command carries the counts (§6 M10).
-                count: 0,
-                index_buffer: Some(batch.indices),
-                indirect: Some(Indirect {
-                    buffer: self.commands,
-                    offset: batch.command_offset,
-                }),
+            .map(|d| {
+                let mut spec = self.spec(self.shadow, &d.push, d.indices, d.command_offset);
+                spec.viewport = Some(tile);
+                spec
             })
             .collect()
     }
 
+    fn spec<'a>(
+        &self,
+        pipeline: PipelineHandle,
+        push: &'a shader::ScenePush,
+        indices: BufferHandle,
+        command_offset: u64,
+    ) -> DrawSpec<'a> {
+        DrawSpec {
+            pipeline,
+            depth_bias: None,
+            viewport: None,
+            push_constants: bytemuck::bytes_of(push),
+            // Unread: the indirect command carries the counts (§6 M10).
+            count: 0,
+            index_buffer: Some(indices),
+            indirect: Some(Indirect {
+                buffer: self.commands,
+                offset: command_offset,
+            }),
+        }
+    }
+
     /// Instances staged and draws issued this frame — the "ten thousand
     /// objects, four draws" claim as two numbers rather than an assertion.
+    ///
+    /// The instance count is the *main* region's: what the camera draws, not
+    /// what the shadow views compacted behind it, so the number still answers
+    /// the question the overlay asks it.
     pub(crate) fn counts(&self) -> (usize, usize) {
-        (self.staged.len(), self.batches.len())
+        (self.spheres.len(), self.batches.len())
+    }
+
+    /// What this pass's shadow cull came to (§6 M32).
+    pub(crate) fn shadow_cull(&self) -> cull::ShadowCull {
+        self.cull
     }
 
     /// The prepass + forward pair for `samples`, built on first ask (§6 M21).
@@ -543,6 +833,30 @@ impl ScenePass {
         rhi.destroy_image(self.flat)?;
         rhi.destroy_image(self.white)
     }
+}
+
+/// The sphere bounding a set of spheres: the mean of their centres, then the
+/// furthest surface from it.
+///
+/// Centred on the **mean** rather than on whichever came first, which is what
+/// keeps a long row of shrubs bounded by a sphere over the row instead of one
+/// over twice its length. Two passes, over data already in cache.
+fn bound(spheres: impl Iterator<Item = (render::Vec3, f32)> + Clone) -> (render::Vec3, f32) {
+    let mut centre = render::Vec3::ZERO;
+    let mut count = 0.0_f32;
+    for (at, _) in spheres.clone() {
+        centre += at;
+        count += 1.0;
+    }
+    if count == 0.0 {
+        return (render::Vec3::ZERO, 0.0);
+    }
+    centre /= count;
+    let mut radius: f32 = 0.0;
+    for (at, r) in spheres {
+        radius = radius.max(at.distance(centre) + r);
+    }
+    (centre, radius)
 }
 
 /// A draw's sort key: pipeline, then material, then depth, most significant

@@ -22,6 +22,7 @@
 
 mod cluster;
 pub mod content;
+mod cull;
 pub mod cvars;
 pub mod graph;
 #[cfg(feature = "hot-reload")]
@@ -58,6 +59,7 @@ use std::path::Path;
 
 pub use cluster::ClusterLoad;
 use content::{Content, ContentError};
+pub use cull::ShadowCull;
 use gg_assets::AssetId;
 use gg_extract::{Extracted, Frustum, Instance, Scenes};
 use gg_math::render;
@@ -364,6 +366,17 @@ impl Renderer {
         self.lighting.cluster_load()
     }
 
+    /// What this frame's shadow cull came to, both passes summed (§6 M32).
+    ///
+    /// The claim §6 M32 exists for is that a batch is no longer drawn into every
+    /// view, and the golden suite cannot check it: a cull that began passing
+    /// everything through renders the identical picture, only slower. This is
+    /// the number that can.
+    #[must_use]
+    pub fn shadow_cull(&self) -> ShadowCull {
+        self.pass.cull.merge(self.scene.shadow_cull())
+    }
+
     /// This frame's luminance histogram, or `None` when `r.histogram` is off
     /// (§6 M11's exit row). Bins are log2 luminance, darkest first.
     ///
@@ -606,7 +619,6 @@ impl Renderer {
             gg_core::zone!("render.plan-sun");
             self.lighting.plan(extracted, view, view_extent)
         };
-        let cascades = sun.map_or(0, |s| s.cascades().len());
         // Beside the sun and for the same reason: the atlas's size depends on
         // how many lamps cast, and the attachments are acquired below.
         {
@@ -628,11 +640,11 @@ impl Renderer {
                 view,
                 content,
                 frame_address,
-                cascades,
-                self.lighting.lamps().lamps().len() * lamp::FACES,
+                sun.as_ref(),
+                self.lighting.lamps(),
             )?;
         }
-        report_draws(&self.scene, &self.lighting, extracted);
+        report_draws(&self.scene, &self.lighting, extracted, self.shadow_cull());
         {
             gg_core::zone!("render.build-ui");
             self.ui.write(&mut self.rhi, slot, ui)?;
@@ -988,6 +1000,17 @@ impl OffscreenRenderer {
         self.lighting.cluster_load()
     }
 
+    /// What this frame's shadow cull came to, both passes summed (§6 M32).
+    ///
+    /// The claim §6 M32 exists for is that a batch is no longer drawn into every
+    /// view, and the golden suite cannot check it: a cull that began passing
+    /// everything through renders the identical picture, only slower. This is
+    /// the number that can.
+    #[must_use]
+    pub fn shadow_cull(&self) -> ShadowCull {
+        self.pass.cull.merge(self.scene.shadow_cull())
+    }
+
     /// This frame's luminance histogram, or `None` when `r.histogram` is off.
     /// Current rather than two frames behind: an offscreen submit blocks.
     #[must_use]
@@ -1088,7 +1111,6 @@ impl OffscreenRenderer {
             self.lighting.plan(extracted, view, view_extent)
         };
         let histogram = luminance::Luminance::enabled();
-        let cascades = sun.map_or(0, |s| s.cascades().len());
         // Beside the sun and for the same reason: the atlas's size depends on
         // how many lamps cast, and the attachments are acquired below.
         {
@@ -1110,11 +1132,11 @@ impl OffscreenRenderer {
                 view,
                 content,
                 frame_address,
-                cascades,
-                self.lighting.lamps().lamps().len() * lamp::FACES,
+                sun.as_ref(),
+                self.lighting.lamps(),
             )?;
         }
-        report_draws(&self.scene, &self.lighting, extracted);
+        report_draws(&self.scene, &self.lighting, extracted, self.shadow_cull());
         {
             gg_core::zone!("render.build-ui");
             self.ui.write(&mut self.rhi, 0, ui)?;
@@ -1306,7 +1328,12 @@ fn stream(
 /// `debug`, exactly like the per-tick hash (§5.6c) — a human's terminal must not
 /// see sixty of these a second, and "ten thousand objects, four draws" is a
 /// claim that should be countable rather than asserted (§6 M10).
-fn report_draws(scene: &ScenePass, lighting: &lighting::Lighting, extracted: &Extracted) {
+fn report_draws(
+    scene: &ScenePass,
+    lighting: &lighting::Lighting,
+    extracted: &Extracted,
+    shadow: ShadowCull,
+) {
     if tracing::enabled!(target: "gg::draws", tracing::Level::DEBUG) {
         let (instances, draws) = scene.counts();
         tracing::debug!(
@@ -1330,6 +1357,14 @@ fn report_draws(scene: &ScenePass, lighting: &lighting::Lighting, extracted: &Ex
             // down — the light is still in the frame and still lights most of
             // it; what is missing is a corner of the busiest froxel.
             clusters_dropped = lighting.cluster_load().dropped,
+            // What the shadow cull took off the shadow passes, summed over every
+            // cascade and lamp face (§6 M32). Reported rather than merely
+            // counted, for the reason `skies_dropped` learned at M29: a number
+            // nothing prints is a number nobody notices going to zero — and a
+            // cull silently switching itself off looks exactly like a slow desk.
+            shadow_drawn = shadow.drawn,
+            shadow_rejected = shadow.rejected,
+            shadow_dropped = shadow.dropped,
         );
     }
 }
@@ -1548,41 +1583,15 @@ fn sky_pushes(
 /// Whether `instance` can cast into `cascade`, for a sun travelling along
 /// `sun.direction`.
 ///
-/// A **prism** test, not a sphere one, and the extrusion is the whole point: a
-/// caster outside the slab but between it and the sun still shadows into it. So
-/// the along-light extent is checked separately, against the depth range
-/// `lighting::fit` built the projection with, and what is left is a footprint
-/// test in the plane perpendicular to the light — where projecting along the sun
-/// moves nothing, so a caster's footprint and its shadow's are the same figure.
-///
-/// That footprint is a **square**, not a disc, and mistaking the two is a real
-/// defect rather than a tightness argument: `fit` builds the projection with
-/// `orthographic_reverse_z(radius, radius, ..)`, so the slab reaches `radius` up
-/// each axis and `radius * sqrt(2)` into its corners. A cull that tested the
-/// distance from the slab's axis therefore dropped every caster whose shadow
-/// landed in a corner — 21% of each cascade's footprint, and since a cascade is
-/// centred on the *view* frustum, a square of missing shadow that slid across
-/// the world as the camera turned (`gg-tools shadow-sweep`).
+/// The geometry moved to [`cull`] at §6 M32, where the same prism answers a
+/// third question a batch needs — *wholly* inside — that a predicate could not.
+/// This is the per-instance half, which wants only yes or no.
 fn casts_into(instance: &Instance, cascade: &lighting::Cascade, sun: &lighting::Sun) -> bool {
-    // The diagnostic off switch (`r.shadow_cull 0`): every caster in every
-    // cascade, so an artifact that survives it is the fit's and not a cull's.
-    if cvars::SHADOW_CULL.int() == 0 {
-        return true;
-    }
-    let to = instance.offset - cascade.centre;
-    let along = to.dot(sun.direction);
-    // `radius * 2` each way: the eye sits two radii up-light of the centre and
-    // the far plane four, so that is exactly the depth the map records.
-    if along.abs() > cascade.radius * 2.0 + instance.radius {
-        return false;
-    }
-    // Distance from the *square*, per axis: zero inside it, and the shortest way
-    // out of it at a corner. A sphere reaches the slab iff that distance is
-    // under its radius.
-    let across = to - sun.direction * along;
-    let out = |axis: render::Vec3| (across.dot(axis).abs() - cascade.radius).max(0.0);
-    let (x, y) = (out(sun.right), out(sun.above));
-    x * x + y * y <= instance.radius * instance.radius
+    let view = cull::View::Slab {
+        cascade,
+        basis: cull::Basis::of(sun),
+    };
+    view.fit(instance.offset, instance.radius) != cull::Fit::Outside
 }
 
 /// One depth attachment per cascade, or none when nothing casts (§6 M15.3).
@@ -1952,6 +1961,9 @@ struct BoxPass {
     pushes: Vec<Push>,
     /// One list per cascade, culled — see [`BoxPass::build_shadow`].
     shadow_pushes: Vec<Vec<Push>>,
+    /// What this pass's per-instance cull came to (§6 M32). No `dropped`: a box
+    /// is its own draw, so there is no batch here to drop whole.
+    cull: cull::ShadowCull,
     /// One list per lamp face, culled — see [`BoxPass::build_lamps`]. Flat, as
     /// `lamp * 6 + face`.
     lamp_pushes: Vec<Vec<Push>>,
@@ -2128,6 +2140,7 @@ impl BoxPass {
             geometry,
             pushes: Vec::new(),
             shadow_pushes: Vec::new(),
+            cull: cull::ShadowCull::default(),
             lamp_pushes: Vec::new(),
         })
     }
@@ -2164,6 +2177,9 @@ impl BoxPass {
     /// Rebuild this frame's push constants.
     fn build(&mut self, extracted: &Extracted, frame: DeviceAddress) {
         let geometry = &self.geometry;
+        // Reset here rather than in either shadow builder: this runs first, and
+        // the two of them accumulate into one frame's figure.
+        self.cull = cull::ShadowCull::default();
         self.pushes.clear();
         self.pushes.extend(
             extracted
@@ -2205,7 +2221,10 @@ impl BoxPass {
                         push
                     }),
             );
+            self.cull.drawn += pushes.len() as u32;
+            self.cull.rejected += (extracted.instances.len() - pushes.len()) as u32;
         }
+        self.cull.views += cascades.len() as u32;
     }
 
     /// The boxes that reach cascade `cascade`, through the shadow pipeline.
@@ -2239,11 +2258,11 @@ impl BoxPass {
                     .instances
                     .iter()
                     .filter(|instance| {
-                        // `r.shadow_cull 0` is a diagnostic for the whole shadow
-                        // path, not the sun's alone: an artifact that survives it
-                        // is the fit's rather than a cull's, here as there.
-                        cvars::SHADOW_CULL.int() == 0
-                            || lamp.casts_into(instance.offset, instance.radius, face)
+                        // `r.shadow_cull 0` lives inside `View::fit` since §6
+                        // M32 — one switch for the whole shadow path rather than
+                        // one per call site to keep in step.
+                        let view = cull::View::Face { lamp, face };
+                        view.fit(instance.offset, instance.radius) != cull::Fit::Outside
                     })
                     .map(|instance| {
                         let mut push = Push::new(geometry, frame, instance);
@@ -2251,7 +2270,10 @@ impl BoxPass {
                         push
                     }),
             );
+            self.cull.drawn += pushes.len() as u32;
+            self.cull.rejected += (extracted.instances.len() - pushes.len()) as u32;
         }
+        self.cull.views += faces as u32;
     }
 
     /// The boxes that reach one lamp face, drawn into that face's tile.

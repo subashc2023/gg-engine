@@ -22,6 +22,8 @@
 //!   gg-tools lamps [--cost|--bias]  what a *casting* lamp costs, swept over
 //!                                   `r.lamps` and face size, and where its
 //!                                   bias belongs — lost against leaked (§6 M31)
+//!   gg-tools cull                  what giving a batch bounds bought the
+//!                                   shadow passes, over *pack* geometry (§6 M32)
 //!   gg-tools banding                what the 8-bit output does to a smooth
 //!                                   gradient, swept over `r.dither`
 //!   gg-tools pace                   what a display rate does to a turn the hand
@@ -35,6 +37,7 @@
 //!                                   an agent over MCP on stdio (§6 M16)
 
 mod banding;
+mod cull;
 mod fp_isa;
 mod lamps;
 mod lights;
@@ -73,6 +76,7 @@ fn main() -> anyhow::Result<()> {
         "shadow-edge" => shadow_edge::run(rest),
         "lights" => lights::run(rest),
         "lamps" => lamps::run(rest),
+        "cull" => cull::run(rest),
         "banding" => banding::run(rest),
         "pace" => pace::run(rest),
         "panorama" => panorama::run(rest),
@@ -81,7 +85,7 @@ fn main() -> anyhow::Result<()> {
         other => {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
-                 shadow-flat, shadow-sweep, shadow-edge, lights, lamps, banding, pace, fp-isa, mcp. A new instrument is a new \
+                 shadow-flat, shadow-sweep, shadow-edge, lights, lamps, cull, banding, pace, fp-isa, mcp. A new instrument is a new \
                  subcommand here, not a \
                  new crate"
             )

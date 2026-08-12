@@ -47,6 +47,7 @@
 use gg_extract::ExtractedLight;
 use gg_math::render;
 
+use crate::cull::Fit;
 use crate::cvars;
 
 /// Faces a lamp has. Six, and it is not a knob: fewer would leave a direction
@@ -109,20 +110,27 @@ pub(crate) struct Lamp {
 }
 
 impl Lamp {
-    /// Whether a caster of `radius` at `offset` can put anything into face
-    /// `face`'s map.
+    /// Where a sphere of `radius` at `offset` sits against face `face`'s map
+    /// (§6 M32).
     ///
-    /// Two tests, cheapest first: the lamp's own sphere, then the face's pyramid
-    /// as the four side planes through the light. The far plane is deliberately
-    /// absent — the projection has none — and the near plane is too, because a
-    /// caster straddling the light is inside the sphere and must be drawn by
-    /// whichever faces its parts fall into rather than rejected by a plane that
-    /// runs through the middle of it.
-    pub(crate) fn casts_into(&self, offset: render::Vec3, radius: f32, face: usize) -> bool {
+    /// Two volumes, cheapest first: the lamp's own reach, then the face's
+    /// pyramid as the four side planes through the light. The far plane is
+    /// deliberately absent — the projection has none — and the near plane is
+    /// too, because a caster straddling the light is inside the reach and must
+    /// be drawn by whichever faces its parts fall into rather than rejected by a
+    /// plane running through the middle of it.
+    ///
+    /// [`Fit::Inside`] is the same four planes at the opposite sign: far enough
+    /// in that nothing the sphere contains can be out.
+    pub(crate) fn fit(&self, offset: render::Vec3, radius: f32, face: usize) -> Fit {
         let to = offset - self.position;
+        // Squared throughout: this runs per instance per face, and a square
+        // root here was worth a measurable slice of the frame on a device fast
+        // enough for the cull's own cost to show (§6 M32's 4090 row).
+        let distance = to.length_squared();
         let reach = self.range + radius;
-        if to.length_squared() > reach * reach {
-            return false;
+        if distance > reach * reach {
+            return Fit::Outside;
         }
         let (forward, up) = AXES[face];
         let right = forward.cross(up);
@@ -134,8 +142,16 @@ impl Lamp {
         let t = self.tan_half;
         let scale = radius * (1.0 + t * t).sqrt();
         let along = to.dot(forward);
-        let inside = |axis: render::Vec3| to.dot(axis).abs() - along * t <= scale;
-        inside(right) && inside(up)
+        let past = |axis: render::Vec3| to.dot(axis).abs() - along * t;
+        let (x, y) = (past(right), past(up));
+        if x > scale || y > scale {
+            return Fit::Outside;
+        }
+        let inner = self.range - radius;
+        if inner > 0.0 && distance <= inner * inner && x <= -scale && y <= -scale {
+            return Fit::Inside;
+        }
+        Fit::Partial
     }
 }
 
@@ -242,4 +258,99 @@ impl Lamps {
 /// afford elsewhere first.
 fn tile_size() -> u32 {
     (cvars::LAMP_SIZE.int().clamp(128, 512) as u32).next_power_of_two()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lamp at the origin reaching ten metres, faces widened by the gutter of
+    /// a 512-texel tile — the default, so the tangent under test is the shipped
+    /// one rather than a clean 1.0.
+    fn lamp() -> Lamp {
+        let tan_half = 512.0 / (512.0 - 2.0 * GUTTER);
+        Lamp {
+            position: render::Vec3::ZERO,
+            range: 10.0,
+            faces: core::array::from_fn(|_| render::Mat4::IDENTITY),
+            tan_half,
+        }
+    }
+
+    #[test]
+    fn a_caster_down_a_faces_axis_is_wholly_inside_it_and_outside_the_others() {
+        let lamp = lamp();
+        // +X at four metres, small: deep inside face 0's pyramid and nothing to
+        // do with the other five.
+        let at = render::Vec3::new(4.0, 0.0, 0.0);
+        assert_eq!(lamp.fit(at, 0.5, 0), Fit::Inside);
+        for face in 1..FACES {
+            assert_eq!(lamp.fit(at, 0.5, face), Fit::Outside, "face {face}");
+        }
+    }
+
+    #[test]
+    fn a_caster_on_a_seam_is_partial_in_both_faces_it_straddles() {
+        let lamp = lamp();
+        // The +X/+Y diagonal is exactly where faces 0 and 2 meet, so neither may
+        // claim it whole and neither may drop it.
+        let at = render::Vec3::new(3.0, 3.0, 0.0);
+        assert_eq!(lamp.fit(at, 0.5, 0), Fit::Partial);
+        assert_eq!(lamp.fit(at, 0.5, 2), Fit::Partial);
+    }
+
+    #[test]
+    fn a_caster_past_the_reach_is_gone_from_every_face() {
+        let lamp = lamp();
+        let at = render::Vec3::new(40.0, 0.0, 0.0);
+        for face in 0..FACES {
+            assert_eq!(lamp.fit(at, 0.5, face), Fit::Outside, "face {face}");
+        }
+        // ... but one whose radius reaches back inside is kept by the face it
+        // points down: a big caster shadows from outside the sphere.
+        assert_ne!(lamp.fit(at, 31.0, 0), Fit::Outside);
+    }
+
+    #[test]
+    fn a_caster_around_the_lamp_is_never_dropped_by_every_face_at_once() {
+        // The near plane's absence, as the property it exists for: a sphere
+        // swallowing the light must still be drawn somewhere, or it stops
+        // shadowing in every direction at once.
+        let lamp = lamp();
+        let kept = (0..FACES).filter(|&f| lamp.fit(render::Vec3::ZERO, 2.0, f) != Fit::Outside);
+        assert_eq!(kept.count(), FACES);
+    }
+
+    #[test]
+    fn an_instance_inside_the_batch_sphere_passes_whatever_the_batch_did() {
+        // `cull`'s soundness claim, for the pyramid: wherever a batch sphere is
+        // Inside, no sub-sphere of it is Outside.
+        let lamp = lamp();
+        for i in 0..24 {
+            for j in 0..24 {
+                let centre = render::Vec3::new(i as f32 * 0.6 - 7.0, j as f32 * 0.6 - 7.0, 1.3);
+                let radius = 0.9;
+                for face in 0..FACES {
+                    if lamp.fit(centre, radius, face) != Fit::Inside {
+                        continue;
+                    }
+                    for k in 0..8 {
+                        let dir = render::Vec3::new(
+                            if k & 1 == 0 { 1.0 } else { -1.0 },
+                            if k & 2 == 0 { 1.0 } else { -1.0 },
+                            if k & 4 == 0 { 1.0 } else { -1.0 },
+                        )
+                        .normalize();
+                        let inner = 0.25;
+                        let at = centre + dir * (radius - inner);
+                        assert_ne!(
+                            lamp.fit(at, inner, face),
+                            Fit::Outside,
+                            "sub-sphere at {at:?} of a batch Inside at {centre:?}, face {face}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

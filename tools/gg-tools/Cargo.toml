@@ -24,7 +24,10 @@ tracing-subscriber.workspace = true
 # It also re-exports the knobs a sweep turns (§4.8) — reached through
 # `gg_render::cvars` off the statics, never registered, because nothing here
 # parses a config file — `gg-core` is below for its clock, never for that.
-gg-render = { path = "../../crates/gg-render" }
+# `gpu-timings` because `cull` reports the *shadow passes'* own device time:
+# the frame is mostly the forward pass on any rasterizer, so a frame-level
+# number would report a 16% change as a 4% one and hide where it came from.
+gg-render = { path = "../../crates/gg-render", features = ["gpu-timings"] }
 gg-extract = { path = "../../crates/gg-extract" }
 # The instrument's scenes declare geometry the way a game does: ordinary
 # components in a World, read through the same typed query the shell uses.
@@ -35,6 +38,15 @@ gg-math = { path = "../../crates/gg-math" }
 # prints is a number `gg-runtime` would have produced.
 gg-core = { path = "../../crates/gg-core" }
 gg-input = { path = "../../crates/gg-input" }
+# `cull`'s subject is demo 05's field — ten thousand instances of three meshes,
+# which is the pack pass's batching at its most extreme. Taken as a crate rather
+# than reproduced here so the scene the instrument measures is the scene the
+# demo renders; `default-features = false` keeps the game ABI's exports out of
+# this binary, the way `gg-golden` takes it.
+demo-05-many = { path = "../../demos/05-many", default-features = false }
+# `Node` parenting is the scene graph's to resolve, and `cull`'s field is
+# parented — extract reads world transforms, it does not compute them.
+gg-scene = { path = "../../crates/gg-scene" }
 # An instrument reports by writing an image under `target/gg-tools/`; it never
 # opens a viewer (§1.5).
 png.workspace = true
