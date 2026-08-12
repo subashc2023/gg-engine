@@ -47,6 +47,7 @@ pub use resource::{
     BufferDesc, BufferHandle, BufferKind, DeviceAddress, ImageDesc, ImageFormat, ImageHandle,
     ImageUse, MemoryUse, Sampler, Samples, full_mip_count, mip_extent,
 };
+pub use swapchain::Output;
 pub use timing::{GpuClock, PassTiming};
 
 use ash::vk;
@@ -268,9 +269,16 @@ impl Rhi {
     /// alive; doing it after `run` returns is too late. Callers owning their
     /// own window must destroy the `Rhi` (via [`Rhi::shutdown`] or by dropping
     /// it) before the window.
+    /// `want` is the output contract asked of the display (§6 M23). It is a
+    /// request and not a setting: HDR exists only where the display, the
+    /// compositor and the driver all agree, so [`Rhi::output`] is what the
+    /// caller must encode against and it may be [`Output::Sdr`] whatever was
+    /// asked. Fixed for the swapchain's life — a colour space is a device-level
+    /// decision, not a per-frame one.
     pub fn new(
         window: &(impl HasWindowHandle + HasDisplayHandle),
         extent: (u32, u32),
+        want: Output,
     ) -> Result<Self, RhiError> {
         let display = window
             .display_handle()
@@ -283,7 +291,14 @@ impl Rhi {
                 return Err(e);
             }
         };
-        Self::bring_up(instance, surface, extent)
+        Self::bring_up(instance, surface, extent, want)
+    }
+
+    /// The output contract the swapchain actually got — never what was asked
+    /// for. See [`Output`].
+    #[must_use]
+    pub fn output(&self) -> Output {
+        self.swapchain.output()
     }
 
     /// Whether [`Rhi::headless`] can run here — that is, whether the loader
@@ -326,7 +341,7 @@ impl Rhi {
                 return Err(e);
             }
         };
-        Self::bring_up(instance, surface, extent)
+        Self::bring_up(instance, surface, extent, Output::Sdr)
     }
 
     /// Device, swapchain, frames and timings over a surface that is already
@@ -336,6 +351,7 @@ impl Rhi {
         mut instance: Instance,
         mut surface: Surface,
         extent: (u32, u32),
+        want: Output,
     ) -> Result<Self, RhiError> {
         let mut gpu = match Gpu::new(&instance, Some(&surface), FRAMES_IN_FLIGHT as usize) {
             Ok(g) => g,
@@ -345,7 +361,7 @@ impl Rhi {
                 return Err(e);
             }
         };
-        let mut swapchain = match Swapchain::new(&gpu.device, &surface, extent) {
+        let mut swapchain = match Swapchain::new(&gpu.device, &surface, extent, want) {
             Ok(s) => s,
             Err(e) => {
                 gpu.destroy();

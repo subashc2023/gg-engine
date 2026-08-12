@@ -100,6 +100,8 @@ fn world_of(count: u32) -> World {
                     rotation: sim::DQuat::from_axis_angle(sim::DVec3::new(0.0, 1.0, 0.0), f * 0.01),
                     half_extent: sim::Vec3::new(0.5, 0.5, 0.5),
                     color: 0x00c0_c0c0,
+                    smoothness: gg_ecs::boundary::DEFAULT_SMOOTHNESS,
+                    metallic: 0.0,
                 },
             )
             .unwrap();

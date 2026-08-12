@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
 
     let desc = WindowDesc::visible_unless_headless("golden — 00-clear", (1280, 720));
     gg_platform::run(desc, |window, event| match event {
-        Event::WindowReady => match Rhi::new(window, window.inner_size()) {
+        Event::WindowReady => match Rhi::new(window, window.inner_size(), gg_rhi::Output::Sdr) {
             Ok(r) => {
                 let d = r.device_report();
                 tracing::info!(

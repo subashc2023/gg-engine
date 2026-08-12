@@ -24,11 +24,11 @@
 //! sphere: a snap can only lock a grid whose *spacing* is already stable.
 
 use bytemuck::Zeroable as _;
-use gg_extract::{Extracted, ExtractedLight, MAX_DIRECTIONAL, MAX_POINT};
+use gg_extract::{Extracted, ExtractedLight, ExtractedSky, MAX_DIRECTIONAL, MAX_POINT};
 use gg_math::render;
 use gg_rhi::{BufferDesc, BufferHandle, DeviceAddress, FRAMES_IN_FLIGHT, RhiError, Sampler};
 
-use crate::{GpuHost, View, cvars, srgb_to_linear};
+use crate::{GpuHost, View, cvars, sky, srgb_to_linear};
 
 /// The per-frame block, mirroring `include/pbr.slang`'s `Frame`. The shader
 /// reads it as scalars through a device address, so this layout is the whole of
@@ -62,11 +62,36 @@ pub(crate) struct GpuFrame {
     shadow_depth_bias: f32,
     /// Fraction of a cascade over which it cross-fades into the next.
     shadow_blend: f32,
+    /// Tangent of the sun's angular **radius** — the penumbra's growth per metre
+    /// of blocker-to-receiver gap (§6 M23). The tangent and not the angle: the
+    /// shader multiplies, and a `tan` per fragment for a constant is waste.
+    sun_tan: f32,
+    /// The screen-pixel penumbra floor, in pixels.
+    shadow_softness: f32,
+    /// Penumbra cap and blocker-search radius, in shadow texels.
+    shadow_penumbra: f32,
+    /// Taps in the filter disk. The search uses a quarter of them.
+    shadow_taps: u32,
+    /// Whether this frame has an environment at all, which is
+    /// [`Sky::intensity`](gg_ecs::boundary::Sky::intensity) already folded into
+    /// [`sh`](GpuFrame::sh) — so it is a *flag* here and not a scale, and the
+    /// shader multiplies by nothing. Zero means fall back to the flat
+    /// [`ambient`](GpuFrame::ambient), which is every scene blessed before §6
+    /// M24 and every game that declares no sky.
+    sky: f32,
     /// Zero. Named rather than implicit: `Pod` refuses padding, and the shader's
     /// `FRAME_STRIDE` has to be a number both sides can write down. Padding to a
-    /// multiple of 16 besides, so the cascade array behind it starts on the
-    /// alignment a `float4` read would want.
-    reserved: [u32; 2],
+    /// multiple of 16 besides, so the arrays behind it start on the alignment a
+    /// `float4` read would want.
+    reserved: [u32; 5],
+    /// The environment as order-2 spherical-harmonic **radiance** coefficients
+    /// (§6 M24) — not irradiance: the diffuse path applies the cosine kernel's
+    /// band factors and the specular path applies a roughness kernel's, and
+    /// pre-convolving here would serve one of them and lie to the other.
+    ///
+    /// `float4` a piece with `w` unused, because a `float3` array's stride in a
+    /// block read as scalars is a fact nobody should have to hold in their head.
+    sh: [[f32; 4]; sky::SH_COEFFICIENTS],
     /// Nearest first, `cascade_count` of them live. A fixed array rather than a
     /// second buffer: it is 320 bytes, and one address the shader already has
     /// beats a second one it would have to be handed.
@@ -87,16 +112,21 @@ struct GpuCascade {
     /// View-space distance it reaches. Unread by the shading path; carried so a
     /// debug view can colour by cascade without a second source of truth.
     split_far: f32,
-    reserved: u32,
+    /// Metres one unit of this cascade's clip depth covers — what turns the gap
+    /// between a blocker's recorded depth and the receiver's back into the
+    /// distance the penumbra grows with (§6 M23). Per cascade for the same
+    /// reason `texel_world` is: each slab is fitted to its own sphere.
+    depth_world: f32,
 }
 
 const _: () = {
     assert!(core::mem::size_of::<GpuCascade>() == 80);
-    assert!(core::mem::size_of::<GpuFrame>() == 448);
+    assert!(core::mem::size_of::<GpuFrame>() == 624);
     assert!(core::mem::offset_of!(GpuFrame, ambient) == 64);
     assert!(core::mem::offset_of!(GpuFrame, light_count) == 80);
     assert!(core::mem::offset_of!(GpuFrame, sun_direction) == 96);
-    assert!(core::mem::offset_of!(GpuFrame, cascades) == 128);
+    assert!(core::mem::offset_of!(GpuFrame, sh) == 160);
+    assert!(core::mem::offset_of!(GpuFrame, cascades) == 304);
 };
 
 /// One light as the shader reads it, mirroring `include/pbr.slang`'s `Light`.
@@ -148,6 +178,10 @@ pub(crate) struct Cascade {
     /// View-space distance this cascade reaches. Carried for the graph dump;
     /// selection is by containment, not by this.
     pub(crate) split_far: f32,
+    /// Metres one unit of clip depth covers — the slab's full depth, since
+    /// `orthographic_reverse_z` maps `[near, far]` onto `[1, 0]`. What the
+    /// blocker search turns a depth difference back into a distance with.
+    pub(crate) depth_world: f32,
 }
 
 /// What the sun asks of the graph this frame.
@@ -200,6 +234,7 @@ impl Sun {
             radius: 0.0,
             texel_world: 0.0,
             split_far: 0.0,
+            depth_world: 0.0,
         }; MAX_CASCADES];
         let mut slice_near = near;
         for (index, cascade) in cascades.iter_mut().enumerate().take(count) {
@@ -271,6 +306,21 @@ fn split(near: f32, far: f32, index: usize, count: usize) -> f32 {
     uniform + lambda * (logarithmic - uniform)
 }
 
+/// Tangent of the sun's angular **radius**, from `r.sun_angle`'s diameter.
+///
+/// The tangent because the shader multiplies it by a distance and wants no
+/// trigonometry per fragment, and the radius because a penumbra grows by the
+/// half-angle either side of the shadow's geometric edge.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the sun's angular size is a tangent by definition; render-side only and never \
+              hashed, and §3 keeps `gg_math::sim` out of this crate entirely"
+)]
+fn sun_tan() -> f32 {
+    let degrees = (cvars::SUN_ANGLE.float() as f32).clamp(0.0, 20.0);
+    (degrees.to_radians() * 0.5).tan()
+}
+
 /// One cascade fitted to the frustum slice from `slice_near` to `slice_far`.
 ///
 /// The slab is sized by the slice's **bounding sphere**, not its corners, and
@@ -327,6 +377,11 @@ fn fit(
         radius: radius + texel_world,
         texel_world,
         split_far: slice_far,
+        // The projection's own far plane, four radii up-light of the eye — the
+        // same `radius * 4.0` the line above builds it from, and the reason this
+        // is derived here rather than in the shader is that the shader is handed
+        // the finished matrix and cannot see the number that went into it.
+        depth_world: radius * 4.0,
     }
 }
 
@@ -398,6 +453,18 @@ pub(crate) struct Lighting {
     lights: Vec<GpuLight>,
     /// This frame's sun, once [`Lighting::plan`] has decided whether one casts.
     sun: Option<Sun>,
+    /// The last environment projected, and what it projected to (§6 M24).
+    ///
+    /// Cached on the *value* and not on a dirty flag, because the value is a
+    /// 16-byte `Copy` component a game may rewrite every tick and comparing it
+    /// is cheaper than the projection by three orders of magnitude. A game that
+    /// really does animate its sky pays the quadrature once a frame, which is
+    /// what it asked for.
+    projected: Option<(ExtractedSky, [[f32; 4]; sky::SH_COEFFICIENTS])>,
+    /// The environment the last [`Lighting::write`] was handed — what
+    /// `dump_graph` reports, on the same terms as [`Lighting::sun`]: whether
+    /// the *next* frame has a sky is not knowable before it is extracted.
+    environment: Option<ExtractedSky>,
 }
 
 impl Lighting {
@@ -416,6 +483,8 @@ impl Lighting {
             buffer,
             lights: Vec::new(),
             sun: None,
+            projected: None,
+            environment: None,
         })
     }
 
@@ -457,6 +526,7 @@ impl Lighting {
         slot: u64,
         view_projection: render::Mat4,
         lights: &[ExtractedLight],
+        environment: Option<ExtractedSky>,
         shadow: &[gg_rhi::TextureIndex],
     ) -> Result<(), RhiError> {
         self.lights.clear();
@@ -488,11 +558,13 @@ impl Lighting {
                     texture: texture.get(),
                     texel_world: fitted.texel_world,
                     split_far: fitted.split_far,
-                    reserved: 0,
+                    depth_world: fitted.depth_world,
                 };
                 cascade_count += 1;
             }
         }
+        self.environment = environment;
+        let sh = environment.map_or([[0.0; 4]; sky::SH_COEFFICIENTS], |e| self.project(e));
         let frame = GpuFrame {
             view_projection: render::rows(view_projection),
             ambient: [ambient, ambient, ambient, 0.0],
@@ -507,7 +579,13 @@ impl Lighting {
             shadow_normal_bias: cvars::SHADOW_NORMAL_BIAS.float().max(0.0) as f32,
             shadow_depth_bias: cvars::SHADOW_DEPTH_BIAS.float().max(0.0) as f32,
             shadow_blend: (cvars::SHADOW_BLEND.float() as f32).clamp(0.0, 0.5),
-            reserved: [0; 2],
+            sun_tan: sun_tan(),
+            shadow_softness: (cvars::SHADOW_SOFTNESS.float() as f32).clamp(0.0, 8.0),
+            shadow_penumbra: (cvars::SHADOW_PENUMBRA.float() as f32).clamp(1.0, 64.0),
+            shadow_taps: cvars::SHADOW_TAPS.int().clamp(4, 32) as u32,
+            sky: f32::from(environment.is_some()),
+            reserved: [0; 5],
+            sh,
             cascades,
         };
 
@@ -522,6 +600,24 @@ impl Lighting {
             )?;
         }
         Ok(())
+    }
+
+    /// The environment the last frame was written with.
+    pub(crate) fn environment(&self) -> Option<ExtractedSky> {
+        self.environment
+    }
+
+    /// This environment's coefficients, projected unless the last frame already
+    /// did it for the same sky.
+    fn project(&mut self, environment: ExtractedSky) -> [[f32; 4]; sky::SH_COEFFICIENTS] {
+        match self.projected {
+            Some((cached, sh)) if cached == environment => sh,
+            _ => {
+                let sh = sky::project(&environment);
+                self.projected = Some((environment, sh));
+                sh
+            }
+        }
     }
 
     /// Where `slot`'s block starts on the device.
@@ -711,7 +807,7 @@ mod tests {
     fn the_gpu_records_are_what_the_shader_strides_by() {
         // `include/pbr.slang` hardcodes FRAME_STRIDE and LIGHT_STRIDE; this is
         // the other half of that agreement, the way the vertex assertions are.
-        assert_eq!(core::mem::size_of::<GpuFrame>(), 448);
+        assert_eq!(core::mem::size_of::<GpuFrame>(), 624);
         assert_eq!(core::mem::size_of::<GpuCascade>(), 80);
         assert_eq!(core::mem::size_of::<GpuLight>(), 48);
         assert_eq!(core::mem::offset_of!(GpuLight, direction), 16);

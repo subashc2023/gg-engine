@@ -10,16 +10,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use demo_12_shooter::{
-    AIM_X, ARMS, BUFFER_TICKS, COYOTE_TICKS, CUE_JUMP, CUE_LAND, CUES, Cue, EYE_LIFT, HALF_H,
-    HALF_W, HUD_SPEED, HUD_STATE, Hud, JUMP, JUMP_VELOCITY, MENU_AA, MENU_BACK, MENU_ITEMS,
+    AIM_X, ARMS, BUFFER_TICKS, CHART_BOXES, COYOTE_TICKS, CUE_JUMP, CUE_LAND, CUES, Cue, EYE_LIFT,
+    HALF_H, HALF_W, HUD_SPEED, HUD_STATE, Hud, JUMP, JUMP_VELOCITY, MENU_AA, MENU_BACK, MENU_ITEMS,
     MENU_LOOK, MENU_LOOK_DOWN, MENU_LOOK_UP, MENU_QUIT, MENU_RESTART, MENU_RESUME, MENU_SETTINGS,
     MENU_TITLE, MENU_VOLUME, MENU_VOLUME_DOWN, MOVE_FORWARD, MOVE_RIGHT, Menu, PAGE_MAIN,
-    PAGE_SETTINGS, PAUSE, RESTART, ROOM, SENS_MAX, SENS_MIN, SENS_ONE, SENS_STEP, SKIN, START,
-    STEP_HEIGHT, Session, Solid, WALK_SPEED, Walker, counts_per_turn, look_per_count,
+    PAGE_SETTINGS, PAUSE, RESTART, ROOM, SENS_DEFAULT, SENS_MAX, SENS_MIN, SENS_ONE, SENS_STEP,
+    SKIN, START, STEP_HEIGHT, Session, Solid, WALK_SPEED, Walker, counts_per_turn, look_per_count,
 };
 use gg_ecs::boundary::{
     self, AbiInfo, ActionId, AxisId, ComponentsTable, Eye, HostApiV1, InputFrame, Light, Prefs,
-    QUIET_MAX, Renderable, Sound, SystemsTable, TickCtx, Widget, aa, state,
+    QUIET_MAX, Renderable, Sky, Sound, SystemsTable, TickCtx, Widget, aa, state,
 };
 use gg_ecs::{Query, World};
 
@@ -61,12 +61,13 @@ impl Game {
         world.register::<boundary::Model>().unwrap();
         world.register::<Light>().unwrap();
         world.register::<Widget>().unwrap();
+        world.register::<Sky>().unwrap();
         // SAFETY: the tables are this binary's own and live for the process.
         let (table, declared) = unsafe {
             let declared = world.adopt(&gg_game_components()).unwrap();
             (gg_game_systems(), declared)
         };
-        assert_eq!(declared, 12, "six of ours and the protocol's six");
+        assert_eq!(declared, 13, "six of ours and the protocol's seven");
         Game {
             world,
             table,
@@ -323,8 +324,14 @@ fn one_tick_deals_the_room_the_body_and_the_hud() {
     let mut game = Game::load();
     game.step();
     assert_eq!(game.all::<Walker>().len(), 1);
-    assert_eq!(game.all::<Solid>().len(), ROOM.len(), "every slab is solid");
-    assert_eq!(game.all::<Renderable>().len(), ROOM.len(), "and only slabs");
+    let boxes = ROOM.len() + CHART_BOXES;
+    assert_eq!(
+        game.all::<Solid>().len(),
+        boxes,
+        "every slab and every sample"
+    );
+    assert_eq!(game.all::<Renderable>().len(), boxes, "and nothing else");
+    assert_eq!(game.all::<Sky>().len(), 1, "one environment (§6 M24)");
     assert_eq!(game.all::<Eye>().len(), 1);
     assert_eq!(game.all::<Light>().len(), 3, "a sun and two lamps");
     assert_eq!(game.all::<Sound>().len(), CUES);
@@ -343,7 +350,7 @@ fn bootstrap_run_again_spawns_nothing_new() {
     let mut game = Game::load();
     game.steps(8);
     assert_eq!(game.all::<Walker>().len(), 1);
-    assert_eq!(game.all::<Renderable>().len(), ROOM.len());
+    assert_eq!(game.all::<Renderable>().len(), ROOM.len() + CHART_BOXES);
     assert_eq!(game.all::<Light>().len(), 3);
     assert_eq!(game.all::<Widget>().len(), ARMS + 2 + MENU_ITEMS.len());
 }
@@ -773,7 +780,7 @@ fn the_look_row_changes_what_a_mouse_count_is_worth() {
     game.tap(PAUSE);
     game.click(MENU_SETTINGS);
     let opening = game.session().sens;
-    assert_eq!(opening, SENS_ONE);
+    assert_eq!(opening, SENS_DEFAULT);
 
     game.click(MENU_LOOK_DOWN);
     assert_eq!(game.session().sens, opening - SENS_STEP);
@@ -818,8 +825,13 @@ fn the_look_row_reports_counts_per_turn() {
     game.steps(2);
     game.tap(PAUSE);
     game.click(MENU_SETTINGS);
-    assert_eq!(game.menu(MENU_LOOK).text(), "LOOK 1.00  12566/TURN");
-    assert_eq!(counts_per_turn(SENS_ONE), 12566);
+    assert_eq!(game.menu(MENU_LOOK).text(), "LOOK 1.50  8377/TURN");
+    assert_eq!(
+        counts_per_turn(SENS_ONE),
+        12566,
+        "the unit, which the default is 1.5 of"
+    );
+    assert_eq!(counts_per_turn(SENS_DEFAULT), 8377);
     // Twice the sensitivity is half the desk, which is the whole point of the
     // unit: the two numbers cannot drift apart because one is derived.
     assert_eq!(counts_per_turn(SENS_ONE * 2), counts_per_turn(SENS_ONE) / 2);
@@ -909,7 +921,7 @@ fn the_menu_restart_respawns_without_clearing_the_settings() {
     assert_eq!(game.walker().position.x, START.x);
     assert_eq!(game.walker().position.z, START.z);
     assert_eq!(game.session().paused, 0, "a restart is not a pause");
-    assert_eq!(game.session().sens, SENS_ONE - SENS_STEP);
+    assert_eq!(game.session().sens, SENS_DEFAULT - SENS_STEP);
 }
 
 /// Quit is the one thing a game could not say before (§6 M21): it asks through

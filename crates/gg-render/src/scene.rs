@@ -99,11 +99,19 @@ const MAX_BATCHES: usize = 4 * 1024;
 const INSTANCE_SLOT_BYTES: u64 = (MAX_INSTANCES * core::mem::size_of::<GpuInstance>()) as u64;
 const COMMAND_SLOT_BYTES: u64 = (MAX_BATCHES * core::mem::size_of::<IndirectCommand>()) as u64;
 
-/// One keyed instance, before sorting and batching.
+/// One instance's *place* in the draw order, before sorting and batching.
+///
+/// The 128-byte [`GpuInstance`] this points at deliberately does not travel with
+/// it. Sorting the payload inline moved ~1.2 MB a frame at ten thousand objects
+/// to answer a question about eight bytes, and measured 1.27 ms — 43 % of the
+/// renderer's host frame (§6 M25). The permutation is unchanged: the sort is
+/// still stable on the same `key`, so the bytes reaching the GPU are identical
+/// and no golden moves.
 struct Keyed {
     key: u64,
     mesh: u64,
-    instance: GpuInstance,
+    /// Index into [`ScenePass::built`], which stays in extract order.
+    at: u32,
 }
 
 /// One draw: a run of instances that share a mesh.
@@ -135,6 +143,9 @@ pub(crate) struct ScenePass {
     commands: BufferHandle,
     /// Scratch, reused across frames.
     keyed: Vec<Keyed>,
+    /// This frame's instances in *extract* order — what `keyed` indexes into.
+    /// Separate from `staged`, which is the same data in *draw* order.
+    built: Vec<GpuInstance>,
     staged: Vec<GpuInstance>,
     batches: Vec<Batch>,
     /// One push per batch per cascade, parallel to `batches` (§6 M15.3). Held
@@ -197,6 +208,7 @@ impl ScenePass {
             instance_address: rhi.buffer_address(instances)?,
             commands,
             keyed: Vec::new(),
+            built: Vec::new(),
             staged: Vec::new(),
             batches: Vec::new(),
             written: Vec::new(),
@@ -231,6 +243,7 @@ impl ScenePass {
         self.shadow_pushes.resize_with(cascades, Vec::new);
         self.shadow_pushes.truncate(cascades);
         self.keyed.clear();
+        self.built.clear();
         self.staged.clear();
         self.batches.clear();
         self.written.clear();
@@ -238,28 +251,27 @@ impl ScenePass {
             return Ok(());
         };
         let view_projection = view.view_projection(extent);
-        for instance in &extracted.models {
-            let id = gg_assets::AssetId(instance.asset);
-            let Some(mesh) = content.mesh(id) else {
-                continue;
-            };
-            if mesh.index_count == 0 || mesh.indices.is_none() {
-                continue;
-            }
-            let material = content.material(id);
-            // The material's base colour is linear in the file; the game's tint
-            // is sRGB bytes it chose. Both multiply, so both must be linear
-            // first — the one place the two colour spaces meet.
-            let tint = srgb_to_linear(instance.color);
-            let model = render::Mat4::from_scale_rotation_translation(
-                instance.half_extent,
-                instance.rotation,
-                instance.offset,
-            );
-            self.keyed.push(Keyed {
-                key: sort_key(instance.asset, instance.offset),
-                mesh: instance.asset,
-                instance: GpuInstance {
+        {
+            gg_core::zone!("scene.key");
+            for instance in &extracted.models {
+                let id = gg_assets::AssetId(instance.asset);
+                let Some(mesh) = content.mesh(id) else {
+                    continue;
+                };
+                if mesh.index_count == 0 || mesh.indices.is_none() {
+                    continue;
+                }
+                let material = content.material(id);
+                // The material's base colour is linear in the file; the game's
+                // tint is sRGB bytes it chose. Both multiply, so both must be
+                // linear first — the one place the two colour spaces meet.
+                let tint = srgb_to_linear(instance.color);
+                let model = render::Mat4::from_scale_rotation_translation(
+                    instance.half_extent,
+                    instance.rotation,
+                    instance.offset,
+                );
+                self.built.push(GpuInstance {
                     mvp: render::rows(view_projection * model),
                     tint: [
                         tint[0] * material.base_color[0],
@@ -270,13 +282,29 @@ impl ScenePass {
                     rotation: instance.rotation.to_array(),
                     offset: instance.offset.extend(0.0).to_array(),
                     scale: instance.half_extent.extend(0.0).to_array(),
-                },
-            });
+                });
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "MAX_INSTANCES caps this far below u32::MAX"
+                )]
+                self.keyed.push(Keyed {
+                    key: sort_key(instance.asset, instance.offset),
+                    mesh: instance.asset,
+                    at: (self.built.len() - 1) as u32,
+                });
+            }
         }
-        // Stable: equal keys keep extract's order, which is a function of world
-        // state and nothing else (§4.2).
-        self.keyed.sort_by_key(|k| k.key);
-        self.batch(content);
+        {
+            // Stable: equal keys keep extract's order, which is a function of
+            // world state and nothing else (§4.2).
+            gg_core::zone!("scene.sort");
+            self.keyed.sort_by_key(|k| k.key);
+        }
+        {
+            gg_core::zone!("scene.batch");
+            self.batch(content);
+        }
+        gg_core::zone!("scene.stage");
         self.stage(rhi, slot)
     }
 
@@ -350,8 +378,14 @@ impl ScenePass {
                 instance_count: (end - start) as u32,
                 ..Default::default()
             });
-            self.staged
-                .extend(self.keyed[start..end].iter().map(|k| k.instance));
+            // Indexed rather than `extend`-ed off an iterator: `keyed` and
+            // `built` are two fields being read while `staged` is written, and
+            // the borrow checker splits that per statement, not per closure.
+            for slot in start..end {
+                let at = self.keyed[slot].at as usize;
+                let instance = self.built[at];
+                self.staged.push(instance);
+            }
             start = end;
         }
     }

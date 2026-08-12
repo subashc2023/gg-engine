@@ -98,6 +98,18 @@ pub trait SimTransform: Component {
     fn asset(&self) -> u64 {
         0
     }
+
+    /// How polished and how metallic, `0.0..=1.0` each — carried for
+    /// [`color`](SimTransform::color)'s reason, and defaulting to what the box
+    /// pass hard-coded before the material crossed the boundary, so a game
+    /// component that does not answer draws exactly as it did.
+    ///
+    /// One method rather than two because the pair is always read together and
+    /// the default has to be the pair — a `metallic` that defaulted separately
+    /// could be answered without its smoothness and silver a surface.
+    fn surface(&self) -> (f32, f32) {
+        (gg_ecs::boundary::DEFAULT_SMOOTHNESS, 0.0)
+    }
 }
 
 /// The bounding radius of a box of `half_extent` — its corner distance, which
@@ -129,6 +141,11 @@ pub struct Instance {
     pub half_extent: render::Vec3,
     /// `0x00RRGGBB`, sRGB.
     pub color: u32,
+    /// Smoothness and metallic, `0.0..=1.0` each — the box pass's material.
+    /// Unread for an instance naming an asset: a pack's own material is the
+    /// authored one, and a game overriding it per placement is a feature this
+    /// is not.
+    pub surface: (f32, f32),
     /// The pack asset to draw, or 0 (§4.6). Always 0 in
     /// [`Extracted::instances`], never 0 in [`Extracted::models`] — the two
     /// arrays are exactly this field's two cases, split so the renderer picks a
@@ -176,6 +193,27 @@ pub struct ExtractedLight {
     pub range: f32,
     /// One of [`gg_ecs::boundary::light`]'s constants.
     pub kind: u32,
+}
+
+/// The environment in render space (§6 M24).
+///
+/// A distinct type from [`Sky`](gg_ecs::boundary::Sky) for
+/// [`ExtractedLight`]'s reason and one more: `gg-render` does not link `gg-ecs`
+/// (§3's per-crate dependency budget), so a protocol component cannot be what
+/// crosses into it. Colour stays `0x00RRGGBB` here exactly as a light's does —
+/// extract converts geometry, never colour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExtractedSky {
+    /// `0x00RRGGBB`, sRGB — straight up.
+    pub zenith: u32,
+    /// The same, at the horizon.
+    pub horizon: u32,
+    /// The same, straight down.
+    pub ground: u32,
+    /// Linear multiplier over all three. Always positive here: a zero-intensity
+    /// sky is filtered to `None` on the way in, so downstream has one answer to
+    /// the question "is there an environment" rather than two.
+    pub intensity: f32,
 }
 
 /// One mesh placed inside a scene asset, in that scene's own space (§4.6).
@@ -270,6 +308,15 @@ pub struct Extracted {
     /// Counted rather than logged: a corner of a room going dark is the symptom,
     /// and a number on the overlay is what turns it into a diagnosis.
     pub lights_dropped: usize,
+    /// The environment this frame is lit by, or `None` for a world that
+    /// declared no [`Sky`](gg_ecs::boundary::Sky) — which is the flat ambient
+    /// term §6 M11 shipped with, and every scene blessed before M24.
+    ///
+    /// One, and the first the query walks. More than one sky is not an error
+    /// and not a blend: an environment is a property of *where the frame is*,
+    /// and two of them is a question about volumes that this protocol has not
+    /// been asked yet.
+    pub sky: Option<ExtractedSky>,
     /// Per-chunk staging for the parallel pass, kept so a frame allocates
     /// nothing. Never read by a consumer: [`gather`] is what turns it into the
     /// arrays above, in chunk order.
@@ -304,6 +351,7 @@ impl Default for Extracted {
             culled: 0,
             lights: Vec::new(),
             lights_dropped: 0,
+            sky: None,
             scratch: Vec::new(),
             previous: Poses::default(),
             previous_models: Poses::default(),
@@ -403,6 +451,7 @@ impl Extracted {
         self.culled = 0;
         self.lights.clear();
         self.lights_dropped = 0;
+        self.sky = None;
     }
 
     /// Widen *instance* culling to whatever can cast a shadow into the view
@@ -616,7 +665,26 @@ impl Extracted {
     ///
     /// If the world refuses the query, which one read alone cannot cause.
     pub fn append_lights(&mut self, world: &World) -> Result<(), AliasError> {
-        use gg_ecs::boundary::{Light, light};
+        use gg_ecs::boundary::{Light, Sky, light};
+
+        // The environment, taken here rather than through a call of its own: a
+        // sky *is* a light, it is read on the same tick as the rest of them, and
+        // a second entry point is a second thing a host can forget — which
+        // would show up as a scene that lights itself flatly for no visible
+        // reason. A world with none leaves it `None` (§6 M24).
+        let skies = Query::<&Sky>::new()?;
+        world.each_ref(&skies, |_, sky: &Sky| {
+            // Zero intensity is *no environment* rather than a black one, so it
+            // is filtered here and the renderer downstream sees one answer.
+            if self.sky.is_none() && sky.intensity > 0.0 {
+                self.sky = Some(ExtractedSky {
+                    zenith: sky.zenith,
+                    horizon: sky.horizon,
+                    ground: sky.ground,
+                    intensity: sky.intensity,
+                });
+            }
+        });
 
         let query = Query::<&Light>::new()?;
         let origin = self.camera_origin;
@@ -962,6 +1030,7 @@ fn place<T: SimTransform>(
         rotation: render::narrow_rotation(pose.rotation),
         half_extent: render::Vec3::new(half.x, half.y, half.z),
         color: transform.color(),
+        surface: transform.surface(),
         asset: transform.asset(),
         radius,
     }
@@ -996,6 +1065,7 @@ fn compose<T: SimTransform>(
             model_scale.z * node.scale.z,
         ),
         color: placed.color,
+        surface: placed.surface,
         asset: node.mesh,
         // The node's own radius, scaled by everything above it. `placed.radius`
         // is the *scene's* and would over-keep every node by the size of the
@@ -1025,6 +1095,10 @@ impl SimTransform for gg_ecs::boundary::Renderable {
 
     fn color(&self) -> u32 {
         self.color
+    }
+
+    fn surface(&self) -> (f32, f32) {
+        (self.smoothness, self.metallic)
     }
 }
 

@@ -13,6 +13,15 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The CPU zone breakdown `bench` and `boot` print (§6 M25). **Off by default,
+# and that default is the measurement's**: the collector costs ~9 % of a `boxes`
+# frame — six times the run-to-run noise on the recording machine — so a
+# baseline archived through it would bake its own instrument into every number.
+# `xtask bench --record` therefore builds without it, and a diagnosis run asks:
+#   cargo run -p gg-golden --features cpu-timings -- bench field
+cpu-timings = ["gg-render/cpu-timings", "gg-core/cpu-timings"]
+
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true
@@ -24,6 +33,11 @@ gg-rhi = { path = "../../crates/gg-rhi" }
 # appends §4.5's readback pass to them.
 gg-render = { path = "../../crates/gg-render" }
 gg-extract = { path = "../../crates/gg-extract" }
+# The CPU zone collector `bench` and `boot` drain (§6 M25). The renderer's zones
+# are `gg-core`'s to hold for the same reason the CVar registry is: a crate that
+# declares one must not point a dependency arrow at the instruments. Inert
+# unless this crate's `cpu-timings` is on.
+gg-core = { path = "../../crates/gg-core" }
 # The v1 pass-list scenes declare their boxes the way a game does: two ordinary
 # components in a World, read through the same typed query the shell uses.
 gg-ecs = { path = "../../crates/gg-ecs" }
@@ -54,6 +68,10 @@ demo-10-tetris = { path = "../../demos/10-tetris", default-features = false }
 # `platformer` scene needs: the level is the checked-in `scene.ggsave`, loaded
 # as data (§6 M20). Without `game`, demo 04's reason again.
 demo-11-platformer = { path = "../../demos/11-platformer", default-features = false }
+# Demo 12 supplies the room, the material chart and the lights the `chart` scene
+# deals — its own tables, so the reference moves when the demo does. Without
+# `game`, demo 04's reason again.
+demo-12-shooter = { path = "../../demos/12-shooter", default-features = false }
 gg-scene = { path = "../../crates/gg-scene" }
 gg-input = { path = "../../crates/gg-input" }
 # The capture trigger (§4.8). `gg-debug` is winit-free by its own dependency

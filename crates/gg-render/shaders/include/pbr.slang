@@ -48,11 +48,15 @@ static const uint LIGHT_POINT = 1;
 // Strides written here and asserted against the Rust records beside them, the
 // same agreement `VERTEX_STRIDE` and `INSTANCE_STRIDE` are half of. HLSL has no
 // `sizeof`, so a drift is a build error rather than a garbled read.
-static const uint FRAME_STRIDE = 448;
+static const uint FRAME_STRIDE = 624;
 static const uint LIGHT_STRIDE = 48;
 static const uint CASCADE_STRIDE = 80;
 // Where the cascade array starts inside the frame block.
-static const uint CASCADE_BASE = 128;
+static const uint CASCADE_BASE = 304;
+// Coefficients in the order-2 environment projection (§6 M24), and where they
+// start. Must equal `sky.rs`'s SH_COEFFICIENTS.
+static const uint SH_COEFFICIENTS = 9;
+static const uint SH_BASE = 160;
 // Must equal `lighting.rs`'s MAX_CASCADES: the loops below are unrolled over it
 // and a mismatch would read past the block.
 static const uint MAX_CASCADES = 4;
@@ -92,6 +96,11 @@ struct Frame
     float shadow_normal_bias;  // *texels* of normal offset, angle-scaled in `to_light_clip`
     float shadow_depth_bias;   // the angle-free part of the normal offset, also in texels
     float shadow_blend;        // fraction of a cascade it cross-fades into the next over
+    float sun_tan;             // tan of the sun's angular *radius* — the penumbra's growth rate
+    float shadow_softness;     // narrowest penumbra, in *screen pixels* (§6 M23)
+    float shadow_penumbra;     // penumbra cap and blocker search radius, in texels
+    uint shadow_taps;          // taps in the filter disk; the search uses a quarter
+    float sky;                 // nonzero when the block holds an environment (§6 M24)
 }
 
 // One cascade. `texel_world` is per-cascade and that is the point: the bias is
@@ -102,6 +111,7 @@ struct Cascade
     uint texture;
     float texel_world;
     float split_far;
+    float depth_world;  // metres one unit of this cascade's clip depth covers
 }
 
 struct Light
@@ -132,7 +142,28 @@ Frame load_frame(uint64_t address)
     frame.shadow_normal_bias = f[27];
     frame.shadow_depth_bias = f[28];
     frame.shadow_blend = f[29];
+    frame.sun_tan = f[30];
+    frame.shadow_softness = f[31];
+    frame.shadow_penumbra = f[32];
+    frame.shadow_taps = u[33];
+    frame.sky = f[34];
     return frame;
+}
+
+// The environment's coefficients, read out of the same block — but **not** by
+// `load_frame`, and that is a measured decision. Loading them eagerly is 27
+// scalar loads a fragment for the environment's sake in every scene that has
+// none, and it cost the frame macro 6 % on the pinned rasterizer with nothing
+// to show for it. `Frame::sky` is uniform across a draw, so the branch that
+// guards this splits no quad and a scene without a sky pays nothing.
+void load_sh(uint64_t address, out float3 sh[SH_COEFFICIENTS])
+{
+    float* f = (float*)(address + uint64_t(SH_BASE));
+    [ForceUnroll]
+    for (uint i = 0; i < SH_COEFFICIENTS; ++i)
+    {
+        sh[i] = float3(f[i * 4], f[i * 4 + 1], f[i * 4 + 2]);
+    }
 }
 
 Cascade load_cascade(uint64_t frame_address, uint index)
@@ -148,6 +179,7 @@ Cascade load_cascade(uint64_t frame_address, uint index)
     c.texture = u[16];
     c.texel_world = f[17];
     c.split_far = f[18];
+    c.depth_world = f[19];
     return c;
 }
 
@@ -256,6 +288,153 @@ float3 shade(Surface s, float3 to_eye, float3 to_light, float3 radiance)
     return (diffuse + specular) * radiance * n_dot_l;
 }
 
+// ---------------------------------------------------------------------------
+// Image-based lighting (§6 M24)
+// ---------------------------------------------------------------------------
+//
+//   [RH01] Ramamoorthi & Hanrahan, "An Efficient Representation for Irradiance
+//          Environment Maps", SIGGRAPH 2001 — the three band factors below, and
+//          the result that a clamped-cosine kernel has no fourth band.
+//   [Slo08] Sloan, "Stupid Spherical Harmonics (SH) Tricks", GDC 2008 — the
+//          basis in polynomial form, and band-wise convolution as a product.
+//   [Laz13] Lazarov, "Getting More Physical in Call of Duty: Black Ops II",
+//          SIGGRAPH 2013 course — the analytic fit to the split-sum's second
+//          integral, as [Kar13] publishes it for mobile.
+
+// The real SH basis, bands 0..=2. **The same literals as `sky.rs`'s `basis`,
+// and neither is derived from the other** — this evaluates what that one
+// projected, they never meet at runtime, and a drift between them is an
+// environment that lights from the wrong direction with nothing to fail.
+//
+// `z` is the polar axis here and the engine's up is `y`; see `sky.rs` for why
+// that is deliberate and harmless.
+void sh_basis(float3 d, out float y[SH_COEFFICIENTS])
+{
+    y[0] = 0.28209479;
+    y[1] = 0.48860251 * d.y;
+    y[2] = 0.48860251 * d.z;
+    y[3] = 0.48860251 * d.x;
+    y[4] = 1.09254840 * d.x * d.y;
+    y[5] = 1.09254840 * d.y * d.z;
+    y[6] = 0.31539157 * (3.0 * d.z * d.z - 1.0);
+    y[7] = 1.09254840 * d.x * d.z;
+    y[8] = 0.54627420 * (d.x * d.x - d.y * d.y);
+}
+
+// Irradiance arriving at a surface facing `normal` — [RH01]. The band factors
+// are the clamped-cosine kernel's, and there are only three of them because
+// that kernel has only three nonzero bands: this is not a truncation of the
+// diffuse integral, it is the diffuse integral.
+//
+// Clamped at zero because a band-limited reconstruction rings: an environment
+// with a strong gradient goes slightly negative facing away from it, and a
+// negative irradiance is a surface that subtracts light from its neighbours.
+float3 sh_irradiance(float3 sh[SH_COEFFICIENTS], float3 normal)
+{
+    float y[SH_COEFFICIENTS];
+    sh_basis(normal, y);
+    // pi, 2pi/3, pi/4 — [RH01]'s A0, A1, A2.
+    float3 e = 3.14159265 * sh[0] * y[0];
+    e += 2.09439510 * (sh[1] * y[1] + sh[2] * y[2] + sh[3] * y[3]);
+    e += 0.78539816 * (sh[4] * y[4] + sh[5] * y[5] + sh[6] * y[6] + sh[7] * y[7] + sh[8] * y[8]);
+    return max(e, 0.0);
+}
+
+// The environment along `direction`, blurred by a lobe of width `alpha` — the
+// split-sum's *first* integral, which is conventionally a prefiltered cubemap
+// with roughness on the mip axis.
+//
+// It is not one here, and the reason is what the environment is rather than a
+// shortcut. Convolving with a spherical Gaussian is a per-band product ([Slo08])
+// — band `l` scaled by `exp(-l(l+1) sigma / 2)` — so an environment already
+// represented in three bands convolves *exactly*, for free, with no second
+// resource and no mip chain to keep in step with the first. What that cannot
+// represent is a sharp reflection of something small, because three bands do
+// not hold anything small: a mirror shows the low-order sky and not the sun.
+// That is precisely the trade this milestone's environment is chosen to make,
+// and the day a loaded panorama arrives it is also the day the prefiltered chain
+// has to (§6 M24 exit).
+//
+// `alpha` and not roughness, so the width is in the same unit GGX's lobe is.
+float3 sh_radiance(float3 sh[SH_COEFFICIENTS], float3 direction, float alpha)
+{
+    float y[SH_COEFFICIENTS];
+    sh_basis(direction, y);
+    // exp(-x) as exp2(-x * log2 e). Band 2's weight is band 1's cubed —
+    // l(l+1)/2 is 1 and 3 — so the whole convolution costs one exp2.
+    float w1 = exp2(-1.44269504 * alpha);
+    float w2 = w1 * w1 * w1;
+    float3 l = sh[0] * y[0];
+    l += w1 * (sh[1] * y[1] + sh[2] * y[2] + sh[3] * y[3]);
+    l += w2 * (sh[4] * y[4] + sh[5] * y[5] + sh[6] * y[6] + sh[7] * y[7] + sh[8] * y[8]);
+    return max(l, 0.0);
+}
+
+// The split-sum's *second* integral — how much of the environment a surface of
+// this roughness reflects, and with what tint — as [Laz13]'s analytic fit rather
+// than as a lookup table. A 2D LUT would be a texture, a bindless slot, a
+// generation pass and a resource to bless; the fit is four constants and is
+// within a percent of the table over the whole domain.
+//
+// Returns the scale and bias applied to F0: `f0 * a + b`.
+float2 env_brdf(float roughness, float n_dot_v)
+{
+    const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
+    const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
+    float4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    return float2(-1.04, 1.04) * a004 + r.zw;
+}
+
+// Fresnel for an *environment* rather than for one direction — [Kar13]. The
+// ceiling is pulled down by roughness because a rough surface's grazing
+// reflection is spread over directions that are no longer all grazing, and the
+// mirror-grade rise to 1.0 at the silhouette is what makes a rough object look
+// like it is wrapped in foil.
+float3 f_schlick_ambient(float3 f0, float n_dot_v, float roughness)
+{
+    float3 ceiling = max(float3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), f0);
+    return f0 + (ceiling - f0) * exp2((-5.55473 * n_dot_v - 6.98316) * n_dot_v);
+}
+
+// Everything the environment contributes, or the flat ambient term when there
+// is no environment — the one place the two are chosen between, so a scene
+// blessed before §6 M24 and a scene with a sky do not each need their own path
+// through `shade_all`.
+float3 ambient_light(uint64_t frame_address, Frame frame, Surface s, float3 to_eye)
+{
+    if (frame.sky <= 0.0)
+    {
+        // §6 M11's placeholder, unchanged: a flat term times albedo, occluded.
+        return frame.ambient * s.diffuse * s.occlusion;
+    }
+    float3 sh[SH_COEFFICIENTS];
+    load_sh(frame_address, sh);
+    float n_dot_v = max(dot(s.normal, to_eye), 1e-4);
+    float roughness = sqrt(s.alpha);
+    float3 fresnel = f_schlick_ambient(s.f0, n_dot_v, roughness);
+
+    // Lambertian: irradiance over pi, times albedo, times what the specular
+    // lobe did not already reflect. `s.diffuse` is albedo with metallic already
+    // folded out, so a conductor's diffuse term is zero here by construction.
+    float3 diffuse = (1.0 - fresnel) * s.diffuse * sh_irradiance(sh, s.normal) / PI;
+
+    // Specular: the reflected environment through the split-sum. `reflect`
+    // takes the incident direction, which is the negation of the one toward the
+    // eye — the sign that is wrong in half the implementations of this on the
+    // internet and which shows up as a reflection that slides the wrong way.
+    float3 reflected = reflect(-to_eye, s.normal);
+    float2 ab = env_brdf(roughness, n_dot_v);
+    float3 specular = sh_radiance(sh, reflected, s.alpha) * (s.f0 * ab.x + ab.y);
+
+    // Occlusion applies to both. Strictly it is a diffuse quantity — a specular
+    // lobe is narrow and mostly misses whatever the occlusion term is standing
+    // in for — but a mirror in a crevice reflecting an unoccluded sky is worse
+    // than the theory being slightly wrong, and the map is a hemisphere average
+    // rather than a measurement anyway.
+    return (diffuse + specular) * s.occlusion;
+}
+
 // Inverse-square, windowed to reach *exactly* zero at `range` — [Kar13].
 //
 // Exactly zero is the part that matters here: `Light::range` is documented as
@@ -357,48 +536,220 @@ float cascade_edge(float3 clip)
     return max(abs(clip.x), abs(clip.y));
 }
 
-// 3x3 percentage-closer filtering in one cascade, the comparison written out per
-// tap rather than done by a comparison sampler. That is deliberate: a
-// `SamplerComparisonState` would mean either a fourth immutable sampler or
-// aliasing the existing binding with a second type, and neither is worth it for
-// nine taps whose arithmetic is this simple. It also keeps the reverse-Z sense
-// visible at the site that depends on it — and it is what makes the per-tap plane
-// extrapolation possible at all, since a comparison sampler takes one depth for
-// the whole kernel.
+// The side of a square covering the same area of this surface as one screen
+// pixel, in metres. **Must be called from uniform control flow** — it takes
+// screen-space derivatives, so a quad whose four fragments did not all reach it
+// gets an undefined answer.
 //
-// No derivatives here, which is what makes it safe under the divergent
-// per-fragment cascade choice: every tap is an explicit-LOD sample.
-float pcf(Frame frame, uint texture, float3 clip, float2 slope,
-          Texture2D<float4> textures[], SamplerState samplers[])
+// A derivative and not an analytic term, and the difference is the whole point.
+// The analytic version — the frustum's half-height over the frame's, times the
+// view depth — is the pixel's *lateral* width, which is right for a wall square
+// to the eye and badly wrong for the case that reported this defect: a floor
+// seen at a grazing angle, where one pixel covers several times more world along
+// the view than across it. Measured against the lateral width, a floor's
+// boundary stayed under a pixel at every softness the sweep could reach.
+//
+// The area's square root rather than the longer or the shorter side: a shadow
+// boundary can run any direction across the pixel, the longer side would blur
+// the narrow axis by the full anisotropy (tens, at a grazing angle), and the
+// shorter is the under-blur this replaced. The isotropic footprint is the same
+// compromise a mip LOD makes, for the same reason.
+float pixel_footprint(float3 world)
+{
+    return sqrt(length(cross(ddx(world), ddy(world))));
+}
+
+// Golden-angle spiral over a unit disk: `count` points no two of which share a
+// radius, so a partial sum of them is a fair estimate at any count and the
+// pattern has no axis for a straight edge to line up with.
+//
+// **Advanced by a rotation rather than recomputed**, which is a performance
+// decision with a measured number behind it. Written the obvious way — an angle
+// `i * VOGEL_ANGLE + rotation` and a `sincos` per tap — twenty taps of
+// transcendentals a fragment moved the frame macro on the pinned software
+// rasterizer from 7.3 ms to 11.9 ms, most of it in `forward-opaque`. Turning by a
+// *constant* angle each step is a 2x2 rotation whose entries are compile-time
+// constants, so a whole loop costs one `sincos` and each tap costs a complex
+// multiply. The drift over thirty-two rotations is far below a texel, and it is
+// deterministic, so nothing about a blessed golden depends on the difference.
+static const float VOGEL_COS = -0.73736888;
+static const float VOGEL_SIN = 0.67549029;
+
+float2 spin(float2 dir)
+{
+    return float2(dir.x * VOGEL_COS - dir.y * VOGEL_SIN,
+                  dir.x * VOGEL_SIN + dir.y * VOGEL_COS);
+}
+
+// The spiral's radius at tap `i` of `count`: `sqrt` of the fraction, which is
+// what spreads the points by *area* rather than crowding them at the centre.
+float spiral_radius(uint i, uint count)
+{
+    return sqrt((float(i) + 0.5) / float(count));
+}
+
+// `lowbias32`, the same mix `post.slang` dithers with. Integer, so it is exact
+// on every device and a blessed golden (§4.10) survives it — a float noise hash
+// would leave two backends disagreeing about the picture for a reason that is
+// not the picture.
+uint shadow_hash(uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+// This pixel's tap rotation, radians. Screen-space and not world-space: a
+// world-space hash is stable under camera motion but aliases against itself at
+// distance, where a screen-space one is stable against the display it is being
+// hidden in.
+float tap_rotation(float2 pixel)
+{
+    uint2 p = uint2(pixel);
+    uint h = shadow_hash(p.x * 73856093u ^ p.y * 19349663u);
+    return float(h >> 8) * (1.0 / 16777216.0) * (2.0 * PI);
+}
+
+// The parts of a cascade the filter needs. Carried instead of the whole
+// `Cascade` because `sun_shadow` holds one of these per cascade and four 4x4
+// matrices in registers is a real cost for two floats' worth of question.
+struct CascadeShape
+{
+    uint texture;
+    float texel_world;
+    float depth_world;
+}
+
+// Percentage-closer *soft* shadows in one cascade (§6 M23): a blocker search
+// that sizes the penumbra, then a disk filter at that size.
+//
+// # Why the radius cannot be a fixed number of texels
+//
+// It was one until this milestone, and a screenshot off the desk is why it is
+// not. A shadow boundary is a shading discontinuity *inside* a triangle: every
+// MSAA sample in the pixel lies on the same triangle and takes the same tap, so
+// coverage antialiasing cannot touch it however many samples are paid for — the
+// silhouette of the very cube casting the shadow comes out smooth beside it,
+// which is what makes the defect so recognizable. Measured off that frame, the
+// boundary crossed 140 levels in **one pixel**: a three-texel kernel that
+// projected to 0.01 px, because a texel is a wildly different number of pixels
+// in each cascade and at each distance. Nothing phrased in texels can promise
+// otherwise.
+//
+// So the radius is the larger of two quantities answering to different masters:
+//
+//   * the **physical** penumbra, `sun_tan * gap` — how far the blocker stands
+//     off the receiver, times the sun's angular radius. This is what makes a
+//     crate's shadow crisp at its own feet and soft where it falls away, and it
+//     is in metres because an angular size is.
+//   * the **screen floor**, `r.shadow_softness` pixels wide, converted through
+//     the host's analytic pixel footprint. This is the antialiasing, and it is
+//     the half that had to be added.
+//
+// # Why a rotated disk and not a grid
+//
+// The floor makes the radius whatever a pixel is worth in texels, which in a far
+// cascade is tens of them. A fixed grid sampled that sparsely is regular
+// undersampling — the aliasing it was meant to cure, wearing a hat. A Vogel
+// spiral rotated per pixel turns it into grain instead, and grain is all that
+// `lit` taking one of `taps + 1` values looks like once nothing correlates the
+// pattern with the geometry.
+//
+// # Why there is no fully-lit early-out
+//
+// The textbook shape returns early when the blocker search finds nothing. No
+// finite search is sound: the innermost ring of a Vogel disk of `n` sits at
+// `sqrt(0.5/n)` of the radius, so a blocker directly overhead falls straight
+// through the middle of it and the early-out punches a lit hole in the deepest
+// part of a shadow. Uniform cost is worth more than a branch here, and the pair
+// still totals fewer taps than the 5x5 box it replaces.
+//
+// The comparison stays per tap rather than going through a comparison sampler: a
+// `SamplerComparisonState` would mean either a fourth immutable sampler or
+// aliasing the existing binding with a second type, it keeps the reverse-Z sense
+// visible at the site that depends on it, and it is what makes the per-tap plane
+// extrapolation possible at all — a comparison sampler takes one depth for the
+// whole kernel. Filtering *after* comparing is also the only order that is
+// correct: a filtered depth compared once is a lie about a silhouette, which is
+// why the sampler stays `NearestClamp`.
+//
+// No derivatives anywhere, which is what keeps it safe under the divergent
+// per-fragment cascade choice: every tap is an explicit-LOD sample and the pixel
+// footprint arrives as an analytic term from the host rather than as an
+// `fwidth`.
+float pcss(Frame frame, CascadeShape cascade, float3 clip, float2 slope, float footprint,
+           float rotation, Texture2D<float4> textures[], SamplerState samplers[])
 {
     // The light's projection is orthographic, so its w is 1 and this is already
     // NDC. x and y go from [-1, 1] to [0, 1]; y needs no flip, because
     // `orthographic_reverse_z` is Y-down like every other projection here.
     float2 uv = clip.xy * 0.5 + 0.5;
-    float lit = 0.0;
-    for (int y = -1; y <= 1; ++y)
+    uint taps = max(frame.shadow_taps, 4u);
+    uint search_taps = max(taps / 4u, 4u);
+
+    // Pixels to texels, through the two conversions that meet here: the host's
+    // metres-per-pixel at this depth, and this cascade's own metres-per-texel.
+    // Halved because `shadow_softness` is a width and this is a radius.
+    float floor_texels = 0.5 * frame.shadow_softness * footprint / cascade.texel_world;
+
+    // Blocker search at the widest a penumbra may get — searching further would
+    // only find occluders whose contribution the same cap discards.
+    float gap_sum = 0.0;
+    float found = 0.0;
+    float2 dir = float2(cos(rotation), sin(rotation));
+    for (uint i = 0; i < search_taps; ++i)
     {
-        for (int x = -1; x <= 1; ++x)
+        float2 offset =
+            dir * (spiral_radius(i, search_taps) * frame.shadow_penumbra * frame.shadow_texel);
+        dir = spin(dir);
+        float caster = textures[cascade.texture]
+                           .SampleLevel(samplers[frame.shadow_sampler], uv + offset, 0)
+                           .r;
+        // Reverse-Z: nearer the light compares greater. Measured along the
+        // receiver's own plane, exactly as the filter does below, so a floor's
+        // up-slope away from the light is not counted as a thing standing on it.
+        float reference = clip.z + max(dot(offset, slope), 0.0);
+        float gap = caster - reference;
+        if (gap > 0.0)
         {
-            float2 offset = float2(float(x), float(y)) * frame.shadow_texel;
-            float caster = textures[texture]
-                               .SampleLevel(samplers[frame.shadow_sampler], uv + offset, 0)
-                               .r;
-            // Reverse-Z: nearer compares *greater*. A fragment is lit when it is
-            // at least as near the light as whatever the map recorded — measured
-            // where the tap is, along the plane, not where the fragment is.
-            //
-            // One-sided on purpose: the plane may promise a tap is *nearer*
-            // (excusing the receiver's own up-slope, the acne the kernel
-            // manufactures) but never farther, because nothing farther from the
-            // light than the fragment can occlude it — a farther prediction
-            // only manufactures shadow. Two-sided, the overshoot past the
-            // neighbouring surface at a concave corner was half of §6 M20's
-            // contact band (`gg-tools shadow-flat` is the measurement).
-            lit += clip.z + max(dot(offset, slope), 0.0) >= caster ? 1.0 : 0.0;
+            gap_sum += gap;
+            found += 1.0;
         }
     }
-    return lit / 9.0;
+
+    // The **mean** gap and not the nearest blocker's: a penumbra is cast by
+    // everything standing between the point and the sun, and sizing it off the
+    // nearest alone makes the width jump wherever one caster passes in front of
+    // another. Clip depth to metres through the cascade's own slab depth.
+    float gap_metres = found > 0.0 ? (gap_sum / found) * cascade.depth_world : 0.0;
+    float penumbra = frame.sun_tan * gap_metres / cascade.texel_world;
+    float radius = clamp(max(penumbra, floor_texels), 0.0, frame.shadow_penumbra);
+
+    // The spiral restarts rather than continuing where the search left off, so
+    // the two are the same pattern at two counts instead of one long sequence
+    // whose second half depends on how many taps the first half happened to use.
+    dir = float2(cos(rotation), sin(rotation));
+    float lit = 0.0;
+    for (uint i = 0; i < taps; ++i)
+    {
+        float2 offset = dir * (spiral_radius(i, taps) * radius * frame.shadow_texel);
+        dir = spin(dir);
+        float caster = textures[cascade.texture]
+                           .SampleLevel(samplers[frame.shadow_sampler], uv + offset, 0)
+                           .r;
+        // One-sided on purpose: the plane may promise a tap is *nearer*
+        // (excusing the receiver's own up-slope, the acne the kernel
+        // manufactures) but never farther, because nothing farther from the
+        // light than the fragment can occlude it — a farther prediction only
+        // manufactures shadow. Two-sided, the overshoot past the neighbouring
+        // surface at a concave corner was half of §6 M20's contact band
+        // (`gg-tools shadow-flat` is the measurement).
+        lit += clip.z + max(dot(offset, slope), 0.0) >= caster ? 1.0 : 0.0;
+    }
+    return lit / float(taps);
 }
 
 // How much of the sun reaches this fragment, in [0, 1].
@@ -412,13 +763,19 @@ float pcf(Frame frame, uint texture, float3 clip, float2 slope,
 // is also what lets the normal offset use the chosen cascade's own texel size.
 //
 // Nothing here takes a screen-space derivative — the receiver plane comes off
-// the normal — so the per-fragment cascade choice and everything after it may
-// diverge freely; `pcf` samples at an explicit LOD.
+// the normal and the pixel footprint off the host — so the per-fragment cascade
+// choice and everything after it may diverge freely; `pcss` samples at an
+// explicit LOD.
 // `normal` drives the normal-offset bias (the shading normal, as the offset has
 // always been scaled); `plane` is the geometric normal the receiver-plane
 // extrapolation is taken from — see `Surface::plane` for why they may differ.
+// `pixel` is the fragment's position on the screen, which seeds the tap
+// rotation. `footprint` is the side of a square covering the same area of *this
+// surface* as one screen pixel, in metres — what a penumbra floored in pixels is
+// floored against, and the one quantity here that a derivative has to supply.
 float sun_shadow(uint64_t frame_address, Frame frame, float3 world, float3 normal,
-                 float3 plane, Texture2D<float4> textures[], SamplerState samplers[])
+                 float3 plane, float2 pixel, float footprint,
+                 Texture2D<float4> textures[], SamplerState samplers[])
 {
     // Uniform across the whole draw: it comes out of the frame block, so this
     // branch never splits a quad.
@@ -429,7 +786,7 @@ float sun_shadow(uint64_t frame_address, Frame frame, float3 world, float3 norma
 
     float3 clip[MAX_CASCADES];
     float2 slope[MAX_CASCADES];
-    uint texture[MAX_CASCADES];
+    CascadeShape shape[MAX_CASCADES];
     [ForceUnroll]
     for (uint i = 0; i < MAX_CASCADES; ++i)
     {
@@ -439,8 +796,12 @@ float sun_shadow(uint64_t frame_address, Frame frame, float3 world, float3 norma
         Cascade c = load_cascade(frame_address, min(i, frame.cascade_count - 1));
         clip[i] = to_light_clip(frame, c, world, normal);
         slope[i] = receiver_plane_slope(c, plane);
-        texture[i] = c.texture;
+        shape[i].texture = c.texture;
+        shape[i].texel_world = c.texel_world;
+        shape[i].depth_world = c.depth_world;
     }
+
+    float rotation = tap_rotation(pixel);
 
     // The tightest cascade containing the point, which for splits fitted
     // nearest-first is the first one that does — containment rather than view
@@ -464,19 +825,22 @@ float sun_shadow(uint64_t frame_address, Frame frame, float3 world, float3 norma
         return 1.0;
     }
 
-    float lit = pcf(frame, texture[chosen], clip[chosen], slope[chosen], textures, samplers);
+    float lit = pcss(frame, shape[chosen], clip[chosen], slope[chosen], footprint, rotation,
+                     textures, samplers);
 
     // Cross-fade into the next cascade over the outer `shadow_blend` of this one.
-    // Without it the split is a visible line: the kernel is a fixed three texels
-    // and those texels are a different size either side, so the softness of every
-    // shadow steps as it crosses.
+    // Less load-bearing than it was — a radius floored in *pixels* is the same
+    // number of pixels either side of a split, so the softness no longer steps
+    // where the texel size does. What survives is the map's own grain changing,
+    // which is the part a fade is the right answer to.
     uint next = chosen + 1;
     float border = 1.0 - frame.shadow_blend;
     float edge = cascade_edge(clip[chosen]);
     if (next < frame.cascade_count && edge > border && inside_cascade(clip[next]))
     {
         float t = saturate((edge - border) / max(frame.shadow_blend, 1e-6));
-        float far = pcf(frame, texture[next], clip[next], slope[next], textures, samplers);
+        float far = pcss(frame, shape[next], clip[next], slope[next], footprint, rotation,
+                         textures, samplers);
         lit = lerp(lit, far, t);
     }
     return lit;
@@ -485,8 +849,11 @@ float sun_shadow(uint64_t frame_address, Frame frame, float3 world, float3 norma
 // Every light in the frame, over one surface. `world` is camera-relative, so under
 // perspective the eye is the origin and the view vector is just its negation — the
 // same property that lets a camera 10^12 m out render without jitter (§1.4).
-float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world,
-                 Texture2D<float4> textures[], SamplerState samplers[])
+// `pixel` and `footprint` are threaded through for the shadow filter alone — see
+// `sun_shadow` for why a shading term needs the screen grid, and `pixel_footprint`
+// for why the caller computes the second of them rather than this.
+float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world, float2 pixel,
+                 float footprint, Texture2D<float4> textures[], SamplerState samplers[])
 {
     // Orthographic has no eye point: every view ray is the camera's axis, so the
     // negation above would turn depth into a specular slide across the screen —
@@ -497,10 +864,9 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world,
     // which is `[0, 0, 0, near]` by construction rather than by rounding.
     float3 axis = frame.view_projection[2].xyz;
     float3 to_eye = dot(axis, axis) > 1e-12 ? normalize(axis) : normalize(-world);
-    // Ambient is flat and occluded, and it is a placeholder saying so: real
-    // indirect light is an irradiance probe or a lightmap, and both are P1. What
-    // it buys today is that an unlit face is dim rather than pure black.
-    float3 total = frame.ambient * s.diffuse * s.occlusion;
+    // The environment, before any light with a direction — image-based since
+    // §6 M24, and the flat placeholder in a frame that declared no sky.
+    float3 total = ambient_light(frame_address, frame, s, to_eye);
     bool shadowed_sun_seen = false;
     for (uint i = 0; i < frame.light_count; ++i)
     {
@@ -517,7 +883,7 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world,
             {
                 shadowed_sun_seen = true;
                 radiance *= sun_shadow(frame_address, frame, world, s.normal, s.plane,
-                                       textures, samplers);
+                                       pixel, footprint, textures, samplers);
             }
         }
         else

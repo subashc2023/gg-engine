@@ -35,6 +35,82 @@ struct Pass {
     frames: u32,
 }
 
+/// One CPU zone's accumulated host time, keyed by name *and* depth so a zone
+/// that appears at two nesting levels stays two rows (§6 M25).
+pub struct Zone {
+    name: &'static str,
+    depth: u16,
+    sum_ms: f64,
+    max_ms: f64,
+    hits: u32,
+}
+
+/// Fold one frame's drained samples into the running table.
+///
+/// Close order is preserved, so the first time a `(name, depth)` pair is seen
+/// fixes its row's position — which makes the printed table read top-down as the
+/// frame ran rather than alphabetically.
+pub fn accumulate(zones: &mut Vec<Zone>, samples: &[gg_core::zone::Sample]) {
+    for sample in samples {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a zone is microseconds; f64 holds nanoseconds exactly to 2^53"
+        )]
+        let ms = sample.nanos as f64 / 1e6;
+        match zones
+            .iter_mut()
+            .find(|z| z.name == sample.name && z.depth == sample.depth)
+        {
+            Some(zone) => {
+                zone.sum_ms += ms;
+                zone.max_ms = zone.max_ms.max(ms);
+                zone.hits += 1;
+            }
+            None => zones.push(Zone {
+                name: sample.name,
+                depth: sample.depth,
+                sum_ms: ms,
+                max_ms: ms,
+                hits: 1,
+            }),
+        }
+    }
+}
+
+/// The zone table, indented by depth so the nesting reads as the tree it is.
+///
+/// Sorted by first appearance rather than by cost: this is a flame graph printed
+/// sideways, and re-ordering it by size would break the one property that makes
+/// it readable — a child sits under its parent.
+pub fn zone_table(zones: &[Zone], frames: usize) -> String {
+    use std::fmt::Write as _;
+
+    #[expect(clippy::cast_precision_loss, reason = "frame counts are thousands")]
+    let per = frames as f64;
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "\n  {:<30} {:>10} {:>10} {:>8}",
+        "cpu zone", "mean ms", "max ms", "per frame"
+    );
+    // Sorted by close order is what `accumulate` already produced; a child
+    // closes before its parent, so printing it as-is would put children above
+    // the zone containing them. Reversed, the outermost comes first.
+    for zone in zones.iter().rev() {
+        let indent = "  ".repeat(usize::from(zone.depth));
+        let _ = write!(
+            out,
+            "\n  {indent}{:<width$} {:>10.4} {:>10.4} {:>8.2}",
+            zone.name,
+            zone.sum_ms / per,
+            zone.max_ms,
+            f64::from(zone.hits) / per,
+            width = 30usize.saturating_sub(indent.len()),
+        );
+    }
+    out
+}
+
 /// The boxes macro: three static instances, extracted once. What M8 archived,
 /// and what a *pass-list* regression shows up in.
 pub fn run(extracted: &Extracted, frames: usize, json: bool) -> anyhow::Result<()> {
@@ -190,12 +266,18 @@ fn measure(
         frame(&mut renderer)?;
     }
 
+    // Drained and dropped: the warmup's zones are a cold cache and a first
+    // pipeline build, and folding them in would report a frame nobody ran.
+    let _ = gg_core::zone::take();
+
     let mut cpu_ms = Vec::with_capacity(frames);
     let mut passes: Vec<Pass> = Vec::new();
+    let mut zones: Vec<Zone> = Vec::new();
     for _ in 0..frames {
         let start = Instant::now();
         frame(&mut renderer)?;
         cpu_ms.push(start.elapsed().as_secs_f64() * 1e3);
+        accumulate(&mut zones, &gg_core::zone::take());
         for timing in renderer.pass_timings() {
             let ms = f64::from(timing.gpu_ms);
             match passes.iter_mut().find(|p| p.name == timing.name) {
@@ -229,6 +311,14 @@ fn measure(
         print!("{}", encode(scene, &device, frames, warmup, stats, &passes));
     } else {
         human(scene, &device, frames, warmup, stats, &passes);
+        // After the pass table, because it answers the question the pass table
+        // raises: the GPU rows sum to a fraction of the CPU frame, and this is
+        // where the rest of it went.
+        if gg_core::zone::enabled() {
+            println!("{}", zone_table(&zones, frames));
+        } else {
+            println!("\n  no cpu zones — built without `cpu-timings` (§4.8)");
+        }
     }
     Ok(())
 }

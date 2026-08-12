@@ -53,7 +53,7 @@
 
 use gg_ecs::Component;
 use gg_ecs::boundary::{
-    ActionId, AxisId, Eye, GameWorld, Light, Prefs, QUIET_MAX, Renderable, Sound, Widget, aa,
+    ActionId, AxisId, Eye, GameWorld, Light, Prefs, QUIET_MAX, Renderable, Sky, Sound, Widget, aa,
     log_level, wave, widget_id,
 };
 use gg_math::sim;
@@ -127,6 +127,15 @@ pub const LOOK_PER_UNIT: f32 = 0.0005;
 /// An integer because it is hashed state and a float multiplier would put a
 /// rounding rule in it (§4.7's argument about axes, applied to a menu).
 pub const SENS_ONE: u32 = 100;
+/// What a session opens at — one and a half, not one, because that is where
+/// tuning it with a hand landed and a default is the tuned value or it is a
+/// placeholder. [`SENS_ONE`] stays the scale's *unit* so [`LOOK_PER_UNIT`]'s
+/// measurement above stays a true statement about one mouse count.
+///
+/// It is also the only sense in which the setting persists: nothing here is
+/// read off disk (see [`Session`]), so every run opens here and a change lasts
+/// the session.
+pub const SENS_DEFAULT: u32 = 150;
 /// The slowest and fastest the menu will go, and what one click moves.
 pub const SENS_MIN: u32 = 10;
 /// See [`SENS_MIN`].
@@ -156,6 +165,90 @@ pub const START: sim::DVec3 = sim::DVec3::new(0.0, HALF_H, 8.0);
 /// Below this the body has left the world and is put back. The room is closed,
 /// so this only fires if a slab moved — a safety net, and a visible one.
 pub const KILL_Y: f64 = -20.0;
+
+// ---------------------------------------------------------------- chart -----
+
+/// Steps across the smoothness axis of [`chart`] — seven, so the ends are 0 and
+/// 1 exactly and the middle step lands on 0.5.
+pub const CHART_STEPS: usize = 7;
+/// Rows: dielectric, then conductor. Two, because the interesting thing about
+/// metallic is not a ramp — it is that a metal has no diffuse lobe at all, and
+/// that reads as a difference between two rows rather than as a gradient.
+pub const CHART_ROWS: usize = 2;
+/// Boxes the chart deals — what `bootstrap` adds to [`ROOM`].
+pub const CHART_BOXES: usize = CHART_STEPS * CHART_ROWS;
+/// Half-extent of one chart box. The waist crates' size on purpose: the same
+/// 0.70 cube, so it reads as an object in the room rather than as a diagram
+/// laid over one, and it can be jumped onto like any other.
+pub const CHART_HALF: f32 = 0.35;
+/// Centre of the first box — dielectric row, roughest step.
+///
+/// The room's one large clear span: east of the mezzanine (which reaches
+/// x = -2.5), north of the floating slabs, and with the far wall five metres
+/// behind it so the chart is read against sky and flat wall rather than against
+/// the furniture. The `chart` golden scene frames it from x = 5.5, z = -3.0,
+/// which is the standoff seven boxes at this pitch need to fit a 16:9 frame.
+pub const CHART_ORIGIN: sim::DVec3 = sim::DVec3::new(2.65, 0.35, -8.0);
+/// Between columns and between the two rows. Wider than a box, so the gap
+/// between two samples is floor and not a shared edge.
+pub const CHART_PITCH: f64 = 0.95;
+/// One base colour for every box in it, and that is the point: the only things
+/// that differ across the chart are the two knobs, so anything else the eye
+/// sees is the lighting answering them.
+pub const CHART_INK: u32 = 0x00b4_b4b4;
+
+/// The material chart on the floor (§6 M24): `(centre, smoothness, metallic)`
+/// for every box in it, dielectric row first, roughest step first.
+///
+/// A function rather than a table because it is arithmetic — a table of 14
+/// hand-written triples is 14 chances to mistype a step, and the thing being
+/// demonstrated is precisely that the steps are even.
+pub fn chart() -> impl Iterator<Item = (sim::DVec3, f32, f32)> {
+    (0..CHART_ROWS).flat_map(|row| {
+        (0..CHART_STEPS).map(move |step| {
+            let at = sim::DVec3::new(
+                CHART_ORIGIN.x + step as f64 * CHART_PITCH,
+                CHART_ORIGIN.y,
+                CHART_ORIGIN.z - row as f64 * CHART_PITCH,
+            );
+            // Perceptual and even: `Renderable::smoothness` is squared into
+            // GGX's alpha by the shader, so an even step here is what looks
+            // like an even step.
+            let smoothness = step as f32 / (CHART_STEPS - 1) as f32;
+            (at, smoothness, row as f32)
+        })
+    })
+}
+
+/// Two lamps, low and warm, so the shapes have a second edge to read by — one
+/// sun leaves everything facing away from it a single flat tone.
+///
+/// Constants rather than literals inside `bootstrap` because the `chart` golden
+/// scene deals this same room (§4.10: the reference guards the demo, not a
+/// lookalike), and a lamp it placed itself would be a second source of truth.
+pub const LAMPS: [sim::DVec3; 2] = [
+    sim::DVec3::new(-6.0, 3.2, -4.0),
+    sim::DVec3::new(6.0, 3.2, 4.0),
+];
+/// See [`LAMPS`].
+pub const LAMP_INK: u32 = 0x00ff_c890;
+/// See [`LAMPS`].
+pub const LAMP_INTENSITY: f32 = 14.0;
+/// See [`LAMPS`].
+pub const LAMP_RANGE: f32 = 11.0;
+/// The sun's tint and strength — [`LAMPS`]' reason for being named.
+pub const SUN_INK: u32 = 0x00ff_f4e0;
+/// See [`SUN_INK`].
+pub const SUN_INTENSITY: f32 = 3.4;
+
+/// How bright the environment is against the sun above it (§6 M24).
+///
+/// The sky's diffuse contribution is roughly `intensity * 0.3 * albedo` against
+/// the sun's `3.4 / PI * albedo` — so 0.8 is a fill about a fifth of the key,
+/// which is what an overcast-free afternoon actually measures. Turning it up
+/// does not make the room brighter so much as make it *flatter*, which is the
+/// thing a fill light is for and the thing too much of it costs.
+pub const SKY_INTENSITY: f32 = 0.8;
 
 // ---------------------------------------------------------------- verbs -----
 
@@ -537,9 +630,16 @@ pub struct Menu {
 /// Hashed like everything else, which is what makes a paused session a
 /// replayable fact rather than a host mode — and what makes a sensitivity
 /// change something a recorded session reproduces without anything on disk.
-/// Nothing here is persisted: settings that outlive a run are a save (§6 M14),
-/// and reading them off disk at boot would be the CVar-in-a-replay hazard (§8)
-/// with the file as the leak.
+/// Nothing here is persisted, and a run therefore opens at [`SENS_DEFAULT`]
+/// however the last one ended. Reading it off disk at boot *unconditionally*
+/// would be the CVar-in-a-replay hazard (§8) with the file as the leak — a
+/// stream blessed on one desk would diverge on another the moment its owner
+/// touched the menu. The mechanism that would be sound is the one
+/// `scene.ggsave` already uses: a probe live sessions make and recorded or
+/// replayed ones do not (§6 M15.2). What it needs that does not exist yet is a
+/// save narrowed to the components a *setting* lives in — `World::load` takes
+/// a whole world, and a settings file that also restored where the player was
+/// standing would be a different feature wearing this one's name.
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
 #[component(id = "shooter.session")]
 #[repr(C)]
@@ -589,18 +689,42 @@ pub fn bootstrap(world: &mut GameWorld) {
         world.put(slab, Renderable::boxed(*position, *half_extent, *color));
     }
 
-    world.spawn_with(Light::sun(SUN, 0x00ff_f4e0, 3.4));
-    // Two lamps, low and warm, so the shapes have a second edge to read by —
-    // one sun leaves everything facing away from it a single flat tone.
-    for at in [
-        sim::DVec3::new(-6.0, 3.2, -4.0),
-        sim::DVec3::new(6.0, 3.2, 4.0),
-    ] {
-        world.spawn_with(Light::point(at, 0x00ff_c890, 14.0, 11.0));
+    // The material chart, solid like everything else in the room: it is
+    // furniture that happens to be a diagram, so it collides, it casts, and it
+    // can be stood on.
+    for (at, smoothness, metallic) in chart() {
+        let cube = world.spawn_with(Solid { _pad: 0 });
+        world.put(
+            cube,
+            Renderable::boxed(at, sim::Vec3::splat(CHART_HALF), CHART_INK)
+                .surfaced(smoothness, metallic),
+        );
     }
 
+    // The environment the chart is read against (§6 M24). Without one the metal
+    // row is black — a conductor has no diffuse lobe, so what it shows is
+    // whatever is around it and nothing else.
+    world.spawn_with(Sky::daylight(SKY_INTENSITY));
+
+    world.spawn_with(Light::sun(SUN, SUN_INK, SUN_INTENSITY));
+    for at in LAMPS {
+        world.spawn_with(Light::point(at, LAMP_INK, LAMP_INTENSITY, LAMP_RANGE));
+    }
+
+    // A rising note and a falling one, the same waveform, the landing heavier —
+    // a matched pair, which is what stops two cues fired a second apart from
+    // reading as two unrelated noises.
+    //
+    // The jump was a square sweeping 300 -> 480 Hz and it was harsh for a reason
+    // worth writing down, because `gain` is the knob one reaches for and it is
+    // the wrong one. A square's odd harmonics fall off as 1/n, so a 480 Hz
+    // fundamental puts real energy at 1.4, 2.4 and 3.4 kHz — the octave the ear
+    // is most sensitive to by something like 10 dB. Peak amplitude said 0.16 and
+    // the loudness the ear reported was nowhere near it. A triangle's harmonics
+    // fall off as 1/n^2, which is the whole difference; dropping the register
+    // and the gain is then arithmetic on a sound that is no longer grating.
     for (kind, sound) in [
-        (CUE_JUMP, chirp(wave::SQUARE, 300.0, 480.0, 70, 0.16)),
+        (CUE_JUMP, chirp(wave::TRIANGLE, 180.0, 260.0, 90, 0.10)),
         (CUE_LAND, chirp(wave::TRIANGLE, 150.0, 110.0, 60, 0.20)),
     ] {
         let entity = world.spawn_with(Cue { kind });
@@ -634,7 +758,7 @@ pub fn bootstrap(world: &mut GameWorld) {
     let globals = world.spawn_with(Session {
         paused: 0,
         page: PAGE_MAIN,
-        sens: SENS_ONE,
+        sens: SENS_DEFAULT,
         _pad: 0,
     });
     // Antialiasing on by default *here*, where it is a game's state and no gate
@@ -1018,7 +1142,7 @@ fn session_of(world: &mut GameWorld) -> Session {
     let mut found = Session {
         paused: 0,
         page: PAGE_MAIN,
-        sens: SENS_ONE,
+        sens: SENS_DEFAULT,
         _pad: 0,
     };
     world.visit::<&Session>(|_, held| found = *held);
@@ -1270,7 +1394,9 @@ impl Line {
 // id space a replay records (§4.7). Neither is alphabetical, neither may drift.
 #[cfg(feature = "game")]
 gg_ecs::gg_game! {
-    components: [Walker, Solid, Cue, Hud, Menu, Session, Renderable, Light, Eye, Widget, Sound, Prefs],
+    components: [
+        Walker, Solid, Cue, Hud, Menu, Session, Renderable, Light, Sky, Eye, Widget, Sound, Prefs
+    ],
     actions: ["jump", "restart", "pause", "ui_click", "ui_focus"],
     axes: ["move_right", "move_forward", "aim_x", "aim_y", "ui_x", "ui_y"],
     systems: [restart, bootstrap, menu, aim, walk, present],

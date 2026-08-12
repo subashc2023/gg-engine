@@ -276,7 +276,14 @@ impl Content {
     /// is logged instead: it has already left the queue, so the next pump
     /// carries on without it and the frame draws what it has.
     pub fn pump(&mut self, rhi: &mut impl GpuHost, budget: usize) -> Result<Progress, RhiError> {
-        self.assets.pump();
+        gg_core::zone!("pack.pump");
+        {
+            // Decode and parse, off the file; the split matters because only one
+            // of these two is bounded by `r.upload_budget` (§6 M25).
+            gg_core::zone!("pack.decode");
+            self.assets.pump();
+        }
+        gg_core::zone!("pack.upload");
         let progress = match self.residency.pump(rhi, &self.assets, budget) {
             Ok(progress) => progress,
             Err(ResidencyError::Rhi(refused)) => return Err(refused),

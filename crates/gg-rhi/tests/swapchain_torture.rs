@@ -103,7 +103,12 @@ fn recreation_survives_1000_synthetic_extents() {
     init_tracing();
     let mut pump = Pump::new(WindowDesc::invisible("gg swapchain recreation", (640, 360)))
         .expect("event loop");
-    let mut rhi = Rhi::new(pump.window(), pump.window().inner_size()).expect("rhi");
+    let mut rhi = Rhi::new(
+        pump.window(),
+        pump.window().inner_size(),
+        gg_rhi::Output::Sdr,
+    )
+    .expect("rhi");
     let start_generation = rhi.swapchain_generation();
 
     let mut lcg = Lcg(0x9E37_79B9_7F4A_7C15);
@@ -140,7 +145,12 @@ fn interactive_resize_minimize_spam_1000() {
     init_tracing();
     let mut pump =
         Pump::new(WindowDesc::invisible("gg interactive resize", (640, 360))).expect("event loop");
-    let mut rhi = Rhi::new(pump.window(), pump.window().inner_size()).expect("rhi");
+    let mut rhi = Rhi::new(
+        pump.window(),
+        pump.window().inner_size(),
+        gg_rhi::Output::Sdr,
+    )
+    .expect("rhi");
 
     let mut lcg = Lcg(0xB5AD_4ECE_DA1C_E2A9);
     let mut resizes_seen = 0u64;

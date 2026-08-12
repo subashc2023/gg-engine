@@ -172,7 +172,12 @@ float4 fs_main(VOut i) : SV_Target
     s.plane = normalize(i.normal);
     // Radiance, unbounded above — the scene attachment is `Rgba16F` and the
     // tonemapper is what brings this into [0, 1] (§6 M11).
-    return float4(shade_all(push.frame, frame, s, i.world, g_textures, g_samplers), 1.0);
+    // The footprint before anything else touches it: `pixel_footprint` takes
+    // derivatives, so it has to be reached by every fragment of a quad.
+    float footprint = pixel_footprint(i.world);
+    return float4(shade_all(push.frame, frame, s, i.world, i.pos.xy, footprint, g_textures,
+                            g_samplers),
+                  1.0);
 }
 
 // The depth prepass (§4.5 v1) and the shadow pass. Both are position-only, and

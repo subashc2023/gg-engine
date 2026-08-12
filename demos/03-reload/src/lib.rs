@@ -399,6 +399,8 @@ fn beam(shot: &Shot) -> Renderable {
         rotation: turn_z_onto(along),
         half_extent: sim::Vec3::new(TRACER_RADIUS, TRACER_RADIUS, (length * 0.5) as f32),
         color: (fade << 16) | (fade << 8) | 0x40,
+        smoothness: gg_ecs::boundary::DEFAULT_SMOOTHNESS,
+        metallic: 0.0,
     }
 }
 

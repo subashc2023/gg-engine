@@ -1032,6 +1032,8 @@ dependencies = [
  "demo-06-lit",
  "demo-10-tetris",
  "demo-11-platformer",
+ "demo-12-shooter",
+ "gg-core",
  "gg-debug",
  "gg-ecs",
  "gg-editor",

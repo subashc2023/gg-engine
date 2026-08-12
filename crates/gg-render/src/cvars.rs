@@ -44,6 +44,22 @@ pub static UPLOAD_BUDGET: CVar = CVar::new_int(
 /// thinks in: `+1` is twice the light, and `0` leaves the scene as authored.
 pub static EXPOSURE: CVar = CVar::new_float("r.exposure", 0.0, "exposure, in stops");
 
+/// Dither amplitude at the output quantizer, in **code values**; `0` is off.
+///
+/// The scene is `Rgba16F` all the way to the post pass and the swapchain is
+/// 8-bit sRGB, so the last thing that happens to a frame is a quantization to
+/// 256 levels a channel — and a gradient that crosses one level over more than a
+/// pixel or two is a *contour*, which is what a lit floor or a distant wall is
+/// made of. Nothing before this point can help: the banding is manufactured by
+/// the quantizer and has to be answered there.
+///
+/// 1.0 is one LSB of triangular-PDF noise, which is the amplitude that makes the
+/// quantization error's mean *and* variance independent of the signal — less
+/// leaves the contour partly visible, more is grain for nothing. It is a knob so
+/// that a measurement has a control leg (`gg-tools banding`) and so that an
+/// operator who suspects the noise can turn it off and look.
+pub static DITHER: CVar = CVar::new_float("r.dither", 1.0, "output dither, in code values");
+
 /// A flat ambient term, linear. Standing in for indirect light, which is an
 /// irradiance probe or a lightmap and is P1 — what this buys today is that a
 /// face pointing away from every light is dim rather than pure black.
@@ -154,6 +170,110 @@ pub static SHADOW_BLEND: CVar = CVar::new_float(
     "cascade cross-fade band, fraction of a cascade",
 );
 
+/// The output contract asked of the display: `0` SDR, `1` HDR10, `2` scRGB
+/// (§6 M23). **Read once, at swapchain creation** — a colour space is not a
+/// per-frame decision — and *written back* by the renderer to whatever the
+/// display actually granted.
+///
+/// That write-back is the point and not a wart. HDR exists only where the
+/// monitor, the compositor and the driver all agree, and none of that is
+/// knowable before asking; a run that encoded PQ into an sRGB swapchain would be
+/// a washed-out grey picture with no error anywhere to explain it. So the value
+/// a session reads back is what it *got*, and an operator who set `1` and reads
+/// `0` has been told the display said no.
+///
+/// The rendering has been HDR since M11 whatever this says: `Rgba16F` scene
+/// attachment, PBR Neutral, linear throughout. This is only about the last
+/// write. What SDR loses is not precision in the pipeline, it is the ability to
+/// say "brighter than paper" at all.
+pub static HDR: CVar = CVar::new_int("r.hdr", 0, "output: 0 sdr, 1 hdr10, 2 scrgb");
+
+/// What the display should call diffuse white, in nits — the anchor the whole
+/// HDR image hangs off, and meaningless under SDR.
+///
+/// PQ is an **absolute** encoding: a code value names a luminance rather than a
+/// fraction of what the panel can do, so something has to say what the sRGB 1.0
+/// a tonemapper produces is worth. 200 is the usual answer for a lit room and is
+/// what Windows' own SDR-content slider defaults near; a dark room wants less.
+/// Too high and the whole picture is glaring, which is the single most common
+/// way HDR is set up wrongly.
+pub static PAPER_WHITE: CVar = CVar::new_float("r.paper_white", 200.0, "hdr diffuse white, nits");
+
+/// The brightest the display can usefully show, in nits — where the tonemapper's
+/// shoulder is put.
+///
+/// The curve is the same Khronos Neutral one SDR uses, evaluated over
+/// `peak / paper_white` instead of over 1: mid-tones come out where they were
+/// and only the highlights roll off later, which is what HDR *is*. Claiming more
+/// than the panel has clips the top of that roll-off back off again; claiming
+/// less leaves headroom unused.
+pub static PEAK_NITS: CVar = CVar::new_float("r.peak_nits", 1000.0, "hdr display peak, nits");
+
+/// The narrowest a shadow's penumbra is allowed to be **on the screen**, in
+/// pixels, clamped to `[0, 8]` (§6 M23).
+///
+/// This is the antialiasing floor, and it is the whole of why a shadow edge is
+/// not a staircase. A shadow boundary is a shading discontinuity *inside* a
+/// triangle: every MSAA sample in the pixel is on the same triangle and takes
+/// the same shadow tap, so no sample count resolves it and `r.msaa` may as well
+/// be off for the purpose. Coverage antialiasing cannot reach it — the only
+/// thing that can is a filter at least a pixel wide, which is what this is.
+///
+/// Its unit is the point. The physical penumbra ([`SUN_ANGLE`]) is in *shadow
+/// texels*, and a texel is a wildly different number of screen pixels in each
+/// cascade and at each distance — which is how a three-texel kernel measured on
+/// the desk came out **0.01 px** wide and put a 140-level step in one pixel.
+/// Anything phrased in texels can go sub-pixel somewhere; only a floor phrased
+/// in pixels cannot.
+///
+/// Zero is the pre-M23 look and is kept reachable because it is the control a
+/// measurement wants, not because anything should ship with it.
+pub static SHADOW_SOFTNESS: CVar = CVar::new_float(
+    "r.shadow_softness",
+    2.0,
+    "narrowest shadow penumbra, in screen pixels",
+);
+
+/// The sun's angular **diameter** in degrees, clamped to `[0, 20]` — what makes
+/// a penumbra grow with the distance to whatever cast it (§6 M23).
+///
+/// The real sun subtends 0.53°, which is the default and is why a crate's shadow
+/// is crisp at its own feet and soft where it falls a few metres away. This is
+/// the physical half of the filter: [`SHADOW_SOFTNESS`] is a floor the display
+/// imposes, this is the width the light actually has. Widening it is an
+/// overcast sky, and it is a look knob rather than an error.
+///
+/// Zero is a point sun — a hard shadow at every distance, floored to a pixel and
+/// no wider.
+pub static SUN_ANGLE: CVar = CVar::new_float("r.sun_angle", 0.53, "sun angular diameter, degrees");
+
+/// Taps in the filter disk, clamped to `[4, 32]`.
+///
+/// The kernel is a Vogel disk rotated per pixel, so this trades noise against
+/// cost directly and nothing else: `lit` takes one of `taps + 1` values, and the
+/// rotation is what turns that quantization into grain instead of into rings.
+/// The blocker search reuses the same disk at a quarter the count.
+///
+/// 16 is the knee. Under 8 the grain is visible on a wide penumbra; over 24 buys
+/// nothing a still frame can show.
+pub static SHADOW_TAPS: CVar = CVar::new_int("r.shadow_taps", 16, "shadow filter taps");
+
+/// The widest a penumbra may get, in **shadow texels**, clamped to `[1, 64]`.
+///
+/// Two jobs, and they are the same number on purpose: it caps the filter disk,
+/// and it *is* the blocker search radius. A blocker further off the receiver
+/// than this cannot widen the penumbra past it, so searching further would find
+/// occluders whose contribution the cap discards anyway.
+///
+/// What it really bounds is noise. A fixed tap count over a growing disk samples
+/// ever more sparsely, so the cap is where "physically softer" stops being worth
+/// the grain.
+pub static SHADOW_PENUMBRA: CVar = CVar::new_float(
+    "r.shadow_penumbra",
+    16.0,
+    "widest shadow penumbra and blocker search, in shadow texels",
+);
+
 /// Normal-offset reach, in **shadow texels** — the acne knob (§6 M11's exit
 /// row).
 ///
@@ -221,6 +341,10 @@ pub fn register() -> Result<(), CVarError> {
         &ORTHO_FAR,
         &UPLOAD_BUDGET,
         &EXPOSURE,
+        &DITHER,
+        &HDR,
+        &PAPER_WHITE,
+        &PEAK_NITS,
         &AMBIENT,
         &HISTOGRAM,
         &AA,
@@ -231,6 +355,10 @@ pub fn register() -> Result<(), CVarError> {
         &SHADOW_CULL,
         &SHADOW_SPLIT_LAMBDA,
         &SHADOW_BLEND,
+        &SHADOW_SOFTNESS,
+        &SUN_ANGLE,
+        &SHADOW_TAPS,
+        &SHADOW_PENUMBRA,
         &SHADOW_NORMAL_BIAS,
         &SHADOW_DEPTH_BIAS,
     ])

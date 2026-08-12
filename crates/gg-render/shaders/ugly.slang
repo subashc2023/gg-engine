@@ -31,6 +31,7 @@ struct UglyPush
     float4 rotation;   // the instance's orientation, xyzw
     float4 offset;     // xyz camera-relative centre; w unused
     float4 scale;      // xyz half-extent, applied before the rotation; w unused
+    float4 material;   // x smoothness, y metallic (§6 M24); zw reserved
     uint cascade;      // which cascade `vs_shadow` projects through; unread elsewhere
 }
 
@@ -40,14 +41,6 @@ ConstantBuffer<UglyPush> push;
 // HLSL has no `sizeof`, so the stride is written here and asserted by the Rust
 // `Vertex` beside it. A drift is a build error, not a garbled mesh.
 static const uint VERTEX_STRIDE = 24;
-
-// A box's material, which the render protocol does not carry: `Renderable` says
-// where, how big and what colour, and nothing else (§6 M5). Dielectric and
-// middling-rough is the plainest thing that is not a mirror and not a chalk
-// board — and inventing a channel for it in the protocol would be giving the
-// host an opinion about how the game looks.
-static const float BOX_METALLIC = 0.0;
-static const float BOX_ROUGHNESS = 0.6;
 
 // Positions carry the instance's scale, which non-uniform scale would shear a
 // normal by; the rotation is applied to normals separately for that reason. A
@@ -101,8 +94,16 @@ float4 fs_main(VOut i) : SV_Target
     Frame frame = load_frame(push.frame);
     // No normal map and no occlusion map: a box has neither, so the tangent
     // frame this pass would need does not exist and is not invented.
-    Surface s = make_surface(normalize(i.normal), push.tint.rgb, BOX_METALLIC, BOX_ROUGHNESS, 1.0);
-    return float4(shade_all(push.frame, frame, s, i.world, g_textures, g_samplers), 1.0);
+    // Smoothness inverts to roughness here and nowhere else — see
+    // `Renderable::smoothness` for why the boundary carries the other one.
+    Surface s = make_surface(normalize(i.normal), push.tint.rgb, push.material.y,
+                             1.0 - push.material.x, 1.0);
+    // The footprint before anything else touches it: `pixel_footprint` takes
+    // derivatives, so it has to be reached by every fragment of a quad.
+    float footprint = pixel_footprint(i.world);
+    return float4(shade_all(push.frame, frame, s, i.world, i.pos.xy, footprint, g_textures,
+                            g_samplers),
+                  1.0);
 }
 
 // The depth prepass (§4.5 v1). It shares `UglyPush` and `world_of` with the pass

@@ -360,7 +360,122 @@ const SCENES: &[Scene] = &[
         },
         render: render_platformer,
     },
+    Scene {
+        name: "chart",
+        // §6 M24's material chart under the environment that lights it — demo
+        // 12's own room, its own `chart()` and its own lights, framed so that
+        // sky, floor, dielectric row and conductor row are all in one picture.
+        //
+        // It is the roster's only image-based-lighting subject, and what it
+        // guards exists nowhere else: the spherical-harmonic irradiance (a
+        // wrong band factor or a transposed basis is a room lit from the wrong
+        // side), the split-sum specular (a metal row that went black is a
+        // Fresnel term lost), the skybox's own gradient *and* its agreement
+        // with what the metals reflect, and the depth test that masks it —
+        // a skybox drawn over the scene rather than behind it is the most
+        // recognizable way to get that pass wrong and it cannot survive here.
+        //
+        // Judged like `atrium`: smooth shading gradients across every face,
+        // where a per-channel budget alone would forgive a curve that moved.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.25,
+        },
+        render: render_chart,
+    },
 ];
+
+/// Demo 12's room with §6 M24's material chart on the floor.
+///
+/// The world is dealt from the demo's own tables — [`ROOM`](demo_12_shooter::ROOM),
+/// [`chart`](demo_12_shooter::chart), the sun, the two lamps and the `Sky` — rather
+/// than from `bootstrap`, which is a system behind the ABI this binary cannot
+/// reach (demo 04's `gg_game!` holds the `extern "C"` names). Same data, so an
+/// edit to the chart's steps or the sky's intensity moves this reference; a
+/// second copy of the *numbers* is what §4.10 forbids and there is none.
+///
+/// The eye is the harness's, and deliberately not the player's: `START` faces
+/// the stairs, and a reference for image-based lighting has to hold the sky, the
+/// floor and both rows of the chart at once.
+fn render_chart() -> Render {
+    use demo_12_shooter as shooter;
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Light, Renderable, Sky};
+
+    let extent = BOXES_EXTENT;
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    world.register::<Light>()?;
+    world.register::<Sky>()?;
+    for (position, half_extent, color) in shooter::ROOM {
+        let slab = world.spawn();
+        world.insert(slab, Renderable::boxed(*position, *half_extent, *color))?;
+    }
+    for (at, smoothness, metallic) in shooter::chart() {
+        let cube = world.spawn();
+        world.insert(
+            cube,
+            Renderable::boxed(
+                at,
+                gg_math::sim::Vec3::splat(shooter::CHART_HALF),
+                shooter::CHART_INK,
+            )
+            .surfaced(smoothness, metallic),
+        )?;
+    }
+    let sun = world.spawn();
+    world.insert(
+        sun,
+        Light::sun(shooter::SUN, shooter::SUN_INK, shooter::SUN_INTENSITY),
+    )?;
+    for at in shooter::LAMPS {
+        let lamp = world.spawn();
+        world.insert(
+            lamp,
+            Light::point(
+                at,
+                shooter::LAMP_INK,
+                shooter::LAMP_INTENSITY,
+                shooter::LAMP_RANGE,
+            ),
+        )?;
+    }
+    let sky = world.spawn();
+    world.insert(sky, Sky::daylight(shooter::SKY_INTENSITY))?;
+
+    // Standing on the floor in front of the chart, pitched down enough to hold
+    // both rows and still open enough at the top to clear the 4 m wall — the
+    // sky has to be in the frame or the skybox is ungated.
+    let eye = gg_math::sim::DVec3::new(5.5, 2.6, -3.0);
+    let view = gg_render::View {
+        pitch: -0.22,
+        ..gg_render::View::default()
+    };
+    let mut extracted = gg_extract::Extracted::default();
+    extracted.clear(eye, view.frustum(extent));
+    extracted.append::<Renderable>(&world)?;
+    extracted.append_lights(&world)?;
+    extracted.cast_shadows(view.caster_reach(extent));
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(
+        device = %renderer.device().chosen,
+        culled = extracted.culled,
+        "offscreen device"
+    );
+    let frame = {
+        let _capture = gg_debug::capture::frame();
+        renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?
+    };
+    ensure_clean(&renderer.shutdown())?;
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
 
 /// Render demo 02's scene — the same buffers, the same upload path through
 /// the transfer queue, and the same bindless texture index the demo draws with
@@ -524,6 +639,96 @@ const LOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 /// only bounds how long this is willing to wait for it.
 const LOAD_FRAMES: usize = 4096;
 
+/// `gg-golden boot [pack]` — what a cold start spends before the first picture
+/// (§6 M25), broken down rather than totalled.
+///
+/// **Not a launch time, and the difference is named**: this process is already
+/// running when the clock starts, so what it excludes is process creation, the
+/// dynamic loader, and — because §1.5 forbids an automated tier a window —
+/// window creation and the swapchain. What it *does* cover is the part that
+/// dominates and the part we wrote: device bring-up, every pipeline, the pack,
+/// and the first frame. A windowed launch is the manual measurement, the way
+/// `bench --record` is.
+///
+/// The pack is optional because the two questions are different: without one
+/// this is the engine's own floor, and with one it is a level's.
+fn boot(pack: Option<&str>) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let mut renderer = gg_render::OffscreenRenderer::new(bench::EXTENT)?;
+    let mut extracted = gg_extract::Extracted::default();
+    let mut frames = 0;
+
+    let path = pack.map(std::path::PathBuf::from);
+    if let Some(path) = &path {
+        renderer.open_pack(path)?;
+        let scenes: Vec<u64> = renderer
+            .pack()
+            .map(gg_render::content::Content::scene_ids)
+            .unwrap_or_default();
+        for (index, asset) in scenes.iter().enumerate() {
+            extracted.models.push(gg_extract::Instance {
+                entity: gg_ecs::Entity::from_bits(index as u64 + 1),
+                offset: gg_math::render::Vec3::ZERO,
+                rotation: gg_math::render::Quat::IDENTITY,
+                half_extent: gg_math::render::Vec3::splat(1.0),
+                color: 0x00ff_ffff,
+                surface: (0.0, 0.0),
+                // Unbounded, for `load`'s reason: an id culled before it streams
+                // stops the clock by never asking.
+                radius: f32::INFINITY,
+                asset: *asset,
+            });
+        }
+    }
+
+    // Frames until the picture is complete: with a pack that means resident,
+    // and without one the first frame *is* the boot.
+    let wanted = path.is_some();
+    loop {
+        frames += 1;
+        renderer.frame(
+            &extracted,
+            &gg_render::View::default(),
+            [0.0, 0.0, 0.0, 1.0],
+            &[],
+        )?;
+        let ready = !wanted
+            || renderer
+                .pack()
+                .and_then(gg_render::content::Content::ready_at)
+                .is_some();
+        if ready || frames >= LOAD_FRAMES {
+            break;
+        }
+    }
+    let total = started.elapsed();
+
+    let mut zones: Vec<bench::Zone> = Vec::new();
+    bench::accumulate(&mut zones, &gg_core::zone::take());
+    let report = renderer.shutdown();
+    anyhow::ensure!(report.clean(), "unclean boot run: {report:?} (§4.3)");
+
+    println!(
+        "gg-golden boot — {} to first frame over {frames} frame(s)\n  pack {}",
+        format_ms(total),
+        path.as_ref()
+            .map_or("(none)".into(), |p| p.display().to_string()),
+    );
+    if gg_core::zone::enabled() {
+        // Divided by one: these are totals for a boot, not a per-frame mean, and
+        // dividing a one-shot by the frames it took would report a fiction.
+        println!("{}", bench::zone_table(&zones, 1));
+    } else {
+        println!("\n  no cpu zones — built without `cpu-timings` (§4.8)");
+    }
+    Ok(())
+}
+
+/// Milliseconds with enough places to see a sub-millisecond stage.
+fn format_ms(d: std::time::Duration) -> String {
+    format!("{:.3} ms", d.as_secs_f64() * 1e3)
+}
+
 /// `gg-golden load [pack]` — time a pack from mapped to fully resident (§4.6).
 ///
 /// Windowless by linkage like everything else here, which is the only reason
@@ -563,6 +768,9 @@ fn load(pack: Option<&str>) -> anyhow::Result<()> {
             rotation: gg_math::render::Quat::IDENTITY,
             half_extent: gg_math::render::Vec3::splat(1.0),
             color: 0x00ff_ffff,
+            // Unread for an instance naming an asset: a pack's material is the
+            // authored one (`Instance::surface`).
+            surface: (0.0, 0.0),
             asset: *asset,
             // Unbounded: this harness exists to time a *load*, and an id culled
             // before it streams in would stop the clock by never asking.
@@ -2183,6 +2391,7 @@ fn main() -> anyhow::Result<()> {
             args.iter().any(|a| a == "--json"),
         ),
         Some("load") => load(filter),
+        Some("boot") => boot(filter),
         // What `xtask gpu` refuses a software rasterizer with: the same
         // bring-up and naming the reference sets are keyed by, so the identity
         // checked is the identity the suite would run under.
@@ -2191,7 +2400,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         _ => anyhow::bail!(
-            "usage: gg-golden <run|bless|graph|verify-gates|chaos|capture|bench|load|backend> \
+            "usage: gg-golden <run|bless|graph|verify-gates|chaos|capture|bench|load|boot|backend> \
              [scene|seed|pack]"
         ),
     }

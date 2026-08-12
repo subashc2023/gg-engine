@@ -37,20 +37,28 @@ pub fn gg_render::content::DrawMaterial::default() -> Self
 pub mod gg_render::cvars
 pub static gg_render::cvars::AA: gg_core::cvar::CVar
 pub static gg_render::cvars::AMBIENT: gg_core::cvar::CVar
+pub static gg_render::cvars::DITHER: gg_core::cvar::CVar
 pub static gg_render::cvars::EXPOSURE: gg_core::cvar::CVar
 pub static gg_render::cvars::FOV: gg_core::cvar::CVar
+pub static gg_render::cvars::HDR: gg_core::cvar::CVar
 pub static gg_render::cvars::HISTOGRAM: gg_core::cvar::CVar
 pub static gg_render::cvars::MSAA: gg_core::cvar::CVar
 pub static gg_render::cvars::NEAR: gg_core::cvar::CVar
 pub static gg_render::cvars::ORTHO_FAR: gg_core::cvar::CVar
+pub static gg_render::cvars::PAPER_WHITE: gg_core::cvar::CVar
+pub static gg_render::cvars::PEAK_NITS: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_BLEND: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_CASCADES: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_CULL: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_DEPTH_BIAS: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_DISTANCE: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_NORMAL_BIAS: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_PENUMBRA: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_SIZE: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_SOFTNESS: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_SPLIT_LAMBDA: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_TAPS: gg_core::cvar::CVar
+pub static gg_render::cvars::SUN_ANGLE: gg_core::cvar::CVar
 pub static gg_render::cvars::UPLOAD_BUDGET: gg_core::cvar::CVar
 pub fn gg_render::cvars::register() -> core::result::Result<(), gg_core::cvar::CVarError>
 pub mod gg_render::graph

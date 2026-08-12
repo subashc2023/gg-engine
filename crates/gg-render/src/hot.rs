@@ -17,15 +17,16 @@ use crate::scene::ScenePass;
 use crate::ui::UiPass;
 use crate::{BoxPass, GpuHost, PipelineDesc, PipelineHandle, shader};
 
-/// The four modules the passes draw with. Every watcher fires on any `.slang`
+/// The five modules the passes draw with. Every watcher fires on any `.slang`
 /// event under the directory (`include/pbr.slang` is included by two of them),
-/// so one edit recompiles all four — deliberate: per-file dependency tracking
-/// would be a build system, and four in-process compiles fit the half-second
+/// so one edit recompiles all five — deliberate: per-file dependency tracking
+/// would be a build system, and five in-process compiles fit the half-second
 /// budget with room to spare.
 enum Module {
     Ugly,
     Post,
     Scene,
+    Skybox,
     Ui,
 }
 
@@ -51,6 +52,7 @@ impl Shaders {
             ("ugly", Module::Ugly),
             ("post", Module::Post),
             ("scene", Module::Scene),
+            ("skybox", Module::Skybox),
             ("ui", Module::Ui),
         ] {
             match ShaderWatcher::new(&dir, name) {
@@ -93,6 +95,7 @@ impl Shaders {
                 Module::Ugly => pass.swap_ugly(rhi, &recompiled.module),
                 Module::Post => pass.swap_post(rhi, &recompiled.module),
                 Module::Scene => scene.swap_shaders(rhi, &recompiled.module),
+                Module::Skybox => pass.swap_skybox(rhi, &recompiled.module),
                 Module::Ui => ui.swap_shaders(rhi, &recompiled.module),
             };
             match swapped {
@@ -226,6 +229,31 @@ impl BoxPass {
                 ..crate::shadow_desc()
             },
         ));
+        swap_all(rhi, &mut swaps)
+    }
+
+    /// Rebuild `skybox.slang`'s pipeline from a hot recompile — one per live
+    /// sample count, for [`BoxPass::swap_ugly`]'s reason (§6 M24).
+    pub(crate) fn swap_skybox(
+        &mut self,
+        rhi: &mut impl GpuHost,
+        module: &CompiledModule,
+    ) -> Result<(), String> {
+        let push = core::mem::size_of::<crate::skybox_shader::SkyPush>();
+        let (vs_main, fs_main) = pair(module, "vs_main", "fs_main", push)?;
+        let mut swaps: Vec<(&mut PipelineHandle, PipelineDesc<'_>)> = Vec::new();
+        for (samples, handle) in self.skyboxes.each() {
+            swaps.push((
+                handle,
+                PipelineDesc {
+                    vs_spirv: &vs_main.spirv,
+                    vs_entry: &vs_main.spirv_entry,
+                    fs_spirv: &fs_main.spirv,
+                    fs_entry: &fs_main.spirv_entry,
+                    ..crate::skybox_desc(samples)
+                },
+            ));
+        }
         swap_all(rhi, &mut swaps)
     }
 

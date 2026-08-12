@@ -49,6 +49,10 @@ validation = ["gg-rhi/validation"]
 # Forwarded, not local: the query pool is the RHI's and the tier meta-features
 # in `gg-runtime` are the only place that decides it exists (§4.8).
 gpu-timings = ["gg-rhi/gpu-timings"]
+# The CPU half of the same picture (§6 M25). Forwarded for `gpu-timings`'
+# reason: the collector is `gg-core`'s so a crate declaring a zone does not
+# point a new dependency arrow at the instruments.
+cpu-timings = ["gg-core/cpu-timings"]
 # The two dev-tier reload paths this crate owns: notice a rebuilt pack and
 # re-upload it (§4.6 — a `stat` and a re-open, gating the call), and recompile
 # an edited `shaders/*.slang` in-process and rebuild its pipelines behind the

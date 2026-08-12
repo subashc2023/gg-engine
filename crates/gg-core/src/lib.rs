@@ -46,6 +46,12 @@ pub mod cvar;
 pub mod event;
 pub mod frame;
 pub mod reload;
+pub mod zone;
+
+// Re-exported for `zone!`'s expansion, which has to name `profiling` from
+// whatever crate invoked it — not a second way to reach the macros.
+#[doc(hidden)]
+pub use profiling;
 
 pub use clock::{DEFAULT_TICK_HZ, Due, MAX_TICKS_PER_FRAME, Pace, TickClock};
 pub use cvar::{CVar, CVarError, CVarKind, CVarSource};

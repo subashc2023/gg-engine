@@ -42,6 +42,11 @@ hot-reload = ["dep:notify"]
 # Re-assert the FP environment after every load (§4.2.1 hazard 5): a dylib is
 # the most plausible thing in the process to have vandalized it.
 fp-assert = []
+# Collect `zone!`'s samples where a terminal can read them (§4.8). Rides the
+# instrumented tier beside `gpu-timings`, for that feature's reason: Tracy is a
+# GUI, and a number nothing automated can print is a number nothing automated
+# can compare.
+cpu-timings = []
 
 [lints]
 workspace = true

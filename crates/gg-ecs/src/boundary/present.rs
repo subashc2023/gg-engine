@@ -47,7 +47,40 @@ pub struct Renderable {
     /// `0x00RRGGBB`, sRGB. An integer rather than three floats: it is a colour
     /// the game picked, not a value anything computes with.
     pub color: u32,
+    /// How polished the surface is, `0.0..=1.0` — 0 is chalk, 1 is a mirror.
+    ///
+    /// **Smoothness and not roughness, which is the field every renderer names
+    /// and the inverse of this one.** The reason is [`quiet`](super::Prefs::quiet)'s,
+    /// applied to a component that predates it: `World::restore` zeroes a field
+    /// a migration could not carry (§4.2.2), and a zeroed *roughness* is a
+    /// perfect mirror — so the first reload after this field appeared would
+    /// silver every box in the world. A zeroed smoothness is a matte surface,
+    /// which is the one answer that cannot look like a bug. The shader converts
+    /// once, at [`make_surface`], and nothing downstream sees this spelling.
+    ///
+    /// Perceptual, not linear in the microfacet distribution: the BRDF squares
+    /// `1 - smoothness` to get GGX's alpha, the [Bur12] remap every glTF asset
+    /// is authored against, so a chart stepped evenly here reads as evenly
+    /// stepped.
+    pub smoothness: f32,
+    /// Whether the surface is a conductor, `0.0..=1.0`. A metal's specular
+    /// colour *is* its base colour and it has no diffuse lobe at all; a
+    /// dielectric reflects a flat 4 % and scatters the rest. In between is not a
+    /// physical material — it is the blend a texture authored at a boundary
+    /// needs — but it is legal, and interpolating beats branching.
+    ///
+    /// Zero is a dielectric, which is both the common case and the safe
+    /// migration, for [`smoothness`](Renderable::smoothness)'s reason.
+    pub metallic: f32,
 }
+
+/// What [`Renderable::boxed`] leaves a surface at: middling-rough, dielectric.
+///
+/// Exactly the constants the box pass held before the material crossed the
+/// boundary (§6 M5's `BOX_ROUGHNESS` was 0.6), so every game written before this
+/// field existed draws the same picture it always did — the widening is visible
+/// in the schema hash and nowhere in the frame.
+pub const DEFAULT_SMOOTHNESS: f32 = 0.4;
 
 impl Renderable {
     /// An axis-aligned box. The common case, spelled once so game code does not
@@ -59,7 +92,18 @@ impl Renderable {
             rotation: sim::DQuat::IDENTITY,
             half_extent,
             color,
+            smoothness: DEFAULT_SMOOTHNESS,
+            metallic: 0.0,
         }
+    }
+
+    /// The same box with a material on it — the two knobs a game has over how a
+    /// surface answers light, past the colour it already picked.
+    #[must_use]
+    pub fn surfaced(mut self, smoothness: f32, metallic: f32) -> Self {
+        self.smoothness = smoothness;
+        self.metallic = metallic;
+        self
     }
 }
 
@@ -205,6 +249,72 @@ impl Light {
     }
 }
 
+/// The environment every surface is lit by when no [`Light`] is pointing at it
+/// — image-based lighting's *image*, declared the way everything else on this
+/// boundary is (§6 M24).
+///
+/// # Why three colours and not a texture
+///
+/// An IBL is conventionally a captured HDR panorama, and a panorama is a file:
+/// it would need a pack format, an importer, and a decision about whose taste
+/// the default one is. What actually lights a surface is the low-frequency part
+/// of that panorama — a diffuse lobe integrates over a whole hemisphere and a
+/// rough specular one over most of it — so the machinery this protocol has to
+/// exist for is the *projection*, not the source. A vertical gradient is the
+/// smallest thing that exercises all of it: the host projects it to spherical
+/// harmonics exactly as it would project a panorama, and the day a panorama
+/// arrives it changes what feeds the projection and nothing downstream of it.
+///
+/// # Why the sun is not in here
+///
+/// A real sky photograph has the sun burnt into it, and an engine that both
+/// lit from that pixel *and* shaded the [`Light`] pointing the same way would
+/// count the same photon twice. The split is therefore: the sun is a
+/// [`Light`], and this is everything else the sky does — which is also why a
+/// surface facing away from the sun is lit at all.
+///
+/// # The zero
+///
+/// [`intensity`](Sky::intensity) of zero is *no environment*, and a world that
+/// declares no `Sky` is exactly the flat `r.ambient` term that came before this
+/// (§6 M11). So the migration `World::restore` performs — every field zeroed —
+/// puts a world back to the lighting it had, and every scene blessed before
+/// this component existed still renders itself.
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "gg.sky")]
+#[repr(C)]
+pub struct Sky {
+    /// `0x00RRGGBB`, sRGB — straight up.
+    pub zenith: u32,
+    /// The same, at the horizon. Reached along a square root of altitude rather
+    /// than linearly, which is what puts most of the gradient in the bottom of
+    /// the sky where a real one keeps it.
+    pub horizon: u32,
+    /// The same, straight down: what the ground bounces back up. The half of an
+    /// environment a gradient usually forgets, and the reason the underside of
+    /// a thing is dim rather than black.
+    pub ground: u32,
+    /// Linear multiplier over all three, and the switch: zero is no environment
+    /// at all. Separate from the colours for [`Light::intensity`]'s reason — a
+    /// sky brighter than white is not expressible in eight bits.
+    pub intensity: f32,
+}
+
+impl Sky {
+    /// A plain daylight environment: pale blue overhead, near-white at the
+    /// horizon, dim warm grey below. Somewhere to start rather than a
+    /// measurement — a game with an opinion sets the fields.
+    #[must_use]
+    pub fn daylight(intensity: f32) -> Self {
+        Sky {
+            zenith: 0x0059_8fd8,
+            horizon: 0x00c8_d4e0,
+            ground: 0x0035_3129,
+            intensity,
+        }
+    }
+}
+
 /// Where the game is looked at from — and, since §6 M20, *how*.
 ///
 /// Yaw and pitch rather than a quaternion: the host builds a fly camera's basis
@@ -318,7 +428,7 @@ mod tests {
     fn the_protocol_types_are_flat_and_padding_free() {
         // `Pod` already refuses padding; these pin the numbers so a field added
         // to either one is a visible edit rather than a silent layout move.
-        assert_eq!(size_of::<Renderable>(), 72);
+        assert_eq!(size_of::<Renderable>(), 80);
         assert_eq!(align_of::<Renderable>(), 8);
         assert_eq!(size_of::<Eye>(), 40);
         assert_eq!(align_of::<Eye>(), 8);
@@ -326,6 +436,24 @@ mod tests {
         assert_eq!(align_of::<Model>(), 8);
         assert_eq!(size_of::<Light>(), 56);
         assert_eq!(align_of::<Light>(), 8);
+        assert_eq!(size_of::<Sky>(), 16);
+        assert_eq!(align_of::<Sky>(), 4);
+    }
+
+    /// The migration law this protocol's zeros are chosen against (§4.2.2): a
+    /// field `World::restore` could not carry comes back zeroed, and every one
+    /// of those zeros has to be what the engine did before the field existed.
+    #[test]
+    fn a_zeroed_sky_is_no_environment_and_a_zeroed_material_is_chalk() {
+        let sky: Sky = bytemuck::Zeroable::zeroed();
+        assert_eq!(
+            sky.intensity, 0.0,
+            "which is the flat ambient term, as before"
+        );
+        let mut box3 = Renderable::boxed(sim::DVec3::ZERO, sim::Vec3::splat(0.5), 0x00ff_ffff);
+        box3.smoothness = 0.0;
+        box3.metallic = 0.0;
+        assert_eq!(1.0 - box3.smoothness, 1.0, "fully rough, never a mirror");
     }
 
     #[test]

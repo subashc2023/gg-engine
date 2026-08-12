@@ -84,8 +84,8 @@ impl Instance {
         let entry = unsafe { ash::Entry::load() }
             .map_err(|e| RhiError::Loader(format!("Vulkan loader not found: {e}")))?;
 
-        // `mut` feeds the validation-only debug_utils push below.
-        #[cfg_attr(not(feature = "validation"), allow(unused_mut))]
+        // `mut` feeds the colour-space push below and the validation-only
+        // debug_utils one after it.
         let mut extensions = match presentation {
             Presentation::Window(display) => ash_window::enumerate_required_extensions(display)
                 .map_err(RhiError::Vk)?
@@ -99,6 +99,25 @@ impl Instance {
             // and enabling it costs nothing without a surface object.
             Presentation::None => vec![ash::khr::surface::NAME.as_ptr()],
         };
+
+        // The HDR colour spaces are behind an instance extension, and asking for
+        // one that is not enabled is undefined rather than an error — so this is
+        // checked and pushed rather than assumed. Absent it, `Swapchain::choose`
+        // simply never sees an HDR pair to match and falls back to SDR, which is
+        // the same path a display without HDR takes.
+        if matches!(presentation, Presentation::Window(_)) {
+            // SAFETY: entry is live; `None` asks for the implementation's own list.
+            if let Ok(available) = unsafe { entry.enumerate_instance_extension_properties(None) } {
+                let named = |n: &std::ffi::CStr| {
+                    available
+                        .iter()
+                        .any(|e| e.extension_name_as_c_str().is_ok_and(|a| a == n))
+                };
+                if named(ash::ext::swapchain_colorspace::NAME) {
+                    extensions.push(ash::ext::swapchain_colorspace::NAME.as_ptr());
+                }
+            }
+        }
 
         let app_info = vk::ApplicationInfo::default()
             .application_name(c"golden")

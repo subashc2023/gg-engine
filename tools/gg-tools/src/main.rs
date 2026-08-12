@@ -15,6 +15,10 @@
 //!                                   band vs shade over bias and fit
 //!   gg-tools shadow-sweep           what a turning camera does to the shadows
 //!                                   in a room standing still around it
+//!   gg-tools shadow-edge            how straight a distant shadow's edge is,
+//!                                   against how soft the filter made it
+//!   gg-tools banding                what the 8-bit output does to a smooth
+//!                                   gradient, swept over `r.dither`
 //!   gg-tools pace                   what a display rate does to a turn the hand
 //!                                   made at a constant speed
 //!   gg-tools fp-isa [--target T]    which floating-point instructions the
@@ -23,10 +27,12 @@
 //!   gg-tools mcp                    serve a running session's reload record to
 //!                                   an agent over MCP on stdio (§6 M16)
 
+mod banding;
 mod fp_isa;
 mod mcp;
 mod pace;
 mod shadow_bias;
+mod shadow_edge;
 mod shadow_fit;
 mod shadow_flat;
 mod shadow_image;
@@ -54,13 +60,15 @@ fn main() -> anyhow::Result<()> {
         "shadow-fit" => shadow_fit::run(rest),
         "shadow-flat" => shadow_flat::run(rest),
         "shadow-sweep" => shadow_sweep::run(rest),
+        "shadow-edge" => shadow_edge::run(rest),
+        "banding" => banding::run(rest),
         "pace" => pace::run(rest),
         "fp-isa" => fp_isa::run(rest),
         "mcp" => mcp::run(rest),
         other => {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
-                 shadow-flat, shadow-sweep, pace, fp-isa, mcp. A new instrument is a new \
+                 shadow-flat, shadow-sweep, shadow-edge, banding, pace, fp-isa, mcp. A new instrument is a new \
                  subcommand here, not a \
                  new crate"
             )

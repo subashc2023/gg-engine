@@ -20,6 +20,11 @@ pub(crate) struct Swapchain {
     /// submit, waited by present. Per image, not per frame: present may hold
     /// its wait until the image is next reacquired.
     render_done: Vec<vk::Semaphore>,
+    /// What the caller asked for, kept so a recreation does not silently
+    /// downgrade a display that came back.
+    want: Output,
+    /// What it got. `want` when the surface offered it, else [`Output::Sdr`].
+    output: Output,
     /// True while the surface is zero-extent (minimized): no swapchain
     /// operations are legal, frames are skipped (§4.3).
     suspended: bool,
@@ -27,19 +32,96 @@ pub(crate) struct Swapchain {
     generation: u64,
 }
 
-/// The surface format the swapchain uses (and pipelines must target): sRGB
-/// BGRA8 when the surface offers it, else whatever it lists first.
-fn preferred_format(device: &Device, surface: &Surface) -> Result<vk::SurfaceFormatKHR, RhiError> {
+/// What the swapchain hands the display, and therefore what the post pass must
+/// encode into (§6 M23).
+///
+/// Not a quality setting with a scale — three genuinely different contracts
+/// about what the numbers in the backbuffer *mean*, and a shader that guessed
+/// wrong renders a picture that is not merely worse but a different colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Output {
+    /// 8-bit sRGB, `SRGB_NONLINEAR`. The **hardware** applies the OETF on write,
+    /// so the shader hands it linear values and encodes nothing — which is why
+    /// this path is the one every golden (§4.10) is blessed against.
+    Sdr,
+    /// 10-bit PQ, Rec.2020 primaries — HDR10, `HDR10_ST2084_EXT`. An absolute
+    /// encoding: a code value names a luminance in nits rather than a fraction
+    /// of whatever the display can do, so the shader must be told what to call
+    /// white and how far it may go above it.
+    Hdr10,
+    /// 16-bit float, linear Rec.709 with values past 1.0 meaning brighter than
+    /// SDR white — scRGB, `EXTENDED_SRGB_LINEAR_EXT`. No transfer function and
+    /// no quantizer worth dithering, at twice the bandwidth of the other two.
+    ScRgb,
+}
+
+impl Output {
+    /// The format and colour space this asks for, nearest-first.
+    ///
+    /// Two candidates for HDR10 because the ordering of the ten-bit packing is
+    /// the driver's business and both spellings are common; one for the others.
+    fn candidates(self) -> &'static [(vk::Format, vk::ColorSpaceKHR)] {
+        match self {
+            Output::Sdr => &[
+                (vk::Format::B8G8R8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR),
+                (vk::Format::R8G8B8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR),
+            ],
+            Output::Hdr10 => &[
+                (
+                    vk::Format::A2B10G10R10_UNORM_PACK32,
+                    vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+                ),
+                (
+                    vk::Format::A2R10G10B10_UNORM_PACK32,
+                    vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+                ),
+            ],
+            Output::ScRgb => &[(
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
+            )],
+        }
+    }
+}
+
+/// The surface format the swapchain uses (and pipelines must target), plus the
+/// output contract it actually got.
+///
+/// **Falls back rather than failing**, and the returned [`Output`] is how the
+/// caller finds out: an HDR colour space exists only when the display, the
+/// compositor *and* the driver all agree, and none of that is knowable before
+/// asking. A run that quietly encoded PQ into an sRGB swapchain would be a
+/// washed-out grey picture with no error anywhere, so the resolved value is
+/// returned rather than assumed and the renderer reconciles `r.hdr` against it.
+fn choose(
+    formats: &[vk::SurfaceFormatKHR],
+    want: Output,
+) -> Option<(vk::SurfaceFormatKHR, Output)> {
+    // What was asked for, then SDR. The second pass is redundant when SDR was
+    // what was asked for and costs two comparisons to keep the loop one shape.
+    for mode in [want, Output::Sdr] {
+        for &(format, color_space) in mode.candidates() {
+            if let Some(found) = formats
+                .iter()
+                .find(|f| f.format == format && f.color_space == color_space)
+            {
+                return Some((*found, mode));
+            }
+        }
+    }
+    // Whatever it lists first, called SDR: a surface offering none of the six
+    // above is not one this engine has a colour management story for, and
+    // guessing that an unknown space is HDR is the more damaging guess.
+    formats.first().map(|f| (*f, Output::Sdr))
+}
+
+fn preferred_format(
+    device: &Device,
+    surface: &Surface,
+    want: Output,
+) -> Result<(vk::SurfaceFormatKHR, Output), RhiError> {
     let formats = surface.formats(device.physical())?;
-    formats
-        .iter()
-        .find(|f| {
-            f.format == vk::Format::B8G8R8A8_SRGB
-                && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-        })
-        .or_else(|| formats.first())
-        .copied()
-        .ok_or_else(|| RhiError::Loader("surface reports no formats".into()))
+    choose(&formats, want).ok_or_else(|| RhiError::Loader("surface reports no formats".into()))
 }
 
 /// What [`Swapchain::acquire`] produced.
@@ -53,10 +135,17 @@ pub(crate) enum Acquired {
 impl Swapchain {
     /// Create the first swapchain. A zero-extent surface yields a suspended
     /// swapchain that materializes on the first nonzero resize.
-    pub fn new(device: &Device, surface: &Surface, desired: (u32, u32)) -> Result<Self, RhiError> {
+    pub fn new(
+        device: &Device,
+        surface: &Surface,
+        desired: (u32, u32),
+        want: Output,
+    ) -> Result<Self, RhiError> {
         let mut swapchain = Self {
             raw: vk::SwapchainKHR::null(),
             format: vk::Format::UNDEFINED,
+            want,
+            output: Output::Sdr,
             extent: vk::Extent2D::default(),
             views: Vec::new(),
             images: Vec::new(),
@@ -103,7 +192,8 @@ impl Swapchain {
             return Ok(false);
         }
 
-        let format = preferred_format(device, surface)?;
+        let (format, output) = preferred_format(device, surface, self.want)?;
+        self.output = output;
 
         let mut min_images = caps.min_image_count + 1;
         if caps.max_image_count > 0 {
@@ -236,7 +326,13 @@ impl Swapchain {
         if self.format != vk::Format::UNDEFINED {
             return Ok(self.format);
         }
-        Ok(preferred_format(device, surface)?.format)
+        Ok(preferred_format(device, surface, self.want)?.0.format)
+    }
+
+    /// The output contract the swapchain actually got — what the post pass must
+    /// encode into, and never assumed from what was asked for.
+    pub fn output(&self) -> Output {
+        self.output
     }
 
     pub fn generation(&self) -> u64 {
@@ -278,5 +374,81 @@ impl Swapchain {
                 self.raw = vk::SwapchainKHR::null();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn offered(pairs: &[(vk::Format, vk::ColorSpaceKHR)]) -> Vec<vk::SurfaceFormatKHR> {
+        pairs
+            .iter()
+            .map(|&(format, color_space)| vk::SurfaceFormatKHR {
+                format,
+                color_space,
+            })
+            .collect()
+    }
+
+    const SDR: (vk::Format, vk::ColorSpaceKHR) =
+        (vk::Format::B8G8R8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR);
+    const PQ: (vk::Format, vk::ColorSpaceKHR) = (
+        vk::Format::A2B10G10R10_UNORM_PACK32,
+        vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+    );
+    const SCRGB: (vk::Format, vk::ColorSpaceKHR) = (
+        vk::Format::R16G16B16A16_SFLOAT,
+        vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
+    );
+
+    /// The whole of the HDR contract that can be gated windowless (§1.5), and it
+    /// is the half worth gating: what a surface *offers* is the driver's and the
+    /// display's to say, but which of them is picked is ours, and picking wrong
+    /// is a picture that is a different colour rather than a picture that errors.
+    #[test]
+    fn an_hdr_surface_is_taken_when_asked_for_and_never_otherwise() {
+        let everything = offered(&[SDR, PQ, SCRGB]);
+        for (want, format) in [
+            (Output::Sdr, SDR),
+            (Output::Hdr10, PQ),
+            (Output::ScRgb, SCRGB),
+        ] {
+            let (got, mode) = choose(&everything, want).expect("a surface offering three formats");
+            assert_eq!(mode, want, "asked for {want:?}");
+            assert_eq!((got.format, got.color_space), format, "asked for {want:?}");
+        }
+    }
+
+    /// The case every desk that is not in HDR mode takes, and the reason
+    /// `choose` returns the mode rather than the caller assuming it: the surface
+    /// simply does not list an HDR pair, and the *only* correct outcome is a
+    /// working SDR picture plus an honest report of what happened.
+    #[test]
+    fn asking_for_hdr_on_an_sdr_surface_falls_back_and_says_so() {
+        let sdr_only = offered(&[SDR]);
+        for want in [Output::Hdr10, Output::ScRgb] {
+            let (got, mode) = choose(&sdr_only, want).expect("an sRGB surface");
+            assert_eq!(mode, Output::Sdr, "asked for {want:?} on an SDR surface");
+            assert_eq!((got.format, got.color_space), SDR);
+        }
+    }
+
+    /// A surface listing something we have no colour management story for is
+    /// still a surface. It is taken, and it is called SDR — the safer of the two
+    /// guesses, since encoding PQ into a space that is not PQ is a washed-out
+    /// grey frame with no error anywhere to explain it.
+    #[test]
+    fn an_unknown_colour_space_is_used_and_called_sdr() {
+        let odd = offered(&[(
+            vk::Format::R5G6B5_UNORM_PACK16,
+            vk::ColorSpaceKHR::DISPLAY_P3_NONLINEAR_EXT,
+        )]);
+        let (got, mode) = choose(&odd, Output::Hdr10).expect("a surface with one odd format");
+        assert_eq!(mode, Output::Sdr);
+        assert_eq!(got.format, vk::Format::R5G6B5_UNORM_PACK16);
+        assert_eq!(choose(&[], Output::Sdr), None, "no formats is not a choice");
     }
 }
