@@ -66,6 +66,7 @@ fn clear_frame(rhi: &mut Rhi, color: [f32; 4]) -> FrameOutcome {
                 color: Some(ColorAttachment {
                     target: Target::Backbuffer,
                     clear: Some(color),
+                    resolve: None,
                 }),
                 depth: None,
                 viewport: None,
@@ -196,6 +197,7 @@ fn a_resize_reaches_the_images_rather_than_being_overridden() {
                     color: Some(ColorAttachment {
                         target: Target::Backbuffer,
                         clear: Some([0.0, 0.0, 0.0, 1.0]),
+                        resolve: None,
                     }),
                     depth: None,
                     viewport: None,

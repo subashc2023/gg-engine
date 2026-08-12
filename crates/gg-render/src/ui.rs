@@ -117,6 +117,7 @@ impl UiPass {
             format: ImageFormat::Rgba8Unorm,
             usage: ImageUse::Sampled,
             mip_levels: 1,
+            samples: gg_rhi::Samples::X1,
         })?;
         rhi.upload_image(image, 0, &rgba)?;
         rhi.flush_uploads()?;
@@ -233,6 +234,7 @@ fn pipeline_desc() -> PipelineDesc<'static> {
         color: ColorTarget::Backbuffer,
         blend: Blend::Alpha,
         depth: DepthMode::Off,
+        samples: gg_rhi::Samples::X1,
         depth_bias: false,
     }
 }

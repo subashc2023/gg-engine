@@ -2124,6 +2124,18 @@ pub fn cross_tier() -> anyhow::Result<()> {
     for tier in HASHED_TIERS {
         let (host, game) = stage(tier)?;
         let log = play(&host, &game, &["--replay", &replay], true)?;
+        // Demo 03 binds no pointer verb, so the shell holds the mouse for it
+        // (§6 M15.1) — and must go on holding it with no editor open. The
+        // hand-back is the *editor's* stop, and a `tier-dev` shell that read
+        // "no editor" as "stopped" released every mouse-look game's cursor on
+        // tick 0, leaving the OS arrow over the game for the session. Looking
+        // still worked (raw device motion arrives grabbed or not), so nothing
+        // but the log line said so — which is why the log line is the gate.
+        anyhow::ensure!(
+            !log.contains("pointer handed back"),
+            "{}: the shell handed the pointer back to a run with no editor",
+            tier.name
+        );
         let seq = sequence(&log)?;
         println!(
             "xtask: {} replayed {} ticks, ending {}",

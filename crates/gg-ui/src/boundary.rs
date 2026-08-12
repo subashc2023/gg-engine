@@ -109,8 +109,16 @@ pub struct Ui {
     /// the world's [`Prefs`], the first walked, so the game's settings menu
     /// reaches this stage without the host relaying a flag.
     prefs: Query<&'static Prefs>,
+    /// The [`Prefs`] the last frame walked — see [`Ui::prefs`].
+    asked: Prefs,
     /// Whether the last frame drew the software arrow — see [`Ui::cursor_drawn`].
     arrow: bool,
+    /// Whether the last frame had a hit-tested widget with area — see
+    /// [`Ui::wants_pointer`]. Separate from `arrow`, which is this *and* the
+    /// player's arrow preference: which arrow is drawn and whether the UI is
+    /// pointed at are different questions, and only the second decides who gets
+    /// the mouse.
+    pointed: bool,
 }
 
 impl Ui {
@@ -129,7 +137,9 @@ impl Ui {
             widgets: Vec::new(),
             order: Vec::new(),
             prefs: Query::new()?,
+            asked: Prefs::default(),
             arrow: false,
+            pointed: false,
         })
     }
 
@@ -150,6 +160,34 @@ impl Ui {
         self.arrow
     }
 
+    /// Whether the last [`frame`](Self::frame) had anything to point at: a
+    /// hit-tested widget with area. What a host asks to decide who holds the
+    /// mouse — a game that binds the pointer verbs holds it while this is false
+    /// (mouse-look, nothing to click) and gives it back while it is true (a menu
+    /// is up). Unlike [`cursor_drawn`](Self::cursor_drawn) this ignores the
+    /// arrow preference: a player who asked for the OS arrow still needs the
+    /// pointer freed to reach the button, and only the picture differs.
+    ///
+    /// Derived from the world's widgets and therefore from hashed state, which
+    /// is what makes it replay-safe: a recorded session opens its menu on the
+    /// same tick with no window anywhere, and the pointer changes hands there
+    /// too (§4.7).
+    #[must_use]
+    pub fn wants_pointer(&self) -> bool {
+        self.pointed
+    }
+
+    /// The [`Prefs`] the last [`frame`](Self::frame) walked — the first in the
+    /// world, that type's documented rule, or the defaults where there is none.
+    ///
+    /// Handed on rather than re-queried by every consumer: this stage reads them
+    /// already, and a second walk in the shell would be a second answer to "the
+    /// first `Prefs`" whenever a game declares two.
+    #[must_use]
+    pub fn prefs(&self) -> Prefs {
+        self.asked
+    }
+
     /// Run one tick of UI over `world` and return the geometry for it.
     ///
     /// `fit` is where the canvas sits on the surface — the whole of it in a
@@ -166,15 +204,22 @@ impl Ui {
             widgets,
             order,
             prefs,
+            asked,
             arrow,
+            pointed,
         } = self;
         // The player's arrow preference, off the world itself (§6 M19): the
         // menu click that set it is ordinary recorded input, and no host flag
         // needs relaying.
-        let mut hardware = None;
+        let mut found = None;
         world.each_ref(prefs, |_, p: &Prefs| {
-            hardware.get_or_insert(p.hardware_cursor());
+            found.get_or_insert(*p);
         });
+        // A world with no `Prefs` at all gets the defaults, which is the same
+        // answer as a world whose `Prefs` is zeroed — the zero law, relied on
+        // rather than restated.
+        *asked = found.unwrap_or_default();
+        let hardware = asked.hardware_cursor();
         router.begin(tick, CANVAS);
         widgets.clear();
         order.clear();
@@ -247,7 +292,8 @@ impl Ui {
         // is the case that found this: 262 widgets, none of them a button, and a
         // white arrow parked in the corner of every frame because "a UI exists"
         // was standing in for "a UI is pointed at".
-        *arrow = hit_tested && !hardware.unwrap_or(false);
+        *pointed = hit_tested;
+        *arrow = hit_tested && !hardware;
         if *arrow {
             crate::draw::cursor(list, router.pointer().position());
         }
@@ -513,6 +559,57 @@ mod tests {
         assert!(ui.cursor_drawn());
     }
 
+    /// The other question asked of the same frame, and the reason it is a
+    /// second accessor: a player who asked for the OS arrow still has to be
+    /// able to reach the button, so the hand-back cannot ride on `cursor_drawn`
+    /// (§6 M21). Two answers that must part exactly here.
+    #[test]
+    fn the_hardware_arrow_changes_the_picture_and_not_who_holds_the_mouse() {
+        let mut ui = Ui::new().expect("query");
+        let mut world = World::new();
+        world.register::<Widget>().expect("register");
+        world.register::<Prefs>().expect("register");
+        let button = world.spawn();
+        world
+            .insert(
+                button,
+                Widget::button(
+                    WidgetId::new("ok").get(),
+                    [10.0, 10.0, 40.0, 12.0],
+                    0,
+                    0,
+                    "",
+                ),
+            )
+            .expect("insert");
+        ui.frame(&mut world, &Tick::default(), Fit::new(TARGET));
+        assert!(ui.wants_pointer(), "a button with area is pointed at");
+        assert!(ui.cursor_drawn(), "and the software arrow draws over it");
+
+        let prefs = world.spawn();
+        world
+            .insert(
+                prefs,
+                Prefs {
+                    cursor: gg_ecs::boundary::cursor::HARDWARE,
+                    ..Default::default()
+                },
+            )
+            .expect("insert");
+        ui.frame(&mut world, &Tick::default(), Fit::new(TARGET));
+        assert!(!ui.cursor_drawn(), "the OS arrow stands in");
+        assert!(
+            ui.wants_pointer(),
+            "and the button is still there to be reached"
+        );
+        assert!(ui.prefs().hardware_cursor(), "read once, handed on");
+
+        // And a HUD is neither: nothing to point at, so the game keeps the mouse.
+        world.despawn(button);
+        ui.frame(&mut world, &Tick::default(), Fit::new(TARGET));
+        assert!(!ui.wants_pointer());
+    }
+
     /// The hardware-cursor preference (`Prefs`, §6 M19): the pointer still
     /// routes — a hover still lands in the world — but no second arrow is
     /// drawn over the OS one, and `cursor_drawn` tells the host to leave the
@@ -537,6 +634,8 @@ mod tests {
                 Prefs {
                     cursor: cursor::HARDWARE,
                     quiet: 0,
+                    aa: 0,
+                    close: 0,
                 },
             )
             .expect("insert");

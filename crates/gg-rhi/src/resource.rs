@@ -182,6 +182,79 @@ impl ImageUse {
     pub fn is_depth(self) -> bool {
         matches!(self, ImageUse::Depth | ImageUse::DepthSampled)
     }
+
+    /// Whether an image for this job may be multisampled at all. Only the two
+    /// attachment kinds can: a sampled or storage image is reached through the
+    /// bindless array, whose descriptors are single-sample by declaration, and
+    /// a multisample image is illegal as a copy source besides.
+    #[must_use]
+    pub fn is_attachment(self) -> bool {
+        matches!(self, ImageUse::Depth | ImageUse::ColorTarget)
+    }
+}
+
+/// How many samples one rasterization covers — MSAA's only knob (§6 M21).
+///
+/// Ordered, so clamping to what a device advertises is `min`. The set stops at
+/// eight because that is where every desktop driver's advertised mask stops
+/// being universal, and a ninth entry would be a mode with no hardware.
+///
+/// A count is **asked for and refused**, never quietly downgraded: an operator
+/// who set 8× and silently got 4× would be judging 8× by the wrong picture.
+/// [`DeviceReport::max_samples`](crate::DeviceReport::max_samples) is where the
+/// asking happens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Samples {
+    /// No multisampling — one sample per pixel, and the only count that needs
+    /// no resolve.
+    #[default]
+    X1,
+    /// Two samples.
+    X2,
+    /// Four samples. The one count above 1 that every driver in the execution
+    /// matrix advertises, including pinned lavapipe — so it is the only one a
+    /// headless gate can prove (§8 residual).
+    X4,
+    /// Eight samples.
+    X8,
+}
+
+impl Samples {
+    /// Every count, ascending.
+    pub const ALL: [Samples; 4] = [Samples::X1, Samples::X2, Samples::X4, Samples::X8];
+
+    /// Samples per pixel.
+    #[must_use]
+    pub fn count(self) -> u32 {
+        match self {
+            Samples::X1 => 1,
+            Samples::X2 => 2,
+            Samples::X4 => 4,
+            Samples::X8 => 8,
+        }
+    }
+
+    /// The count `n` names, or `None` when it is not one we have — including
+    /// 16 and 32, which exist in Vulkan and not here.
+    #[must_use]
+    pub fn from_count(n: u32) -> Option<Samples> {
+        Samples::ALL.into_iter().find(|s| s.count() == n)
+    }
+
+    /// Whether this count needs a resolve attachment beside it.
+    #[must_use]
+    pub fn multisampled(self) -> bool {
+        self != Samples::X1
+    }
+
+    pub(crate) fn vk(self) -> vk::SampleCountFlags {
+        match self {
+            Samples::X1 => vk::SampleCountFlags::TYPE_1,
+            Samples::X2 => vk::SampleCountFlags::TYPE_2,
+            Samples::X4 => vk::SampleCountFlags::TYPE_4,
+            Samples::X8 => vk::SampleCountFlags::TYPE_8,
+        }
+    }
 }
 
 /// The whole sampler set (§4.3: samplers are a small *immutable* set baked
@@ -268,6 +341,10 @@ pub struct ImageDesc<'a> {
     /// offline by `ggc` and uploaded level by level (§4.6), so this allocates
     /// the levels and the caller fills every one of them.
     pub mip_levels: u32,
+    /// Samples per pixel. Anything above [`Samples::X1`] makes this an
+    /// attachment and nothing else — not sampled, not copied, not mipped — and
+    /// the pass that writes it must resolve into a single-sample image.
+    pub samples: Samples,
 }
 
 /// An opaque handle to a buffer. Plain data, like [`PipelineHandle`]: a handle
@@ -442,6 +519,38 @@ impl Resources {
                 desc.name, desc.mip_levels, desc.extent
             )));
         }
+        // The three ways a multisample image is not an ordinary one, refused
+        // here rather than left to validation: only an attachment can be one,
+        // a chain of them is levels no pass can name, and a count the device
+        // does not advertise is a mode the operator must be told they cannot
+        // have (§6 M21) — never one quietly rounded down.
+        if desc.samples.multisampled() {
+            if !desc.usage.is_attachment() {
+                return Err(RhiError::Loader(format!(
+                    "image `{}`: {:?} at {}x — only an attachment can be multisampled, since \
+                     everything else is reached through the bindless array or a copy",
+                    desc.name,
+                    desc.usage,
+                    desc.samples.count()
+                )));
+            }
+            if desc.mip_levels != 1 {
+                return Err(RhiError::Loader(format!(
+                    "image `{}`: {} mip levels at {}x — a multisample image has one level",
+                    desc.name,
+                    desc.mip_levels,
+                    desc.samples.count()
+                )));
+            }
+            if !device.supports_samples(desc.samples) {
+                return Err(RhiError::Loader(format!(
+                    "image `{}`: this device does not do {}x — it advertises up to {}x",
+                    desc.name,
+                    desc.samples.count(),
+                    device.report().max_samples().count()
+                )));
+            }
+        }
         let usage = match desc.usage {
             ImageUse::Sampled => vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             ImageUse::Depth => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
@@ -449,6 +558,13 @@ impl Resources {
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED
             }
             ImageUse::Storage => vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC,
+            // A multisample target keeps the attachment usage and drops the
+            // other two: sampling one needs a `2DMS` descriptor the global set
+            // does not declare, and it is not a legal copy source at all. What
+            // reads it is the resolve, and a resolve is not either of those.
+            ImageUse::ColorTarget if desc.samples.multisampled() => {
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+            }
             ImageUse::ColorTarget => {
                 vk::ImageUsageFlags::COLOR_ATTACHMENT
                     | vk::ImageUsageFlags::SAMPLED
@@ -465,7 +581,7 @@ impl Resources {
             })
             .mip_levels(desc.mip_levels)
             .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
+            .samples(desc.samples.vk())
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(usage)
             .initial_layout(vk::ImageLayout::UNDEFINED);

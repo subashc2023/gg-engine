@@ -60,6 +60,7 @@ fn pipeline(
             color: gg_rhi::ColorTarget::Backbuffer,
             blend: gg_rhi::Blend::Off,
             depth,
+            samples: gg_rhi::Samples::X1,
             depth_bias: false,
         })
         .unwrap();
@@ -188,6 +189,7 @@ float4 fs_main() : SV_Target
                 format: ImageFormat::Rgba8Unorm,
                 usage: ImageUse::Sampled,
                 mip_levels: 1,
+                samples: gg_rhi::Samples::X1,
             })
             .unwrap();
         rhi.upload_image(image, 0, &solid(color)).unwrap();
@@ -540,6 +542,7 @@ fn a_mip_chain_uploads_level_by_level_and_samples_from_every_one() {
             format: ImageFormat::Rgba8Unorm,
             usage: ImageUse::Sampled,
             mip_levels: LEVELS,
+            samples: gg_rhi::Samples::X1,
         })
         .unwrap();
     for level in (0..LEVELS).rev() {
@@ -626,6 +629,7 @@ fn impossible_uploads_are_refused_by_name() {
             format: ImageFormat::Bc7Srgb,
             usage: ImageUse::Sampled,
             mip_levels: 1,
+            samples: gg_rhi::Samples::X1,
         })
         .unwrap();
     assert_eq!(ImageFormat::Bc7Srgb.packed_size((8, 8)), 64);
@@ -651,6 +655,7 @@ fn impossible_uploads_are_refused_by_name() {
             format: ImageFormat::Rgba8Unorm,
             usage: ImageUse::Sampled,
             mip_levels: 5,
+            samples: gg_rhi::Samples::X1,
         })
         .unwrap_err()
         .to_string();
@@ -664,6 +669,7 @@ fn impossible_uploads_are_refused_by_name() {
             format: ImageFormat::Depth32,
             usage: ImageUse::Depth,
             mip_levels: 1,
+            samples: gg_rhi::Samples::X1,
         })
         .unwrap();
     let err = rhi.register_texture(depth).unwrap_err().to_string();
@@ -677,6 +683,7 @@ fn impossible_uploads_are_refused_by_name() {
             format: ImageFormat::Depth32,
             usage: ImageUse::Sampled,
             mip_levels: 1,
+            samples: gg_rhi::Samples::X1,
         })
         .unwrap_err()
         .to_string();
@@ -729,6 +736,7 @@ fn uploads_are_clean_on_whichever_queue_topology_this_device_has() {
             format: ImageFormat::Rgba8Srgb,
             usage: ImageUse::Sampled,
             mip_levels: 1,
+            samples: gg_rhi::Samples::X1,
         })
         .unwrap();
     rhi.upload_buffer(buffer, 0, &[7u8; 256]).unwrap();
@@ -780,6 +788,7 @@ fn a_resource_retired_before_its_first_read_leaves_no_barrier_owed() {
             format: ImageFormat::Rgba8Srgb,
             usage: ImageUse::Sampled,
             mip_levels: 1,
+            samples: gg_rhi::Samples::X1,
         })
         .unwrap();
     rhi.upload_buffer(buffer, 0, &[7u8; 256]).unwrap();
@@ -808,6 +817,7 @@ fn a_storage_image_takes_a_slot_in_the_storage_array() {
             format: ImageFormat::Rgba8Unorm,
             usage: ImageUse::Storage,
             mip_levels: 1,
+            samples: gg_rhi::Samples::X1,
         })
         .unwrap();
     let index = rhi.register_storage_image(image).unwrap();

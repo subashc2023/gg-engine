@@ -155,10 +155,10 @@ fn a_shader_edit_lands_without_a_rebuild_and_a_bad_one_keeps_last_good() {
     // A layout edit: compiles clean, but the push-constant block no longer
     // matches what this build's codegen froze — swapping it in would corrupt
     // every draw, so it must be refused the same way (§4.4 codegen).
-    let grown = hijacked.replace("uint reserved;", "uint reserved;\n    float4 grown;");
+    let grown = hijacked.replace("float2 texel;", "float2 texel;\n    float4 grown;");
     assert!(
         grown != hijacked,
-        "post.slang lost its `uint reserved;` anchor"
+        "post.slang lost its `float2 texel;` anchor"
     );
     std::fs::write(&post, &grown).unwrap();
     hold(&mut renderer, &magenta, "push-constant layout edit");

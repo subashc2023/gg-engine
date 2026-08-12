@@ -129,6 +129,7 @@ pub fn pipeline_desc() -> PipelineDesc<'static> {
         // test of reverse-Z rather than of winding order.
         blend: gg_rhi::Blend::Off,
         depth: gg_rhi::DepthMode::Write,
+        samples: gg_rhi::Samples::X1,
         depth_bias: false,
     }
 }
@@ -146,6 +147,7 @@ pub fn declare<'a>(
         name: "forward-opaque",
         body: gg_render::graph::Body::Draw {
             color: Some((backbuffer, gg_render::graph::Load::Clear(CLEAR))),
+            resolve: None,
             depth: Some((depth, gg_render::graph::DepthUse::Write)),
             viewport: None,
             samples: &[],
@@ -368,6 +370,7 @@ pub fn upload(host: &mut impl SceneHost) -> Result<SceneResources, RhiError> {
         format: ImageFormat::Bc7Srgb,
         usage: ImageUse::Sampled,
         mip_levels: 1,
+        samples: gg_rhi::Samples::X1,
     })?;
 
     host.upload_buffer(vertex_buffer, 0, vertex_bytes)?;

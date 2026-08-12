@@ -80,6 +80,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             color: gg_rhi::ColorTarget::Backbuffer,
             blend: gg_rhi::Blend::Off,
             depth: gg_rhi::DepthMode::Off,
+            samples: gg_rhi::Samples::X1,
             depth_bias: false,
         })
         .unwrap();
@@ -183,6 +184,7 @@ float4 fs_main() : SV_Target { return push.color; }
             color: gg_rhi::ColorTarget::Backbuffer,
             blend: gg_rhi::Blend::Off,
             depth: gg_rhi::DepthMode::Off,
+            samples: gg_rhi::Samples::X1,
             depth_bias: false,
         })
         .unwrap();
@@ -286,6 +288,7 @@ float4 fs_main() : SV_Target { return push.color; }
             color: gg_rhi::ColorTarget::Backbuffer,
             blend: gg_rhi::Blend::Off,
             depth: gg_rhi::DepthMode::Off,
+            samples: gg_rhi::Samples::X1,
             depth_bias: false,
         })
         .unwrap();

@@ -15,9 +15,10 @@
 struct PostPush
 {
     uint texture_index; // the scene attachment's slot in g_textures
-    uint sampler_index; // NearestClamp: this is a resolve, not a filter
+    uint sampler_index; // NearestClamp resolving, LinearClamp when aa != 0
     float exposure;     // stops, so 0 is unchanged and +1 is twice the light
-    uint reserved;
+    uint aa;            // 0 off, 1 fxaa — `r.aa`, or the game's Prefs (§6 M21)
+    float2 texel;       // 1/extent of the source, in uv units
 }
 
 [[vk::push_constant]]
@@ -87,15 +88,105 @@ float3 pbr_neutral(float3 color)
     return lerp(color, new_peak.xxx, g);
 }
 
-[shader("fragment")]
-float4 fs_main(VOut i) : SV_Target
+// One tap of the finished picture: the scene's radiance, exposed and tonemapped.
+//
+// Everything the antialiaser below does is done to *this* — display-referred
+// values in 0..1 — and never to the radiance behind it. That is not a detail of
+// convenience: an edge between 0.4 and 40.0 nits blended in HDR and tonemapped
+// afterwards lands wherever the curve's knee happens to put the mean, which is
+// nowhere near the halfway point an eye expects. Tonemapping each tap and
+// blending the results is the order that makes a blended edge read as half.
+float3 tap(float2 uv)
 {
-    float3 radiance =
-        g_textures[push.texture_index].Sample(g_samplers[push.sampler_index], i.uv).rgb;
+    float3 radiance = g_textures[push.texture_index].Sample(g_samplers[push.sampler_index], uv).rgb;
     // Exposure in stops, applied *before* the curve: it is the choice of what
     // counts as "1.0", and applying it after would be adjusting a picture that
     // had already been compressed.
-    return float4(pbr_neutral(radiance * exp2(push.exposure)), 1.0);
+    return pbr_neutral(radiance * exp2(push.exposure));
+}
+
+// Perceptual weight, Rec. 709 without blue. Blue's coefficient is 0.07 and
+// dropping it is the reference implementation's own economy — the term costs a
+// multiply-add per tap and moves an edge decision almost never.
+float luma(float3 c)
+{
+    return c.r * 0.299 + c.g * 0.587;
+}
+
+// FXAA, the console variant (Lottes, NVIDIA 2011, FXAA 3.11 `FxaaPixelShader`
+// with `FXAA_PC == 0`) — transcribed, with its three constants unchanged.
+//
+// Why this and not MSAA: MSAA antialiases *geometry* and would have to reach
+// into `gg-rhi`, which today creates every image and every pipeline at one
+// sample (`SampleCountFlags::TYPE_1`) — sample counts on attachments, on
+// pipelines, on the depth prepass the forward pass shares, and a resolve the
+// post pass could sample. That is a milestone with a public-API bless and a
+// re-bless of every golden on three backends in it. This is a fullscreen read,
+// costs nothing the frame notices, needs no RHI change, and — unlike MSAA —
+// also softens the edges *inside* a triangle, which is where a flat-shaded
+// engine's worst aliasing actually is.
+//
+// The cost it does have is the honest one: it cannot tell a real edge from an
+// authored one, so a high-contrast texture detail one pixel wide is softened
+// along with the staircase. That is why it is a mode and not a constant.
+static const float FXAA_SPAN_MAX = 8.0;
+static const float FXAA_REDUCE_MUL = 1.0 / 8.0;
+static const float FXAA_REDUCE_MIN = 1.0 / 128.0;
+
+float3 fxaa(float2 uv, float3 centre)
+{
+    // The four corners are sampled *between* texels, so a linear sampler makes
+    // each one the mean of the four it sits among — which is what turns nine
+    // reads into the sixteen-texel neighbourhood the filter reasons about. With
+    // a nearest sampler this degenerates to four diagonal texels and the edge
+    // direction below is quantized to the diagonals; that is why the mode picks
+    // `LinearClamp` and the resolve path does not.
+    float2 half_texel = push.texel * 0.5;
+    float nw = luma(tap(uv + float2(-half_texel.x, -half_texel.y)));
+    float ne = luma(tap(uv + float2(half_texel.x, -half_texel.y)));
+    float sw = luma(tap(uv + float2(-half_texel.x, half_texel.y)));
+    float se = luma(tap(uv + float2(half_texel.x, half_texel.y)));
+    float m = luma(centre);
+
+    float lo = min(m, min(min(nw, ne), min(sw, se)));
+    float hi = max(m, max(max(nw, ne), max(sw, se)));
+
+    // The edge runs *along* the smaller gradient, which is why the two rows are
+    // crossed: a vertical staircase has a large horizontal luma step and is
+    // blended horizontally.
+    float2 dir = float2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
+
+    // Reduction keeps the step bounded where the neighbourhood is dark: `dir`
+    // is a difference of luma, so on a near-black edge it is a tiny number
+    // whose reciprocal would otherwise fling the taps across the screen. The
+    // `MIN` term is what stops a perfectly flat neighbourhood dividing by zero.
+    float reduce = max((nw + ne + sw + se) * 0.25 * FXAA_REDUCE_MUL, FXAA_REDUCE_MIN);
+    float rcp_min = 1.0 / (min(abs(dir.x), abs(dir.y)) + reduce);
+    dir = clamp(dir * rcp_min, -FXAA_SPAN_MAX.xx, FXAA_SPAN_MAX.xx) * push.texel;
+
+    // Two taps inside the pixel, two out at the span's ends. The inner pair is
+    // the safe answer; the outer pair sharpens a long shallow edge and is
+    // discarded below when it reaches past the neighbourhood's own range.
+    float3 inner = 0.5 * (tap(uv + dir * (1.0 / 3.0 - 0.5)) + tap(uv + dir * (2.0 / 3.0 - 0.5)));
+    float3 outer = inner * 0.5 + 0.25 * (tap(uv + dir * -0.5) + tap(uv + dir * 0.5));
+
+    // The whole guard against over-blurring: a result outside what the 3x3
+    // neighbourhood contained came from somewhere this pixel cannot see, so the
+    // inner pair stands instead. Without it a thin bright line is smeared into
+    // whatever is two pixels away from it.
+    float outer_luma = luma(outer);
+    return (outer_luma < lo || outer_luma > hi) ? inner : outer;
+}
+
+[shader("fragment")]
+float4 fs_main(VOut i) : SV_Target
+{
+    float3 colour = tap(i.uv);
+    if (push.aa != 0)
+    {
+        colour = fxaa(i.uv, colour);
+    }
+    return float4(colour, 1.0);
 }
 
 // The overlay's luminance histogram (§6 M11's exit row), first half: resample

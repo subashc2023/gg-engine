@@ -97,6 +97,7 @@ float4 fs_main() : SV_Target {{ return float4({BRIGHT}, 0.5, 0.0, 1.0); }}
             color: gg_rhi::ColorTarget::Format(ImageFormat::Rgba16F),
             blend: gg_rhi::Blend::Off,
             depth: gg_rhi::DepthMode::Off,
+            samples: gg_rhi::Samples::X1,
             depth_bias: false,
         })
         .unwrap();
@@ -107,6 +108,7 @@ float4 fs_main() : SV_Target {{ return float4({BRIGHT}, 0.5, 0.0, 1.0); }}
             format: ImageFormat::Rgba16F,
             usage: ImageUse::ColorTarget,
             mip_levels: 1,
+            samples: gg_rhi::Samples::X1,
         })
         .unwrap();
     let readback = rhi
@@ -148,6 +150,7 @@ float4 fs_main() : SV_Target {{ return float4({BRIGHT}, 0.5, 0.0, 1.0); }}
                 color: Some(ColorAttachment {
                     target: Target::Image(target),
                     clear: Some([0.0, 0.0, 0.0, 1.0]),
+                    resolve: None,
                 }),
                 depth: None,
                 viewport: None,
@@ -201,6 +204,7 @@ fn only_a_shadow_map_gets_a_bindless_slot() {
             format: ImageFormat::Depth32,
             usage: ImageUse::Depth,
             mip_levels: 1,
+            samples: gg_rhi::Samples::X1,
         })
         .unwrap();
     let refused = rhi.register_texture(prepass);
@@ -216,6 +220,7 @@ fn only_a_shadow_map_gets_a_bindless_slot() {
             format: ImageFormat::Depth32,
             usage: ImageUse::DepthSampled,
             mip_levels: 1,
+            samples: gg_rhi::Samples::X1,
         })
         .unwrap();
     rhi.register_texture(shadow).unwrap();
@@ -228,6 +233,7 @@ fn only_a_shadow_map_gets_a_bindless_slot() {
         format: ImageFormat::Depth32,
         usage: ImageUse::ColorTarget,
         mip_levels: 1,
+        samples: gg_rhi::Samples::X1,
     });
     assert!(mismatch.is_err(), "a depth format is a depth attachment");
 
@@ -283,6 +289,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             color: gg_rhi::ColorTarget::Backbuffer,
             blend: gg_rhi::Blend::Off,
             depth: gg_rhi::DepthMode::Off,
+            samples: gg_rhi::Samples::X1,
             depth_bias,
         })
         .unwrap()
@@ -317,6 +324,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
                 color: Some(ColorAttachment {
                     target: Target::Backbuffer,
                     clear: Some([0.0, 0.0, 0.0, 1.0]),
+                    resolve: None,
                 }),
                 depth: None,
                 viewport: None,

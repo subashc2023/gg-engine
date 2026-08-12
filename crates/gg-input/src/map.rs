@@ -336,6 +336,29 @@ impl ActionMap {
         self.contexts.len()
     }
 
+    /// Whether any active layer binds `source` — the consumption test asked
+    /// *before* the event, which is what a host needs to know whether a key is
+    /// still its own.
+    ///
+    /// The shell owns `Escape` (quit) only for as long as the game does not want
+    /// it: a game with a pause menu binds it, and a key bound to a verb has to
+    /// reach the action map rather than being eaten one layer above it. Same
+    /// rule this module's header states for layering, applied to the host as the
+    /// bottom layer.
+    pub fn claims(&self, stack: &[ContextId], source: Source) -> bool {
+        self.consumer(stack, source).is_some()
+    }
+
+    /// Whether any active layer binds `motion` to an axis — "this game does
+    /// mouse-look", asked of the bindings rather than guessed from behaviour.
+    ///
+    /// Raw device motion, not the steered pointer: the two [`MouseAxis`] pairs
+    /// are what tell a camera apart from a cursor (§4.9), which is exactly the
+    /// distinction a host needs to decide whether to hold the mouse at all.
+    pub fn claims_motion(&self, stack: &[ContextId], motion: MouseAxis) -> bool {
+        self.motion_axes(stack, motion).next().is_some()
+    }
+
     /// The topmost context in `stack` that binds `source`, or `None` when no
     /// active layer wants it. Layering lives here and nowhere else.
     fn consumer(&self, stack: &[ContextId], source: Source) -> Option<usize> {
@@ -459,6 +482,51 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// What a shell asks before treating a key as its own (§6 M21): Escape is
+    /// the app's until a game's map binds it. Asked of the *active* stack, so a
+    /// context that is not pushed does not claim anything.
+    #[test]
+    fn a_key_is_the_apps_until_an_active_layer_binds_it() {
+        const PAUSED: &str = r#"
+            [game.actions]
+            look = ["Escape"]
+        "#;
+        let map = ActionMap::parse(PAUSED, ACTIONS, AXES).unwrap();
+        let game = map.context("game").unwrap();
+        assert!(!map.claims(&[], Source::Key(Key::Escape)), "no layer is up");
+        assert!(map.claims(&[game], Source::Key(Key::Escape)));
+        assert!(!map.claims(&[game], Source::Key(Key::Tab)));
+    }
+
+    /// And whether the game does mouse-look at all, which is a question about
+    /// *raw* motion: a menu binds the steered pointer and must not be mistaken
+    /// for a camera.
+    #[test]
+    fn raw_motion_is_what_says_a_game_does_mouse_look() {
+        const BOTH: &str = r#"
+            [game.axes]
+            look_x = ["MouseX"]
+            move_right = ["PointerX"]
+        "#;
+        let map = ActionMap::parse(BOTH, ACTIONS, AXES).unwrap();
+        let game = map.context("game").unwrap();
+        assert!(map.claims_motion(&[game], MouseAxis::X));
+        assert!(!map.claims_motion(&[game], MouseAxis::Y));
+        assert!(!map.claims_motion(&[], MouseAxis::X), "no layer is up");
+
+        const POINTER_ONLY: &str = r#"
+            [game.axes]
+            move_right = ["PointerX"]
+            look_x = ["PointerY"]
+        "#;
+        let map = ActionMap::parse(POINTER_ONLY, ACTIONS, AXES).unwrap();
+        let game = map.context("game").unwrap();
+        assert!(
+            !map.claims_motion(&[game], MouseAxis::X) && !map.claims_motion(&[game], MouseAxis::Y),
+            "a pointer is not a camera"
+        );
+    }
 
     const ACTIONS: &[&str] = &["look", "spawn"];
     const AXES: &[&str] = &["move_right", "look_x"];

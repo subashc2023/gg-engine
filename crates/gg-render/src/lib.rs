@@ -56,6 +56,10 @@ use gg_assets::AssetId;
 use gg_extract::{Extracted, Frustum, Instance, Scenes};
 use gg_math::render;
 pub use gg_rhi::Viewport;
+// Re-exported because [`View::samples`] is spelled in it and the shell sets
+// that field: a host would otherwise have to depend on `gg-rhi` to name a
+// count, which §3 keeps to this crate's own dependents.
+pub use gg_rhi::Samples;
 use gg_rhi::{
     Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthMode, DeviceAddress,
     DeviceReport, DrawSpec, FrameOutcome, FrameStart, GpuClock, GraphContext, ImageDesc,
@@ -109,11 +113,40 @@ pub struct View {
     /// perspective's far is at infinity (§2) and a finite far is the price of
     /// parallel rays, paid here and in the frustum's sixth plane.
     pub ortho_far: f32,
+    /// Antialias the finished picture (§6 M21) — `r.aa`, which a game's
+    /// [`Prefs`](gg_ecs::boundary::Prefs) may override for the player.
+    ///
+    /// Not camera geometry, and the only field here that is not. It sits here
+    /// because a `View` is what a frame is *rendered with* and is rebuilt from
+    /// the CVars every frame, which is precisely the plumbing an AA mode needs;
+    /// a second parameter on [`Renderer::frame`] would move every call site in
+    /// the tree to carry one bool.
+    pub aa: bool,
+    /// Samples per pixel the scene pass is **asked** for (§6 M21) — `r.msaa`,
+    /// which a game's `Prefs` may override for the player.
+    ///
+    /// A request, not a fact: the renderer clamps it to what the device
+    /// advertises and reports the result through [`Renderer::samples`]. Unlike
+    /// `aa` this one moves the graph — a count above one allocates a
+    /// multisampled scene attachment and a resolve beside it — which is why the
+    /// dump shows it and the FXAA flag does not.
+    pub samples: Samples,
+}
+
+/// The largest count we have that `n` reaches, so a typo'd `r.msaa 3` is 2×
+/// rather than off. What a device cannot do is clamped later and *logged*;
+/// this one is only about the number the operator typed.
+fn asked_samples(n: i64) -> Samples {
+    Samples::ALL
+        .into_iter()
+        .rev()
+        .find(|s| i64::from(s.count()) <= n)
+        .unwrap_or(Samples::X1)
 }
 
 impl Default for View {
-    /// Not a constant: `fov_y`, `near` and `ortho_far` are CVars (§4.8), so
-    /// *rebuilding* a `View` each frame is how a console edit reaches the
+    /// Not a constant: `fov_y`, `near`, `ortho_far` and `aa` are CVars (§4.8),
+    /// so *rebuilding* a `View` each frame is how a console edit reaches the
     /// screen — and a caller that keeps one instead has pinned them,
     /// deliberately.
     fn default() -> Self {
@@ -124,6 +157,8 @@ impl Default for View {
             near: cvars::NEAR.float() as f32,
             ortho: 0.0,
             ortho_far: cvars::ORTHO_FAR.float() as f32,
+            aa: cvars::AA.bool(),
+            samples: asked_samples(cvars::MSAA.int()),
         }
     }
 }
@@ -146,8 +181,26 @@ impl View {
         Frustum::from_view_projection(self.view_projection(extent))
     }
 
+    /// How far up-light of this view a shadow caster can sit and still reach a
+    /// cascade — what `Extracted::cast_along` sweeps the culling frustum by.
+    ///
+    /// Public for [`View::frustum`]'s reason: the split scheme is this crate's
+    /// (§6 M11), and a shell carrying its own copy of it would decide what to keep
+    /// by one rule while the maps recorded by another. Zero is not special —
+    /// sweeping by it culls exactly as the view does.
+    #[must_use]
+    pub fn caster_reach(&self, extent: (u32, u32)) -> f32 {
+        lighting::caster_reach(self, extent)
+    }
+
     /// Camera-relative world → clip.
-    fn view_projection(&self, extent: (u32, u32)) -> render::Mat4 {
+    ///
+    /// Public for the same reason [`View::frustum`] is: the convention is this
+    /// crate's (§2, Math row), and an instrument that needs to know where a world
+    /// point landed in a frame must ask the matrix the frame was drawn with
+    /// rather than rebuild one beside it (`gg-tools shadow-sweep`).
+    #[must_use]
+    pub fn view_projection(&self, extent: (u32, u32)) -> render::Mat4 {
         let rotation = self.rotation();
         let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
         let view = render::camera::rh::view::look_to_mat4(
@@ -189,9 +242,36 @@ pub struct Renderer {
     content: Option<Content>,
     /// Where the frame lands in the window. See [`Renderer::set_viewport`].
     viewport: Option<Viewport>,
+    /// What the last frame actually rendered at — see [`Renderer::samples`].
+    /// Held so the clamp logs when it *changes* rather than every frame.
+    samples: Samples,
     /// The dev tier's shader watcher (§4.4); `None` when watching failed.
     #[cfg(feature = "hot-reload")]
     hot: Option<hot::Shaders>,
+}
+
+/// `asked` cut to what the device does, announced when the answer changes.
+///
+/// A free function so both entry points clamp identically; `last` is the
+/// caller's memory of the previous answer, which is what keeps a device that
+/// cannot do 8× from saying so sixty times a second.
+fn granted_samples(report: &DeviceReport, asked: Samples, last: Samples) -> Samples {
+    let granted = report.afforded(asked);
+    if granted != last {
+        match granted == asked {
+            true => tracing::info!(samples = granted.count(), "msaa"),
+            // The one reduction that is not a refusal (§6 M21), so it says so
+            // out loud: an operator reading 8× in a menu and 4× in the log has
+            // been told which of the two made the picture.
+            false => tracing::warn!(
+                asked = asked.count(),
+                granted = granted.count(),
+                max = report.max_samples().count(),
+                "msaa: this device does not do the count asked for"
+            ),
+        }
+    }
+    granted
 }
 
 impl Renderer {
@@ -225,6 +305,7 @@ impl Renderer {
             transients: Transients::default(),
             content: None,
             viewport: None,
+            samples: Samples::X1,
             #[cfg(feature = "hot-reload")]
             hot: hot::Shaders::new(),
         })
@@ -346,6 +427,20 @@ impl Renderer {
     /// is composed for a narrower rectangle culls objects that are on screen.
     pub fn view_extent(&self) -> (u32, u32) {
         view_extent(self.viewport, self.rhi.swapchain_extent())
+    }
+
+    /// The MSAA count the last frame actually used (§6 M21) — [`View::samples`]
+    /// after the device had its say. What a settings menu or an overlay should
+    /// show, because it is the count that made the picture.
+    pub fn samples(&self) -> Samples {
+        self.samples
+    }
+
+    /// Clamp and remember, so the warning below fires on a change and not per
+    /// frame.
+    fn granted(&mut self, asked: Samples) -> Samples {
+        self.samples = granted_samples(self.rhi.device_report(), asked, self.samples);
+        self.samples
     }
 
     /// New window size in physical pixels. `(0, 0)` suspends rather than
@@ -487,10 +582,20 @@ impl Renderer {
         self.ui.write(&mut self.rhi, slot, ui)?;
         let ui_push = self.ui.push(extent);
 
+        // Before the attachments, because the count sizes them — and before the
+        // graph takes the RHI, because building a pipeline needs it back.
+        let samples = self.granted(view.samples);
+        let at = (
+            self.pass.variant(&mut self.rhi, samples)?,
+            self.scene.variant(&mut self.rhi, samples)?,
+        );
+
         let mut frame = self.transients.frame(&mut self.rhi, extent)?;
-        let att = scene_attachments(&mut frame, view_extent, sun, histogram)?;
-        let post_push = self.pass.post_push(&frame, att.scene)?;
-        let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push);
+        let att = scene_attachments(&mut frame, view_extent, sun, histogram, samples)?;
+        let post_push = self
+            .pass
+            .post_push(&frame, att.scene, view_extent, view.aa)?;
+        let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push, at);
         let ui_draws: Vec<DrawSpec<'_>> = self.ui.draw(&ui_push).into_iter().collect();
         let luminance = att.grid.map(|grid| {
             (
@@ -545,10 +650,24 @@ impl Renderer {
         // written — nothing here is submitted.
         let slot = GraphContext::frame_slot(&self.rhi);
         let histogram = luminance::Luminance::enabled();
+        // The count the *last* frame was granted, like the sun and the UI pass:
+        // a game's `Prefs` may move it, and what the next frame will be asked
+        // for is not knowable here. Unlike FXAA — a push constant that moves no
+        // edge — MSAA is visible in this dump, as the multisampled attachment
+        // and the resolve the forward pass gained.
+        let samples = self.samples;
+        let at = (
+            self.pass.variant(&mut self.rhi, samples)?,
+            self.scene.variant(&mut self.rhi, samples)?,
+        );
         let mut frame = self.transients.frame(&mut self.rhi, extent)?;
-        let att = scene_attachments(&mut frame, view_extent, sun, histogram)?;
-        let post_push = self.pass.post_push(&frame, att.scene)?;
-        let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push);
+        let att = scene_attachments(&mut frame, view_extent, sun, histogram, samples)?;
+        // The CVar rather than a `View` this has none of: FXAA is a push
+        // constant, so what it changes is invisible here by construction.
+        let post_push = self
+            .pass
+            .post_push(&frame, att.scene, view_extent, cvars::AA.bool())?;
+        let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push, at);
         // The UI pass as the *last* frame declared it: what the next one draws
         // is not knowable here, and a dump that always omitted it would print a
         // graph the screen never runs.
@@ -626,6 +745,8 @@ pub struct OffscreenRenderer {
     extent: (u32, u32),
     content: Option<Content>,
     viewport: Option<Viewport>,
+    /// As [`Renderer::samples`] — see [`OffscreenRenderer::samples`].
+    samples: Samples,
     /// As [`Renderer`]'s: here as well because the offscreen path is the only
     /// one an automated gate can drive (§1.5), so it is where the swap is
     /// *proven* — `tests/hot.rs` edits a copied shader tree and reads the new
@@ -666,6 +787,7 @@ impl OffscreenRenderer {
             extent,
             content: None,
             viewport: None,
+            samples: Samples::X1,
             #[cfg(feature = "hot-reload")]
             hot: hot::Shaders::new(),
         })
@@ -764,6 +886,16 @@ impl OffscreenRenderer {
         self.rhi.pass_timings()
     }
 
+    /// As [`Renderer::samples`]: the count the last frame actually used.
+    pub fn samples(&self) -> Samples {
+        self.samples
+    }
+
+    fn granted(&mut self, asked: Samples) -> Samples {
+        self.samples = granted_samples(self.rhi.device_report(), asked, self.samples);
+        self.samples
+    }
+
     /// One frame: depth prepass, forward opaque, post, the UI layer, readback.
     ///
     /// # Errors
@@ -807,11 +939,18 @@ impl OffscreenRenderer {
         report_draws(&self.scene, extracted);
         self.ui.write(&mut self.rhi, 0, ui)?;
         let ui_push = self.ui.push(self.extent);
+        let samples = self.granted(view.samples);
+        let at = (
+            self.pass.variant(&mut self.rhi, samples)?,
+            self.scene.variant(&mut self.rhi, samples)?,
+        );
         let mut frame = self.transients.frame(&mut self.rhi, self.extent)?;
-        let att = scene_attachments(&mut frame, view_extent, sun, histogram)?;
+        let att = scene_attachments(&mut frame, view_extent, sun, histogram, samples)?;
         let into = frame.readback_buffer("render.offscreen.readback", self.readback);
-        let post_push = self.pass.post_push(&frame, att.scene)?;
-        let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push);
+        let post_push = self
+            .pass
+            .post_push(&frame, att.scene, view_extent, view.aa)?;
+        let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push, at);
         let ui_draws: Vec<DrawSpec<'_>> = self.ui.draw(&ui_push).into_iter().collect();
         let luminance = att.grid.map(|grid| {
             (
@@ -930,35 +1069,132 @@ fn report_draws(scene: &ScenePass, extracted: &Extracted) {
     }
 }
 
+/// The two pipelines whose shape is the scene pass's sample count, for one
+/// count (§6 M21). Copy, so a frame resolves them once and hands them around.
+#[derive(Clone, Copy)]
+pub(crate) struct Variant {
+    pub(crate) prepass: PipelineHandle,
+    pub(crate) forward: PipelineHandle,
+}
+
+/// Those pipelines, one set per count, created on first ask.
+///
+/// A set per count rather than a field, because the count is baked into a
+/// pipeline at creation and MSAA is a mode an operator switches while the
+/// picture is on screen: switching means *another* pipeline, and the one they
+/// just left has to still be there when they switch back. At most four sets
+/// exist, so this is a short `Vec` and not a map.
+#[derive(Default)]
+pub(crate) struct Variants {
+    live: Vec<(Samples, Variant)>,
+}
+
+impl Variants {
+    /// The set for `samples`, built from `descs` if this is the first frame to
+    /// ask for it. Fallible *here* rather than at the draw, so the lookup a
+    /// frame does is infallible and needs no unwrap (§3's lint).
+    pub(crate) fn get(
+        &mut self,
+        rhi: &mut impl GpuHost,
+        samples: Samples,
+        descs: impl FnOnce(Samples) -> [PipelineDesc<'static>; 2],
+    ) -> Result<Variant, RhiError> {
+        if let Some((_, variant)) = self.live.iter().find(|(s, _)| *s == samples) {
+            return Ok(*variant);
+        }
+        let [prepass, forward] = descs(samples);
+        let prepass = rhi.create_pipeline(&prepass)?;
+        // The prepass is orphaned if the forward one fails, so hand it back
+        // before the error leaves: a refused mode must cost nothing.
+        let forward = match rhi.create_pipeline(&forward) {
+            Ok(handle) => handle,
+            Err(e) => {
+                rhi.destroy_pipeline(prepass)?;
+                return Err(e);
+            }
+        };
+        let variant = Variant { prepass, forward };
+        self.live.push((samples, variant));
+        Ok(variant)
+    }
+
+    /// Every live set with its count — what a hot reload has to rebuild, since
+    /// an edit to the shared shader invalidates all of them at once.
+    #[cfg(feature = "hot-reload")]
+    pub(crate) fn each(&mut self) -> impl Iterator<Item = (Samples, &mut Variant)> {
+        self.live.iter_mut().map(|(s, v)| (*s, v))
+    }
+
+    pub(crate) fn destroy(self, rhi: &mut impl GpuHost) -> Result<(), RhiError> {
+        for (_, variant) in self.live {
+            rhi.destroy_pipeline(variant.prepass)?;
+            rhi.destroy_pipeline(variant.forward)?;
+        }
+        Ok(())
+    }
+}
+
 /// Boxes then pack meshes, as one list. Two pipelines inside one pass rather
 /// than a pass each: they write the same attachments, so a second prepass would
 /// be a second set of derived barriers around no new resource.
-fn prepass_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass) -> Vec<DrawSpec<'a>> {
-    let mut draws = pass.draws(pass.prepass);
-    draws.extend(scene.draws(scene.prepass()));
+fn prepass_draws<'a>(
+    pass: &'a BoxPass,
+    scene: &'a ScenePass,
+    at: (Variant, Variant),
+) -> Vec<DrawSpec<'a>> {
+    let mut draws = pass.draws(at.0.prepass);
+    draws.extend(scene.draws(at.1.prepass));
     draws
 }
 
-fn forward_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass) -> Vec<DrawSpec<'a>> {
-    let mut draws = pass.draws(pass.forward);
-    draws.extend(scene.draws(scene.forward()));
+fn forward_draws<'a>(
+    pass: &'a BoxPass,
+    scene: &'a ScenePass,
+    at: (Variant, Variant),
+) -> Vec<DrawSpec<'a>> {
+    let mut draws = pass.draws(at.0.forward);
+    draws.extend(scene.draws(at.1.forward));
     draws
 }
 
-/// Whether `instance` can cast into `cascade`, for a sun travelling `direction`.
+/// Whether `instance` can cast into `cascade`, for a sun travelling along
+/// `sun.direction`.
 ///
-/// A **cylinder** test, not a sphere one, and the difference is the whole point:
-/// a caster outside the slab but between it and the sun still shadows into it.
-/// So what is tested is the distance from the slab's axis — the light direction
-/// through its centre — with the along-light extent checked separately against
-/// the depth range `lighting::fit` built the projection with.
-fn casts_into(instance: &Instance, cascade: &lighting::Cascade, direction: render::Vec3) -> bool {
+/// A **prism** test, not a sphere one, and the extrusion is the whole point: a
+/// caster outside the slab but between it and the sun still shadows into it. So
+/// the along-light extent is checked separately, against the depth range
+/// `lighting::fit` built the projection with, and what is left is a footprint
+/// test in the plane perpendicular to the light — where projecting along the sun
+/// moves nothing, so a caster's footprint and its shadow's are the same figure.
+///
+/// That footprint is a **square**, not a disc, and mistaking the two is a real
+/// defect rather than a tightness argument: `fit` builds the projection with
+/// `orthographic_reverse_z(radius, radius, ..)`, so the slab reaches `radius` up
+/// each axis and `radius * sqrt(2)` into its corners. A cull that tested the
+/// distance from the slab's axis therefore dropped every caster whose shadow
+/// landed in a corner — 21% of each cascade's footprint, and since a cascade is
+/// centred on the *view* frustum, a square of missing shadow that slid across
+/// the world as the camera turned (`gg-tools shadow-sweep`).
+fn casts_into(instance: &Instance, cascade: &lighting::Cascade, sun: &lighting::Sun) -> bool {
+    // The diagnostic off switch (`r.shadow_cull 0`): every caster in every
+    // cascade, so an artifact that survives it is the fit's and not a cull's.
+    if cvars::SHADOW_CULL.int() == 0 {
+        return true;
+    }
     let to = instance.offset - cascade.centre;
-    let along = to.dot(direction);
-    let reach = cascade.radius + instance.radius;
+    let along = to.dot(sun.direction);
     // `radius * 2` each way: the eye sits two radii up-light of the centre and
     // the far plane four, so that is exactly the depth the map records.
-    (to - direction * along).length() <= reach && along.abs() <= cascade.radius * 2.0 + reach
+    if along.abs() > cascade.radius * 2.0 + instance.radius {
+        return false;
+    }
+    // Distance from the *square*, per axis: zero inside it, and the shortest way
+    // out of it at a corner. A sphere reaches the slab iff that distance is
+    // under its radius.
+    let across = to - sun.direction * along;
+    let out = |axis: render::Vec3| (across.dot(axis).abs() - cascade.radius).max(0.0);
+    let (x, y) = (out(sun.right), out(sun.above));
+    x * x + y * y <= instance.radius * instance.radius
 }
 
 /// One depth attachment per cascade, or none when nothing casts (§6 M15.3).
@@ -1019,7 +1255,17 @@ struct SceneAttachments {
     /// the *viewport's* extent, never the surface's. See [`view_extent`].
     view_extent: (u32, u32),
     backbuffer: graph::ResourceId,
+    /// What the post pass samples: the single-sample scene image. Under MSAA
+    /// this is the *resolve* target and nothing draws into it directly, which
+    /// is why every later pass names this one either way.
     scene: graph::ResourceId,
+    /// The multisampled colour the forward pass draws into, when there is one.
+    /// Absent at 1× — where `scene` is simply drawn into, and a resolve of an
+    /// image to itself would be a pass copying its own output.
+    scene_ms: Option<graph::ResourceId>,
+    /// The camera's depth, at the same count as `scene_ms`: dynamic rendering
+    /// requires every attachment of a pass to agree, and a 1× depth beside a 4×
+    /// colour is the mismatch that fails pipeline creation rather than a draw.
     depth: graph::ResourceId,
     /// One per cascade, nearest first; empty when nothing casts (§6 M15.3).
     shadows: Vec<graph::ResourceId>,
@@ -1035,19 +1281,28 @@ fn scene_attachments(
     view_extent: (u32, u32),
     sun: Option<lighting::Sun>,
     histogram: bool,
+    samples: Samples,
 ) -> Result<SceneAttachments, RhiError> {
     let backbuffer = frame.backbuffer();
-    let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT)?;
-    let depth = frame.depth_at("scene.depth", view_extent)?;
+    // Always allocated, always single-sample, always what is sampled
+    // downstream: at 1× the forward pass draws into it, above 1× the resolve
+    // lands in it. Everything after the forward pass is then written once.
+    let scene = frame.color_at("scene.color", view_extent, SCENE_FORMAT, Samples::X1)?;
+    let scene_ms = samples
+        .multisampled()
+        .then(|| frame.color_at("scene.color.ms", view_extent, SCENE_FORMAT, samples))
+        .transpose()?;
+    let depth = frame.depth_at("scene.depth", view_extent, samples)?;
     let shadows = shadow_maps(frame, sun)?;
     let shadow_textures = shadows.iter().filter_map(|id| frame.texture(*id)).collect();
     let grid = histogram
-        .then(|| frame.color_at("luminance.grid", luminance::GRID, SCENE_FORMAT))
+        .then(|| frame.color_at("luminance.grid", luminance::GRID, SCENE_FORMAT, Samples::X1))
         .transpose()?;
     Ok(SceneAttachments {
         view_extent,
         backbuffer,
         scene,
+        scene_ms,
         depth,
         shadows,
         shadow_textures,
@@ -1075,13 +1330,14 @@ impl<'a> SceneDraws<'a> {
         scene: &'a ScenePass,
         att: &SceneAttachments,
         post_push: &'a post_shader::PostPush,
+        at: (Variant, Variant),
     ) -> Self {
         SceneDraws {
-            prepass: prepass_draws(pass, scene),
+            prepass: prepass_draws(pass, scene, at),
             shadow: (0..att.shadows.len())
                 .map(|cascade| shadow_draws(pass, scene, cascade))
                 .collect(),
-            forward: forward_draws(pass, scene),
+            forward: forward_draws(pass, scene, at),
             post: [pass.post_draw(post_push)],
             downsample: [pass.downsample_draw(post_push)],
             samples: [att.scene],
@@ -1123,6 +1379,7 @@ fn declare_frame<'a>(
     let mut declared = scene_graph(&SceneFrame {
         backbuffer: att.backbuffer,
         scene: att.scene,
+        scene_ms: att.scene_ms,
         depth: att.depth,
         shadows: &att.shadows,
         clear: plan.clear,
@@ -1178,8 +1435,8 @@ fn write_lighting(
 /// The boxes, and the four pipelines that draw them: prepass, shadow, forward,
 /// post.
 struct BoxPass {
-    prepass: PipelineHandle,
-    forward: PipelineHandle,
+    /// Prepass + forward, per sample count (§6 M21).
+    variants: Variants,
     shadow: PipelineHandle,
     post: PipelineHandle,
     /// The luminance resample: the post pass's vertex stage into a small float
@@ -1332,9 +1589,16 @@ impl BoxPass {
         rhi.upload_buffer(index_buffer, 0, index_bytes)?;
         rhi.flush_uploads()?;
 
+        // 1× eagerly, every other count on first ask. Eagerly because 1× is
+        // what a session that never opens a video menu draws for its whole
+        // life, and building it in the first *frame* instead would move four
+        // pipeline creations inside §6 M9's load-to-first-frame budget — which
+        // is exactly where GPU-AV's instrumented creation cost blew it.
+        let mut variants = Variants::default();
+        variants.get(rhi, Samples::X1, |s| [prepass_desc(s), forward_desc(s)])?;
+
         Ok(BoxPass {
-            prepass: rhi.create_pipeline(&prepass_desc())?,
-            forward: rhi.create_pipeline(&forward_desc())?,
+            variants,
             shadow: rhi.create_pipeline(&shadow_desc())?,
             post: rhi.create_pipeline(&post_desc())?,
             downsample: rhi.create_pipeline(&downsample_desc())?,
@@ -1363,10 +1627,8 @@ impl BoxPass {
     /// boxes that can cast *into* that cascade (§6 M15.3).
     ///
     /// The cull is what keeps four cascades from being four times the shadow
-    /// pass. It is a cylinder test, not a sphere one: a caster outside the slab
-    /// but between it and the sun still shadows into it, so what is tested is
-    /// the distance from the slab's axis, with the along-light extent checked
-    /// separately against the depth range `Cascade` was built with.
+    /// pass, and it is [`casts_into`]'s prism rather than a sphere — a caster
+    /// outside the slab but between it and the sun still shadows into it.
     fn build_shadow(
         &mut self,
         extracted: &Extracted,
@@ -1377,14 +1639,16 @@ impl BoxPass {
         let cascades = sun.map_or(&[][..], |s| s.cascades());
         self.shadow_pushes.resize_with(cascades.len(), Vec::new);
         self.shadow_pushes.truncate(cascades.len());
+        // Only reachable with cascades to walk, which is the same `Some` the
+        // slice came out of — so the loop below never runs without one.
+        let Some(sun) = sun else { return };
         for (index, (pushes, cascade)) in self.shadow_pushes.iter_mut().zip(cascades).enumerate() {
-            let direction = sun.map_or(render::Vec3::NEG_Y, |s| s.direction);
             pushes.clear();
             pushes.extend(
                 extracted
                     .instances
                     .iter()
-                    .filter(|instance| casts_into(instance, cascade, direction))
+                    .filter(|instance| casts_into(instance, cascade, sun))
                     .map(|instance| {
                         let mut push = push_for(address, frame, instance);
                         push.cascade = index as u32;
@@ -1401,6 +1665,12 @@ impl BoxPass {
             .get(cascade)
             .map_or(&[][..], Vec::as_slice);
         self.draws_of(self.shadow, pushes)
+    }
+
+    /// The prepass + forward pair for `samples`, built on first ask (§6 M21).
+    fn variant(&mut self, rhi: &mut impl GpuHost, samples: Samples) -> Result<Variant, RhiError> {
+        self.variants
+            .get(rhi, samples, |s| [prepass_desc(s), forward_desc(s)])
     }
 
     /// The frame's boxes, drawn by `pipeline`.
@@ -1430,21 +1700,34 @@ impl BoxPass {
             .collect()
     }
 
-    /// Where the post pass reads the scene attachment from, and what exposure it
-    /// applies (§6 M11).
+    /// Where the post pass reads the scene attachment from, what exposure it
+    /// applies (§6 M11), and whether it antialiases on the way out (§6 M21).
+    ///
+    /// The sampler is part of the mode, not a second knob: resolving one texel
+    /// per pixel must not filter (a blur nobody asked for), and FXAA's corner
+    /// taps sit between texels and are *meant* to be the mean of four.
     fn post_push(
         &self,
         frame: &graph::Frame<'_>,
         scene: graph::ResourceId,
+        extent: (u32, u32),
+        aa: bool,
     ) -> Result<post_shader::PostPush, RhiError> {
         let index = frame.texture(scene).ok_or_else(|| {
             RhiError::Loader("the scene attachment has no bindless slot to sample".into())
         })?;
+        let sampler = match aa {
+            true => Sampler::LinearClamp,
+            false => Sampler::NearestClamp,
+        };
         Ok(post_shader::PostPush::new(
             index.get(),
-            Sampler::NearestClamp.index(),
+            sampler.index(),
             cvars::EXPOSURE.float() as f32,
-            0,
+            u32::from(aa),
+            // The *source's* texel, so a viewport smaller than the window (the
+            // editor's game pane) still steps one scene texel per tap.
+            [1.0 / extent.0.max(1) as f32, 1.0 / extent.1.max(1) as f32],
         ))
     }
 
@@ -1475,8 +1758,7 @@ impl BoxPass {
     /// Release the pipelines and both buffers.
     fn destroy(self, rhi: &mut impl GpuHost) -> Result<(), RhiError> {
         rhi.destroy_pipeline(self.downsample)?;
-        rhi.destroy_pipeline(self.prepass)?;
-        rhi.destroy_pipeline(self.forward)?;
+        self.variants.destroy(rhi)?;
         rhi.destroy_pipeline(self.shadow)?;
         rhi.destroy_pipeline(self.post)?;
         rhi.destroy_buffer(self.vertices)?;
@@ -1503,6 +1785,7 @@ fn luminance_passes<'a>(
                 // texel, so a clear would be a target's worth of thrown-away
                 // writes.
                 color: Some((grid, Load::Keep)),
+                resolve: None,
                 depth: None,
                 viewport: None,
                 samples,
@@ -1522,6 +1805,7 @@ pub fn ui_pass<'a>(backbuffer: graph::ResourceId, draws: &'a [DrawSpec<'a>]) -> 
         name: "ui",
         body: Body::Draw {
             color: Some((backbuffer, Load::Keep)),
+            resolve: None,
             depth: None,
             // The whole target, never the scene's viewport: the panels that
             // frame a viewport are exactly the pixels outside it (§6 M15).
@@ -1542,8 +1826,12 @@ pub fn ui_pass<'a>(backbuffer: graph::ResourceId, draws: &'a [DrawSpec<'a>]) -> 
 pub struct SceneFrame<'a> {
     /// Where the frame lands.
     pub backbuffer: graph::ResourceId,
-    /// The HDR scene attachment.
+    /// The single-sample HDR scene attachment — what the post pass reads, and
+    /// what the forward pass writes when `scene_ms` is absent.
     pub scene: graph::ResourceId,
+    /// The multisampled colour the forward pass draws into instead, resolving
+    /// into `scene` as the pass ends (§6 M21). `None` is 1× and no resolve.
+    pub scene_ms: Option<graph::ResourceId>,
     /// The camera's depth buffer.
     pub depth: graph::ResourceId,
     /// One depth buffer per cascade, nearest first, empty when nothing casts
@@ -1598,6 +1886,7 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
             name,
             body: Body::Draw {
                 color: None,
+                resolve: None,
                 // Stored, unlike the prepass's: the forward pass samples it.
                 depth: Some((*shadow, DepthUse::WriteStore)),
                 viewport: None,
@@ -1610,6 +1899,7 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
         name: "depth-prepass",
         body: Body::Draw {
             color: None,
+            resolve: None,
             depth: Some((frame.depth, DepthUse::WriteStore)),
             // Every pass up to the post owns an attachment sized to the
             // viewport already, so all three draw over the whole of theirs.
@@ -1621,7 +1911,14 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
     declared.push(Declared {
         name: "forward-opaque",
         body: Body::Draw {
-            color: Some((frame.scene, Load::Clear(frame.clear))),
+            // The multisampled attachment when there is one, and `scene` as its
+            // resolve — so what the post pass samples is one image under either
+            // mode and no pass downstream knows which it got.
+            color: Some((
+                frame.scene_ms.unwrap_or(frame.scene),
+                Load::Clear(frame.clear),
+            )),
+            resolve: frame.scene_ms.map(|_| frame.scene),
             depth: Some((frame.depth, DepthUse::Test)),
             viewport: None,
             // The shadow map is read through the bindless array like any
@@ -1648,6 +1945,9 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
                     None => Load::Keep,
                 },
             )),
+            // The post pass is single-sample by construction: what it reads is
+            // already resolved, and what it writes is the screen.
+            resolve: None,
             depth: None,
             viewport: frame.viewport,
             samples: frame.samples,
@@ -1678,7 +1978,7 @@ const LETTERBOX: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// The depth prepass: position only, no colour, depth stored for the forward
 /// pass to test against.
-fn prepass_desc() -> PipelineDesc<'static> {
+fn prepass_desc(samples: Samples) -> PipelineDesc<'static> {
     PipelineDesc {
         name: "ugly.prepass",
         vs_spirv: shader::VS_DEPTH_SPIRV,
@@ -1689,6 +1989,7 @@ fn prepass_desc() -> PipelineDesc<'static> {
         color: ColorTarget::None,
         blend: Blend::Off,
         depth: DepthMode::Write,
+        samples,
         depth_bias: false,
     }
 }
@@ -1697,7 +1998,7 @@ fn prepass_desc() -> PipelineDesc<'static> {
 /// post pass is what reaches the screen. Depth is tested, not written — the
 /// prepass placed every fragment already, and reverse-Z's `GREATER_OR_EQUAL`
 /// lets the same geometry re-draw exactly where it landed.
-fn forward_desc() -> PipelineDesc<'static> {
+fn forward_desc(samples: Samples) -> PipelineDesc<'static> {
     PipelineDesc {
         name: "ugly.forward",
         vs_spirv: shader::VS_MAIN_SPIRV,
@@ -1708,6 +2009,7 @@ fn forward_desc() -> PipelineDesc<'static> {
         color: ColorTarget::Format(SCENE_FORMAT),
         blend: Blend::Off,
         depth: DepthMode::TestOnly,
+        samples,
         depth_bias: false,
     }
 }
@@ -1725,6 +2027,7 @@ fn shadow_desc() -> PipelineDesc<'static> {
         color: ColorTarget::None,
         blend: Blend::Off,
         depth: DepthMode::Write,
+        samples: Samples::X1,
         depth_bias: false,
     }
 }
@@ -1741,6 +2044,7 @@ fn post_desc() -> PipelineDesc<'static> {
         color: ColorTarget::Backbuffer,
         blend: Blend::Off,
         depth: DepthMode::Off,
+        samples: Samples::X1,
         depth_bias: false,
     }
 }
@@ -1759,6 +2063,7 @@ fn downsample_desc() -> PipelineDesc<'static> {
         color: ColorTarget::Format(SCENE_FORMAT),
         blend: Blend::Off,
         depth: DepthMode::Off,
+        samples: Samples::X1,
         depth_bias: false,
     }
 }
@@ -2263,6 +2568,94 @@ mod tests {
             renderer.shutdown().clean(),
             "no leaks, no validation messages"
         );
+    }
+
+    /// A caster whose shadow lands in a cascade's *corner* is kept.
+    ///
+    /// The slab is `orthographic_reverse_z(radius, radius, ..)` — a square, which
+    /// reaches `radius * sqrt(2)` diagonally. A cull measuring the distance from
+    /// the slab's axis therefore threw away every caster in the outer 21% of each
+    /// cascade's footprint, and because a cascade is fitted to the *view*
+    /// frustum, that hole slid across the world as the camera turned. Both
+    /// directions are asserted: a cull widened until it forgives everything would
+    /// pass the first half alone.
+    #[test]
+    fn a_caster_over_a_cascades_corner_still_casts_into_it() {
+        use gg_ecs::World;
+        use gg_ecs::boundary::Light;
+        use gg_math::sim;
+
+        const EXTENT: (u32, u32) = (1280, 720);
+        let mut world = World::new();
+        world.register::<Light>().unwrap();
+        let e = world.spawn();
+        // Straight down, so the slab's two axes are horizontal and a corner is
+        // reachable by walking along them rather than by solving for one.
+        world
+            .insert(
+                e,
+                Light::sun(sim::Vec3::new(0.0, -1.0, 0.0), 0x00ff_ffff, 1.0),
+            )
+            .unwrap();
+        let mut extracted = Extracted::default();
+        extracted
+            .transforms::<gg_ecs::boundary::Renderable>(
+                &world,
+                sim::DVec3::ZERO,
+                Frustum::UNBOUNDED,
+            )
+            .unwrap();
+        extracted.append_lights(&world).unwrap();
+
+        let view = View::default();
+        let sun = lighting::Sun::of(&extracted, &view, EXTENT).expect("a caster");
+        let cascade = sun.cascades()[0];
+        let r = cascade.radius;
+
+        // Small enough that its own radius cannot be what saves it — the claim
+        // is about where the slab reaches, not about a generous bound.
+        let at = |offset: render::Vec3| Instance {
+            entity: gg_ecs::Entity::from_bits(1),
+            offset,
+            rotation: render::Quat::IDENTITY,
+            half_extent: render::Vec3::splat(0.01),
+            color: 0,
+            asset: 0,
+            radius: 0.02,
+        };
+        // 0.9 of the way out along both axes: inside the square, and 1.27 radii
+        // from the axis — which is what the old cylinder rejected.
+        let corner = cascade.centre + (sun.right + sun.above) * r * 0.9;
+        assert!(
+            (corner - cascade.centre).length() > r,
+            "the corner has to be outside the inscribed sphere or this proves nothing"
+        );
+        assert!(
+            casts_into(&at(corner), &cascade, &sun),
+            "a caster over the slab's corner casts into it"
+        );
+        // And the control, one axis past the edge: still inside the *sphere* of
+        // radius r*sqrt(2), so a cull that merely grew its radius would keep it.
+        let outside = cascade.centre + sun.right * r * 1.3;
+        assert!(
+            (outside - cascade.centre).length() < r * std::f32::consts::SQRT_2,
+            "the control must sit inside the circumscribed sphere to be a control"
+        );
+        assert!(
+            !casts_into(&at(outside), &cascade, &sun),
+            "and one past the slab's edge does not"
+        );
+
+        // The diagnostic switch, gated where the thing it switches lives — a
+        // knob a session turns to tell a cull's artifact from the fit's is worth
+        // nothing if it silently does not switch. Safe to set: nextest runs each
+        // test in its own process, so this CVar write reaches no other test.
+        cvars::SHADOW_CULL.set_int(0);
+        assert!(
+            casts_into(&at(outside), &cascade, &sun),
+            "`r.shadow_cull 0` keeps every caster in every cascade"
+        );
+        cvars::SHADOW_CULL.set_int(1);
     }
 
     /// A box two metres over a floor, a sun straight down, and the patch of

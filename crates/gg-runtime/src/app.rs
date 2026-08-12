@@ -99,6 +99,10 @@ pub struct App {
     /// re-resolved at every swap for the reason [`bind`] gives. `None` is a
     /// game that declared none: its UI draws and cannot be clicked.
     ui_binding: Option<Binding>,
+    /// Whether the map binds raw device motion — "this game does mouse-look",
+    /// which is what decides the pointer is the game's to hold at all (§6 M21).
+    /// Re-read at every swap beside `ui_binding`, and for the same reason.
+    looks: bool,
     /// The frame's UI geometry, game first and instruments over the top. One
     /// buffer because [`Renderer::frame`] takes one slice; cleared and refilled,
     /// so it allocates once (§6 M13).
@@ -192,6 +196,8 @@ impl App {
         let (verbs, extra) = unsafe { verbs_for(&lib, args.editor) };
         let input = bind(&format!("{bindings}{extra}"), &drive, verbs)?;
         let ui_binding = binding(&verbs);
+        // Before the struct literal takes `input`.
+        let input_looks = input.looks();
         info!(
             path = %lib.path().display(),
             components = declared,
@@ -232,6 +238,7 @@ impl App {
             ui: gg_ui::Ui::new()?,
             audio: gg_audio::Audio::device_unless_headless()?,
             cursor: Cursor::new(args.editor || ui_binding.is_some()),
+            looks: input_looks,
             ui_binding,
             #[cfg(feature = "editor")]
             ui_atlas_rev: 0,
@@ -783,6 +790,7 @@ impl App {
             self.audio.forget();
             report
         };
+        self.looks = input.looks();
         self.input = input;
         // Same move, same reason: an edit that appends a verb moves the id
         // space the UI's four names resolved to (§4.7). An edit that *deletes*
@@ -959,6 +967,25 @@ fn journal(args: &crate::Args, game: &str) -> gg_agent::Journal {
         journal.recording(path);
     }
     journal
+}
+
+/// Whether a held pointer goes back to the operator this tick (§6 M15.1).
+///
+/// `running` is the **editor's** transport, so `Some(false)` — a scene stopped
+/// under an open editor — is the one case that hands the mouse back. `None` is a
+/// run with no editor, which has nowhere to hand a pointer *to*; that is the
+/// same rule [`App::release_pointer`] states about Escape, and it is a rule
+/// rather than a shortcut because a plain game is *supposed* to hold the mouse
+/// for the life of the session.
+///
+/// Its own function because reading `None` as "stopped" is what handed every
+/// mouse-look game its pointer back on tick 0 of any build carrying the editor
+/// feature — which is `tier-dev`, so every run anyone plays. Raw device motion
+/// arrives grabbed or not, so looking still worked perfectly and the only
+/// symptom was the OS arrow sitting on top of the game for the whole session.
+#[cfg(feature = "editor")]
+fn hands_back(held: bool, running: Option<bool>) -> bool {
+    held && running.is_some_and(|running| !running)
 }
 
 /// The OS cursor, and which of the two things a mouse does is happening (§6
@@ -1393,7 +1420,14 @@ impl Stages for App {
     }
 
     fn quitting(&self) -> bool {
-        self.rejuvenate.pending()
+        // A menu's quit button (§6 M21), beside rejuvenation's staged successor.
+        // Read off the UI stage's cached `Prefs` rather than the world: this
+        // takes `&self` and a query does not.
+        self.rejuvenate.pending() || self.ui.prefs().closing()
+    }
+
+    fn ticks_due(&mut self, due: gg_core::Due) {
+        self.input.frame_covered(due.covered);
     }
 
     fn sim_tick(&mut self, tick: u64) -> anyhow::Result<()> {
@@ -1404,6 +1438,19 @@ impl Stages for App {
         #[cfg(all(feature = "fp-assert", debug_assertions))]
         gg_math::fpenv::assert_fp_env();
         self.next_tick = tick + 1;
+        // What the frames between this tick and the next blend away from (§4.1).
+        // At the top, before anything this tick writes — including a `--play`
+        // edge and the editor's own edits — so it is exactly the world the
+        // previous tick left, whatever path the rest of this one takes.
+        //
+        // Unconditional, and cheap enough to be: it is two reads over the same
+        // rows extract already walks, and a locked pace pays for a table it then
+        // never blends with (`alpha` is zero throughout, §4.1). Making it
+        // conditional would put the render pace inside the sim tick, which is
+        // the one place §1.4 says it may not be.
+        self.extracted.capture::<Renderable>(&self.world)?;
+        self.extracted.capture_models::<Model>(&self.world)?;
+        self.extracted.capture_eye(&self.world)?;
         // A second's cadence, not a tick's: the record's readers poll on a human
         // clock, and a file write inside the sim loop is jitter charged to every
         // frame to keep a number nobody reads that fast. Tick zero publishes on
@@ -1449,8 +1496,9 @@ impl Stages for App {
         // with the mouse held: the arrow would have stayed hidden over a scene
         // nothing advances, with Escape — which a script cannot press — as the
         // only way out.
+        //
         #[cfg(feature = "editor")]
-        if self.cursor.held && mouse.is_none_or(|(play, _)| !play.running()) {
+        if hands_back(self.cursor.held, mouse.map(|(play, _)| play.running())) {
             self.cursor.held = false;
             info!(tick, "editor: pointer handed back — the scene is stopped");
         }
@@ -1546,6 +1594,26 @@ impl Stages for App {
         let game_ui = if dead { UiTick::default() } else { ui_tick };
         let fit = self.game_fit();
         self.ui.frame(&mut self.world, &game_ui, fit);
+        // Mouse-look and a menu are one physical mouse (§4.9). A game that binds
+        // raw device motion holds it — that binding is what tells a camera from
+        // a cursor — and gives it back for exactly as long as its UI has
+        // something to point at. Both halves are world state, so a replayed
+        // session changes hands on the same tick with no window anywhere (§4.7),
+        // and a game with no menu never reaches the second half at all. Left to
+        // the editor's own take/hand-back rules while it is hosting.
+        if self.looks && !self.editing() {
+            let held = !self.ui.wants_pointer();
+            if self.cursor.held && !held {
+                // Where `Window::set_pointer` warped it when the game took it,
+                // which is the only thing that knows where a locked cursor is:
+                // without this the software arrow spends its first frames in
+                // the top-left corner and jumps under the OS one on the first
+                // motion event.
+                let (w, h) = self.surface();
+                self.cursor.at = Some((w as f32 / 2.0, h as f32 / 2.0));
+            }
+            self.cursor.held = held;
+        }
         // The audio tick (§6 M18 item 2). After the UI so a cue a game fires in
         // response to a click lands in the same tick as the click, and *outside*
         // the hash entirely — it takes `&World` and the compiler is what proves
@@ -1580,11 +1648,12 @@ impl Stages for App {
         Ok(())
     }
 
-    /// `alpha` is unread: interpolating would need last tick's transforms kept
-    /// beside this tick's, and the render protocol (§4.5 v0) carries one pose
-    /// per entity. The loop hands it over anyway so the day a second buffer
-    /// exists, the signature does not move.
-    fn extract(&mut self, _alpha: f32) -> anyhow::Result<()> {
+    /// `alpha` is how far past the last tick this frame landed (§4.1), and what
+    /// it buys is that a 60 Hz sim does not present each pose for two refreshes
+    /// and then three. `sim_tick` captured the far side of the interval; this
+    /// end of it is the world as it stands. Zero under a locked pace, so a
+    /// replay, a golden run and every headless tier extract the tick exactly.
+    fn extract(&mut self, alpha: f32) -> anyhow::Result<()> {
         // Restated every frame rather than on `Resized`: the pane's pixels move
         // with the window *and* with a seam the operator drags, and one
         // assignment ahead of the two stages that read it is cheaper than an
@@ -1598,7 +1667,11 @@ impl Stages for App {
         let Some(renderer) = &self.gpu else {
             return Ok(());
         };
-        let eye = Eye::of(&self.world)?;
+        self.extracted.interpolate(alpha);
+        // Blended before the editor's substitution below, never after: what the
+        // two ticks bracket is the *game's* eye, and the editor's camera is host
+        // state moved by a tick of its own.
+        let eye = self.extracted.eye(Eye::of(&self.world)?);
         // The editor's own camera while the scene is stopped (§6 M15.2 item 2):
         // host state, in no archetype and in no save, so what the operator flies
         // moves nothing the canonical hash can see. `game` back in every other
@@ -1614,6 +1687,18 @@ impl Stages for App {
             // editor camera latched from an ortho game carries the game's flat
             // view with it — which is what makes authoring in-plane.
             ortho: eye.ortho,
+            // The player's ask beats the host's `r.aa`/`r.msaa`, and only where
+            // they made one: both are `None` for a game that declares no video
+            // menu, which is every game before this one (§6 M21). The count is
+            // still a *request* — the renderer cuts it to what the device does
+            // and logs the cut.
+            aa: self.ui.prefs().antialias().unwrap_or(View::default().aa),
+            samples: self
+                .ui
+                .prefs()
+                .samples()
+                .and_then(gg_render::Samples::from_count)
+                .unwrap_or(View::default().samples),
             ..View::default()
         };
         // The frustum crosses from the renderer, which owns the projection, to
@@ -1623,17 +1708,26 @@ impl Stages for App {
         // `view_extent` and not `extent`: with the editor open the picture is
         // composed for the viewport panel, and a frustum built from the whole
         // window would cull what the panel can still see.
-        let frustum = self.view.frustum(renderer.view_extent());
+        let extent = renderer.view_extent();
         self.extracted
-            .transforms::<Renderable>(&self.world, eye.position, frustum)?;
+            .clear(eye.position, self.view.frustum(extent));
+        // The lights the game declared (§6 M11), and *before* the instances now
+        // rather than after: the sun is what the caster sweep below is aimed
+        // along, and a directional light is culled by nothing, so there is
+        // nothing it needs settled first. A game with no lights renders unlit —
+        // dim and obviously so, which is the same rule a missing `Eye` follows.
+        self.extracted.append_lights(&self.world)?;
+        // A caster does not have to be on screen. An object just past the edge
+        // still lays its shadow across what is, and culling casters by the view
+        // is a shadow that vanishes while its own is still in frame — widened
+        // up-light by exactly the depth the cascades record (§6 M11).
+        self.extracted.cast_shadows(self.view.caster_reach(extent));
+        self.extracted.append::<Renderable>(&self.world)?;
         // Pack content, expanded through whatever the renderer has mapped. A
         // run with no `--pack` expands nothing and this is a query over an
         // empty archetype (§4.6).
         self.extracted
             .append_models::<Model>(&self.world, renderer.scenes())?;
-        // The lights the game declared (§6 M11). A game with none renders unlit
-        // — dim and obviously so, which is the same rule a missing `Eye` follows.
-        self.extracted.append_lights(&self.world)?;
         Ok(())
     }
 

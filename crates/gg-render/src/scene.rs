@@ -42,7 +42,7 @@ use gg_math::render;
 use gg_rhi::{
     Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthMode, DeviceAddress, DrawSpec,
     FRAMES_IN_FLIGHT, ImageDesc, ImageFormat, ImageHandle, ImageUse, Indirect, IndirectCommand,
-    PipelineDesc, PipelineHandle, RhiError, Sampler, TextureIndex,
+    PipelineDesc, PipelineHandle, RhiError, Sampler, Samples, TextureIndex,
 };
 
 use crate::content::Content;
@@ -116,8 +116,8 @@ struct Batch {
 
 /// The pack pass: two pipelines, one fallback texel, this frame's draws.
 pub(crate) struct ScenePass {
-    prepass: PipelineHandle,
-    forward: PipelineHandle,
+    /// Prepass + forward, per sample count (§6 M21).
+    variants: crate::Variants,
     shadow: PipelineHandle,
     white: ImageHandle,
     white_index: TextureIndex,
@@ -157,6 +157,7 @@ impl ScenePass {
             format: ImageFormat::Rgba8Srgb,
             usage: ImageUse::Sampled,
             mip_levels: 1,
+            samples: Samples::X1,
         })?;
         rhi.upload_image(white, 0, &[0xff; 4])?;
         let flat = rhi.create_image(&ImageDesc {
@@ -166,6 +167,7 @@ impl ScenePass {
             format: ImageFormat::Rgba8Unorm,
             usage: ImageUse::Sampled,
             mip_levels: 1,
+            samples: Samples::X1,
         })?;
         // (0.5, 0.5) decodes to a tangent-space (0, 0, 1) — the flat normal.
         rhi.upload_image(flat, 0, &[0x80, 0x80, 0xff, 0xff])?;
@@ -180,9 +182,12 @@ impl ScenePass {
             size: COMMAND_SLOT_BYTES * FRAMES_IN_FLIGHT,
             kind: BufferKind::Indirect,
         })?;
+        // 1× eagerly, every other count on first ask — see `BoxPass::new`.
+        let mut variants = crate::Variants::default();
+        variants.get(rhi, Samples::X1, |s| [prepass_desc(s), forward_desc(s)])?;
+
         Ok(ScenePass {
-            prepass: rhi.create_pipeline(&prepass_desc())?,
-            forward: rhi.create_pipeline(&forward_desc())?,
+            variants,
             shadow: rhi.create_pipeline(&shadow_desc())?,
             white,
             white_index: rhi.register_texture(white)?,
@@ -443,20 +448,23 @@ impl ScenePass {
         (self.staged.len(), self.batches.len())
     }
 
-    /// The depth-prepass pipeline.
-    pub(crate) fn prepass(&self) -> PipelineHandle {
-        self.prepass
-    }
-
-    /// The forward pipeline.
-    pub(crate) fn forward(&self) -> PipelineHandle {
-        self.forward
+    /// The prepass + forward pair for `samples`, built on first ask (§6 M21).
+    ///
+    /// # Errors
+    ///
+    /// Pipeline creation — including a device that does not do this count.
+    pub(crate) fn variant(
+        &mut self,
+        rhi: &mut impl GpuHost,
+        samples: Samples,
+    ) -> Result<crate::Variant, RhiError> {
+        self.variants
+            .get(rhi, samples, |s| [prepass_desc(s), forward_desc(s)])
     }
 
     /// Release the pipelines, both fallback texels and the per-frame streams.
     pub(crate) fn destroy(self, rhi: &mut impl GpuHost) -> Result<(), RhiError> {
-        rhi.destroy_pipeline(self.prepass)?;
-        rhi.destroy_pipeline(self.forward)?;
+        self.variants.destroy(rhi)?;
         rhi.destroy_pipeline(self.shadow)?;
         rhi.destroy_buffer(self.instances)?;
         rhi.destroy_buffer(self.commands)?;
@@ -491,7 +499,7 @@ fn sort_key(mesh: u64, offset: render::Vec3) -> u64 {
 }
 
 /// Position only, depth stored — see `ugly.slang` for why it shares the block.
-fn prepass_desc() -> PipelineDesc<'static> {
+fn prepass_desc(samples: Samples) -> PipelineDesc<'static> {
     PipelineDesc {
         name: "scene.prepass",
         vs_spirv: shader::VS_DEPTH_SPIRV,
@@ -502,13 +510,14 @@ fn prepass_desc() -> PipelineDesc<'static> {
         color: ColorTarget::None,
         blend: Blend::Off,
         depth: DepthMode::Write,
+        samples,
         depth_bias: false,
     }
 }
 
 /// The forward pass into the scene attachment, depth tested against the
 /// prepass's result — the same arrangement `ugly.forward` uses.
-fn forward_desc() -> PipelineDesc<'static> {
+fn forward_desc(samples: Samples) -> PipelineDesc<'static> {
     PipelineDesc {
         name: "scene.forward",
         vs_spirv: shader::VS_MAIN_SPIRV,
@@ -519,6 +528,7 @@ fn forward_desc() -> PipelineDesc<'static> {
         color: ColorTarget::Format(SCENE_FORMAT),
         blend: Blend::Off,
         depth: DepthMode::TestOnly,
+        samples,
         depth_bias: false,
     }
 }
@@ -535,41 +545,41 @@ impl ScenePass {
         let (vs_main, fs_main) = crate::hot::pair(module, "vs_main", "fs_main", push)?;
         let (vs_depth, fs_depth) = crate::hot::pair(module, "vs_depth", "fs_depth", push)?;
         let (vs_shadow, _) = crate::hot::pair(module, "vs_shadow", "fs_depth", push)?;
-        crate::hot::swap_all(
-            rhi,
-            &mut [
-                (
-                    &mut self.prepass,
-                    PipelineDesc {
-                        vs_spirv: &vs_depth.spirv,
-                        vs_entry: &vs_depth.spirv_entry,
-                        fs_spirv: &fs_depth.spirv,
-                        fs_entry: &fs_depth.spirv_entry,
-                        ..prepass_desc()
-                    },
-                ),
-                (
-                    &mut self.forward,
-                    PipelineDesc {
-                        vs_spirv: &vs_main.spirv,
-                        vs_entry: &vs_main.spirv_entry,
-                        fs_spirv: &fs_main.spirv,
-                        fs_entry: &fs_main.spirv_entry,
-                        ..forward_desc()
-                    },
-                ),
-                (
-                    &mut self.shadow,
-                    PipelineDesc {
-                        vs_spirv: &vs_shadow.spirv,
-                        vs_entry: &vs_shadow.spirv_entry,
-                        fs_spirv: &fs_depth.spirv,
-                        fs_entry: &fs_depth.spirv_entry,
-                        ..shadow_desc()
-                    },
-                ),
-            ],
-        )
+        // Every live count, for the reason `BoxPass::swap_ugly` gives.
+        let mut swaps: Vec<(&mut PipelineHandle, PipelineDesc<'_>)> = Vec::new();
+        for (samples, variant) in self.variants.each() {
+            swaps.push((
+                &mut variant.prepass,
+                PipelineDesc {
+                    vs_spirv: &vs_depth.spirv,
+                    vs_entry: &vs_depth.spirv_entry,
+                    fs_spirv: &fs_depth.spirv,
+                    fs_entry: &fs_depth.spirv_entry,
+                    ..prepass_desc(samples)
+                },
+            ));
+            swaps.push((
+                &mut variant.forward,
+                PipelineDesc {
+                    vs_spirv: &vs_main.spirv,
+                    vs_entry: &vs_main.spirv_entry,
+                    fs_spirv: &fs_main.spirv,
+                    fs_entry: &fs_main.spirv_entry,
+                    ..forward_desc(samples)
+                },
+            ));
+        }
+        swaps.push((
+            &mut self.shadow,
+            PipelineDesc {
+                vs_spirv: &vs_shadow.spirv,
+                vs_entry: &vs_shadow.spirv_entry,
+                fs_spirv: &fs_depth.spirv,
+                fs_entry: &fs_depth.spirv_entry,
+                ..shadow_desc()
+            },
+        ));
+        crate::hot::swap_all(rhi, &mut swaps)
     }
 }
 
@@ -587,6 +597,7 @@ fn shadow_desc() -> PipelineDesc<'static> {
         color: ColorTarget::None,
         blend: Blend::Off,
         depth: DepthMode::Write,
+        samples: Samples::X1,
         depth_bias: false,
     }
 }

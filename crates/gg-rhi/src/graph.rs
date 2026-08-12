@@ -158,6 +158,15 @@ pub struct ColorAttachment {
     /// Clear to this (linear values; an sRGB target encodes) or load what is
     /// there.
     pub clear: Option<[f32; 4]>,
+    /// Where a multisampled `target` is averaged down to, at the end of the
+    /// pass. Present exactly when `target` has more than one sample.
+    ///
+    /// Part of the attachment rather than a pass of its own: dynamic rendering
+    /// resolves *as* the render ends, so there is no second pass to order, no
+    /// barrier between the two, and — the reason it matters — the multisample
+    /// attachment is then never stored at all. What the next pass reads is this
+    /// one image, so the graph derives one dependency and not three.
+    pub resolve: Option<Target>,
 }
 
 /// Where in its attachments a pass draws, in pixels from the top-left — the
@@ -323,7 +332,7 @@ enum ResolvedTransition {
 /// What a render pass draws into, resolved. A struct because the three travel
 /// together everywhere and the recorder takes them all at once.
 struct Attachments {
-    color: Option<(Ref, Option<[f32; 4]>)>,
+    color: Option<(Ref, Option<[f32; 4]>, Option<Ref>)>,
     depth: Option<(Ref, Option<f32>, bool, bool)>,
     viewport: Option<Viewport>,
 }
@@ -385,7 +394,11 @@ pub(crate) fn resolve<'a>(
                         into: Attachments {
                             color: color
                                 .map(|c| {
-                                    Ok::<_, RhiError>((resolve_image(gpu, c.target)?, c.clear))
+                                    Ok::<_, RhiError>((
+                                        resolve_image(gpu, c.target)?,
+                                        c.clear,
+                                        c.resolve.map(|r| resolve_image(gpu, r)).transpose()?,
+                                    ))
                                 })
                                 .transpose()?,
                             depth: depth
@@ -639,24 +652,39 @@ unsafe fn render(
     draws: &[ResolvedDraw<'_>],
     backbuffer: &Bound,
 ) {
-    let color = into.color.map(|(r, clear)| (r.get(backbuffer), clear));
+    let color = into
+        .color
+        .map(|(r, clear, resolve)| (r.get(backbuffer), clear, resolve.map(|r| r.get(backbuffer))));
     let depth = into
         .depth
         .map(|(r, clear, store, read_only)| (r.get(backbuffer), clear, store, read_only));
     // The render area is the color attachment's, or the depth one's when a
     // prepass has no color. resolve() refused the pass that has neither.
     let extent = color
-        .map(|(b, _)| b.extent)
+        .map(|(b, ..)| b.extent)
         .or(depth.map(|(b, ..)| b.extent))
         .unwrap_or((1, 1));
 
     let color_attachments: Vec<vk::RenderingAttachmentInfo<'_>> = color
         .iter()
-        .map(|(bound, clear)| {
+        .map(|(bound, clear, resolve)| {
             let info = vk::RenderingAttachmentInfo::default()
                 .image_view(bound.view)
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .store_op(vk::AttachmentStoreOp::STORE);
+                // A resolved attachment is never stored: the averaged image is
+                // the pass's whole output, and storing the samples beside it
+                // would write N× the bytes for something nothing reads.
+                .store_op(match resolve {
+                    Some(_) => vk::AttachmentStoreOp::DONT_CARE,
+                    None => vk::AttachmentStoreOp::STORE,
+                });
+            let info = match resolve {
+                Some(into) => info
+                    .resolve_mode(vk::ResolveModeFlags::AVERAGE)
+                    .resolve_image_view(into.view)
+                    .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+                None => info,
+            };
             match clear {
                 Some(c) => info
                     .load_op(vk::AttachmentLoadOp::CLEAR)

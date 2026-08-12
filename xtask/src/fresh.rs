@@ -14,10 +14,19 @@
 //! disprove it.
 //!
 //! It runs the `--push` tier rather than `--nightly`: from a cold target dir
-//! the nightly tier's fat-LTO dist builds and golden suite would put the weekly
-//! run into hours, and everything the *clone* can get wrong — a missing
-//! generated file, an uncommitted fixture, a path that only resolves because
-//! this machine has it — fails inside `--push` already.
+//! the nightly tier's fat-LTO dist builds would put the weekly run into hours,
+//! and everything the *clone* can get wrong — a missing generated file, an
+//! uncommitted fixture, a path that only resolves because this machine has it —
+//! fails inside `--push` already.
+//!
+//! Since the golden suite joined `--push` (§6 M20 item 11) this gate downloads
+//! the pinned lavapipe into the clone's own cache and renders the 16 scenes,
+//! adding a few minutes and a network fetch. That is the gate getting *stronger*
+//! rather than a cost to work around: §9's recovery bar reads "the Vulkan SDK,
+//! Rust, and a network connection, with every fetch pinned", and until now
+//! nothing exercised the fetch half of that sentence from a cold machine. The
+//! SHA-256 pin means the network can still change nothing — it can only be
+//! absent, which is a red weekly with an obvious cause.
 
 use crate::util::{cargo, run as exec, run_capture, workspace_root};
 

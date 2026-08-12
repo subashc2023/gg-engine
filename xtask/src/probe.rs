@@ -232,6 +232,20 @@ fn probe_device(system: bool) -> anyhow::Result<()> {
             missing == 0,
             "{missing} required capabilities missing — the M4A bindless path is not viable on this pin (§6 M0A spike 2)"
         );
+
+        // Reported, not required: the engine renders at 1× on anything, so no
+        // count is load-bearing (§6 M21). What this line decides is which MSAA
+        // modes a *gate* can prove here — pinned lavapipe advertises 1, 4 and 8
+        // and not 2, so 2× is reachable only on the desk's own GPU, and the
+        // difference is why the clamp tests membership rather than a maximum.
+        let counts = props.limits.framebuffer_color_sample_counts
+            & props.limits.framebuffer_depth_sample_counts;
+        let advertised: Vec<u32> = [1u32, 2, 4, 8, 16, 32, 64]
+            .into_iter()
+            .filter(|n| counts.contains(ash::vk::SampleCountFlags::from_raw(*n)))
+            .collect();
+        println!("  MSAA color+depth sample counts: {advertised:?}");
+
         println!("probe: all capabilities present");
         report_instruments(&instance, pd, &props);
         Ok(())

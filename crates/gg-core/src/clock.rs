@@ -44,7 +44,10 @@ pub enum Pace {
 }
 
 /// Ticks a frame owes, from [`TickClock::advance`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Not `Eq`: [`Due::covered`] is the render side's own float (§1.4), and a
+/// clock's report is compared for equality nowhere the sim can see.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Due {
     /// Tick number of the first one owed. Sim ticks are consecutive forever;
     /// this is the count *before* the frame, not an index into the frame.
@@ -54,6 +57,24 @@ pub struct Due {
     /// Ticks the catch-up guard refused. Nonzero means the sim skipped forward
     /// in wall-clock terms — worth a log line, never worth simulating.
     pub dropped: u64,
+    /// Wall time the clock now holds unspent, in *tick periods*: `count` plus
+    /// [`TickClock::alpha`], measured after this frame's charge landed.
+    ///
+    /// The denominator for anything accumulated per frame and spent per tick.
+    /// Continuous input is the one such thing (§4.7): it arrives on the frame's
+    /// clock, so the travel in hand at a tick is whatever a *variable* number of
+    /// frames delivered — four of them at 240 Hz, and sometimes three or five,
+    /// which is a fifth of a turn's rate appearing and disappearing while held
+    /// keys deflect an axis identically throughout. Dividing by the tick count
+    /// alone cannot see that; dividing by this can, because it is the wall time
+    /// the accumulator actually spans.
+    ///
+    /// A locked pace reports exactly `count` — alpha is zero throughout — so
+    /// every replay, golden run and headless tier divides by one per tick and
+    /// takes the whole accumulator, as it always did. The catch-up guard is
+    /// covered for free: it zeroes the residue, so a dropped hitch's wall time
+    /// leaves with the ticks rather than diluting the ones that did run.
+    pub covered: f32,
 }
 
 /// Fixed-timestep clock: wall time in, whole sim ticks out.
@@ -146,6 +167,9 @@ impl TickClock {
             first,
             count,
             dropped,
+            // After the subtraction and after the guard, so it is what the clock
+            // *kept*, never what arrived.
+            covered: count as f32 + self.alpha(),
         }
     }
 

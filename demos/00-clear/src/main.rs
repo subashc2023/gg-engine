@@ -123,7 +123,8 @@ fn main() -> anyhow::Result<()> {
         | Event::MouseButton { .. }
         | Event::MouseMotion { .. }
         | Event::CursorMoved { .. }
-        | Event::MouseWheel { .. } => Control::Continue,
+        | Event::MouseWheel { .. }
+        | Event::Focused(_) => Control::Continue,
     })?;
 
     if let Some(err) = failure {

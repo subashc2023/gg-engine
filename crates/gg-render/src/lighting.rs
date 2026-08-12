@@ -24,7 +24,7 @@
 //! sphere: a snap can only lock a grid whose *spacing* is already stable.
 
 use bytemuck::Zeroable as _;
-use gg_extract::{Extracted, ExtractedLight, MAX_DIRECTIONAL, MAX_POINT, light};
+use gg_extract::{Extracted, ExtractedLight, MAX_DIRECTIONAL, MAX_POINT};
 use gg_math::render;
 use gg_rhi::{BufferDesc, BufferHandle, DeviceAddress, FRAMES_IN_FLIGHT, RhiError, Sampler};
 
@@ -158,6 +158,12 @@ pub(crate) struct Sun {
     /// Shadow map edge, in texels — one size for every cascade, which is what
     /// makes the kernel's three-texel width mean the same thing in each.
     pub(crate) size: u32,
+    /// The light basis every cascade shares, as the two axes across the slab.
+    /// Carried because the caster cull has to know which way the slab's *square*
+    /// is turned — a distance from its axis cannot tell a corner from an edge
+    /// (see [`crate::casts_into`]).
+    pub(crate) right: render::Vec3,
+    pub(crate) above: render::Vec3,
     cascades: [Cascade; MAX_CASCADES],
     count: usize,
 }
@@ -172,12 +178,11 @@ impl Sun {
     ///
     /// The first directional light in extract's order — which is world iteration
     /// order, and therefore a function of world state (§4.2).
-    fn of(extracted: &Extracted, view: &View, extent: (u32, u32)) -> Option<Self> {
-        let sun = extracted
-            .lights
-            .iter()
-            .find(|l| l.kind == light::DIRECTIONAL && l.direction != render::Vec3::ZERO)?;
-        let direction = sun.direction.normalize_or_zero();
+    pub(crate) fn of(extracted: &Extracted, view: &View, extent: (u32, u32)) -> Option<Self> {
+        // Asked of extract rather than found here: the same call the shell swept
+        // its caster frustum along, so the light the cascades are fitted to and
+        // the light the culler kept casters for are one light by construction.
+        let direction = extracted.sun()?.normalize_or_zero();
         let size = cvars::SHADOW_SIZE.int().clamp(256, 4096) as u32;
         let count = (cvars::SHADOW_CASCADES.int().max(1) as usize).min(MAX_CASCADES);
         let near = view.near.max(1e-3);
@@ -188,6 +193,7 @@ impl Sun {
         // A per-cascade `up` could flip one map against its neighbour, which is
         // a seam at the split no blend hides.
         let up = up_for(direction);
+        let basis = render::camera::rh::view::look_to_mat4(render::Vec3::ZERO, direction, up);
         let mut cascades = [Cascade {
             view_projection: render::Mat4::IDENTITY,
             centre: render::Vec3::ZERO,
@@ -199,7 +205,7 @@ impl Sun {
         for (index, cascade) in cascades.iter_mut().enumerate().take(count) {
             let slice_far = split(near, far, index + 1, count);
             *cascade = fit(
-                extracted, view, extent, direction, up, size, slice_near, slice_far,
+                extracted, view, extent, direction, up, &basis, size, slice_near, slice_far,
             );
             // Butted, not overlapping: the band the shader cross-fades over
             // lives *inside* each cascade's extent, so widening the slices to
@@ -209,10 +215,38 @@ impl Sun {
         Some(Sun {
             direction,
             size,
+            right: basis.row(0).truncate(),
+            above: basis.row(1).truncate(),
             cascades,
             count,
         })
     }
+}
+
+/// How far up-light a caster can sit and still land in a cascade — the depth the
+/// maps record, over the widest one.
+///
+/// What `Extracted::cast_along` sweeps the view frustum by, and the reason it is
+/// computed here: a shorter sweep drops a caster the map would have held, a
+/// longer one keeps instances [`crate::casts_into`] then rejects, and only this
+/// module knows the split scheme that decides which. The widest cascade is the
+/// last, so its slab contains every other's.
+pub(crate) fn caster_reach(view: &View, extent: (u32, u32)) -> f32 {
+    // `r.shadow_cull 0`'s half of the switch. Large and finite rather than
+    // infinite: the sweep multiplies this by a plane normal, and `inf * 0` is the
+    // `NaN` that would quietly cull *everything* instead of nothing.
+    if cvars::SHADOW_CULL.int() == 0 {
+        return 1.0e6;
+    }
+    let near = view.near.max(1e-3);
+    let far = (cvars::SHADOW_DISTANCE.float() as f32).max(near * 2.0);
+    let count = (cvars::SHADOW_CASCADES.int().max(1) as usize).min(MAX_CASCADES);
+    let size = cvars::SHADOW_SIZE.int().clamp(256, 4096) as u32;
+    let (_, radius) = slice_sphere(view, extent, split(near, far, count - 1, count), far);
+    // `fit`'s light eye sits two radii up-light of the centre and its far plane
+    // two beyond — four radii of depth — over the same `radius + texel` the cull
+    // widens the cascade by.
+    (radius + 2.0 * radius / size as f32) * 4.0
 }
 
 /// The far distance of split `index` of `count` over `[near, far]`.
@@ -256,6 +290,7 @@ fn fit(
     extent: (u32, u32),
     direction: render::Vec3,
     up: render::Vec3,
+    basis: &render::Mat4,
     size: u32,
     slice_near: f32,
     slice_far: f32,
@@ -265,7 +300,8 @@ fn fit(
     let centre = view.rotation() * render::Vec3::new(0.0, 0.0, -centre_depth);
     let texel_world = 2.0 * radius / size as f32;
 
-    let basis = render::camera::rh::view::look_to_mat4(render::Vec3::ZERO, direction, up);
+    // The caller's, shared by every cascade — and the same two axes `Sun` hands
+    // the caster cull, which is what keeps the snap and the cull in one frame.
     let (right, above) = (basis.row(0).truncate(), basis.row(1).truncate());
     // The shimmer fix (§6 M11's exit row), now covering rotation as well as
     // travel: the slab's centre moves whenever the camera moves *or turns*, so
@@ -512,6 +548,10 @@ impl Lighting {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    // Only the tests name a light *kind* now: `Sun::of` asks extract which light
+    // casts rather than deciding for itself.
+    use gg_extract::light;
+
     use super::*;
 
     fn sun(direction: render::Vec3) -> ExtractedLight {
@@ -551,11 +591,37 @@ mod tests {
             near: 0.05,
             ortho: 0.0,
             ortho_far: 500.0,
+            aa: false,
+            samples: gg_rhi::Samples::X1,
         }
     }
 
     fn cast(extracted: &Extracted) -> Sun {
         Sun::of(extracted, &looking(0.0, 0.0), EXTENT).expect("a caster")
+    }
+
+    /// The sweep and the cull read off one scheme (post-M21). `caster_reach` is
+    /// what extract widens by and [`casts_into`](crate::casts_into) is what then
+    /// rejects: short of the widest slab drops a caster the map would have held,
+    /// past it keeps instances nothing can use. Equality is the only right answer,
+    /// so this fails in both directions.
+    #[test]
+    fn the_caster_reach_is_the_widest_cascades_slab_and_nothing_over() {
+        let cast = cast(&at_origin(&[sun(render::Vec3::new(-0.4, -1.0, -0.35))]));
+        let widest = cast
+            .cascades()
+            .iter()
+            .map(|c| c.radius)
+            .fold(0.0f32, f32::max);
+        assert!(widest > 0.0, "a fitted cascade has an extent");
+        // `casts_into` takes a caster up to two radii up-light of the centre and
+        // two down; four radii is the depth the map records.
+        let slab = widest * 4.0;
+        let reach = caster_reach(&looking(0.0, 0.0), EXTENT);
+        assert!(
+            (reach - slab).abs() <= slab * 1e-5,
+            "{reach} against {slab}"
+        );
     }
 
     fn lamp() -> ExtractedLight {

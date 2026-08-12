@@ -85,6 +85,7 @@ impl HotReload {
             color: gg_rhi::ColorTarget::Backbuffer,
             blend: gg_rhi::Blend::Off,
             depth: gg_rhi::DepthMode::Off,
+            samples: gg_rhi::Samples::X1,
             depth_bias: false,
         };
         match rhi.create_pipeline(&desc) {
@@ -262,7 +263,8 @@ fn main() -> anyhow::Result<()> {
         | Event::MouseButton { .. }
         | Event::MouseMotion { .. }
         | Event::CursorMoved { .. }
-        | Event::MouseWheel { .. } => Control::Continue,
+        | Event::MouseWheel { .. }
+        | Event::Focused(_) => Control::Continue,
     })?;
 
     if let Some(err) = failure {

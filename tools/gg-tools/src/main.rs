@@ -13,14 +13,24 @@
 //!                                   picture, per radius, against a tight leg
 //!   gg-tools shadow-flat            the flat camera's contact band (§6 M20):
 //!                                   band vs shade over bias and fit
+//!   gg-tools shadow-sweep           what a turning camera does to the shadows
+//!                                   in a room standing still around it
+//!   gg-tools pace                   what a display rate does to a turn the hand
+//!                                   made at a constant speed
+//!   gg-tools fp-isa [--target T]    which floating-point instructions the
+//!                                   determinism path contains, by how much
+//!                                   freedom the ISA leaves them (§8's qemu row)
 //!   gg-tools mcp                    serve a running session's reload record to
 //!                                   an agent over MCP on stdio (§6 M16)
 
+mod fp_isa;
 mod mcp;
+mod pace;
 mod shadow_bias;
 mod shadow_fit;
 mod shadow_flat;
 mod shadow_image;
+mod shadow_sweep;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -43,11 +53,16 @@ fn main() -> anyhow::Result<()> {
         "shadow-bias" => shadow_bias::run(rest),
         "shadow-fit" => shadow_fit::run(rest),
         "shadow-flat" => shadow_flat::run(rest),
+        "shadow-sweep" => shadow_sweep::run(rest),
+        "pace" => pace::run(rest),
+        "fp-isa" => fp_isa::run(rest),
         "mcp" => mcp::run(rest),
         other => {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
-                 shadow-flat, mcp. A new instrument is a new subcommand here, not a new crate"
+                 shadow-flat, shadow-sweep, pace, fp-isa, mcp. A new instrument is a new \
+                 subcommand here, not a \
+                 new crate"
             )
         }
     }

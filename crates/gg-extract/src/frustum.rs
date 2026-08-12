@@ -137,21 +137,68 @@ impl Frustum {
         }
     }
 
+    /// This frustum swept `distance` metres back up `direction` — the volume a
+    /// shadow caster has to be in to darken anything inside it (§6 M11).
+    ///
+    /// A caster need not be visible: it shadows a visible surface exactly when it
+    /// lies up-light of one, so the set worth keeping is the Minkowski sum of the
+    /// frustum with the segment `[-direction * distance, 0]`. Each plane relaxes
+    /// by the sweep's support along its own normal, which is exact for the
+    /// half-spaces and a superset of the true hull by the silhouette sides it does
+    /// not add — the direction a culler is allowed to be wrong in.
+    ///
+    /// **Directional, not padding.** A sun overhead moves the top plane by
+    /// `distance` and leaves the floor where it was, so what it admits is the
+    /// column of world that can cast down into the view and not a dilation in six
+    /// directions. `distance` is the shadow maps' own reach — `gg-render`'s
+    /// `View::caster_reach`, read off the same split scheme the cascades are fitted
+    /// by — so a caster no cascade could hold is still culled.
+    #[must_use]
+    pub fn swept(mut self, direction: render::Vec3, distance: f32) -> Frustum {
+        if self.unbounded || !(distance.is_finite() && distance > 0.0) {
+            return self;
+        }
+        for plane in &mut self.planes[..self.count] {
+            // `max(0)`: a plane the light travels *away* from is never reached by
+            // the sweep, and relaxing it would keep casters that shadow nothing.
+            plane.distance += (plane.normal.dot(direction) * distance).max(0.0);
+        }
+        self
+    }
+
     /// Whether a sphere at `center` (camera-relative metres) of `radius` has any
     /// part inside.
     ///
     /// A non-finite radius keeps the instance: an asset whose bounds are not
     /// known yet must not vanish while it streams in (§4.6).
     ///
-    /// P1: the short-circuiting `all` looks cheaper than it is. A variant that
-    /// evaluated every plane's distance up front — *and* a needless `sqrt` on
-    /// each, needless because [`Frustum::from_view_projection`] normalizes once
-    /// at construction — ran the extract bench's serial narrow leg at
-    /// 8.2 ns/entity against 9.5, because a world spread across the frustum
-    /// mispredicts the early exit every few rows. Found by accident while
-    /// falsifying that bench's gates, and not yet measured without the `sqrt`,
-    /// which is what would settle it. That bench's frustum is perspective, so it
-    /// prices the five-plane case only.
+    /// The short circuit stays, and the deferral that stood here asking for a
+    /// branchless variant is **settled against it** (§6 M17 item 7) — by
+    /// measuring the variant two ways and finding the two disagree, which is
+    /// the whole of the finding.
+    ///
+    /// Isolated over the extract bench's own spread (100 000 points, 3 416 kept,
+    /// identical answers): branchless 2.09 ns/entity against this 8.67, and the
+    /// `sqrt`-paying form the deferral recorded slowest of the three at 13.46 —
+    /// so its arithmetic was right and its attribution was not, since most of
+    /// what it credited to the missing branch the `sqrt` was handing back.
+    /// *In situ*, where the predicate sits inside [`Chunk::keep`], the ordering
+    /// inverts: the serial narrow leg reads 3.66 ns/entity here against 5.48
+    /// branchless over `count` and 5.87 over a fixed six.
+    ///
+    /// The two measurements are not in conflict — they price different things.
+    /// Alone, the predicate *is* the loop, so a mispredicted early exit is the
+    /// whole cost. Inside extract it is one step of a row that also narrows to
+    /// `f32`, builds a rotation and stores, and that work hides the mispredict
+    /// while the exit still skips five plane dots out of six on 96.6% of rows.
+    /// The lesson is the micro's, not the culler's: a predicate benchmarked as
+    /// the only thing in flight measures its branch, not its work.
+    ///
+    /// A fixed six *is* correct — the degenerate far slot's zero normal at zero
+    /// offset answers `0.0 >= -radius` for every radius a bound can have — and
+    /// it is the worst of the three, because six unrolled dots inline into the
+    /// gather and cost even the unbounded leg, which tests no plane at all,
+    /// 4.64 → 7.50 ns/entity. `#[inline]` does not recover it.
     #[must_use]
     pub fn contains(&self, center: render::Vec3, radius: f32) -> bool {
         if self.unbounded || !radius.is_finite() {
@@ -263,6 +310,65 @@ mod tests {
         let f = frustum();
         assert!(!f.contains(render::Vec3::new(1000.0, 0.0, -10.0), 1.0));
         assert!(f.contains(render::Vec3::new(1000.0, 0.0, -10.0), 10_000.0));
+    }
+
+    /// The defect this exists for: a caster above the view casts *down* into it,
+    /// and culling it by the view is a shadow that vanishes while its own is
+    /// still on screen. Both directions — the floor below the frustum is not
+    /// relaxed, because nothing down-light of the view can shadow it.
+    #[test]
+    fn a_sweep_up_light_admits_what_can_cast_in_and_not_what_cannot() {
+        let f = frustum();
+        let down = render::Vec3::new(0.0, -1.0, 0.0);
+        // Well outside the 60° frustum at 10 m, which reaches 5.77 m up.
+        let above = render::Vec3::new(0.0, 30.0, -10.0);
+        let below = render::Vec3::new(0.0, -30.0, -10.0);
+        assert!(
+            !f.contains(above, 0.0) && !f.contains(below, 0.0),
+            "both out"
+        );
+        let swept = f.swept(down, 40.0);
+        assert!(swept.contains(above, 0.0), "up-light of the view");
+        assert!(!swept.contains(below, 0.0), "down-light casts nothing in");
+    }
+
+    /// The sweep is bounded, so it is a cull and not an off switch: 40 m of sun
+    /// does not reach a caster 100 m up.
+    #[test]
+    fn a_sweep_reaches_exactly_as_far_as_it_was_given() {
+        let f = frustum().swept(render::Vec3::new(0.0, -1.0, 0.0), 40.0);
+        assert!(f.contains(render::Vec3::new(0.0, 40.0, -10.0), 0.0));
+        assert!(!f.contains(render::Vec3::new(0.0, 100.0, -10.0), 0.0));
+    }
+
+    /// A slanted sun sweeps sideways as well as up — the whole reason the
+    /// relaxation is per-plane and not one padded radius.
+    #[test]
+    fn a_slanted_sun_sweeps_the_side_planes_and_a_vertical_one_does_not() {
+        let across = render::Vec3::new(0.0, 30.0, -10.0) + render::Vec3::new(-25.0, 0.0, 0.0);
+        assert!(
+            !frustum()
+                .swept(render::Vec3::new(0.0, -1.0, 0.0), 40.0)
+                .contains(across, 0.0),
+            "straight down reaches nothing off to the +X side"
+        );
+        assert!(
+            frustum()
+                .swept(render::Vec3::new(0.6, -0.8, 0.0).normalize(), 40.0)
+                .contains(across, 0.0),
+            "a sun leaning +X does"
+        );
+    }
+
+    #[test]
+    fn a_sweep_of_nothing_changes_nothing() {
+        let f = frustum();
+        let down = render::Vec3::new(0.0, -1.0, 0.0);
+        for distance in [0.0, -1.0, f32::NAN] {
+            assert_eq!(f.swept(down, distance), f, "{distance}");
+        }
+        // And an unbounded frustum stays unbounded rather than growing planes.
+        assert_eq!(Frustum::UNBOUNDED.swept(down, 40.0), Frustum::UNBOUNDED);
     }
 
     #[test]

@@ -30,6 +30,14 @@ pub use gg_ecs::boundary::VerbsTable
 pub use gg_ecs::boundary::WorldHandle
 pub use gg_ecs::boundary::asset_id
 pub use gg_ecs::boundary::log_level
+pub mod gg_ecs::boundary::aa
+pub const gg_ecs::boundary::aa::DEFAULT: u32
+pub const gg_ecs::boundary::aa::FXAA: u32
+pub const gg_ecs::boundary::aa::MSAA_2: u32
+pub const gg_ecs::boundary::aa::MSAA_4: u32
+pub const gg_ecs::boundary::aa::MSAA_8: u32
+pub const gg_ecs::boundary::aa::OFF: u32
+pub fn gg_ecs::boundary::aa::samples(u32) -> core::option::Option<u32>
 pub mod gg_ecs::boundary::cursor
 pub const gg_ecs::boundary::cursor::HARDWARE: u32
 pub const gg_ecs::boundary::cursor::SOFTWARE: u32
@@ -163,10 +171,15 @@ pub const gg_ecs::boundary::Node::TYPE_NAME: &'static str
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Node
 pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 #[repr(C)] pub struct gg_ecs::boundary::Prefs
+pub gg_ecs::boundary::Prefs::aa: u32
+pub gg_ecs::boundary::Prefs::close: u32
 pub gg_ecs::boundary::Prefs::cursor: u32
 pub gg_ecs::boundary::Prefs::quiet: u32
 impl gg_ecs::boundary::Prefs
+pub fn gg_ecs::boundary::Prefs::antialias(&self) -> core::option::Option<bool>
+pub fn gg_ecs::boundary::Prefs::closing(&self) -> bool
 pub fn gg_ecs::boundary::Prefs::hardware_cursor(&self) -> bool
+pub fn gg_ecs::boundary::Prefs::samples(&self) -> core::option::Option<u32>
 pub fn gg_ecs::boundary::Prefs::volume(&self) -> f32
 impl bytemuck::pod::Pod for gg_ecs::boundary::Prefs
 impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Prefs

@@ -46,8 +46,37 @@ pub fn to_render(v: sim::Vec3) -> Vec3 {
 /// (`GREATER_OR_EQUAL`), every depth clear (`0.0`), and every golden image, and
 /// a second projection built the ordinary way would render a scene that is
 /// subtly, consistently wrong. `vertical_fov` is in radians.
+///
+/// Built here rather than delegated to glam's `perspective_infinite_reverse`
+/// for one reason beyond that, and it is not a determinism one — this is the
+/// `f32` side of §1.4's membrane and nothing hashed passes through it. It is a
+/// *golden-image portability* one. The cotangent below is the only transcendental
+/// in the engine's projection, it scales every pixel of every frame, and glam
+/// reaches std for it — which put a `sincosf` import in the aarch64 dev artifact
+/// (§6 M17 item 6) and made the picture a function of the host's libm. Measured
+/// over vertical fovs from 0.05 to 3.0 rad: the MSVC CRT and `libm` disagree on
+/// `cos/sin` at 86 of 29 509 angles, by up to 2 ulp. Small, and not nothing —
+/// `r.fov` is a runtime CVar, so which side of that 0.29% a session lands on is
+/// the operator's to choose, and §4.10 expects the two lavapipe reference sets
+/// to stay byte-identical. Through `sim` they agree by construction instead of
+/// by luck, at no cost in pixels: every fov in this tree came out bit-identical
+/// either way, which `the_cotangent_is_the_one_the_golden_sets_were_blessed_against`
+/// keeps true.
 pub fn perspective_reverse_z(vertical_fov: f32, aspect_ratio: f32, near: f32) -> Mat4 {
-    camera::rh::proj::vulkan::perspective_infinite_reverse(vertical_fov, aspect_ratio, near)
+    // glam's own form, and deliberately `cos/sin` rather than the algebraically
+    // equal `1/tan`: the two differ by an ulp at fovs where sin and cos agree,
+    // so reproducing the matrix bit-for-bit means reproducing the expression.
+    let (sin_half, cos_half) = sim::sin_cos(vertical_fov * 0.5);
+    let h = cos_half / sin_half;
+    Mat4::from_cols(
+        Vec4::new(h / aspect_ratio, 0.0, 0.0, 0.0),
+        // Vulkan's clip space is Y-down.
+        Vec4::new(0.0, -h, 0.0, 0.0),
+        // Infinite far: `near` maps to depth 1 and infinity to 0, and w carries
+        // the perspective divide's -z.
+        Vec4::new(0.0, 0.0, 0.0, -1.0),
+        Vec4::new(0.0, 0.0, near, 0.0),
+    )
 }
 
 /// The engine's other projection: right-handed Y-up view space in, Vulkan NDC
@@ -109,6 +138,43 @@ mod tests {
         // Narrow-first would have quantized to whole units at that range.
         let narrowed_first = world.x as f32 - camera.x as f32;
         assert_ne!(narrowed_first, 0.25);
+    }
+
+    /// The cotangent is the projection's only transcendental and so the only
+    /// place two libms can disagree. These are its bits at every fov this tree
+    /// uses, and they are **what glam produced on the day the projection moved
+    /// off it** — which is why that change re-blessed no golden, and what this
+    /// test exists to keep true.
+    ///
+    /// Pinned rather than still compared against glam, for two reasons. The
+    /// comparison would put the call back in the binary and undo the point: the
+    /// aarch64 leg's artifacts import no math routine (§6 M17 item 6), and a
+    /// test is one of those artifacts. And it would re-tie the picture to a
+    /// dependency's choice of formula, which is the tie being cut — glam is now
+    /// free to change its mind without moving a pixel here.
+    ///
+    /// Every other entry is exact arithmetic on this number and the two
+    /// arguments, so the structural claims stay in the test below rather than
+    /// being restated per fov.
+    #[test]
+    fn the_cotangent_is_the_one_the_golden_sets_were_blessed_against() {
+        for (fov, bits) in [
+            (1.0_f32, 0x3fea_4d6b_u32),                 // r.fov's default
+            (std::f32::consts::FRAC_PI_3, 0x3fdd_b3d7), // 60°, the unit tests'
+            (0.35, 0x40b4_fc96),                        // the extract bench's
+            (1.2, 0x3fbb_18da),
+            (0.7, 0x402f_542b),
+        ] {
+            // Column 1's y is -h and a sign flip is exact, so this reads the
+            // cotangent back out of the matrix rather than recomputing it.
+            let h = -perspective_reverse_z(fov, 1.0, 0.1).y_axis.y;
+            assert_eq!(
+                h.to_bits(),
+                bits,
+                "fov {fov} produced {h} ({:08x})",
+                h.to_bits()
+            );
+        }
     }
 
     #[test]

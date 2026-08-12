@@ -446,10 +446,12 @@ impl Window {
     /// pixels.
     ///
     /// Best effort: Wayland refuses outright and every platform refuses while
-    /// the window is not focused. Used at exactly one moment — handing the
-    /// pointer back after a grab (§6 M15.1) — where the failure is that the
-    /// arrow reappears where the OS parked it rather than where the operator
-    /// left it, which is the behaviour of every build before this one.
+    /// the window is not focused — which is why [`Event::Focused`] exists, since
+    /// both callers state something the OS threw away if it arrived early.
+    /// Handing the pointer back after a grab (§6 M15.1) is one, and there the
+    /// failure is only that the arrow reappears where the OS parked it; taking
+    /// the pointer is the other, and see [`Window::set_pointer`] for why that
+    /// one is not cosmetic.
     pub fn set_cursor_at(&self, x: f32, y: f32) {
         let _ = self
             .inner
@@ -482,6 +484,18 @@ impl Window {
     /// applied over the window, which is the OS's rule and the right one.
     pub fn set_pointer(&self, held: bool, hidden: bool) {
         use winit::window::CursorGrabMode;
+        // Into the window *before* locking it there, and this is not a nicety.
+        // `Locked` pins the pointer to a one-pixel box at wherever it already
+        // is, so a cursor that was anywhere else when the game took it — the
+        // other monitor, the taskbar, the desktop under a window that had not
+        // been focused yet — is frozen out there for the rest of the session. It
+        // is also left *visible*: a platform hides the arrow only while it is
+        // over the client area, which that one never becomes, and no mouse
+        // movement can bring it back because it is locked. One warp closes it.
+        if held {
+            let size = self.inner.inner_size();
+            self.set_cursor_at(size.width as f32 / 2.0, size.height as f32 / 2.0);
+        }
         let mode = if held {
             CursorGrabMode::Locked
         } else {
@@ -583,6 +597,15 @@ pub enum Event {
         /// Distance from the top edge of the surface.
         y: f32,
     },
+    /// The window gained (`true`) or lost keyboard focus.
+    ///
+    /// It exists for one reason: **every pointer request the OS was given while
+    /// the window was unfocused was dropped**, and Windows additionally releases
+    /// the cursor clip on focus loss. A grab and a hidden arrow asked for once at
+    /// startup are therefore a race against the focus that had not arrived yet,
+    /// and alt-tabbing away and back is a game that quietly stopped holding the
+    /// mouse. A consumer that asked for either states it again here.
+    Focused(bool),
     /// Wheel travel, in notches, positive away from the operator.
     ///
     /// A count of detents and not a distance: `gg_input` binds the two
@@ -699,6 +722,10 @@ mod feed_tests {
             // M15.1). A `feed` that guessed would put the arrow in the wrong
             // place at every window size but one.
             Event::CursorMoved { x: 4.0, y: 8.0 },
+            // Also deliberately unclaimed: focus is a fact about the window,
+            // and a key held across an alt-tab is the shell's problem to have
+            // an opinion about, not the action map's.
+            Event::Focused(true),
         ] {
             assert!(!feed(&mut input, &event), "wrongly claimed: {event:?}");
         }
@@ -945,6 +972,7 @@ impl ApplicationHandler for App<'_> {
                 x: position.x as f32,
                 y: position.y as f32,
             },
+            WindowEvent::Focused(focused) => Event::Focused(focused),
             // Both units become notches here, which is the layer that knows
             // which one arrived: a wheel reports lines and a trackpad reports
             // pixels, and `gg_input::Wheel` counts detents. The divisor is a

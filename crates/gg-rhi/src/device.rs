@@ -33,6 +33,41 @@ pub struct DeviceReport {
     /// Whether a dedicated transfer family existed (lavapipe has one family
     /// total, so `false` there — recorded, not papered over).
     pub transfer_dedicated: bool,
+    /// Every MSAA count this device advertises for **both** a color and a depth
+    /// framebuffer (§6 M21), ascending and always starting at 1×.
+    ///
+    /// The intersection of the two masks, because the scene pass needs the pair
+    /// at one count: a device offering 8× color and 4× depth can only do 4×.
+    /// The whole set rather than a maximum, because support is *membership* —
+    /// a driver may advertise 1, 4 and 8 and not 2, and clamping to a maximum
+    /// would hand it a count it never claimed.
+    pub samples: Vec<crate::Samples>,
+}
+
+impl DeviceReport {
+    /// Whether this device does `samples`.
+    #[must_use]
+    pub fn supports_samples(&self, samples: crate::Samples) -> bool {
+        self.samples.contains(&samples)
+    }
+
+    /// The largest count it does, which is at worst 1×.
+    #[must_use]
+    pub fn max_samples(&self) -> crate::Samples {
+        self.samples.last().copied().unwrap_or_default()
+    }
+
+    /// `asked` cut down to the largest count this device actually does. The
+    /// one place a request is reduced rather than refused: something has to be
+    /// drawn, and a black window is not a better answer than 4×.
+    #[must_use]
+    pub fn afforded(&self, asked: crate::Samples) -> crate::Samples {
+        self.samples
+            .iter()
+            .copied()
+            .rfind(|s| *s <= asked)
+            .unwrap_or_default()
+    }
 }
 
 /// One scored candidate from device selection.
@@ -485,6 +520,15 @@ impl Device {
             bits => (1u64 << bits) - 1,
         };
 
+        // Both masks, because the scene pass needs a color and a depth
+        // attachment at one count and only what they share is reachable.
+        let sample_counts = props.limits.framebuffer_color_sample_counts
+            & props.limits.framebuffer_depth_sample_counts;
+        let samples: Vec<crate::Samples> = crate::Samples::ALL
+            .into_iter()
+            .filter(|s| sample_counts.contains(s.vk()))
+            .collect();
+
         let api = props.api_version;
         let report = DeviceReport {
             chosen: candidates[chosen_idx].name.clone(),
@@ -495,11 +539,13 @@ impl Device {
                 vk::api_version_patch(api),
             ),
             transfer_dedicated,
+            samples,
         };
         tracing::info!(
             chosen = %report.chosen,
             api = ?report.api_version,
             transfer_dedicated,
+            samples = ?report.samples.iter().map(|s| s.count()).collect::<Vec<_>>(),
             device_fault = wants_fault,
             buffer_marker = wants_markers,
             "device created"
@@ -532,6 +578,12 @@ impl Device {
         device.set_name(graphics_timeline, "gg.graphics.timeline");
         device.set_name(transfer_timeline, "gg.transfer.timeline");
         Ok(device)
+    }
+
+    /// Whether this device advertises `samples` for a color *and* depth
+    /// framebuffer. Membership, not a comparison against the maximum.
+    pub(crate) fn supports_samples(&self, samples: crate::Samples) -> bool {
+        self.report.supports_samples(samples)
     }
 
     /// What selection saw and decided.

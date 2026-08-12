@@ -1222,6 +1222,8 @@ pub fn bootstrap(world: &mut GameWorld) {
         Prefs {
             cursor: 0,
             quiet: 0,
+            aa: 0,
+            close: 0,
         },
     );
 
@@ -1969,6 +1971,8 @@ pub fn hud(world: &mut GameWorld) {
         Prefs {
             cursor: 0,
             quiet: 0,
+            aa: 0,
+            close: 0,
         },
     );
     let _ = world.each::<&Screen>(|_, s| screen = *s);

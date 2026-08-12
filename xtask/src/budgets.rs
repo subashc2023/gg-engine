@@ -45,9 +45,43 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 /// 1310, §4.2.2's pointer-swap fast path) and the §6 M15.2 post-close pair
 /// (1310 → 1335, `game_fit` and `opening_scene`) each left ~10 spare lines.
 ///
+/// - **Render interpolation** (1335 → 1355, §4.1's `alpha`): a capture is a
+///   *tick-boundary* act and a blend is a *frame* act, and one place sees both
+///   clocks. `gg-core` owns the loop's shape but sits below `gg-ecs` in §3's
+///   dependency direction and so cannot read a world; `gg-extract` owns every
+///   line of the arithmetic — the pose table, the shortest-arc quaternion and
+///   angle blends, the eye. What landed here is the four calls that place them
+///   on the two clocks, and there is nowhere else to place them from.
+///
+/// - **The settings menu's three answers** (1355 → 1365, §6 M21): who holds the
+///   mouse, which edge treatment the frame runs, and whether the player asked to
+///   stop. Every piece of *judgement* moved to the crate that owns it —
+///   `ActionMap::claims_motion` answers "does this game do mouse-look" from the
+///   bindings, `Ui::wants_pointer` answers "is there anything to point at" from
+///   the widgets, and `Prefs`' own accessors decide what an unknown mode means.
+///   What is left here is the conjunction, and the conjunction is the thing with
+///   no other home: `gg-ui` cannot see an action map, `gg-input` cannot see a
+///   widget, and neither can see the window whose centre a released cursor is
+///   warped to. The nine lines are that sentence, once.
+///
+/// - **Two clocks meeting** (1365 → 1370, post-M21): four lines, both of them a
+///   *sequencing* fact rather than a computation, which is the one thing a stage
+///   cannot state about itself.
+///
+///   `ticks_due` is three of them. `gg-core` owns the wall time a frame charged
+///   the tick clock and sits below `gg-input` in §3's direction, so it cannot hand
+///   that to an accumulator; `gg-input` owns the accumulator and has never heard
+///   of a frame. The shell is the only place both are in scope, and what it says
+///   is one sentence — the travel in hand covers this much time, spend a tick of it.
+///
+///   `cast_shadows` is the fourth. The reach is `gg-render`'s (its split scheme)
+///   and the sweep is `gg-extract`'s (its frustum), but the *order* — the sun has
+///   to be extracted before the instances are culled against it — is a property of
+///   the frame the shell composes and of nothing either crate can see.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio) — each argued the same way as above.
-const SHELL_BUDGET: usize = 1335;
+const SHELL_BUDGET: usize = 1370;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

@@ -21,6 +21,22 @@
 //! The renderer never holds a reference into the world, which is what buys
 //! trivially parallel render prep, a later render-thread split, and clean
 //! interpolation — all without refactoring the sim.
+//!
+//! # Interpolation
+//!
+//! The sim ticks at a fixed rate and a window presents at the monitor's, so most
+//! frames land *between* two ticks. Drawing the newer of the two puts each pose
+//! on screen for two refreshes and then three, which reads as judder on
+//! everything moving and as discrete steps on a mouse-look — the camera is the
+//! one transform a whole screen of pixels hangs off.
+//!
+//! [`Extracted::capture`] records the pose every entity held when the last tick
+//! began; [`Extracted::interpolate`] states how far past it this frame sits
+//! (§4.1's `alpha`), and extract then blends. It costs one tick of latency and
+//! is the standard trade — a frame drawn between two simulated states is a state
+//! the sim did pass through, where an extrapolated one is a guess that overshoots
+//! every wall. A locked pace reports `alpha == 0.0` throughout, so a replay, a
+//! golden run and every headless tier extract the world exactly as it stands.
 
 #![warn(missing_docs)]
 
@@ -33,6 +49,7 @@ pub use frustum::Frustum;
 /// `gg-render` does not, and should not have to for two constants.
 pub use gg_ecs::boundary::light;
 
+use gg_ecs::boundary::Eye;
 use gg_ecs::{AliasError, Component, Entity, Query, World};
 use gg_math::{render, sim};
 use rayon::prelude::*;
@@ -236,6 +253,11 @@ pub struct Extracted {
     /// What this frame culled against. Kept for the same reason the origin is:
     /// the arrays are only meaningful paired with the eye that produced them.
     pub frustum: Frustum,
+    /// What *instances* are culled against — [`Extracted::frustum`] until
+    /// [`Extracted::cast_along`] widens it, and reset to it by
+    /// [`Extracted::clear`]. Private because it is derived: a second frustum
+    /// anyone could set is a second way to have the two disagree.
+    casters: Frustum,
     /// Instances the frustum rejected this frame, across both arrays. The
     /// number worth a line on the overlay — "10k entities, 400 drawn" is the
     /// claim §6 M10 makes, and an unmeasured culler is one that might be
@@ -252,6 +274,20 @@ pub struct Extracted {
     /// nothing. Never read by a consumer: [`gather`] is what turns it into the
     /// arrays above, in chunk order.
     scratch: Vec<Chunk>,
+    /// Where [`Extracted::instances`]' entities were when the last tick began.
+    previous: Poses,
+    /// The same for [`Extracted::models`]. A second table and not a second
+    /// component type in the first: one entity may carry both protocol
+    /// components, and one slot per entity would have them overwrite each other.
+    previous_models: Poses,
+    /// How far past those poses this frame sits, `0.0..1.0`. `f64` because the
+    /// blend happens on un-narrowed positions — see [`Blend::pose`].
+    alpha: f64,
+    /// The eye as the last tick began. Here rather than in the caller because it
+    /// is captured and blended on the same two clocks everything above it is,
+    /// and a shell keeping its own copy would be a second place to get the
+    /// pairing wrong. `None` until [`Extracted::capture_eye`] has been called.
+    previous_eye: Option<Eye>,
 }
 
 impl Default for Extracted {
@@ -264,15 +300,89 @@ impl Default for Extracted {
             // an unset transform reaches the origin instead of an error.
             camera_origin: sim::DVec3::ZERO,
             frustum: Frustum::UNBOUNDED,
+            casters: Frustum::UNBOUNDED,
             culled: 0,
             lights: Vec::new(),
             lights_dropped: 0,
             scratch: Vec::new(),
+            previous: Poses::default(),
+            previous_models: Poses::default(),
+            alpha: 0.0,
+            previous_eye: None,
         }
     }
 }
 
 impl Extracted {
+    /// Record the pose every entity carrying `T` holds *now*, as the one the
+    /// coming frames blend away from.
+    ///
+    /// Called once per sim tick, before the tick runs — so what it holds is the
+    /// world the previous tick left, which is the near end of the interval a
+    /// frame lands in. A tick that skipped this leaves the previous capture in
+    /// place; that is one tick of smear on a paused sim and nothing at all on a
+    /// halted one, where the two poses are the same world.
+    ///
+    /// Read-only and render-side: nothing recorded here re-enters the sim, and
+    /// a run that never calls it renders exactly as it did before this existed.
+    ///
+    /// # Errors
+    ///
+    /// If the world refuses the query, which one read alone cannot cause.
+    pub fn capture<T: SimTransform>(&mut self, world: &World) -> Result<(), AliasError> {
+        self.previous.capture::<T>(world)
+    }
+
+    /// The same, for the array [`Extracted::append_models`] fills.
+    ///
+    /// # Errors
+    ///
+    /// If the world refuses the query, which one read alone cannot cause.
+    pub fn capture_models<T: SimTransform>(&mut self, world: &World) -> Result<(), AliasError> {
+        self.previous_models.capture::<T>(world)
+    }
+
+    /// The same, for the eye [`Eye::of`] picks. Concrete where the two above are
+    /// generic, and for [`Extracted::append_lights`]' reason: a game with its own
+    /// camera component writes a system that fills this one in, which is what the
+    /// protocol is for.
+    ///
+    /// # Errors
+    ///
+    /// If the world refuses the query, which one read alone cannot cause.
+    pub fn capture_eye(&mut self, world: &World) -> Result<(), AliasError> {
+        self.previous_eye = Some(Eye::of(world)?);
+        Ok(())
+    }
+
+    /// The eye to render this frame through: `current`, blended back towards the
+    /// captured one by whatever [`Extracted::interpolate`] was told.
+    ///
+    /// Taken rather than read out of the world so a host may substitute its own
+    /// camera afterwards — the editor's, which is not in any archetype — without
+    /// this having an opinion about which one it got.
+    #[must_use]
+    pub fn eye(&self, current: Eye) -> Eye {
+        match self.previous_eye {
+            Some(previous) => blend_eye(previous, current, self.alpha as f32),
+            None => current,
+        }
+    }
+
+    /// How far past the captured poses this frame sits, `0.0..1.0` (§4.1).
+    ///
+    /// Zero — the default, and what a locked pace reports for every frame it
+    /// ever runs — extracts the world exactly as it stands, so a replay and a
+    /// golden run are untouched by any of this. Clamped rather than trusted: a
+    /// clock that handed over 1.5 would extrapolate, which is a different
+    /// decision than the one this crate has made.
+    ///
+    /// Frame state, not frame *output*: [`Extracted::clear`] leaves it alone, so
+    /// one call covers the whole frame's several appends.
+    pub fn interpolate(&mut self, alpha: f32) {
+        self.alpha = f64::from(alpha.clamp(0.0, 1.0));
+    }
+
     /// Empty, with whatever capacity previous frames earned, and pointed at a
     /// new eye and frustum.
     ///
@@ -286,9 +396,54 @@ impl Extracted {
         self.models.clear();
         self.camera_origin = camera_origin;
         self.frustum = frustum;
+        // Reset, not kept: a caster volume outlives neither the frustum it was
+        // swept from nor the sun it was swept along, so a frame that forgets to
+        // re-widen culls tightly rather than against last frame's camera.
+        self.casters = frustum;
         self.culled = 0;
         self.lights.clear();
         self.lights_dropped = 0;
+    }
+
+    /// Widen *instance* culling to whatever can cast a shadow into the view
+    /// (§6 M11): [`Extracted::frustum`] swept `reach` metres up-light, which is
+    /// [`Frustum::swept`] along the sun [`Extracted::sun`] found.
+    ///
+    /// Call between [`Extracted::append_lights`] — the sun has to be in hand — and
+    /// the instance appends, with the reach `gg-render`'s `View::caster_reach`
+    /// gives, so what is kept and what the cascades can hold are read off one
+    /// scheme. It takes the sun from this frame's own light list rather than from
+    /// an argument, which is the only way a caller cannot pair a frame with the
+    /// wrong one; a frame with no sun sweeps along the zero vector, relaxes no
+    /// plane, and culls exactly as it did before this existed — which is every
+    /// headless run and every test below.
+    ///
+    /// Instances only. [`Extracted::frustum`] still culls lights and is still what
+    /// the overlay reports, because a light off screen lights nothing on it while
+    /// a box off screen shadows plenty.
+    ///
+    /// P2: what it admits costs a *main*-pass draw the rasterizer then discards —
+    /// the shadow pass re-culls each cascade's slab exactly. One array partitioned
+    /// into visible-then-casting would hand the main pass its own prefix back.
+    pub fn cast_shadows(&mut self, reach: f32) {
+        let sun = self.sun().unwrap_or(render::Vec3::ZERO);
+        self.casters = self.frustum.swept(sun, reach);
+    }
+
+    /// The travel direction of the light this frame's shadows come from — the
+    /// first casting directional in [`Extracted::lights`], unit.
+    ///
+    /// The same light `gg-render` fits its cascades to, and read out of the same
+    /// array, so the sweep and the fit cannot pick different suns. `None` before
+    /// [`Extracted::append_lights`] has run, and for a world with no sun.
+    #[must_use]
+    pub fn sun(&self) -> Option<render::Vec3> {
+        self.lights
+            .iter()
+            .find(|l| {
+                l.kind == gg_ecs::boundary::light::DIRECTIONAL && l.direction != render::Vec3::ZERO
+            })
+            .map(|l| l.direction)
     }
 
     /// How far the point `camera-relative `at`` sits along `axis`, in units of
@@ -358,7 +513,10 @@ impl Extracted {
     pub fn append<T: SimTransform>(&mut self, world: &World) -> Result<(), AliasError> {
         let query = Query::<&T>::new()?;
         let origin = self.camera_origin;
-        let frustum = self.frustum;
+        // The caster volume, which is the frustum itself unless someone widened
+        // it: an instance off screen may still be laying a shadow across it.
+        let frustum = self.casters;
+        let blend = self.previous.blend(self.alpha);
         let chunks = chunks_of::<T>(world, &query);
         let scratch = fit(&mut self.scratch, chunks.len());
         scratch
@@ -367,7 +525,8 @@ impl Extracted {
             .for_each(|(chunk, (entities, rows))| {
                 for (&entity, transform) in entities.iter().zip(rows.iter()) {
                     let radius = box_radius(transform.half_extent());
-                    chunk.keep(place(entity, transform, origin, radius), frustum);
+                    let pose = blend.pose(entity, transform);
+                    chunk.keep(place(entity, transform, origin, radius, pose), frustum);
                 }
             });
         gather(scratch, &mut self.instances, &mut self.culled);
@@ -391,7 +550,8 @@ impl Extracted {
     ) -> Result<(), AliasError> {
         let query = Query::<&T>::new()?;
         let origin = self.camera_origin;
-        let frustum = self.frustum;
+        let frustum = self.casters;
+        let blend = self.previous_models.blend(self.alpha);
         let chunks = chunks_of::<T>(world, &query);
         let scratch = fit(&mut self.scratch, chunks.len());
         scratch
@@ -406,7 +566,8 @@ impl Extracted {
                     let own = scenes
                         .radius(asset)
                         .map_or(f32::INFINITY, |radius| radius * scale);
-                    let placed = place(entity, transform, origin, own);
+                    let pose = blend.pose(entity, transform);
+                    let placed = place(entity, transform, origin, own, pose);
                     let mut expanded = false;
                     scenes.expand(asset, &mut |node| {
                         expanded = true;
@@ -414,7 +575,7 @@ impl Extracted {
                         // exactly so the half of a building behind the camera
                         // costs nothing, and testing the whole scene's bound
                         // would hand that back.
-                        chunk.keep(compose(&placed, transform, origin, node), frustum);
+                        chunk.keep(compose(&placed, transform, origin, node, pose), frustum);
                     });
                     if !expanded {
                         chunk.keep(placed, frustum);
@@ -514,6 +675,209 @@ impl Extracted {
     }
 }
 
+/// An entity's placement for one frame: its own, or blended towards it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Posed {
+    position: sim::DVec3,
+    rotation: sim::DQuat,
+}
+
+/// Where entities were when the last tick began.
+///
+/// Keyed by entity **index**, not by extract order. Extract order is stable
+/// between two ticks that spawned nothing and shifts wholesale on the one that
+/// did — a table matched by position would pop every entity after the new row,
+/// which in a game that spawns is every frame.
+///
+/// `stamp` is what makes a slot's answer "captured *this* tick" rather than
+/// "captured once". A slot is overwritten in place and never cleared (a per-tick
+/// memset over the index space is the one cost this must not have), so without
+/// it an entity that stopped carrying `T` and later got it back would blend out
+/// of a pose it left minutes ago, across the whole level.
+#[derive(Clone, Debug, Default)]
+struct Poses {
+    /// Indexed by [`Entity::index`]. Sparse: dead and never-captured slots sit
+    /// at [`Pose::EMPTY`], whose entity is [`Entity::NONE`] and matches nothing.
+    slots: Vec<Pose>,
+    /// Captures so far. Starts at zero, which [`Pose::EMPTY`] also holds — so
+    /// the first capture is stamp 1 and an untouched slot never matches.
+    stamp: u64,
+}
+
+/// One entity's captured pose.
+#[derive(Clone, Copy, Debug)]
+struct Pose {
+    /// The whole handle, generation included: an index reused by a new entity
+    /// must not inherit the dead one's pose.
+    entity: Entity,
+    stamp: u64,
+    position: sim::DVec3,
+    rotation: sim::DQuat,
+}
+
+impl Pose {
+    /// Not `Default`: `sim` types carry none on purpose, because a zero position
+    /// is a *place* and defaulting to it silently is how an unset transform
+    /// reaches the origin instead of an error. Here the guard is the entity.
+    const EMPTY: Pose = Pose {
+        entity: Entity::NONE,
+        stamp: 0,
+        position: sim::DVec3::ZERO,
+        rotation: sim::DQuat::IDENTITY,
+    };
+}
+
+impl Poses {
+    /// Overwrite every `T`-carrying entity's slot with the pose it holds now.
+    fn capture<T: SimTransform>(&mut self, world: &World) -> Result<(), AliasError> {
+        let query = Query::<&T>::new()?;
+        self.stamp += 1;
+        let (slots, stamp) = (&mut self.slots, self.stamp);
+        world.each_ref(&query, |entity, transform: &T| {
+            let index = entity.index() as usize;
+            if index >= slots.len() {
+                slots.resize(index + 1, Pose::EMPTY);
+            }
+            slots[index] = Pose {
+                entity,
+                stamp,
+                position: transform.world_position(),
+                rotation: transform.orientation(),
+            };
+        });
+        Ok(())
+    }
+
+    /// This frame's blend against these poses. `alpha` of zero — and a table
+    /// nothing was ever captured into — yields the identity blend, which is the
+    /// path every locked-pace run takes.
+    fn blend(&self, alpha: f64) -> Blend<'_> {
+        Blend {
+            poses: self,
+            alpha: if self.stamp == 0 { 0.0 } else { alpha },
+        }
+    }
+
+    /// `entity`'s pose from the **latest** capture, or `None` — not captured,
+    /// captured in an earlier tick and not this one, or a reused index.
+    fn of(&self, entity: Entity) -> Option<&Pose> {
+        self.slots
+            .get(entity.index() as usize)
+            .filter(|pose| pose.entity == entity && pose.stamp == self.stamp)
+    }
+}
+
+/// A frame's position between the captured poses and the world as it stands.
+#[derive(Clone, Copy)]
+struct Blend<'a> {
+    poses: &'a Poses,
+    alpha: f64,
+}
+
+impl Blend<'_> {
+    /// Where to draw `transform` this frame.
+    ///
+    /// The blend is `f64` and happens **before** the narrowing, which is the
+    /// whole membrane argument (§1.4) applied to a second pair of positions: two
+    /// planetary coordinates blended in `f32` would round to the same 65 km grid
+    /// point and the interpolation would be pure noise.
+    ///
+    /// An entity with no captured pose draws at its own — which is what a
+    /// spawn should do. Popping into existence at the right place beats sliding
+    /// in from wherever the table's zero happened to be.
+    fn pose<T: SimTransform>(&self, entity: Entity, transform: &T) -> Posed {
+        let position = transform.world_position();
+        let rotation = transform.orientation();
+        if self.alpha == 0.0 {
+            return Posed { position, rotation };
+        }
+        match self.poses.of(entity) {
+            Some(previous) => Posed {
+                position: previous.position.lerp(position, self.alpha),
+                rotation: blend_rotation(previous.rotation, rotation, self.alpha),
+            },
+            None => Posed { position, rotation },
+        }
+    }
+}
+
+/// Shortest-arc normalized lerp between two orientations.
+///
+/// Nlerp and not slerp: over one tick the angular error against a constant-rate
+/// slerp peaks below a thousandth of the arc, which is well under a pixel at any
+/// rotation rate a frame covers, and slerp costs an `acos`/`sin` pair per
+/// instance to fix it. The sign flip is not optional — `q` and `-q` are the same
+/// orientation, and lerping between the two representations of a small turn goes
+/// the long way round, which is a full revolution in one frame.
+///
+/// A blend that cancels to zero length (two exactly opposite quaternions, which
+/// is a half-turn in one tick) keeps `b`: there is no shortest arc to pick
+/// between, and hazard 6 forbids handing back the NaN a normalize would give.
+fn blend_rotation(a: sim::DQuat, b: sim::DQuat, t: f64) -> sim::DQuat {
+    let b = if a.dot(b) < 0.0 {
+        sim::DQuat::from_xyzw(-b.x, -b.y, -b.z, -b.w)
+    } else {
+        b
+    };
+    sim::DQuat::from_xyzw(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t,
+        a.w + (b.w - a.w) * t,
+    )
+    .try_normalize()
+    .unwrap_or(b)
+}
+
+/// The eye a frame `alpha` of a tick past `previous` looks through (§4.1).
+///
+/// Separate from [`Extracted`] because the eye is not an instance: it is chosen
+/// by [`Eye::of`]'s rule, it sets the origin every offset in the frame is
+/// relative to, and a host may substitute its own (the editor's camera) after
+/// the game's has been read.
+///
+/// Angles take the short way round. A yaw wrapped from `+π` to `-π` between two
+/// ticks is a few milliradians of turn, and blending it the arithmetic way spins
+/// the camera through a full revolution inside one frame — which is the one
+/// visible artifact a naive interpolator has, and it fires exactly when someone
+/// is turning quickly.
+///
+/// `ortho` blends only between two eyes that agree about what a projection is:
+/// zero is the perspective sentinel (§6 M20), so a frame halfway between an
+/// orthographic eye and a perspective one would render a third thing that is
+/// neither. A game that switched projection between two ticks switches on the
+/// tick, like the discrete fact it is.
+#[must_use]
+pub fn blend_eye(previous: Eye, current: Eye, alpha: f32) -> Eye {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let flat = (previous.ortho == 0.0) == (current.ortho == 0.0);
+    Eye {
+        position: previous.position.lerp(current.position, f64::from(alpha)),
+        yaw: blend_angle(previous.yaw, current.yaw, alpha),
+        pitch: blend_angle(previous.pitch, current.pitch, alpha),
+        ortho: match flat {
+            true => previous.ortho + (current.ortho - previous.ortho) * alpha,
+            false => current.ortho,
+        },
+        reserved: current.reserved,
+    }
+}
+
+/// Blend two angles along the shorter of the two arcs between them, radians.
+///
+/// `%` and not a transcendental: the remainder is exact, so this is portable by
+/// construction like everything else that crosses the membrane.
+fn blend_angle(a: f32, b: f32, t: f32) -> f32 {
+    use core::f32::consts::{PI, TAU};
+    let mut delta = (b - a) % TAU;
+    if delta > PI {
+        delta -= TAU;
+    } else if delta < -PI {
+        delta += TAU;
+    }
+    a + delta * t
+}
+
 /// One parallel chunk's output. Reused across frames — the allocation pattern
 /// of a fresh `Vec` per chunk per frame is exactly what [`Extracted`] exists to
 /// avoid, and there are more chunks than there are arrays.
@@ -579,17 +943,23 @@ fn gather(scratch: &[Chunk], into: &mut Vec<Instance>, culled: &mut usize) {
 
 /// One entity's own transform, narrowed, with the world-space bounding radius
 /// its caller worked out.
+///
+/// `pose` is where it is *this frame* — its own pose, or the blend towards it —
+/// and everything else still comes off the transform: only position and
+/// orientation move between two ticks, and a size or a colour that changed is a
+/// discrete fact rather than a quantity to be halfway through.
 fn place<T: SimTransform>(
     entity: Entity,
     transform: &T,
     origin: sim::DVec3,
     radius: f32,
+    pose: Posed,
 ) -> Instance {
     let half = transform.half_extent();
     Instance {
         entity,
-        offset: render::camera_relative(transform.world_position(), origin),
-        rotation: render::narrow_rotation(transform.orientation()),
+        offset: render::camera_relative(pose.position, origin),
+        rotation: render::narrow_rotation(pose.rotation),
         half_extent: render::Vec3::new(half.x, half.y, half.z),
         color: transform.color(),
         asset: transform.asset(),
@@ -606,6 +976,7 @@ fn compose<T: SimTransform>(
     transform: &T,
     origin: sim::DVec3,
     node: Placement,
+    pose: Posed,
 ) -> Instance {
     let model_scale = transform.half_extent();
     let scaled = sim::DVec3::new(
@@ -613,8 +984,8 @@ fn compose<T: SimTransform>(
         node.translation.y * f64::from(model_scale.y),
         node.translation.z * f64::from(model_scale.z),
     );
-    let rotation = transform.orientation();
-    let world = transform.world_position() + rotation.rotate(scaled);
+    let rotation = pose.rotation;
+    let world = pose.position + rotation.rotate(scaled);
     Instance {
         entity: placed.entity,
         offset: render::camera_relative(world, origin),
@@ -1010,6 +1381,71 @@ mod tests {
         assert_eq!(out.culled, 1);
     }
 
+    /// Two boxes and a sun: one on screen, one overhead and off it — and the
+    /// overhead one is what lays a shadow across the first.
+    fn a_room_under(direction: sim::Vec3) -> World {
+        use gg_ecs::boundary::Light;
+        let mut world = world_with(&[
+            sim::DVec3::new(0.0, 0.0, -10.0),  // on screen
+            sim::DVec3::new(0.0, 30.0, -10.0), // overhead, casting down into it
+        ]);
+        world.register::<Light>().unwrap();
+        let e = world.spawn();
+        world
+            .insert(e, Light::sun(direction, 0x00ff_ffff, 3.0))
+            .unwrap();
+        world
+    }
+
+    /// The post-M21 defect, in the instance list: a box high above the view is
+    /// off screen and its shadow is not, so culling it by the view is a shadow
+    /// that vanishes while its own is still in frame.
+    #[test]
+    fn a_caster_off_screen_survives_a_sweep_up_light_and_the_view_alone_drops_it() {
+        let world = a_room_under(sim::Vec3::new(0.0, -1.0, 0.0));
+        let mut out = Extracted::default();
+        out.transforms::<Body>(&world, sim::DVec3::ZERO, looking_forward())
+            .unwrap();
+        assert_eq!(out.culled, 1, "the view alone drops the caster");
+
+        let mut swept = |world: &World, reach| {
+            out.clear(sim::DVec3::ZERO, looking_forward());
+            out.append_lights(world).unwrap();
+            out.cast_shadows(reach);
+            out.append::<Body>(world).unwrap();
+            out.culled
+        };
+        assert_eq!(swept(&world, 40.0), 0, "swept up-light it is kept");
+
+        // Two ways of failing to be the fix. A sun from *below* reaches nothing
+        // above the view, and 40 m of any sun does not reach a caster at 100.
+        let below = a_room_under(sim::Vec3::new(0.0, 1.0, 0.0));
+        assert_eq!(
+            swept(&below, 40.0),
+            1,
+            "a sun from below casts nothing down"
+        );
+        assert_eq!(swept(&world, 5.0), 1, "and the reach is a reach");
+    }
+
+    /// `clear` resets the sweep, so a frame that forgets to re-widen culls by its
+    /// own camera rather than by the one two frames ago.
+    #[test]
+    fn a_caster_volume_does_not_outlive_the_frame_it_was_swept_for() {
+        let world = a_room_under(sim::Vec3::new(0.0, -1.0, 0.0));
+        let mut out = Extracted::default();
+        out.clear(sim::DVec3::ZERO, looking_forward());
+        out.append_lights(&world).unwrap();
+        out.cast_shadows(40.0);
+        out.append::<Body>(&world).unwrap();
+        assert_eq!(out.culled, 0);
+
+        out.clear(sim::DVec3::ZERO, looking_forward());
+        out.append_lights(&world).unwrap();
+        out.append::<Body>(&world).unwrap();
+        assert_eq!(out.culled, 1, "the sweep did not carry over");
+    }
+
     /// The sixth plane doing its job in a real extract, not only in `Frustum`'s
     /// own tests (post-M20 audit). The exit row asks for the finite-far culler
     /// *proven able to fail*; `gg-golden`'s `verify-gates` proves it in pixels
@@ -1302,6 +1738,222 @@ mod tests {
                 "{period}"
             );
         }
+    }
+
+    /// A world of one body, movable, so a capture and a move can be staged.
+    fn one_body(position: sim::DVec3) -> (World, Entity) {
+        let mut world = World::new();
+        let e = world.spawn();
+        let _ = world.insert(
+            e,
+            Body {
+                position,
+                rotation: sim::DQuat::IDENTITY,
+            },
+        );
+        (world, e)
+    }
+
+    fn move_to(world: &mut World, entity: Entity, position: sim::DVec3) {
+        world.get_mut::<Body>(entity).unwrap().position = position;
+    }
+
+    fn drawn(world: &World, out: &mut Extracted) -> Vec<render::Vec3> {
+        out.transforms::<Body>(world, sim::DVec3::ZERO, Frustum::UNBOUNDED)
+            .unwrap();
+        out.instances.iter().map(|i| i.offset).collect()
+    }
+
+    #[test]
+    fn a_frame_between_two_ticks_draws_between_two_poses() {
+        let (mut world, e) = one_body(sim::DVec3::ZERO);
+        let mut out = Extracted::default();
+        out.capture::<Body>(&world).unwrap();
+        move_to(&mut world, e, sim::DVec3::new(4.0, 0.0, 0.0));
+
+        // The three frames a 60 Hz tick is shown across at 240 Hz, and the tick
+        // boundary itself — which must land exactly on the new pose, or every
+        // tick would end a hair short of where the sim actually put things.
+        for (alpha, x) in [(0.0, 4.0), (0.25, 1.0), (0.5, 2.0), (1.0, 4.0)] {
+            out.interpolate(alpha);
+            assert_eq!(drawn(&world, &mut out)[0].x, x, "alpha {alpha}");
+        }
+    }
+
+    #[test]
+    fn nothing_interpolates_until_a_pose_was_captured_for_it() {
+        // The spawn case, and the whole-run case: an entity with no previous
+        // pose draws where it is. Sliding in from a table's zero would put every
+        // new projectile through the middle of the level on its first frame.
+        let (mut world, _) = one_body(sim::DVec3::new(9.0, 0.0, 0.0));
+        let mut out = Extracted::default();
+        out.interpolate(0.5);
+        assert_eq!(drawn(&world, &mut out)[0].x, 9.0, "no capture, no blend");
+
+        out.capture::<Body>(&world).unwrap();
+        let fresh = world.spawn();
+        world
+            .insert(
+                fresh,
+                Body {
+                    position: sim::DVec3::new(-3.0, 0.0, 0.0),
+                    rotation: sim::DQuat::IDENTITY,
+                },
+            )
+            .unwrap();
+        let offsets = drawn(&world, &mut out);
+        assert_eq!(offsets.len(), 2);
+        assert!(offsets.iter().any(|o| o.x == -3.0), "the new one popped in");
+    }
+
+    #[test]
+    fn a_reused_index_does_not_inherit_the_dead_entitys_pose() {
+        // The generation check, in the one situation that reaches it: the
+        // allocator hands indices back LIFO, so the *next* spawn after a despawn
+        // lands on the slot the dead body's pose is still sitting in.
+        let (mut world, e) = one_body(sim::DVec3::new(100.0, 0.0, 0.0));
+        let mut out = Extracted::default();
+        out.capture::<Body>(&world).unwrap();
+        world.despawn(e);
+        let reborn = world.spawn();
+        assert_eq!(reborn.index(), e.index(), "the test needs the reuse");
+        world
+            .insert(
+                reborn,
+                Body {
+                    position: sim::DVec3::ZERO,
+                    rotation: sim::DQuat::IDENTITY,
+                },
+            )
+            .unwrap();
+        out.interpolate(0.5);
+        assert_eq!(drawn(&world, &mut out)[0].x, 0.0, "not halfway from 100");
+    }
+
+    #[test]
+    fn a_capture_an_entity_missed_does_not_blend_it_out_of_an_old_pose() {
+        // What the stamp is for. Slots are overwritten and never cleared, so a
+        // body that stops being drawn and starts again keeps a row in the table
+        // — and without the stamp it would slide back in from wherever it was
+        // when it left, which may be the other side of the level.
+        let (mut world, e) = one_body(sim::DVec3::new(50.0, 0.0, 0.0));
+        let mut out = Extracted::default();
+        out.capture::<Body>(&world).unwrap();
+        assert!(world.remove::<Body>(e));
+        out.capture::<Body>(&world).unwrap(); // this capture does not see it
+        world
+            .insert(
+                e,
+                Body {
+                    position: sim::DVec3::ZERO,
+                    rotation: sim::DQuat::IDENTITY,
+                },
+            )
+            .unwrap();
+        out.interpolate(0.5);
+        assert_eq!(drawn(&world, &mut out)[0].x, 0.0, "not halfway from 50");
+    }
+
+    #[test]
+    fn the_blend_happens_before_the_narrowing() {
+        // The membrane (§1.4) applied to the second pair of positions this crate
+        // now holds. At 10^12 m an absolute `f32` resolves ~65 km, so two poses
+        // one metre apart would blend to noise if either narrowed first.
+        let far = 1.0e12;
+        let (mut world, e) = one_body(sim::DVec3::new(far, 0.0, 0.0));
+        let mut out = Extracted::default();
+        out.capture::<Body>(&world).unwrap();
+        move_to(&mut world, e, sim::DVec3::new(far + 1.0, 0.0, 0.0));
+        out.interpolate(0.5);
+        out.transforms::<Body>(&world, sim::DVec3::new(far, 0.0, 0.0), Frustum::UNBOUNDED)
+            .unwrap();
+        assert_eq!(out.instances[0].offset, render::Vec3::new(0.5, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_locked_pace_extracts_the_tick_exactly() {
+        // Zero alpha is what every replay, golden run and headless tier reports,
+        // and it must reproduce the pre-interpolation picture bit for bit — not
+        // approximately, or a blessed image would drift the day this landed.
+        let (mut world, e) = one_body(sim::DVec3::new(1.0 / 3.0, 7.7, -0.1));
+        let mut captured = Extracted::default();
+        captured.capture::<Body>(&world).unwrap();
+        move_to(&mut world, e, sim::DVec3::new(2.0 / 3.0, 1.1, 9.0));
+
+        let mut untouched = Extracted::default();
+        assert_eq!(drawn(&world, &mut captured), drawn(&world, &mut untouched));
+    }
+
+    #[test]
+    fn a_turn_takes_the_short_way_round_and_stays_a_unit_quaternion() {
+        // `q` and `-q` are one orientation. A body that turned a few degrees can
+        // arrive at the far representation, and lerping the components then goes
+        // the long way — a full revolution inside one frame, at exactly the
+        // moment someone is turning quickly.
+        let small = sim::DQuat::from_axis_angle(sim::DVec3::Y, 0.1);
+        let far = sim::DQuat::from_xyzw(-small.x, -small.y, -small.z, -small.w);
+        let half = blend_rotation(sim::DQuat::IDENTITY, far, 0.5);
+        let short = blend_rotation(sim::DQuat::IDENTITY, small, 0.5);
+        assert!((half.dot(short).abs() - 1.0).abs() < 1e-12, "{half:?}");
+        assert!((half.length() - 1.0).abs() < 1e-12, "not normalized");
+        // And the degenerate case hazard 6 forbids handing back a NaN for.
+        let opposite = sim::DQuat::from_xyzw(0.0, 0.0, 0.0, -1.0);
+        let flipped = blend_rotation(sim::DQuat::IDENTITY, opposite, 0.5);
+        assert!(flipped.length().is_finite());
+    }
+
+    #[test]
+    fn an_eye_blends_its_angles_the_short_way_and_its_position_in_f64() {
+        use gg_ecs::boundary::Eye;
+        let far = 1.0e12;
+        let previous = Eye {
+            position: sim::DVec3::new(far, 0.0, 0.0),
+            // Just under +π, turning positive: the wrap is the case that spins
+            // a camera through a whole revolution in one frame if unhandled.
+            yaw: core::f32::consts::PI - 0.05,
+            pitch: 0.2,
+            ortho: 0.0,
+            reserved: 0,
+        };
+        let current = Eye {
+            position: sim::DVec3::new(far + 2.0, 0.0, 0.0),
+            yaw: -core::f32::consts::PI + 0.05,
+            pitch: 0.4,
+            ..previous
+        };
+        let mid = blend_eye(previous, current, 0.5);
+        assert_eq!(mid.position.x - far, 1.0, "narrowed nothing");
+        assert!((mid.pitch - 0.3).abs() < 1e-6);
+        // Halfway across the seam is π itself, whichever sign it comes out as.
+        assert!(
+            (mid.yaw.abs() - core::f32::consts::PI).abs() < 1e-5,
+            "yaw went the long way: {}",
+            mid.yaw
+        );
+    }
+
+    #[test]
+    fn an_eye_never_blends_across_the_perspective_sentinel() {
+        use gg_ecs::boundary::Eye;
+        // `ortho == 0.0` means perspective (§6 M20), so a frame halfway between
+        // a flat eye and a perspective one would render a third projection that
+        // is neither. Two eyes that agree about which they are still blend.
+        let flat = Eye {
+            ortho: 8.0,
+            ..Eye::ORIGIN
+        };
+        let deep = Eye::ORIGIN;
+        assert_eq!(
+            blend_eye(flat, deep, 0.5).ortho,
+            0.0,
+            "switches on the tick"
+        );
+        assert_eq!(blend_eye(deep, flat, 0.5).ortho, 8.0);
+        let zoomed = Eye {
+            ortho: 4.0,
+            ..Eye::ORIGIN
+        };
+        assert_eq!(blend_eye(flat, zoomed, 0.5).ortho, 6.0, "a zoom does blend");
     }
 
     #[test]

@@ -104,6 +104,10 @@ impl OffscreenRhi {
             format: TARGET_FORMAT,
             usage: ImageUse::ColorTarget,
             mip_levels: 1,
+            // The offscreen target is where a resolve lands, never what is
+            // resolved: the harness reads it back, and a multisample image is
+            // not a legal copy source.
+            samples: crate::Samples::X1,
         })?;
 
         let device = &mut gpu.device;

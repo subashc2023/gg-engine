@@ -45,7 +45,7 @@ pub use offscreen::OffscreenRhi;
 pub use pipeline::{Blend, ColorTarget, DepthMode, PipelineDesc, PipelineHandle};
 pub use resource::{
     BufferDesc, BufferHandle, BufferKind, DeviceAddress, ImageDesc, ImageFormat, ImageHandle,
-    ImageUse, MemoryUse, Sampler, full_mip_count, mip_extent,
+    ImageUse, MemoryUse, Sampler, Samples, full_mip_count, mip_extent,
 };
 pub use timing::{GpuClock, PassTiming};
 

@@ -39,6 +39,7 @@ pub fn render_with_depth(
         format: ImageFormat::Depth32,
         usage: ImageUse::Depth,
         mip_levels: 1,
+        samples: gg_rhi::Samples::X1,
     })?;
     let pixels = render_inner(rhi, clear, draws, None, Some(depth));
     rhi.destroy_image(depth)?;
@@ -117,6 +118,7 @@ fn record(
                 color: Some(ColorAttachment {
                     target: Target::Backbuffer,
                     clear: Some(clear),
+                    resolve: None,
                 }),
                 depth: depth.map(|target| DepthAttachment {
                     target: Target::Image(target),

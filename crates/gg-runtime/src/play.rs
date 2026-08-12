@@ -118,11 +118,17 @@ pub fn play(app: &mut App, title: &str, target: Option<u64>) -> anyhow::Result<u
             // was nothing to release (§6 M15.1). One key for both, in that
             // order, is what every game does — and the editor is why there
             // is now something for it to mean besides "quit".
+            //
+            // Unless the game's map binds it, in which case it is not the
+            // app's key at all and falls through to `feed` like any other
+            // (`ActionMap::claims`): a game with a pause menu owns Escape,
+            // and a pause that arrived as a verb is in the replay where a
+            // quit never was.
             Event::Key {
                 key: Key::Escape,
                 pressed: true,
                 ..
-            } => match app.release_pointer() {
+            } if !app.input().claims_key(Key::Escape) => match app.release_pointer() {
                 Some((x, y)) => {
                     window.set_cursor_at(x, y);
                     Ok(Control::Continue)
@@ -133,6 +139,17 @@ pub fn play(app: &mut App, title: &str, target: Option<u64>) -> anyhow::Result<u
             // canvas delta needs the surface, which is the app's.
             Event::CursorMoved { x, y } => {
                 app.cursor_at(x, y);
+                Ok(Control::Continue)
+            }
+            // Forget what the window was told, so the next frame tells it again
+            // (§6 M15.1). The OS drops a grab and a cursor-hide asked for while
+            // the window was unfocused, and Windows releases the clip on focus
+            // *loss* — so without this the first statement is a race against a
+            // focus that had not arrived, and alt-tabbing back is a game that
+            // silently stopped holding the mouse. Cheap: focus changes are rare,
+            // and the arm below still only calls through on a difference.
+            Event::Focused(true) => {
+                pointer_state = None;
                 Ok(Control::Continue)
             }
             Event::Frame => {

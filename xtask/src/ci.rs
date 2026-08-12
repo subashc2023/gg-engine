@@ -126,9 +126,16 @@ fn fast_tier_verdict(window: &[u64]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Pre-push tier: gates 1-3 in full, the native legs of replay determinism
-/// (§5.6a and 6b's x86 half, plus the dist-profile leg of 6c), and
+/// Pre-push tier: gates 1-3 in full, gate 5, the native legs of replay
+/// determinism (§5.6a and 6b's x86 half, plus the dist-profile leg of 6c), and
 /// dist/dist-verify feature checks (§5).
+///
+/// Gate 5 sits here rather than in the nightly tier since M20: the picture is
+/// the one thing an agent changes and cannot see. Every other gate this tier
+/// runs reads text an agent can read too, so an editor or UI edit that moved
+/// the frame passed `--push` green and reported itself done, and the nightly
+/// found it hours later with the session that caused it long gone. Fourteen
+/// seconds on a warm tree buys the loop back (§6 M20 item 11).
 fn push() -> anyhow::Result<()> {
     exec(cargo().args(["fmt", "--check"]), "cargo fmt --check")?;
     clippy(&All)?;
@@ -167,6 +174,10 @@ fn push() -> anyhow::Result<()> {
     // Gate 3 (§5): entry points compile + reflection codegen diff-clean. Check
     // mode: CI verifies the checked-in artifacts, it never rewrites the tree.
     crate::shaders::build_all(true)?;
+    // Gate 5, *after* gate 3 deliberately: codegen drift and a stale `.spv` are
+    // both things the suite would report as pixels, and a gate that can name the
+    // cause should get to speak first.
+    golden_suite()?;
     // §4.6's byte-reproducibility, which §6 M9's exit row asks to be CI-tested:
     // every demo's asset tree compiled twice *cleanly* and compared. Here and
     // not in the nightly tier, because the incremental cache rests on it — a
@@ -219,7 +230,6 @@ fn nightly() -> anyhow::Result<()> {
     // bindless index, a read off the end of a device address (§8's sync/upload
     // risk row). Nightly rather than weekly — 28 s windowless on the pin.
     crate::gpuav::run(&[])?;
-    golden_suite()?;
     winit_scan()?;
     println!(
         "xtask ci --nightly: green (windowless by construction — windowed WSI coverage is \

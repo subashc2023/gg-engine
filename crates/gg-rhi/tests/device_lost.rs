@@ -145,6 +145,7 @@ fn a_hung_pass_is_named_by_the_device_lost_report() {
             color: Some(ColorAttachment {
                 target: Target::Backbuffer,
                 clear: Some(BLUE),
+                resolve: None,
             }),
             depth: None,
             viewport: None,
@@ -223,6 +224,7 @@ fn arm(
             color: ColorTarget::Backbuffer,
             blend: gg_rhi::Blend::Off,
             depth: DepthMode::Off,
+            samples: gg_rhi::Samples::X1,
             depth_bias: false,
         })
         .unwrap();

@@ -84,6 +84,11 @@ pub struct PipelineDesc<'a> {
     /// formats, so a pipeline that ignores depth cannot run in a pass that has
     /// one.
     pub depth: DepthMode,
+    /// How many samples it rasterizes into. Must equal the sample count of
+    /// every attachment of the pass it runs in — dynamic rendering checks that,
+    /// which is why a multisampled pass needs its own pipeline rather than a
+    /// dynamic state (§6 M21).
+    pub samples: crate::Samples,
     /// Whether fragments are depth-biased, with the amount supplied per draw
     /// through [`DrawSpec::depth_bias`](crate::DrawSpec::depth_bias). Only the
     /// shadow pass wants it, and it is dynamic so a CVar can move it while the
@@ -165,6 +170,17 @@ impl PipelineStore {
         backbuffer_format: vk::Format,
         set_layout: vk::DescriptorSetLayout,
     ) -> Result<PipelineHandle, RhiError> {
+        // Named here rather than left to validation: a pipeline is the *first*
+        // thing a mode switch creates, so this is where an operator asking for
+        // a count the device does not have finds out (§6 M21).
+        if !device.supports_samples(desc.samples) {
+            return Err(RhiError::Loader(format!(
+                "pipeline `{}`: this device does not do {}x — it advertises up to {}x",
+                desc.name,
+                desc.samples.count(),
+                device.report().max_samples().count()
+            )));
+        }
         let started = std::time::Instant::now();
         let vs = create_shader_module(device, desc.vs_spirv, desc.name)?;
         let fs = match create_shader_module(device, desc.fs_spirv, desc.name) {
@@ -245,8 +261,12 @@ impl PipelineStore {
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(desc.depth_bias)
             .line_width(1.0);
+        // Plain MSAA: coverage is per-*sample*, the fragment shader still runs
+        // once per pixel. `sampleShading` is the knob that would change that,
+        // and it costs the shader N times over to fix only the aliasing that is
+        // inside a triangle — which is what the FXAA mode beside this is for.
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(desc.samples.vk());
         // One blend state per color attachment, so a depth prepass gets none —
         // the counts must agree or creation is invalid.
         let blend_attachments: Vec<vk::PipelineColorBlendAttachmentState> =

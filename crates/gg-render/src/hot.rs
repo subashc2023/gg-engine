@@ -190,41 +190,43 @@ impl BoxPass {
         let (vs_main, fs_main) = pair(module, "vs_main", "fs_main", push)?;
         let (vs_depth, fs_depth) = pair(module, "vs_depth", "fs_depth", push)?;
         let (vs_shadow, _) = pair(module, "vs_shadow", "fs_depth", push)?;
-        swap_all(
-            rhi,
-            &mut [
-                (
-                    &mut self.prepass,
-                    PipelineDesc {
-                        vs_spirv: &vs_depth.spirv,
-                        vs_entry: &vs_depth.spirv_entry,
-                        fs_spirv: &fs_depth.spirv,
-                        fs_entry: &fs_depth.spirv_entry,
-                        ..crate::prepass_desc()
-                    },
-                ),
-                (
-                    &mut self.forward,
-                    PipelineDesc {
-                        vs_spirv: &vs_main.spirv,
-                        vs_entry: &vs_main.spirv_entry,
-                        fs_spirv: &fs_main.spirv,
-                        fs_entry: &fs_main.spirv_entry,
-                        ..crate::forward_desc()
-                    },
-                ),
-                (
-                    &mut self.shadow,
-                    PipelineDesc {
-                        vs_spirv: &vs_shadow.spirv,
-                        vs_entry: &vs_shadow.spirv_entry,
-                        fs_spirv: &fs_depth.spirv,
-                        fs_entry: &fs_depth.spirv_entry,
-                        ..crate::shadow_desc()
-                    },
-                ),
-            ],
-        )
+        // Every live sample count, not just the one on screen: the edit
+        // invalidates the shader they all share, so a variant left behind would
+        // draw the old code the moment the operator switched back to it.
+        let mut swaps: Vec<(&mut PipelineHandle, PipelineDesc<'_>)> = Vec::new();
+        for (samples, variant) in self.variants.each() {
+            swaps.push((
+                &mut variant.prepass,
+                PipelineDesc {
+                    vs_spirv: &vs_depth.spirv,
+                    vs_entry: &vs_depth.spirv_entry,
+                    fs_spirv: &fs_depth.spirv,
+                    fs_entry: &fs_depth.spirv_entry,
+                    ..crate::prepass_desc(samples)
+                },
+            ));
+            swaps.push((
+                &mut variant.forward,
+                PipelineDesc {
+                    vs_spirv: &vs_main.spirv,
+                    vs_entry: &vs_main.spirv_entry,
+                    fs_spirv: &fs_main.spirv,
+                    fs_entry: &fs_main.spirv_entry,
+                    ..crate::forward_desc(samples)
+                },
+            ));
+        }
+        swaps.push((
+            &mut self.shadow,
+            PipelineDesc {
+                vs_spirv: &vs_shadow.spirv,
+                vs_entry: &vs_shadow.spirv_entry,
+                fs_spirv: &fs_depth.spirv,
+                fs_entry: &fs_depth.spirv_entry,
+                ..crate::shadow_desc()
+            },
+        ));
+        swap_all(rhi, &mut swaps)
     }
 
     /// Rebuild the two `post.slang` pipelines from a hot recompile.

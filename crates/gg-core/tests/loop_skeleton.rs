@@ -255,6 +255,36 @@ fn a_locked_pace_never_interpolates() {
     assert_eq!(clock.tick(), 1);
 }
 
+/// `covered` is what a frame's accumulated input is divided by, so it has to be
+/// the wall time the clock *kept* — not what arrived, and not the tick count.
+/// Three cases, and the third is the one a count cannot express.
+#[test]
+fn covered_is_the_wall_time_the_clock_is_holding_unspent() {
+    // A locked pace: exactly the tick count, so a replay and every headless tier
+    // divide by one per tick and take the accumulator whole, as they always did.
+    let mut clock = TickClock::new(60, Pace::Locked(3));
+    assert_eq!(clock.advance(Duration::from_millis(7)).covered, 3.0);
+
+    // A hitch: the guard drops the residue with the ticks, so the wall time a
+    // refused tick covered leaves with it rather than diluting the ones that ran.
+    let mut clock = TickClock::new(60, Pace::Realtime);
+    let due = clock.advance(Duration::from_secs(2));
+    assert_eq!(due.covered, f64::from(MAX_TICKS_PER_FRAME) as f32);
+    assert!(due.dropped > 0);
+
+    // And the case the tick count is blind to: a frame owing *one* tick that has
+    // more than one tick's travel in hand. This is every frame at 240 Hz where
+    // the two clocks slipped a beat, and `count` reads 1 for all of them.
+    let mut clock = TickClock::new(60, Pace::Realtime);
+    let due = clock.advance(TICK + TICK / 4);
+    assert_eq!(due.count, 1);
+    assert!(
+        (due.covered - 1.25).abs() < 1e-3,
+        "covered was {}",
+        due.covered
+    );
+}
+
 #[test]
 fn alpha_reports_the_fraction_of_a_tick_the_frame_landed_on() {
     let mut clock = TickClock::new(60, Pace::Realtime);

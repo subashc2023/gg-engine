@@ -1,0 +1,29 @@
+# Demo 12's bindings (§4.7). By *physical* key position, so this file means the
+# same thing on AZERTY as on QWERTY.
+#
+# Two pointer jobs at once, which is the thing this file is worth reading for.
+# `MouseX`/`MouseY` are raw device counts and are the *camera's*; `PointerX`/
+# `PointerY` are the steered cursor and are the *menu's* (§4.9). Binding both is
+# how a game gets mouse-look and a settings panel out of one physical mouse: the
+# shell holds the pointer while nothing is pointable and hands it back for
+# exactly as long as the menu is up, and the axis a parked pointer feeds is
+# zero either way.
+#
+# `pause` on Escape is what takes Escape *off* the shell, where it has quit every
+# demo since M4: a key the game's map binds is not the app's key. Quitting is the
+# menu's button now, and the window's close button as ever.
+
+[game.actions]
+jump = ["Space"]
+restart = ["R"]
+pause = ["Escape"]
+ui_click = ["Mouse1"]
+ui_focus = ["Tab"]
+
+[game.axes]
+move_right = ["+D", "-A"]
+move_forward = ["+W", "-S"]
+aim_x = ["MouseX"]
+aim_y = ["MouseY"]
+ui_x = ["PointerX"]
+ui_y = ["PointerY"]

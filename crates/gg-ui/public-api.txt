@@ -42,7 +42,9 @@ pub fn gg_ui::boundary::Ui::cursor_drawn(&self) -> bool
 pub fn gg_ui::boundary::Ui::frame(&mut self, &mut gg_ecs::world::World, &gg_ui::router::Tick, gg_ui::layout::Fit) -> &[gg_render::ui::UiVertex]
 pub fn gg_ui::boundary::Ui::new() -> core::result::Result<gg_ui::boundary::Ui, gg_ecs::view::AliasError>
 pub fn gg_ui::boundary::Ui::pointer(&self) -> (f32, f32)
+pub fn gg_ui::boundary::Ui::prefs(&self) -> gg_ecs::boundary::prefs::Prefs
 pub fn gg_ui::boundary::Ui::vertices(&self) -> &[gg_render::ui::UiVertex]
+pub fn gg_ui::boundary::Ui::wants_pointer(&self) -> bool
 pub fn gg_ui::boundary::binding(&gg_ecs::boundary::load::Verbs) -> core::option::Option<gg_ui::router::Binding>
 pub mod gg_ui::dock
 pub enum gg_ui::dock::Node
@@ -415,7 +417,9 @@ pub fn gg_ui::boundary::Ui::cursor_drawn(&self) -> bool
 pub fn gg_ui::boundary::Ui::frame(&mut self, &mut gg_ecs::world::World, &gg_ui::router::Tick, gg_ui::layout::Fit) -> &[gg_render::ui::UiVertex]
 pub fn gg_ui::boundary::Ui::new() -> core::result::Result<gg_ui::boundary::Ui, gg_ecs::view::AliasError>
 pub fn gg_ui::boundary::Ui::pointer(&self) -> (f32, f32)
+pub fn gg_ui::boundary::Ui::prefs(&self) -> gg_ecs::boundary::prefs::Prefs
 pub fn gg_ui::boundary::Ui::vertices(&self) -> &[gg_render::ui::UiVertex]
+pub fn gg_ui::boundary::Ui::wants_pointer(&self) -> bool
 pub struct gg_ui::WidgetId(_)
 impl gg_ui::router::WidgetId
 pub const fn gg_ui::router::WidgetId::from_hash(u64) -> Self

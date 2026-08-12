@@ -23,13 +23,18 @@ tracing-subscriber.workspace = true
 # Offscreen render → readback, the same surface `gg-golden` measures through.
 # It also re-exports the knobs a sweep turns (§4.8) — reached through
 # `gg_render::cvars` off the statics, never registered, because nothing here
-# parses a config file, which is why `gg-core` is not a dependency of its own.
+# parses a config file — `gg-core` is below for its clock, never for that.
 gg-render = { path = "../../crates/gg-render" }
 gg-extract = { path = "../../crates/gg-extract" }
 # The instrument's scenes declare geometry the way a game does: ordinary
 # components in a World, read through the same typed query the shell uses.
 gg-ecs = { path = "../../crates/gg-ecs" }
 gg-math = { path = "../../crates/gg-math" }
+# `pace` drives the two clocks the shell drives — the tick accumulator and the
+# input one — rather than modelling them, which is the only way a number it
+# prints is a number `gg-runtime` would have produced.
+gg-core = { path = "../../crates/gg-core" }
+gg-input = { path = "../../crates/gg-input" }
 # An instrument reports by writing an image under `target/gg-tools/`; it never
 # opens a viewer (§1.5).
 png.workspace = true

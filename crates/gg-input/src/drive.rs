@@ -25,6 +25,11 @@ impl Drive {
     /// Call once per *tick*, not once per frame: `just_pressed` is an edge
     /// between two ticks, and a render frame that owes three of them must not
     /// report one edge to all three.
+    ///
+    /// How much of a frame's accumulated motion each tick spends is
+    /// [`Input::frame_covered`]' business, not this one's — and live-only by
+    /// construction, since a replay's frames were already divided when they were
+    /// recorded and dividing them again would be a second sim.
     pub fn frame(&mut self, input: &mut Input, tick: u64) -> InputFrame {
         match self {
             Drive::Live(recorder) => {

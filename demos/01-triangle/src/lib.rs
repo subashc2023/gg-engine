@@ -38,6 +38,7 @@ pub fn pipeline_desc() -> gg_rhi::PipelineDesc<'static> {
         // that ignores depth has to say.
         blend: gg_rhi::Blend::Off,
         depth: gg_rhi::DepthMode::Off,
+        samples: gg_rhi::Samples::X1,
         depth_bias: false,
     }
 }

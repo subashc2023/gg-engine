@@ -61,6 +61,28 @@ pub static HISTOGRAM: CVar = CVar::new_bool(
     "resample the frame's radiance for the overlay histogram",
 );
 
+/// Antialias the finished picture with one post-process edge pass (§6 M21).
+///
+/// **Off by default, and that default is load-bearing**: every blessed golden
+/// (§4.10) was rendered without it, and an AA pass moves pixels along every
+/// silhouette in the frame by construction — turning it on by default would mean
+/// re-blessing three backends to change nothing anyone asked to change. A player
+/// turns it on through a game's settings menu (`Prefs::aa`), which is a *game's*
+/// world state and reaches no gate.
+pub static AA: CVar = CVar::new_bool("r.aa", false, "antialias the finished picture (FXAA)");
+
+/// Samples per pixel in the scene pass — MSAA (§6 M21). `1` is off, and off for
+/// the same load-bearing reason [`AA`] is: it moves every silhouette.
+///
+/// Clamped to a power of two in `[1, 8]` and then down to what the device
+/// advertises, which is the *only* place a count is silently reduced — a device
+/// that cannot do 8× has to draw something, and the alternative is a black
+/// window. The reduction is logged once, and [`Renderer::samples`] is what the
+/// operator reads back to see which count they actually got.
+///
+/// [`Renderer::samples`]: crate::Renderer::samples
+pub static MSAA: CVar = CVar::new_int("r.msaa", 1, "scene-pass samples per pixel (1, 2, 4, 8)");
+
 /// Shadow map edge in texels, clamped to `[256, 4096]`. A quality knob and a
 /// memory one at once: 2048² of `D32_SFLOAT` is 16 MiB.
 pub static SHADOW_SIZE: CVar = CVar::new_int("r.shadow_size", 2048, "shadow map edge, texels");
@@ -87,6 +109,25 @@ pub static SHADOW_DISTANCE: CVar = CVar::new_float(
 /// control a measurement wants.
 pub static SHADOW_CASCADES: CVar =
     CVar::new_int("r.shadow_cascades", 4, "shadow cascades over the range");
+
+/// Cull casters, `1` on. **A diagnostic switch, not a quality setting.**
+///
+/// Two culls stand between a box and the shadow map it belongs in — the swept view
+/// frustum at extract (`Extracted::cast_along`) and the per-cascade slab test
+/// ([`casts_into`](crate::casts_into)) — and both are a function of where the
+/// camera is pointed. So "a shadow that comes and goes as I turn" has two
+/// candidate causes that look alike from a chair, and this separates them in one
+/// toggle: `r.shadow_cull 0` keeps every caster in every cascade, so if the
+/// artifact survives it is the cascade *fit* and not either cull.
+///
+/// Off, a frame draws the whole world into each cascade — which is the cost the
+/// culls exist to avoid, and why this is a knob a session turns and not one a
+/// build ships with.
+pub static SHADOW_CULL: CVar = CVar::new_int(
+    "r.shadow_cull",
+    1,
+    "cull shadow casters (0 = every caster in every cascade — a diagnostic)",
+);
 
 /// How the range is divided, `0` uniform to `1` logarithmic.
 ///
@@ -182,9 +223,12 @@ pub fn register() -> Result<(), CVarError> {
         &EXPOSURE,
         &AMBIENT,
         &HISTOGRAM,
+        &AA,
+        &MSAA,
         &SHADOW_SIZE,
         &SHADOW_DISTANCE,
         &SHADOW_CASCADES,
+        &SHADOW_CULL,
         &SHADOW_SPLIT_LAMBDA,
         &SHADOW_BLEND,
         &SHADOW_NORMAL_BIAS,

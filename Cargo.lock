@@ -655,6 +655,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "demo-12-shooter"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "gg-ecs",
+ "gg-math",
+]
+
+[[package]]
 name = "demo-99-template"
 version = "0.1.0"
 dependencies = [
@@ -1154,8 +1163,10 @@ name = "gg-tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "gg-core",
  "gg-ecs",
  "gg-extract",
+ "gg-input",
  "gg-math",
  "gg-render",
  "png",

@@ -378,6 +378,7 @@ impl Residency {
                     format,
                     usage: ImageUse::Sampled,
                     mip_levels,
+                    samples: gg_rhi::Samples::X1,
                 })?;
                 *image = Some(created);
                 created

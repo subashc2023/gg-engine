@@ -67,6 +67,7 @@ fn clear_frame(rhi: &mut Rhi, color: [f32; 4]) -> FrameOutcome {
                 color: Some(ColorAttachment {
                     target: Target::Backbuffer,
                     clear: Some(color),
+                    resolve: None,
                 }),
                 depth: None,
                 viewport: None,
@@ -170,7 +171,8 @@ fn interactive_resize_minimize_spam_1000() {
                 | Event::MouseButton { .. }
                 | Event::MouseMotion { .. }
                 | Event::CursorMoved { .. }
-                | Event::MouseWheel { .. } => {}
+                | Event::MouseWheel { .. }
+                | Event::Focused(_) => {}
             }
         }
         match clear_frame(&mut rhi, [0.3, 0.2, 0.1, 1.0]) {

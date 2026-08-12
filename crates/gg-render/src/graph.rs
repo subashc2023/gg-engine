@@ -16,7 +16,8 @@
 
 use gg_rhi::{
     Access, BufferHandle, ColorAttachment, DepthAttachment, DrawSpec, GraphContext, ImageDesc,
-    ImageFormat, ImageHandle, ImageUse, Pass, PassKind, RhiError, Target, TextureIndex, Viewport,
+    ImageFormat, ImageHandle, ImageUse, Pass, PassKind, RhiError, Samples, Target, TextureIndex,
+    Viewport,
 };
 
 /// A virtual resource inside one frame's graph.
@@ -59,6 +60,11 @@ pub enum Body<'a> {
     Draw {
         /// Written as color, if any.
         color: Option<(ResourceId, Load)>,
+        /// Where a multisampled `color` is averaged down at the end of the pass
+        /// (§6 M21). Required exactly when `color` has more than one sample —
+        /// the samples are never stored, so this is the pass's only output, and
+        /// a later pass samples *this* rather than the attachment drawn into.
+        resolve: Option<ResourceId>,
         /// Tested against, if any.
         depth: Option<(ResourceId, DepthUse)>,
         /// Where in the attachments the draws land; `None` is all of them. A
@@ -98,6 +104,7 @@ pub fn single_pass<'a>(
         name,
         body: Body::Draw {
             color: Some((backbuffer, load)),
+            resolve: None,
             depth: None,
             viewport: None,
             samples: &[],
@@ -287,9 +294,14 @@ impl<'p> Frame<'p> {
         name: &'static str,
         format: ImageFormat,
     ) -> Result<ResourceId, RhiError> {
-        let entry =
-            self.pool
-                .acquire(self.ctx, name, self.extent, format, ImageUse::ColorTarget)?;
+        let entry = self.pool.acquire(
+            self.ctx,
+            name,
+            self.extent,
+            format,
+            ImageUse::ColorTarget,
+            Samples::X1,
+        )?;
         Ok(self.push(name, Target::Image(entry.image), entry.texture))
     }
 
@@ -300,7 +312,7 @@ impl<'p> Frame<'p> {
     ///
     /// Allocation.
     pub fn depth(&mut self, name: &'static str) -> Result<ResourceId, RhiError> {
-        self.depth_at(name, self.extent)
+        self.depth_at(name, self.extent, Samples::X1)
     }
 
     /// A pooled depth attachment at **its own** extent — the camera's depth
@@ -318,6 +330,7 @@ impl<'p> Frame<'p> {
         &mut self,
         name: &'static str,
         extent: (u32, u32),
+        samples: Samples,
     ) -> Result<ResourceId, RhiError> {
         let entry = self.pool.acquire(
             self.ctx,
@@ -325,6 +338,7 @@ impl<'p> Frame<'p> {
             extent,
             ImageFormat::Depth32,
             ImageUse::Depth,
+            samples,
         )?;
         Ok(self.push(name, Target::Image(entry.image), None))
     }
@@ -335,15 +349,26 @@ impl<'p> Frame<'p> {
     /// # Errors
     ///
     /// Allocation, or a full bindless array.
+    /// A multisampled one has **no bindless slot**: nothing samples it, the
+    /// resolve target beside it is what a later pass reads, and a `2DMS`
+    /// descriptor is not something the global set declares. [`Frame::texture`]
+    /// therefore returns `None` for it, which is the shape that makes "the post
+    /// pass samples the resolve" the only spelling that compiles.
     pub fn color_at(
         &mut self,
         name: &'static str,
         extent: (u32, u32),
         format: ImageFormat,
+        samples: Samples,
     ) -> Result<ResourceId, RhiError> {
-        let entry = self
-            .pool
-            .acquire(self.ctx, name, extent, format, ImageUse::ColorTarget)?;
+        let entry = self.pool.acquire(
+            self.ctx,
+            name,
+            extent,
+            format,
+            ImageUse::ColorTarget,
+            samples,
+        )?;
         Ok(self.push(name, Target::Image(entry.image), entry.texture))
     }
 
@@ -369,6 +394,11 @@ impl<'p> Frame<'p> {
             extent,
             ImageFormat::Depth32,
             ImageUse::DepthSampled,
+            // Never multisampled, whatever the camera's count: a shadow map is
+            // sampled — many times, at an offset — so its samples would have to
+            // be resolved before the lookup, and what the lookup wants is the
+            // nearest depth rather than the average of eight.
+            Samples::X1,
         )?;
         Ok(self.push(name, Target::Image(entry.image), entry.texture))
     }
@@ -423,20 +453,31 @@ impl<'p> Frame<'p> {
             let body = match &pass.body {
                 Body::Draw {
                     color,
+                    resolve,
                     depth,
                     viewport,
                     samples,
                     draws,
                 } => {
+                    let resolve = *resolve;
                     let color = color
                         .map(|(id, load)| {
                             let target = self.transition(&mut edges, id, Access::ColorWrite)?;
+                            // The resolve target is written by the pass as
+                            // surely as the multisample one is — later, and by
+                            // fixed function rather than by a draw, but a pass
+                            // that did not declare it would be a pass whose
+                            // output nothing barriered.
+                            let into = resolve
+                                .map(|id| self.transition(&mut edges, id, Access::ColorWrite))
+                                .transpose()?;
                             Ok::<_, RhiError>(ColorAttachment {
                                 target,
                                 clear: match load {
                                     Load::Clear(c) => Some(c),
                                     Load::Keep => None,
                                 },
+                                resolve: into,
                             })
                         })
                         .transpose()?;
@@ -581,6 +622,7 @@ struct Slot {
     slot: u64,
     extent: (u32, u32),
     format: ImageFormat,
+    samples: Samples,
     entry: Entry,
     last_used: u64,
 }
@@ -664,14 +706,20 @@ impl Transients {
         extent: (u32, u32),
         format: ImageFormat,
         usage: ImageUse,
+        samples: Samples,
     ) -> Result<Entry, RhiError> {
         let slot = ctx.frame_slot();
         let frame = self.frame;
-        if let Some(existing) = self
-            .slots
-            .iter_mut()
-            .find(|s| s.name == name && s.slot == slot && s.extent == extent && s.format == format)
-        {
+        // The sample count is part of the key for the same reason the extent
+        // is: a mode switch mid-session must not hand back the old count's
+        // image, and the one it stops asking for retires by going idle.
+        if let Some(existing) = self.slots.iter_mut().find(|s| {
+            s.name == name
+                && s.slot == slot
+                && s.extent == extent
+                && s.format == format
+                && s.samples == samples
+        }) {
             existing.last_used = frame;
             return Ok(existing.entry);
         }
@@ -683,12 +731,17 @@ impl Transients {
             // A transient is written and sampled at full size; a chain would be
             // levels no pass declares and no upload fills.
             mip_levels: 1,
+            samples,
         })?;
         // Sampled attachments get their bindless slot once, here, rather than
         // per frame: a descriptor write every frame would be a cost the graph
         // charges for nothing, since the pool hands back the same image.
+        //
+        // A multisample attachment gets none at all — the global set's arrays
+        // are single-sample, and what a later pass reads is the resolve.
         let texture = match usage {
             ImageUse::Depth => None,
+            _ if samples.multisampled() => None,
             _ => Some(ctx.register_texture(image)?),
         };
         let entry = Entry { image, texture };
@@ -697,6 +750,7 @@ impl Transients {
             slot,
             extent,
             format,
+            samples,
             entry,
             last_used: frame,
         });
@@ -767,6 +821,7 @@ mod tests {
             name: "pass",
             body: Body::Draw {
                 color: None,
+                resolve: None,
                 depth: Some((id, DepthUse::Write)),
                 viewport: None,
                 samples: &[],

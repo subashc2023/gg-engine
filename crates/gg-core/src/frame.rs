@@ -26,7 +26,7 @@
 
 use core::time::Duration;
 
-use crate::clock::{Pace, TickClock};
+use crate::clock::{Due, Pace, TickClock};
 use crate::event::{AppEvent, Events};
 
 /// Whether the shell should come back for another frame.
@@ -59,6 +59,19 @@ pub trait Stages {
     fn event(&mut self, event: AppEvent) -> Result<(), Self::Error> {
         let _ = event;
         Ok(())
+    }
+
+    /// What this frame charged the clock, before the first tick runs.
+    ///
+    /// The one thing a stage cannot work out for itself, and it matters because
+    /// continuous input is accumulated per *frame* and spent per *tick*: the
+    /// travel in hand at a tick is whatever a variable number of frames
+    /// delivered, and spending it whole turns the camera by a rate that wobbles
+    /// with the frame clock while held keys deflect an axis identically
+    /// throughout. [`Due::covered`] is the denominator that fixes it. A frame
+    /// owing nothing is passed too — it is a frame the accumulator grew on.
+    fn ticks_due(&mut self, due: Due) {
+        let _ = due;
     }
 
     /// The game-code swap point (§4.2.2): a rebuilt dylib that passed its
@@ -192,6 +205,9 @@ impl FrameLoop {
         }
 
         let due = self.clock.advance(elapsed);
+        // Before the loop, not inside it: a stage spending a frame's accumulated
+        // input has to know the denominator at the first tick, not the last.
+        stages.ticks_due(due);
         if due.dropped > 0 {
             tracing::debug!(
                 dropped = due.dropped,
@@ -222,6 +238,23 @@ impl FrameLoop {
             profiling::scope!("render");
             stages.render(alpha)?;
         }
+
+        // One line per frame, off by default (§4.8's convention), for the
+        // question a frame time alone cannot answer: whether a stutter is the
+        // *sim* landing unevenly or the picture arriving late. A 60 Hz sim under
+        // a faster display runs 0 or 1 ticks a frame in a pattern set by
+        // `elapsed`, and `alpha` is where between two poses the frame was
+        // interpolated — a smooth session walks alpha evenly, and a session that
+        // judders repeats or skips it. `RUST_LOG=gg::pace=debug`.
+        tracing::debug!(
+            target: "gg::pace",
+            frame = self.frame,
+            elapsed_us = elapsed.as_micros(),
+            ticks = due.count,
+            dropped = due.dropped,
+            alpha = alpha,
+            "paced"
+        );
 
         // Closes the frame *after* every zone above it, so the Tracy timeline
         // shows frames rather than zones straddling them.

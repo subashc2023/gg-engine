@@ -54,6 +54,7 @@ pub gg_rhi::ImageUse::DepthSampled
 pub gg_rhi::ImageUse::Sampled
 pub gg_rhi::ImageUse::Storage
 impl gg_rhi::ImageUse
+pub fn gg_rhi::ImageUse::is_attachment(self) -> bool
 pub fn gg_rhi::ImageUse::is_depth(self) -> bool
 pub enum gg_rhi::PassKind<'a>
 pub gg_rhi::PassKind::Barriers
@@ -79,6 +80,16 @@ pub gg_rhi::Sampler::NearestClamp
 impl gg_rhi::Sampler
 pub const gg_rhi::Sampler::COUNT: u32
 pub fn gg_rhi::Sampler::index(self) -> u32
+pub enum gg_rhi::Samples
+pub gg_rhi::Samples::X1
+pub gg_rhi::Samples::X2
+pub gg_rhi::Samples::X4
+pub gg_rhi::Samples::X8
+impl gg_rhi::Samples
+pub const gg_rhi::Samples::ALL: [gg_rhi::Samples; 4]
+pub fn gg_rhi::Samples::count(self) -> u32
+pub fn gg_rhi::Samples::from_count(u32) -> core::option::Option<gg_rhi::Samples>
+pub fn gg_rhi::Samples::multisampled(self) -> bool
 pub enum gg_rhi::Target
 pub gg_rhi::Target::Backbuffer
 pub gg_rhi::Target::Buffer(gg_rhi::BufferHandle)
@@ -95,6 +106,7 @@ pub gg_rhi::Candidate::name: alloc::string::String
 pub gg_rhi::Candidate::score: u32
 pub struct gg_rhi::ColorAttachment
 pub gg_rhi::ColorAttachment::clear: core::option::Option<[f32; 4]>
+pub gg_rhi::ColorAttachment::resolve: core::option::Option<gg_rhi::Target>
 pub gg_rhi::ColorAttachment::target: gg_rhi::Target
 pub struct gg_rhi::DepthAttachment
 pub gg_rhi::DepthAttachment::clear: core::option::Option<f32>
@@ -108,7 +120,12 @@ pub struct gg_rhi::DeviceReport
 pub gg_rhi::DeviceReport::api_version: (u32, u32, u32)
 pub gg_rhi::DeviceReport::candidates: alloc::vec::Vec<gg_rhi::Candidate>
 pub gg_rhi::DeviceReport::chosen: alloc::string::String
+pub gg_rhi::DeviceReport::samples: alloc::vec::Vec<gg_rhi::Samples>
 pub gg_rhi::DeviceReport::transfer_dedicated: bool
+impl gg_rhi::DeviceReport
+pub fn gg_rhi::DeviceReport::afforded(&self, gg_rhi::Samples) -> gg_rhi::Samples
+pub fn gg_rhi::DeviceReport::max_samples(&self) -> gg_rhi::Samples
+pub fn gg_rhi::DeviceReport::supports_samples(&self, gg_rhi::Samples) -> bool
 pub struct gg_rhi::DrawSpec<'a>
 pub gg_rhi::DrawSpec::count: u32
 pub gg_rhi::DrawSpec::depth_bias: core::option::Option<gg_rhi::DepthBias>
@@ -127,6 +144,7 @@ pub gg_rhi::ImageDesc::extent: (u32, u32)
 pub gg_rhi::ImageDesc::format: gg_rhi::ImageFormat
 pub gg_rhi::ImageDesc::mip_levels: u32
 pub gg_rhi::ImageDesc::name: &'a str
+pub gg_rhi::ImageDesc::samples: gg_rhi::Samples
 pub gg_rhi::ImageDesc::usage: gg_rhi::ImageUse
 pub struct gg_rhi::ImageHandle(_)
 pub struct gg_rhi::Indirect
@@ -200,6 +218,7 @@ pub gg_rhi::PipelineDesc::fs_entry: &'a str
 pub gg_rhi::PipelineDesc::fs_spirv: &'a [u8]
 pub gg_rhi::PipelineDesc::name: &'a str
 pub gg_rhi::PipelineDesc::push_constant_size: u32
+pub gg_rhi::PipelineDesc::samples: gg_rhi::Samples
 pub gg_rhi::PipelineDesc::vs_entry: &'a str
 pub gg_rhi::PipelineDesc::vs_spirv: &'a [u8]
 pub struct gg_rhi::PipelineHandle(_)

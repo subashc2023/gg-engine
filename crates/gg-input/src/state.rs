@@ -52,6 +52,12 @@ pub struct Input {
     /// has no id, no binding and no meaning to a game — so it reaches
     /// [`InputFrame`] never and `gg_input::replay`'s text channel only.
     typed: String,
+    /// Wall time the accumulators above span, in *tick periods* — the
+    /// denominator [`Input::tick`] spends against, set by
+    /// [`Input::frame_covered`] and decremented by one as each tick takes its
+    /// period. One is the resting value, and it means "this tick takes
+    /// everything".
+    covered: f32,
     current: InputFrame,
     previous: InputFrame,
 }
@@ -71,6 +77,7 @@ impl Input {
             cursor: [0; 2],
             wheel: 0.0,
             typed: String::new(),
+            covered: 1.0,
             current: InputFrame::default(),
             previous: InputFrame::default(),
         }
@@ -100,6 +107,20 @@ impl Input {
             }
             None => false,
         }
+    }
+
+    /// Whether the active layers bind `key` — see [`ActionMap::claims`]. What a
+    /// shell asks before treating a key as its own.
+    pub fn claims_key(&self, key: Key) -> bool {
+        self.map.claims(&self.stack, Source::Key(key))
+    }
+
+    /// Whether the active layers bind raw device motion to any axis — see
+    /// [`ActionMap::claims_motion`]. True for a game that does mouse-look.
+    pub fn looks(&self) -> bool {
+        [MouseAxis::X, MouseAxis::Y]
+            .into_iter()
+            .any(|m| self.map.claims_motion(&self.stack, m))
     }
 
     /// Deactivate the topmost layer.
@@ -193,9 +214,49 @@ impl Input {
         }
     }
 
-    /// Fold accumulated raw input into this tick's frame. Call exactly once per
-    /// sim tick; the returned frame is what the recorder writes.
+    /// How much wall time the accumulated motion spans, in tick periods —
+    /// `gg_core::Due::covered`, handed over before the frame's first tick.
+    ///
+    /// Motion arrives on a frame's clock and is spent on a tick's, and the two do
+    /// not divide. Spending the accumulator whole gives a tick however much travel
+    /// a *variable* number of frames delivered: four at 240 Hz and sometimes three
+    /// or five, so the view turns at a rate that wobbles by a quarter while held
+    /// keys deflect an axis identically throughout. Translation walks on evenly,
+    /// rotation lurches — which reads as the *world* juddering rather than the
+    /// mouse, and gets worse the further the panel is from the sim rate.
+    ///
+    /// So a tick takes one period's worth, `1/covered` of what is in hand, and
+    /// leaves the rest. It is lossless and it does not lag: the leftover is the
+    /// travel of the leftover time, and it is still there when that time's tick
+    /// comes due. A frame owing two ticks is the same statement with `covered`
+    /// near two — half each — which is why there is no separate tick count here.
+    ///
+    /// A host that never calls this leaves it at one and every tick takes the
+    /// whole accumulator, which is what a one-tick-per-frame run and every
+    /// locked-pace tier (§5.6) already had — `covered` is exactly the tick count
+    /// there, alpha being zero throughout.
+    pub fn frame_covered(&mut self, ticks: f32) {
+        // Set, not added: the clock's own residue already carries the frames that
+        // owed nothing, so accumulating here would count that time twice.
+        self.covered = ticks;
+    }
+
+    /// Fold this tick's share of the accumulated input into a frame. Call exactly
+    /// once per sim tick; the returned frame is what the recorder writes.
+    ///
+    /// Impulses are *not* shared — a wheel notch and a typed character belong to
+    /// the tick they arrived on and cannot be a third of anything, so they land on
+    /// the first tick of a frame and are spent there.
     pub fn tick(&mut self) -> InputFrame {
+        // One tick period out of however many the accumulator spans. Never above
+        // one — a tick may not spend travel that has not happened — and a
+        // non-finite or non-positive `covered` takes everything, which is the
+        // resting behaviour rather than a NaN in the sim.
+        let take = match self.covered > 1.0 {
+            true => 1.0 / self.covered,
+            false => 1.0,
+        };
+        self.covered = (self.covered - 1.0).max(0.0);
         let mut buttons = 0u64;
         // Digital deflection is *tallied by direction*, not summed: two keys
         // bound the same way are not twice the stick, and a key bound each way
@@ -252,15 +313,24 @@ impl Input {
                 deflect(&mut positive, &mut negative, axis.index(), sign);
             }
         }
+        // This tick's period of the accumulated motion, subtracted rather than
+        // cleared so the remainder is the next tick's. Truncation on the cursor
+        // keeps that exact — an integer source stays integral either side — while
+        // the raw accumulator is a float whose residue stays un-quantized, which
+        // is the same rounding a single tick already had.
+        let share = [self.motion[0] * take, self.motion[1] * take];
+        // `f64` and an exact identity at `take == 1.0`: the cursor is an integer
+        // the host already quantized (§6 M15.1), and a delta past 2^24 does not
+        // survive an `f32` multiply — scaling it there would move a number that
+        // was supposed to arrive unchanged.
+        let steps = match take < 1.0 {
+            true => [scaled(self.cursor[0], take), scaled(self.cursor[1], take)],
+            false => self.cursor,
+        };
         // Device motion quantizes here; cursor motion arrived quantized. Same
         // loop either way — what differs is which accumulator was in whose
         // units, and a source is only ever in one of them.
-        let deltas = [
-            quantize(self.motion[0]),
-            quantize(self.motion[1]),
-            self.cursor[0],
-            self.cursor[1],
-        ];
+        let deltas = [quantize(share[0]), quantize(share[1]), steps[0], steps[1]];
         for (quantized, which) in deltas.into_iter().zip(MouseAxis::ALL) {
             for (axis, sign) in self.map.motion_axes(&self.stack, which) {
                 motion[axis.index()] += sign * quantized;
@@ -278,8 +348,8 @@ impl Input {
             let digital = i32::from(positive[i]) - i32::from(negative[i]);
             frame.axes[i] = digital * AXIS_SCALE + motion[i];
         }
-        self.motion = [0.0; 2];
-        self.cursor = [0; 2];
+        self.motion = [self.motion[0] - share[0], self.motion[1] - share[1]];
+        self.cursor = [self.cursor[0] - steps[0], self.cursor[1] - steps[1]];
         // Spent whole rather than decremented: a notch that pressed this tick
         // must not press again next tick, and travel that never reached one is
         // a hand resting on the wheel rather than a scroll being saved up.
@@ -348,6 +418,14 @@ fn deflect(
     }
 }
 
+/// A fraction of an already-quantized integer delta, toward zero. `f64` because
+/// it holds every `i32` exactly, which `f32` stops doing at 2^24 — and the
+/// residue this leaves behind is the next tick's, so a rounding that drifted
+/// would drift into the sim.
+fn scaled(v: i32, take: f32) -> i32 {
+    (f64::from(v) * f64::from(take)) as i32
+}
+
 /// Device units → [`AXIS_SCALE`]ths, saturating. `as` on a float saturates in
 /// Rust, so an absurd delta clamps instead of wrapping into a turn the other
 /// way.
@@ -376,7 +454,7 @@ mod tests {
     const MAP: &str = "
         [game.actions]
         look = [\"Tab\"]
-        spawn = [\"F\", \"Mouse1\"]
+        spawn = [\"F\", \"Mouse1\", \"WheelUp\"]
 
         [game.axes]
         move_right = [\"+D\", \"+Right\", \"-A\"]
@@ -438,6 +516,95 @@ mod tests {
         assert_eq!(i.axis(LOOK_X), 0.75);
         i.tick();
         assert_eq!(i.axis(LOOK_X), 0.0);
+    }
+
+    /// A frame owing two ticks turns the view half as far on each rather than
+    /// wholly on the first: held keys deflect an axis identically on both ticks,
+    /// so motion that lands all on one is rotation lurching against translation
+    /// that did not — the *world* juddering, which is how it reads from a chair.
+    #[test]
+    fn a_frames_motion_is_spent_over_the_time_that_frame_covered() {
+        let mut i = input();
+        i.motion(1.0, 0.0);
+        i.frame_covered(2.0);
+        i.tick();
+        assert_eq!(i.axis(LOOK_X), 0.5, "half on the first tick");
+        i.tick();
+        assert_eq!(i.axis(LOOK_X), 0.5, "and the remainder on the last");
+        i.tick();
+        assert_eq!(i.axis(LOOK_X), 0.0, "with nothing left over");
+
+        // The control: the same travel over one period is undivided, which is
+        // what every locked-pace tier runs and what this must not have moved.
+        i.motion(1.0, 0.0);
+        i.frame_covered(1.0);
+        i.tick();
+        assert_eq!(i.axis(LOOK_X), 1.0);
+    }
+
+    /// The 240 Hz case, which the tick *count* cannot see: every frame owes zero
+    /// ticks or one, so a count-based divisor is always one, and yet the tick that
+    /// comes due has whatever four frames delivered — or five, when the two clocks
+    /// slip a beat. Spending that whole is a fifth of the turn rate appearing out
+    /// of nothing, for one tick, while held keys deflect identically throughout.
+    ///
+    /// A quarter unit a frame, and a tick due after five of them rather than four.
+    #[test]
+    fn a_tick_spends_one_period_however_many_frames_delivered_it() {
+        let mut i = input();
+        for frame in 1u8..=5 {
+            i.motion(0.25, 0.0);
+            // What the clock reports: five quarter-periods in hand, and the tick
+            // comes due on the fifth.
+            i.frame_covered(0.25 * f32::from(frame));
+        }
+        i.tick();
+        assert_eq!(i.axis(LOOK_X), 0.25 * 4.0, "one period's travel, not five");
+
+        // And the fifth quarter is not lost — it is the next tick's, along with
+        // whatever arrives before it. Three more frames complete that period.
+        for frame in 1u8..=3 {
+            i.motion(0.25, 0.0);
+            i.frame_covered(0.25 * f32::from(frame + 1));
+        }
+        i.tick();
+        assert_eq!(i.axis(LOOK_X), 0.25 * 4.0, "the leftover quarter arrived");
+    }
+
+    /// Lossless, which is the property that makes spending a fraction safe to do
+    /// at all: the tick that exhausts the covered time takes the remainder, so a
+    /// division that does not come out even neither drops travel nor invents it.
+    /// Three periods over a delta that is not a multiple of three, and one that is
+    /// not a multiple of `AXIS_SCALE`.
+    #[test]
+    fn spending_motion_by_period_neither_drops_it_nor_invents_it() {
+        let mut i = input();
+        i.cursor(100, 0);
+        i.frame_covered(3.0);
+        let mut total = 0;
+        for _ in 0..3 {
+            i.tick();
+            total += i.frame().axes[UI_X.index()];
+        }
+        assert_eq!(total, 100, "every quantum arrived, once");
+        assert_eq!(
+            i.frame().axes[UI_X.index()],
+            34,
+            "the last takes the residue"
+        );
+    }
+
+    /// A notch is not a fraction of anything. Impulses land on the first tick of
+    /// the frame they arrived in and are spent there, however much time it covered.
+    #[test]
+    fn a_wheel_notch_is_not_spent_by_period() {
+        let mut i = input();
+        i.wheel(1.0);
+        i.frame_covered(3.0);
+        i.tick();
+        assert!(i.pressed(SPAWN), "the whole notch, on the first tick");
+        i.tick();
+        assert!(!i.pressed(SPAWN), "and not again");
     }
 
     /// The two pointer sources are two sources (§6 M15.1). One mouse moving
