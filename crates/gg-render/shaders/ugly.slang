@@ -42,17 +42,28 @@ ConstantBuffer<UglyPush> push;
 // `Vertex` beside it. A drift is a build error, not a garbled mesh.
 static const uint VERTEX_STRIDE = 24;
 
-// Positions carry the instance's scale, which non-uniform scale would shear a
-// normal by; the rotation is applied to normals separately for that reason. A
-// box's face normals are unaffected by axis-aligned scale, which is what makes
-// the shortcut exact here rather than merely cheap.
 float3 rotate_by(float4 q, float3 v)
 {
     float3 t = 2.0 * cross(q.xyz, v);
     return v + q.w * t + cross(q.xyz, t);
 }
 
-// Camera-relative world position of one of the box's corners. Shared by all
+// Positions carry the instance's scale, which shears a normal; the inverse
+// transpose of a diagonal `T*R*S` is `R*S^-1`, so a normal divides where a
+// position multiplies — `scene.slang`'s vertex stage, on the pass that always
+// had meshes to get this wrong on.
+//
+// Exact for both primitives and free for one of them: a box's face normal is
+// axis-aligned, so dividing it by the scale changes only its length and
+// `normalize` puts that back. That is why this was a rotation alone until §6
+// M26 — correct by luck for every instance the pass had ever drawn, and wrong
+// the moment one of them curved.
+float3 normal_of(float3 n)
+{
+    return normalize(rotate_by(push.rotation, n / nonzero_scale(push.scale.xyz)));
+}
+
+// Camera-relative world position of one of the primitive's vertices. Shared by all
 // three entry points below so the three cannot disagree about where a fragment
 // is — which for prepass and forward is a hard requirement, not tidiness.
 float3 world_of(uint vid)
@@ -77,7 +88,7 @@ VOut vs_main(uint vid: SV_VertexID)
     float* v = (float*)(push.vertices + uint64_t(vid) * VERTEX_STRIDE);
     Frame frame = load_frame(push.frame);
     float3 world = world_of(vid);
-    float3 normal = normalize(rotate_by(push.rotation, float3(v[3], v[4], v[5])));
+    float3 normal = normal_of(float3(v[3], v[4], v[5]));
 
     VOut o;
     o.pos = mul(frame.view_projection, float4(world, 1.0));

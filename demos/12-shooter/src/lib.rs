@@ -168,54 +168,74 @@ pub const KILL_Y: f64 = -20.0;
 
 // ---------------------------------------------------------------- chart -----
 
-/// Steps across the smoothness axis of [`chart`] — seven, so the ends are 0 and
-/// 1 exactly and the middle step lands on 0.5.
-pub const CHART_STEPS: usize = 7;
-/// Rows: dielectric, then conductor. Two, because the interesting thing about
-/// metallic is not a ramp — it is that a metal has no diffuse lobe at all, and
-/// that reads as a difference between two rows rather than as a gradient.
-pub const CHART_ROWS: usize = 2;
-/// Boxes the chart deals — what `bootstrap` adds to [`ROOM`].
-pub const CHART_BOXES: usize = CHART_STEPS * CHART_ROWS;
-/// Half-extent of one chart box. The waist crates' size on purpose: the same
-/// 0.70 cube, so it reads as an object in the room rather than as a diagram
-/// laid over one, and it can be jumped onto like any other.
-pub const CHART_HALF: f32 = 0.35;
-/// Centre of the first box — dielectric row, roughest step.
+/// Steps along each axis of [`chart`] — five, so the ends are 0 and 1 exactly,
+/// the middle step lands on 0.5, and the grid is the twenty-five balls every
+/// published material chart is (§6 M26).
+pub const CHART_STEPS: usize = 5;
+/// Balls the chart deals — what `bootstrap` adds to [`ROOM`].
+pub const CHART_BALLS: usize = CHART_STEPS * CHART_STEPS;
+/// Radius of one ball.
+pub const CHART_RADIUS: f32 = 0.28;
+/// Between neighbours, along both axes. Wider than a ball, so what separates
+/// two samples is background and not a tangent.
+pub const CHART_PITCH: f64 = 0.72;
+/// Centre of the grid — the middle ball, smoothness and metallic both 0.5.
 ///
-/// The room's one large clear span: east of the mezzanine (which reaches
-/// x = -2.5), north of the floating slabs, and with the far wall five metres
-/// behind it so the chart is read against sky and flat wall rather than against
-/// the furniture. The `chart` golden scene frames it from x = 5.5, z = -3.0,
-/// which is the standoff seven boxes at this pitch need to fit a 16:9 frame.
-pub const CHART_ORIGIN: sim::DVec3 = sim::DVec3::new(2.65, 0.35, -8.0);
-/// Between columns and between the two rows. Wider than a box, so the gap
-/// between two samples is floor and not a shared edge.
-pub const CHART_PITCH: f64 = 0.95;
-/// One base colour for every box in it, and that is the point: the only things
+/// **Centred in the room's width, off the floor, and clear of everything that
+/// casts (§6 M26).** Three separate requirements, and the room only satisfies
+/// all three here:
+///
+/// - *Nothing shadows it.* The sun travels `-x, -y, -z`, so a caster has to
+///   stand east, above and south of the chart. The nearest that qualifies is
+///   the pillar at `(2, -6)`, whose shadow crosses `y = 2.1` at `z = -6.6` —
+///   four metres short. The old placement failed exactly this: on the floor at
+///   the east end, the pillar at `(9, -6)` laid a shadow across its bright half,
+///   and a chart with a shadow on it is measuring the shadow.
+/// - *Nothing stands behind it.* The room's middle is not its clear span: the
+///   mezzanine reaches `x = -2.5` and a pillar stands at `x = 2`, which leaves
+///   4.5 m for a 3.4 m chart and puts a column of concrete behind the smooth
+///   end of it. Against the north wall the backdrop is one flat, evenly lit
+///   plane with sky above — which is what a chart is read against.
+/// - *Nothing walks through it.* It hangs at head height in the one part of the
+///   room the course does not use.
+pub const CHART_CENTRE: sim::DVec3 = sim::DVec3::new(0.0, 2.1, -10.5);
+/// One base colour for every ball in it, and that is the point: the only things
 /// that differ across the chart are the two knobs, so anything else the eye
 /// sees is the lighting answering them.
 pub const CHART_INK: u32 = 0x00b4_b4b4;
 
-/// The material chart on the floor (§6 M24): `(centre, smoothness, metallic)`
-/// for every box in it, dielectric row first, roughest step first.
+/// The material chart (§6 M24, spheres since §6 M26): `(centre, smoothness,
+/// metallic)` for every ball in it, dielectric row first, roughest step first.
 ///
-/// A function rather than a table because it is arithmetic — a table of 14
-/// hand-written triples is 14 chances to mistype a step, and the thing being
-/// demonstrated is precisely that the steps are even.
+/// A grid standing up in the air rather than lying on the floor, because a
+/// chart is read against a background and a floor is a background that changes
+/// with distance — every sample at a different range, under a different slice
+/// of the same shadow cascade. Smoothness runs left to right, roughest first;
+/// metallic runs upward, dielectrics along the bottom where reading starts.
+///
+/// A function rather than a table because it is arithmetic — twenty-five
+/// hand-written triples are twenty-five chances to mistype a step, and the
+/// thing being demonstrated is precisely that the steps are even.
+///
+/// The metallic axis passes through values no real material has. That is
+/// deliberate and [`Renderable::metallic`](gg_ecs::boundary::Renderable::metallic)
+/// says so: in between is not a substance, it is the blend a texture authored
+/// across a boundary needs, and a chart that skipped it would not show what the
+/// knob does between its ends.
 pub fn chart() -> impl Iterator<Item = (sim::DVec3, f32, f32)> {
-    (0..CHART_ROWS).flat_map(|row| {
+    let span = (CHART_STEPS - 1) as f64 * CHART_PITCH;
+    (0..CHART_STEPS).flat_map(move |row| {
         (0..CHART_STEPS).map(move |step| {
             let at = sim::DVec3::new(
-                CHART_ORIGIN.x + step as f64 * CHART_PITCH,
-                CHART_ORIGIN.y,
-                CHART_ORIGIN.z - row as f64 * CHART_PITCH,
+                CHART_CENTRE.x - span / 2.0 + step as f64 * CHART_PITCH,
+                CHART_CENTRE.y - span / 2.0 + row as f64 * CHART_PITCH,
+                CHART_CENTRE.z,
             );
             // Perceptual and even: `Renderable::smoothness` is squared into
             // GGX's alpha by the shader, so an even step here is what looks
             // like an even step.
-            let smoothness = step as f32 / (CHART_STEPS - 1) as f32;
-            (at, smoothness, row as f32)
+            let axis = |i: usize| i as f32 / (CHART_STEPS - 1) as f32;
+            (at, axis(step), axis(row))
         })
     })
 }
@@ -689,15 +709,16 @@ pub fn bootstrap(world: &mut GameWorld) {
         world.put(slab, Renderable::boxed(*position, *half_extent, *color));
     }
 
-    // The material chart, solid like everything else in the room: it is
-    // furniture that happens to be a diagram, so it collides, it casts, and it
-    // can be stood on.
+    // The material chart. **Not `Solid`, unlike everything else in the room**
+    // (§6 M26): the walk resolves against axis-aligned boxes, so a solid ball
+    // would collide as the cube it is inscribed in — an invisible corner to
+    // catch on, in mid-air, in the room's one open span. It hangs where it is
+    // read from and nothing walks into it.
     for (at, smoothness, metallic) in chart() {
-        let cube = world.spawn_with(Solid { _pad: 0 });
+        let ball = world.spawn();
         world.put(
-            cube,
-            Renderable::boxed(at, sim::Vec3::splat(CHART_HALF), CHART_INK)
-                .surfaced(smoothness, metallic),
+            ball,
+            Renderable::ball(at, CHART_RADIUS, CHART_INK).surfaced(smoothness, metallic),
         );
     }
 

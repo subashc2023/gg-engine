@@ -401,6 +401,7 @@ fn beam(shot: &Shot) -> Renderable {
         color: (fade << 16) | (fade << 8) | 0x40,
         smoothness: gg_ecs::boundary::DEFAULT_SMOOTHNESS,
         metallic: 0.0,
+        shape: gg_ecs::boundary::shape::BOX,
     }
 }
 

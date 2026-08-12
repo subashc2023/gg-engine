@@ -10,7 +10,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use demo_12_shooter::{
-    AIM_X, ARMS, BUFFER_TICKS, CHART_BOXES, COYOTE_TICKS, CUE_JUMP, CUE_LAND, CUES, Cue, EYE_LIFT,
+    AIM_X, ARMS, BUFFER_TICKS, CHART_BALLS, COYOTE_TICKS, CUE_JUMP, CUE_LAND, CUES, Cue, EYE_LIFT,
     HALF_H, HALF_W, HUD_SPEED, HUD_STATE, Hud, JUMP, JUMP_VELOCITY, MENU_AA, MENU_BACK, MENU_ITEMS,
     MENU_LOOK, MENU_LOOK_DOWN, MENU_LOOK_UP, MENU_QUIT, MENU_RESTART, MENU_RESUME, MENU_SETTINGS,
     MENU_TITLE, MENU_VOLUME, MENU_VOLUME_DOWN, MOVE_FORWARD, MOVE_RIGHT, Menu, PAGE_MAIN,
@@ -324,13 +324,16 @@ fn one_tick_deals_the_room_the_body_and_the_hud() {
     let mut game = Game::load();
     game.step();
     assert_eq!(game.all::<Walker>().len(), 1);
-    let boxes = ROOM.len() + CHART_BOXES;
     assert_eq!(
         game.all::<Solid>().len(),
-        boxes,
-        "every slab and every sample"
+        ROOM.len(),
+        "every slab, and the chart is not one (§6 M26)"
     );
-    assert_eq!(game.all::<Renderable>().len(), boxes, "and nothing else");
+    assert_eq!(
+        game.all::<Renderable>().len(),
+        ROOM.len() + CHART_BALLS,
+        "the room and the chart, and nothing else"
+    );
     assert_eq!(game.all::<Sky>().len(), 1, "one environment (§6 M24)");
     assert_eq!(game.all::<Eye>().len(), 1);
     assert_eq!(game.all::<Light>().len(), 3, "a sun and two lamps");
@@ -350,7 +353,7 @@ fn bootstrap_run_again_spawns_nothing_new() {
     let mut game = Game::load();
     game.steps(8);
     assert_eq!(game.all::<Walker>().len(), 1);
-    assert_eq!(game.all::<Renderable>().len(), ROOM.len() + CHART_BOXES);
+    assert_eq!(game.all::<Renderable>().len(), ROOM.len() + CHART_BALLS);
     assert_eq!(game.all::<Light>().len(), 3);
     assert_eq!(game.all::<Widget>().len(), ARMS + 2 + MENU_ITEMS.len());
 }

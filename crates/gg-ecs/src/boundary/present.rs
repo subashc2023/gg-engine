@@ -10,9 +10,10 @@
 //! The consequence worth naming: **nothing about how the game looks lives in the
 //! host.** A system fills these in from whatever the game's own components say,
 //! which puts colour, size and pose inside the dylib — reloadable, and editable
-//! while someone is playing. The host's renderer knows one shape, one colour
+//! while someone is playing. The host's renderer knows two shapes, one colour
 //! channel, and how to resolve a name in the pack it was handed; that is the
-//! whole of its opinion.
+//! whole of its opinion — and the second shape arrived at §6 M26 as a field on
+//! a component, not as a renderer setting, for exactly that reason.
 //!
 //! Layout agreement is not asserted here because it is already checked where it
 //! matters: the schema hash covers every field's name, type token, offset and
@@ -26,11 +27,13 @@ use gg_math::sim;
 
 use crate::Component;
 
-/// One box to draw, in world space.
+/// One primitive to draw, in world space.
 ///
-/// A box because M5's renderer draws exactly one primitive (§6 M5, deliberately
-/// ugly): a cube, a floor slab and a tracer are all this type with different
-/// [`half_extent`](Renderable::half_extent)s.
+/// Two of them since §6 M26 — a box and a sphere, chosen by
+/// [`shape`](Renderable::shape). A cube, a floor slab and a tracer are all the
+/// first with different [`half_extent`](Renderable::half_extent)s; the second
+/// exists because a *curved* surface is the only one that shows a whole
+/// specular lobe at once, and a material is not readable without that.
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
 #[component(id = "gg.renderable")]
 #[repr(C)]
@@ -72,6 +75,33 @@ pub struct Renderable {
     /// Zero is a dielectric, which is both the common case and the safe
     /// migration, for [`smoothness`](Renderable::smoothness)'s reason.
     pub metallic: f32,
+    /// Which primitive this draws — [`shape::BOX`] or [`shape::SPHERE`].
+    ///
+    /// A number with associated constants rather than an `enum`, for
+    /// [`light`]'s reason: a bare enum in a component is refused by the derive,
+    /// and an unknown value here draws the box rather than nothing. Zero is the
+    /// box for [`smoothness`](Renderable::smoothness)'s reason — a migration
+    /// that cannot carry this field zeroes it, and what a world full of boxes
+    /// turns into on its first reload must be the world that was already there.
+    ///
+    /// `u64` rather than `u32`, and that is arithmetic and not ambition: `f64`
+    /// puts this struct's alignment at 8, so a trailing `u32` would be followed
+    /// by four bytes of implicit padding — which `bytemuck::Pod` refuses. Both
+    /// spellings cost the same 88 bytes; only the narrow one needs a `_pad`
+    /// beside it in the schema, in the inspector, and in every struct literal.
+    pub shape: u64,
+}
+
+/// What [`Renderable::shape`] is. Associated constants rather than an `enum`
+/// field, for [`light`]'s reason — see that module.
+pub mod shape {
+    /// An axis-aligned box of [`half_extent`](super::Renderable::half_extent),
+    /// rotated. Zero, so it is what every migration and every zeroed field
+    /// produces.
+    pub const BOX: u64 = 0;
+    /// An ellipsoid of the same half-extent — a sphere when the three axes
+    /// agree, which is the case worth having and the only one a chart uses.
+    pub const SPHERE: u64 = 1;
 }
 
 /// What [`Renderable::boxed`] leaves a surface at: middling-rough, dielectric.
@@ -94,11 +124,26 @@ impl Renderable {
             color,
             smoothness: DEFAULT_SMOOTHNESS,
             metallic: 0.0,
+            shape: shape::BOX,
         }
     }
 
-    /// The same box with a material on it — the two knobs a game has over how a
-    /// surface answers light, past the colour it already picked.
+    /// A sphere of `radius`, unrotated — the same primitive a
+    /// [`boxed`](Renderable::boxed) call makes, drawn round.
+    ///
+    /// Uniform by construction: an ellipsoid is reachable by setting
+    /// [`half_extent`](Renderable::half_extent) directly and is legal, but the
+    /// thing a game asks for by name is a ball.
+    #[must_use]
+    pub fn ball(position: sim::DVec3, radius: f32, color: u32) -> Self {
+        Renderable {
+            shape: shape::SPHERE,
+            ..Renderable::boxed(position, sim::Vec3::splat(radius), color)
+        }
+    }
+
+    /// The same primitive with a material on it — the two knobs a game has over
+    /// how a surface answers light, past the colour it already picked.
     #[must_use]
     pub fn surfaced(mut self, smoothness: f32, metallic: f32) -> Self {
         self.smoothness = smoothness;
@@ -428,7 +473,10 @@ mod tests {
     fn the_protocol_types_are_flat_and_padding_free() {
         // `Pod` already refuses padding; these pin the numbers so a field added
         // to either one is a visible edit rather than a silent layout move.
-        assert_eq!(size_of::<Renderable>(), 80);
+        // 88 since §6 M26's `shape`, and the eight is the whole argument for
+        // spelling it `u64`: at align 8 a trailing `u32` would have cost the
+        // same eight bytes and a `_pad` field beside it.
+        assert_eq!(size_of::<Renderable>(), 88);
         assert_eq!(align_of::<Renderable>(), 8);
         assert_eq!(size_of::<Eye>(), 40);
         assert_eq!(align_of::<Eye>(), 8);
@@ -454,6 +502,32 @@ mod tests {
         box3.smoothness = 0.0;
         box3.metallic = 0.0;
         assert_eq!(1.0 - box3.smoothness, 1.0, "fully rough, never a mirror");
+        let zeroed: Renderable = bytemuck::Zeroable::zeroed();
+        assert_eq!(
+            zeroed.shape,
+            shape::BOX,
+            "a world that lost this field on a reload comes back the boxes it was"
+        );
+    }
+
+    /// The two spellings a game reaches for, and the one difference between
+    /// them. Not a tautology: `ball` is `boxed` with one field moved, so an
+    /// edit that made it a separate constructor could silently drop the
+    /// material default or the identity rotation.
+    #[test]
+    fn a_ball_is_a_box_that_differs_only_in_its_shape() {
+        let at = sim::DVec3::new(1.0, 2.0, 3.0);
+        let ball = Renderable::ball(at, 0.5, 0x0012_3456);
+        let boxed = Renderable::boxed(at, sim::Vec3::splat(0.5), 0x0012_3456);
+        assert_eq!(ball.shape, shape::SPHERE);
+        assert_eq!(boxed.shape, shape::BOX);
+        assert_eq!(
+            Renderable {
+                shape: shape::BOX,
+                ..ball
+            },
+            boxed
+        );
     }
 
     #[test]

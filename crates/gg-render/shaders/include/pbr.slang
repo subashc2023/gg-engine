@@ -41,6 +41,26 @@
 
 static const float PI = 3.14159265358979323846;
 
+// The instance scale with every component pulled off zero, sign kept.
+//
+// Here, in the one file both vertex stages include, because it is a numerical
+// guard the two must *agree* on: a normal takes `R * S^-1` (the inverse
+// transpose of a diagonal `T*R*S`), so both divide by this, and two copies that
+// drifted would shade the same geometry differently through the two pipelines.
+//
+// Only the tangent-frame paths use it; positions take the raw scale, because
+// prepass and forward agree on a fragment's depth only if they compute it from
+// bit-identical inputs. A zero component collapses the instance into a plane,
+// whose reciprocal is infinite and whose normalize is NaN — a black pixel that
+// reads as a lighting bug. Clamped, the collapsed axis merely dominates, so the
+// normal points along it: the direction a flattened surface faces. The sign
+// survives because a negative scale is a mirror and the normal flips with it.
+float3 nonzero_scale(float3 s)
+{
+    float3 magnitude = max(abs(s), 1e-8);
+    return select(s < 0.0, -magnitude, magnitude);
+}
+
 // `gg_ecs::boundary::light`'s constants, on the other side of the wire.
 static const uint LIGHT_DIRECTIONAL = 0;
 static const uint LIGHT_POINT = 1;

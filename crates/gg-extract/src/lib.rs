@@ -110,12 +110,41 @@ pub trait SimTransform: Component {
     fn surface(&self) -> (f32, f32) {
         (gg_ecs::boundary::DEFAULT_SMOOTHNESS, 0.0)
     }
+
+    /// Which primitive the host draws this as (§6 M26). Defaults to the box,
+    /// so a game component written before spheres existed answers correctly
+    /// without knowing the question.
+    fn shape(&self) -> u64 {
+        gg_ecs::boundary::shape::BOX
+    }
 }
 
 /// The bounding radius of a box of `half_extent` — its corner distance, which
 /// is what makes the sphere test rotation-invariant.
 fn box_radius(half_extent: sim::Vec3) -> f32 {
     render::Vec3::new(half_extent.x, half_extent.y, half_extent.z).length()
+}
+
+/// What [`Instance::shape`] means, re-exported rather than restated (§6 M26).
+///
+/// `gg-render` does not depend on `gg-ecs` and must not start (§3), but it is
+/// the crate that has to turn a shape into a vertex buffer. Extract is already
+/// the seam both sides reach across, so the constants cross here — one
+/// definition, named twice.
+pub use gg_ecs::boundary::shape;
+
+/// The cull radius `shape` implies, so a primitive bounds itself and the caller
+/// does not choose.
+///
+/// An ellipsoid's is its longest semi-axis, not its box's corner: it is
+/// inscribed in that box, so the `sqrt(3)` would keep plenty that never reaches
+/// the frustum and cull nothing extra in exchange.
+fn shape_radius(shape: u64, half_extent: sim::Vec3) -> f32 {
+    if shape == gg_ecs::boundary::shape::SPHERE {
+        max_scale(half_extent)
+    } else {
+        box_radius(half_extent)
+    }
 }
 
 /// The largest axis of a scale, for turning a local radius into a world one.
@@ -155,6 +184,10 @@ pub struct Instance {
     /// Carried rather than recomputed downstream because the culler already
     /// needed it and a second derivation is a second chance to disagree.
     pub radius: f32,
+    /// Which primitive to draw it as (§6 M26). Unread for an instance naming an
+    /// asset — a pack's content is whatever mesh it holds, and a shape field
+    /// over it would be a second opinion about the same geometry.
+    pub shape: u64,
 }
 
 /// Directional lights one frame may carry. Small on purpose: a scene has a sun,
@@ -573,7 +606,7 @@ impl Extracted {
             .zip(chunks.par_iter())
             .for_each(|(chunk, (entities, rows))| {
                 for (&entity, transform) in entities.iter().zip(rows.iter()) {
-                    let radius = box_radius(transform.half_extent());
+                    let radius = shape_radius(transform.shape(), transform.half_extent());
                     let pose = blend.pose(entity, transform);
                     chunk.keep(place(entity, transform, origin, radius, pose), frustum);
                 }
@@ -1033,6 +1066,7 @@ fn place<T: SimTransform>(
         surface: transform.surface(),
         asset: transform.asset(),
         radius,
+        shape: transform.shape(),
     }
 }
 
@@ -1071,6 +1105,9 @@ fn compose<T: SimTransform>(
         // is the *scene's* and would over-keep every node by the size of the
         // whole building.
         radius: node.radius * max_scale(model_scale) * max_scale(node.scale),
+        // Carried rather than set: a node draws a mesh, so nothing reads this,
+        // and inheriting it beats inventing a second answer.
+        shape: placed.shape,
     }
 }
 
@@ -1099,6 +1136,10 @@ impl SimTransform for gg_ecs::boundary::Renderable {
 
     fn surface(&self) -> (f32, f32) {
         (self.smoothness, self.metallic)
+    }
+
+    fn shape(&self) -> u64 {
+        self.shape
     }
 }
 

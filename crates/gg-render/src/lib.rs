@@ -1671,16 +1671,43 @@ struct BoxPass {
     /// The luminance resample: the post pass's vertex stage into a small float
     /// target, without the tonemap curve (§6 M11).
     downsample: PipelineHandle,
+    /// The two primitives the pass knows, indexed by
+    /// [`Geometry::of`](Geometry::of) (§6 M26).
+    geometry: [Geometry; 2],
+    /// Reused across frames. The push constants have to outlive the [`DrawSpec`]s
+    /// that borrow them, and extract already refuses to allocate per frame — a
+    /// buffer beside it that did would undo that.
+    pushes: Vec<Push>,
+    /// One list per cascade, culled — see [`BoxPass::build_shadow`].
+    shadow_pushes: Vec<Vec<Push>>,
+}
+
+/// One static primitive: its vertices, its indices, and the address the shader
+/// pulls from. Two of them since §6 M26, and the *only* thing a shape changes —
+/// a sphere is drawn by the same four pipelines with the same push block.
+struct Geometry {
     vertices: BufferHandle,
     indices: BufferHandle,
     vertex_address: DeviceAddress,
     index_count: u32,
-    /// Reused across frames. The push constants have to outlive the [`DrawSpec`]s
-    /// that borrow them, and extract already refuses to allocate per frame — a
-    /// buffer beside it that did would undo that.
-    pushes: Vec<shader::UglyPush>,
-    /// One list per cascade, culled — see [`BoxPass::build_shadow`].
-    shadow_pushes: Vec<Vec<shader::UglyPush>>,
+}
+
+impl Geometry {
+    /// Which of [`BoxPass::geometry`] a [`gg_extract::shape`] value picks.
+    /// An unrecognized shape is the box, for the reason that field's `///`
+    /// gives: the dylib on the other side of the boundary is not the compiler
+    /// that wrote it, and a value from the future must draw *something*.
+    fn of(shape: u64) -> usize {
+        usize::from(shape == gg_extract::shape::SPHERE)
+    }
+}
+
+/// A push block and the primitive it draws with — a pair because the shape
+/// picks an index buffer and a draw count, neither of which fits in the push
+/// block and neither of which the shader needs.
+struct Push {
+    push: shader::UglyPush,
+    geometry: usize,
 }
 
 /// The slice of an RHI a pass — or a resident asset — needs to put itself on
@@ -1798,24 +1825,13 @@ pass_host!(Rhi);
 pass_host!(gg_rhi::OffscreenRhi);
 
 impl BoxPass {
-    /// Upload the box and build the pipelines. One flush, at startup.
+    /// Upload the two primitives and build the pipelines. One flush, at startup.
     fn new(rhi: &mut impl GpuHost) -> Result<Self, RhiError> {
-        let (vertices, indices) = unit_box();
-        let vertex_bytes = bytemuck::cast_slice(&vertices);
-        let index_bytes = bytemuck::cast_slice(&indices);
-
-        let vertex_buffer = rhi.create_buffer(&BufferDesc {
-            name: "render.box.vertices",
-            size: vertex_bytes.len() as u64,
-            kind: BufferKind::Storage,
-        })?;
-        let index_buffer = rhi.create_buffer(&BufferDesc {
-            name: "render.box.indices",
-            size: index_bytes.len() as u64,
-            kind: BufferKind::Index,
-        })?;
-        rhi.upload_buffer(vertex_buffer, 0, vertex_bytes)?;
-        rhi.upload_buffer(index_buffer, 0, index_bytes)?;
+        // Order fixed by `Geometry::of`, which is fixed by `shape::BOX` being 0.
+        let geometry = [
+            Self::upload("box", rhi, unit_box())?,
+            Self::upload("sphere", rhi, unit_sphere())?,
+        ];
         rhi.flush_uploads()?;
 
         // 1× eagerly, every other count on first ask. Eagerly because 1× is
@@ -1834,24 +1850,50 @@ impl BoxPass {
             shadow: rhi.create_pipeline(&shadow_desc())?,
             post: rhi.create_pipeline(&post_desc())?,
             downsample: rhi.create_pipeline(&downsample_desc())?,
-            vertices: vertex_buffer,
-            indices: index_buffer,
-            vertex_address: rhi.buffer_address(vertex_buffer)?,
-            index_count: indices.len() as u32,
+            geometry,
             pushes: Vec::new(),
             shadow_pushes: Vec::new(),
         })
     }
 
+    /// One primitive onto the GPU. Not flushed here: the caller uploads both
+    /// and flushes once, which is the whole of §6 M9's "one flush at startup".
+    fn upload(
+        name: &str,
+        rhi: &mut impl GpuHost,
+        (vertices, indices): (Vec<Vertex>, Vec<u32>),
+    ) -> Result<Geometry, RhiError> {
+        let vertex_bytes: &[u8] = bytemuck::cast_slice(&vertices);
+        let index_bytes: &[u8] = bytemuck::cast_slice(&indices);
+        let vertex_buffer = rhi.create_buffer(&BufferDesc {
+            name: &format!("render.{name}.vertices"),
+            size: vertex_bytes.len() as u64,
+            kind: BufferKind::Storage,
+        })?;
+        let index_buffer = rhi.create_buffer(&BufferDesc {
+            name: &format!("render.{name}.indices"),
+            size: index_bytes.len() as u64,
+            kind: BufferKind::Index,
+        })?;
+        rhi.upload_buffer(vertex_buffer, 0, vertex_bytes)?;
+        rhi.upload_buffer(index_buffer, 0, index_bytes)?;
+        Ok(Geometry {
+            vertices: vertex_buffer,
+            indices: index_buffer,
+            vertex_address: rhi.buffer_address(vertex_buffer)?,
+            index_count: indices.len() as u32,
+        })
+    }
+
     /// Rebuild this frame's push constants.
     fn build(&mut self, extracted: &Extracted, frame: DeviceAddress) {
-        let address = self.vertex_address;
+        let geometry = &self.geometry;
         self.pushes.clear();
         self.pushes.extend(
             extracted
                 .instances
                 .iter()
-                .map(|instance| push_for(address, frame, instance)),
+                .map(|instance| Push::new(geometry, frame, instance)),
         );
     }
 
@@ -1867,7 +1909,7 @@ impl BoxPass {
         frame: DeviceAddress,
         sun: Option<&lighting::Sun>,
     ) {
-        let address = self.vertex_address;
+        let geometry = &self.geometry;
         let cascades = sun.map_or(&[][..], |s| s.cascades());
         self.shadow_pushes.resize_with(cascades.len(), Vec::new);
         self.shadow_pushes.truncate(cascades.len());
@@ -1882,8 +1924,8 @@ impl BoxPass {
                     .iter()
                     .filter(|instance| casts_into(instance, cascade, sun))
                     .map(|instance| {
-                        let mut push = push_for(address, frame, instance);
-                        push.cascade = index as u32;
+                        let mut push = Push::new(geometry, frame, instance);
+                        push.push.cascade = index as u32;
                         push
                     }),
             );
@@ -1923,20 +1965,19 @@ impl BoxPass {
         self.draws_of(pipeline, &self.pushes)
     }
 
-    fn draws_of<'a>(
-        &'a self,
-        pipeline: PipelineHandle,
-        pushes: &'a [shader::UglyPush],
-    ) -> Vec<DrawSpec<'a>> {
+    fn draws_of<'a>(&'a self, pipeline: PipelineHandle, pushes: &'a [Push]) -> Vec<DrawSpec<'a>> {
         pushes
             .iter()
-            .map(|push| DrawSpec {
-                pipeline,
-                push_constants: bytemuck::bytes_of(push),
-                count: self.index_count,
-                index_buffer: Some(self.indices),
-                indirect: None,
-                depth_bias: None,
+            .map(|push| {
+                let geometry = &self.geometry[push.geometry];
+                DrawSpec {
+                    pipeline,
+                    push_constants: bytemuck::bytes_of(&push.push),
+                    count: geometry.index_count,
+                    index_buffer: Some(geometry.indices),
+                    indirect: None,
+                    depth_bias: None,
+                }
             })
             .collect()
     }
@@ -2003,15 +2044,18 @@ impl BoxPass {
         }
     }
 
-    /// Release the pipelines and both buffers.
+    /// Release the pipelines and every primitive's buffers.
     fn destroy(self, rhi: &mut impl GpuHost) -> Result<(), RhiError> {
         rhi.destroy_pipeline(self.downsample)?;
         self.variants.destroy(rhi)?;
         self.skyboxes.destroy(rhi)?;
         rhi.destroy_pipeline(self.shadow)?;
         rhi.destroy_pipeline(self.post)?;
-        rhi.destroy_buffer(self.vertices)?;
-        rhi.destroy_buffer(self.indices)
+        for geometry in self.geometry {
+            rhi.destroy_buffer(geometry.vertices)?;
+            rhi.destroy_buffer(geometry.indices)?;
+        }
+        Ok(())
     }
 }
 
@@ -2377,6 +2421,19 @@ fn push_for(
     )
 }
 
+impl Push {
+    /// The block for one instance, against the primitive its shape names. The
+    /// vertex address is the *geometry's* and not the pass's, which is the one
+    /// thing a shape changes on this side (§6 M26).
+    fn new(geometry: &[Geometry; 2], frame: DeviceAddress, instance: &Instance) -> Self {
+        let at = Geometry::of(instance.shape);
+        Push {
+            push: push_for(geometry[at].vertex_address, frame, instance),
+            geometry: at,
+        }
+    }
+}
+
 /// The sRGB EOTF (IEC 61966-2-1) evaluated at every byte: `c/12.92` up to
 /// `0.04045`, `((c + 0.055)/1.055)^2.4` above it. A table because the domain is
 /// 256 values and `powf` is banned engine-wide (§3) — exact, portable, and
@@ -2470,6 +2527,69 @@ fn unit_box() -> (Vec<Vertex>, Vec<u32>) {
             });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    (vertices, indices)
+}
+
+/// Rings of latitude in [`unit_sphere`], and segments around each.
+///
+/// 24x48 is 1225 vertices and 2304 triangles, sized off the silhouette rather
+/// than off a look (§6 M26): a 48-gon's chord departs from its circle by
+/// `r * (1 - cos(pi/48))`, which is 0.23 px on a ball filling a fifth of a 1080p
+/// frame — under the quarter-pixel where an edge starts to step. The shading is
+/// finer than that anyway, since normals are exact at every vertex and it is the
+/// *highlight* a material chart is read by.
+const SPHERE_RINGS: u32 = 24;
+/// See [`SPHERE_RINGS`].
+const SPHERE_SEGMENTS: u32 = 48;
+
+/// A sphere of radius 1 — the instance's half-extent is what gives it a size,
+/// and three unequal axes make it an ellipsoid (§6 M26).
+///
+/// A UV sphere and not an icosphere: the poles are its worse-distributed part
+/// and this one is lit and shaded per pixel, so the even *normals* an icosphere
+/// buys are worth less here than being able to state the tessellation in two
+/// numbers. Positions and normals coincide, which is what "unit" means.
+///
+/// Trigonometry through [`sim`](gg_math::sim) rather than `std`: this runs once
+/// at startup and never in a frame, so the cost is irrelevant and the workspace
+/// ban is not about cost (§4.2.1).
+fn unit_sphere() -> (Vec<Vertex>, Vec<u32>) {
+    use gg_math::sim;
+
+    let rows = SPHERE_RINGS + 1;
+    let columns = SPHERE_SEGMENTS + 1;
+    let mut vertices = Vec::with_capacity((rows * columns) as usize);
+    // The seam is duplicated (`columns` is segments + 1) rather than wrapped:
+    // the two sides of it carry the same position and the same normal here, and
+    // the day this grows a uv they must carry different ones.
+    for ring in 0..rows {
+        let polar = core::f32::consts::PI * ring as f32 / SPHERE_RINGS as f32;
+        let (sin_polar, cos_polar) = sim::sin_cos(polar);
+        for segment in 0..columns {
+            let azimuth = core::f32::consts::TAU * segment as f32 / SPHERE_SEGMENTS as f32;
+            let (sin_azimuth, cos_azimuth) = sim::sin_cos(azimuth);
+            let normal = [sin_polar * cos_azimuth, cos_polar, sin_polar * sin_azimuth];
+            vertices.push(Vertex {
+                position: normal,
+                normal,
+            });
+        }
+    }
+
+    let mut indices = Vec::with_capacity((SPHERE_RINGS * SPHERE_SEGMENTS * 6) as usize);
+    for ring in 0..SPHERE_RINGS {
+        for segment in 0..SPHERE_SEGMENTS {
+            let here = ring * columns + segment;
+            let below = here + columns;
+            // Wound so `(v1 - v0) x (v2 - v0)` points *outward*, which is what
+            // `unit_box`'s faces do: the pipelines cull backfaces and a sphere
+            // wound inside out is a silhouette with a hole in it. The polar
+            // rings degenerate to zero-area triangles and are left in — 96 of
+            // 2304, and special-casing them would put a branch in the one loop
+            // whose regularity is the reason the winding is checkable at all.
+            indices.extend_from_slice(&[here, below + 1, below, here, here + 1, below + 1]);
+        }
     }
     (vertices, indices)
 }
@@ -2985,6 +3105,7 @@ mod tests {
             surface: (0.0, 0.0),
             asset: 0,
             radius: 0.02,
+            shape: gg_extract::shape::BOX,
         };
         // 0.9 of the way out along both axes: inside the square, and 1.27 radii
         // from the axis — which is what the old cylinder rejected.

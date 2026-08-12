@@ -102,6 +102,7 @@ fn world_of(count: u32) -> World {
                     color: 0x00c0_c0c0,
                     smoothness: gg_ecs::boundary::DEFAULT_SMOOTHNESS,
                     metallic: 0.0,
+                    shape: gg_ecs::boundary::shape::BOX,
                 },
             )
             .unwrap();

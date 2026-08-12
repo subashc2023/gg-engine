@@ -364,7 +364,15 @@ const SCENES: &[Scene] = &[
         name: "chart",
         // §6 M24's material chart under the environment that lights it — demo
         // 12's own room, its own `chart()` and its own lights, framed so that
-        // sky, floor, dielectric row and conductor row are all in one picture.
+        // sky, floor and all five metallic rows are in one picture.
+        //
+        // Twenty-five *spheres* since §6 M26, which is what makes it a gate on
+        // the BRDF rather than on three flat normals: a box shows one point of
+        // the specular lobe per face, so a roughness that drifted moved a few
+        // face tones and a curved highlight that collapsed moved nothing at
+        // all. The grid also gates `unit_sphere`'s winding — a sphere wound
+        // inside out is a hole, not a subtle delta — and the normal transform
+        // beside it, which was a rotation alone while only boxes existed.
         //
         // It is the roster's only image-based-lighting subject, and what it
         // guards exists nowhere else: the spherical-harmonic irradiance (a
@@ -388,7 +396,7 @@ const SCENES: &[Scene] = &[
     },
 ];
 
-/// Demo 12's room with §6 M24's material chart on the floor.
+/// Demo 12's room with §6 M24's material chart standing in the middle of it.
 ///
 /// The world is dealt from the demo's own tables — [`ROOM`](demo_12_shooter::ROOM),
 /// [`chart`](demo_12_shooter::chart), the sun, the two lamps and the `Sky` — rather
@@ -399,7 +407,7 @@ const SCENES: &[Scene] = &[
 ///
 /// The eye is the harness's, and deliberately not the player's: `START` faces
 /// the stairs, and a reference for image-based lighting has to hold the sky, the
-/// floor and both rows of the chart at once.
+/// floor and all twenty-five samples at once.
 fn render_chart() -> Render {
     use demo_12_shooter as shooter;
     use gg_ecs::World;
@@ -415,15 +423,11 @@ fn render_chart() -> Render {
         world.insert(slab, Renderable::boxed(*position, *half_extent, *color))?;
     }
     for (at, smoothness, metallic) in shooter::chart() {
-        let cube = world.spawn();
+        let ball = world.spawn();
         world.insert(
-            cube,
-            Renderable::boxed(
-                at,
-                gg_math::sim::Vec3::splat(shooter::CHART_HALF),
-                shooter::CHART_INK,
-            )
-            .surfaced(smoothness, metallic),
+            ball,
+            Renderable::ball(at, shooter::CHART_RADIUS, shooter::CHART_INK)
+                .surfaced(smoothness, metallic),
         )?;
     }
     let sun = world.spawn();
@@ -446,14 +450,14 @@ fn render_chart() -> Render {
     let sky = world.spawn();
     world.insert(sky, Sky::daylight(shooter::SKY_INTENSITY))?;
 
-    // Standing on the floor in front of the chart, pitched down enough to hold
-    // both rows and still open enough at the top to clear the 4 m wall — the
-    // sky has to be in the frame or the skybox is ungated.
-    let eye = gg_math::sim::DVec3::new(5.5, 2.6, -3.0);
-    let view = gg_render::View {
-        pitch: -0.22,
-        ..gg_render::View::default()
-    };
+    // Square on to the grid at its own height, four metres out (§6 M26): at the
+    // default 1.0 rad that frames 4.4 m of a 3.4 m chart, so every ball is in
+    // shot with margin and none is at the edge where a wide lens would stretch
+    // its highlight. Level rather than pitched — the horizon and the middle
+    // sample land on the same line, and the frame still holds floor below and
+    // sky above the 4 m wall, which is what keeps the skybox gated.
+    let eye = gg_math::sim::DVec3::new(0.0, shooter::CHART_CENTRE.y, shooter::CHART_CENTRE.z + 4.0);
+    let view = gg_render::View::default();
     let mut extracted = gg_extract::Extracted::default();
     extracted.clear(eye, view.frustum(extent));
     extracted.append::<Renderable>(&world)?;
@@ -677,6 +681,8 @@ fn boot(pack: Option<&str>) -> anyhow::Result<()> {
                 // stops the clock by never asking.
                 radius: f32::INFINITY,
                 asset: *asset,
+                // Unread on the model path: the mesh is the shape.
+                shape: gg_extract::shape::BOX,
             });
         }
     }
@@ -775,6 +781,8 @@ fn load(pack: Option<&str>) -> anyhow::Result<()> {
             // Unbounded: this harness exists to time a *load*, and an id culled
             // before it streams in would stop the clock by never asking.
             radius: f32::INFINITY,
+            // Unread on the model path: the mesh is the shape.
+            shape: gg_extract::shape::BOX,
         });
     }
 
@@ -1290,6 +1298,24 @@ fn render_platformer_far(far: Option<f32>) -> Render {
 /// the host's five protocol registrations plus demo 11's seven and `Sound` —
 /// then the save loaded clean, exactly as the shell opens it (§6 M20 item 3).
 fn platformer_world() -> anyhow::Result<(gg_ecs::World, gg_ecs::boundary::Eye)> {
+    use gg_ecs::boundary::Eye;
+
+    let (world, report) = platformer_loaded()?;
+    anyhow::ensure!(
+        report.is_clean(),
+        "the scene did not load clean against this build: {report:?} — \
+         `cargo run -p gg-golden -- migrate` rewrites it in this schema (§6 M26)"
+    );
+    let query = gg_ecs::Query::<&Eye>::new()?;
+    let mut eye = None;
+    world.each_ref(&query, |_, e: &Eye| eye = Some(*e));
+    let eye = eye.ok_or_else(|| anyhow::anyhow!("the scene holds no eye to see it through"))?;
+    Ok((world, eye))
+}
+
+/// The same file loaded, *without* judging the report — every name its manifest
+/// carries: the host's six protocol registrations and demo 11's seven.
+fn platformer_loaded() -> anyhow::Result<(gg_ecs::World, gg_ecs::MigrationReport)> {
     use gg_ecs::boundary::{Eye, Light, Model, Renderable, Sound, Widget};
 
     let path = demo_11_platformer::session::scene_path();
@@ -1315,15 +1341,46 @@ fn platformer_world() -> anyhow::Result<(gg_ecs::World, gg_ecs::boundary::Eye)> 
     world.register::<demo_11_platformer::Cue>()?;
     world.register::<demo_11_platformer::Hud>()?;
     let report = world.load(&save)?;
-    anyhow::ensure!(
-        report.is_clean(),
-        "the scene did not load clean against this build: {report:?}"
+    Ok((world, report))
+}
+
+/// Rewrite every checked-in `scene.ggsave` in this build's schema (§6 M26).
+///
+/// A **bless**, and the deliberate kind: it belongs beside `bless` rather than
+/// in a tier, and it lives in this binary for the reason the scenes do — the
+/// types a save has to be loaded against are the demos' own, and this is the
+/// crate that already links every demo (§4.10).
+///
+/// Why it is a subcommand and not a hand-edit: a boundary component that gains
+/// a field leaves every checked-in level one field behind, and `platformer_world`
+/// refuses a migrated load on purpose — a reference image has to be rendered
+/// from the level the build *declares*, not from one a migration invented on the
+/// way in. That happened at §6 M24 and again at §6 M26, and the second time a
+/// thing is done by hand is when it stops being done by hand.
+///
+/// Tick and provenance are carried rather than reset. They are the save's
+/// identity (`Save::new`), and a level that changed identity because a field
+/// was added would read as a different level to everything that opens one.
+fn migrate() -> anyhow::Result<()> {
+    let path = demo_11_platformer::session::scene_path();
+    let before = std::fs::read(&path)?;
+    let save = gg_ecs::Save::decode(&before)?;
+    let (world, report) = platformer_loaded()?;
+    if report.is_clean() {
+        println!("gg-golden migrate: {} is already current", path.display());
+        return Ok(());
+    }
+    let after = gg_ecs::Save::new(world.snapshot(), save.tick(), save.provenance()).encode();
+    std::fs::write(&path, &after)?;
+    // The report, not a byte count: what a reader has to check before committing
+    // this is *which* component moved and how, and "4 bytes bigger" says neither.
+    println!(
+        "gg-golden migrate: {} rewritten, {} -> {} bytes\n{report:?}",
+        path.display(),
+        before.len(),
+        after.len()
     );
-    let query = gg_ecs::Query::<&Eye>::new()?;
-    let mut eye = None;
-    world.each_ref(&query, |_, e: &Eye| eye = Some(*e));
-    let eye = eye.ok_or_else(|| anyhow::anyhow!("the scene holds no eye to see it through"))?;
-    Ok((world, eye))
+    Ok(())
 }
 
 /// The UI scenes' extent. Small on purpose: what they gate is glyph coverage
@@ -2392,6 +2449,7 @@ fn main() -> anyhow::Result<()> {
         ),
         Some("load") => load(filter),
         Some("boot") => boot(filter),
+        Some("migrate") => migrate(),
         // What `xtask gpu` refuses a software rasterizer with: the same
         // bring-up and naming the reference sets are keyed by, so the identity
         // checked is the identity the suite would run under.
@@ -2400,7 +2458,8 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         _ => anyhow::bail!(
-            "usage: gg-golden <run|bless|graph|verify-gates|chaos|capture|bench|load|boot|backend> \
+            "usage: gg-golden \
+             <run|bless|graph|verify-gates|chaos|capture|bench|load|boot|migrate|backend> \
              [scene|seed|pack]"
         ),
     }

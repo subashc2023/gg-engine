@@ -59,21 +59,6 @@ float3 rotate_by(float4 q, float3 v)
     return v + q.w * t + cross(q.xyz, t);
 }
 
-// The instance scale with every component pulled off zero, sign kept.
-//
-// Only the tangent-frame paths use it; positions take `inst.scale` raw, because
-// prepass and forward agree on a fragment's depth only if they compute it from
-// bit-identical inputs. A zero component collapses the instance into a plane,
-// whose reciprocal is infinite and whose normalize is NaN — a black pixel that
-// reads as a lighting bug. Clamped, the collapsed axis merely dominates, so the
-// normal points along it: the direction a flattened surface faces. The sign
-// survives because a negative scale is a mirror and the normal flips with it.
-float3 nonzero_scale(float3 s)
-{
-    float3 magnitude = max(abs(s), 1e-8);
-    return select(s < 0.0, -magnitude, magnitude);
-}
-
 // One instance's record. Read as scalars for the same reason vertices are: a
 // `float4x4*` would let Slang pick the layout while the Rust side is packed
 // `repr(C)`, and consecutive floats are what both agree on. The constructor
