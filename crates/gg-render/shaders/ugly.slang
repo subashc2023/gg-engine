@@ -32,7 +32,7 @@ struct UglyPush
     float4 offset;     // xyz camera-relative centre; w unused
     float4 scale;      // xyz half-extent, applied before the rotation; w unused
     float4 material;   // x smoothness, y metallic (§6 M24); zw reserved
-    uint cascade;      // which cascade `vs_shadow` projects through; unread elsewhere
+    uint shadow_view;  // which projection `vs_shadow` uses — see `shadow_view_projection`
 }
 
 [[vk::push_constant]]
@@ -128,15 +128,14 @@ float4 vs_depth(uint vid: SV_VertexID) : SV_Position
     return mul(load_frame(push.frame).view_projection, float4(world_of(vid), 1.0));
 }
 
-// The shadow pass: the same geometry through one cascade's projection, chosen by
-// the push rather than by the frame, because the pass is recorded once per
-// cascade. No normal offset here — the bias belongs on the lookup, so the depth
+// The shadow pass: the same geometry through one shadow view's projection,
+// chosen by the push rather than by the frame, because the pass is recorded once
+// per view. No normal offset here — the bias belongs on the lookup, so the depth
 // this records stays the geometry's own.
 [shader("vertex")]
 float4 vs_shadow(uint vid: SV_VertexID) : SV_Position
 {
-    Cascade cascade = load_cascade(push.frame, push.cascade);
-    return mul(cascade.view_projection, float4(world_of(vid), 1.0));
+    return mul(shadow_view_projection(push.frame, push.shadow_view), float4(world_of(vid), 1.0));
 }
 
 [shader("fragment")]

@@ -41,7 +41,7 @@ struct ScenePush
     uint sampler_index;   // LinearRepeat: a mip chain exists and uvs may leave [0,1]
     float metallic;       // factor, multiplied with the map
     float roughness;      // factor, multiplied with the map
-    uint cascade;         // which cascade `vs_shadow` projects through; unread elsewhere
+    uint shadow_view;     // which projection `vs_shadow` uses — see `shadow_view_projection`
 }
 
 [[vk::push_constant]]
@@ -175,19 +175,18 @@ float4 vs_depth(uint vid: SV_VertexID, uint iid: SV_InstanceID) : SV_Position
     return mul(load_instance(iid).mvp, float4(v[0], v[1], v[2], 1.0));
 }
 
-// The shadow pass reprojects through one cascade rather than the camera, which
-// is why it cannot reuse `mvp` and rebuilds the world position the way `vs_main`
-// does. The cascade comes from the push because the pass is recorded once per
-// cascade. No normal offset here: the bias belongs on the *lookup*
+// The shadow pass reprojects through one shadow view rather than the camera,
+// which is why it cannot reuse `mvp` and rebuilds the world position the way
+// `vs_main` does. The view comes from the push because the pass is recorded once
+// per view. No normal offset here: the bias belongs on the *lookup*
 // (`to_light_clip`), so that the depth this records stays the geometry's own.
 [shader("vertex")]
 float4 vs_shadow(uint vid: SV_VertexID, uint iid: SV_InstanceID) : SV_Position
 {
     float* v = (float*)(push.vertices + uint64_t(vid) * VERTEX_STRIDE);
     Instance inst = load_instance(iid);
-    Frame frame = load_frame(push.frame);
     float3 world = inst.offset + rotate_by(inst.rotation, float3(v[0], v[1], v[2]) * inst.scale);
-    return mul(load_cascade(push.frame, push.cascade).view_projection, float4(world, 1.0));
+    return mul(shadow_view_projection(push.frame, push.shadow_view), float4(world, 1.0));
 }
 
 [shader("fragment")]

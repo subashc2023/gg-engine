@@ -152,7 +152,7 @@ twox-hash = { version = "2", default-features = false, features = [
 gltf = "1.4"
 # Only the two codecs glTF actually carries. The rest of `image`'s format list
 # is build time spent on formats a source tree cannot contain.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "hdr"] }
 intel_tex_2 = "0.5"
 ash-window = "0.13"
 # 0.28 gained no_std support, which moved `std` into `default` — so with

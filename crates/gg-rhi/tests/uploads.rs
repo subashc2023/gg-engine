@@ -141,6 +141,7 @@ float4 fs_main() : SV_Target
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }],
     )
     .unwrap();
@@ -210,6 +211,7 @@ float4 fs_main() : SV_Target
                 index_buffer: None,
                 indirect: None,
                 depth_bias: None,
+                viewport: None,
             }],
         )
         .unwrap()
@@ -284,6 +286,7 @@ float4 fs_main(VOut i) : SV_Target { return i.color; }
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }],
     )
     .unwrap();
@@ -356,6 +359,7 @@ float4 fs_main() : SV_Target
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }],
     )
     .unwrap();
@@ -585,6 +589,7 @@ float4 fs_main() : SV_Target
                 index_buffer: None,
                 indirect: None,
                 depth_bias: None,
+                viewport: None,
             }],
         )
         .unwrap();
@@ -900,6 +905,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             index_buffer: Some(indices),
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }],
     )
     .unwrap();
@@ -931,6 +937,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
                 offset: 0,
             }),
             depth_bias: None,
+            viewport: None,
         }],
     )
     .unwrap();
@@ -964,6 +971,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
                 offset: 0,
             }),
             depth_bias: None,
+            viewport: None,
         }],
     )
     .unwrap();

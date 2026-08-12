@@ -573,7 +573,56 @@ pub const ROOM: &[(sim::DVec3, sim::Vec3, u32)] = &[
         sim::Vec3::new(0.5, 0.35, 0.5),
         0x004f_9a8c,
     ),
+    // The shelter's roof and the one wall that closes it — the room's other two
+    // sides are already walls. Both derived from [`SHELTER`] rather than placed
+    // beside it, so the space that is *covered* and the space that is *lit*
+    // differently cannot drift apart (§6 M28).
+    (
+        sim::DVec3::new(
+            SHELTER.0.x,
+            SHELTER.0.y + SHELTER.1.y as f64 + ROOF.y as f64,
+            SHELTER.0.z,
+        ),
+        sim::Vec3::new(SHELTER.1.x + 0.25, ROOF.y, SHELTER.1.z + 0.25),
+        0x008f_9298,
+    ),
+    (
+        sim::DVec3::new(
+            SHELTER.0.x - SHELTER.1.x as f64 - 0.25,
+            SHELTER.0.y,
+            SHELTER.0.z,
+        ),
+        sim::Vec3::new(0.25, SHELTER.1.y, SHELTER.1.z + 0.25),
+        0x008f_9298,
+    ),
 ];
+
+/// The sheltered corner: the centre and half-extent of the space *under* the
+/// roof, in the far +x/+z corner where nothing else stands.
+///
+/// One constant because it is two facts that must agree — where the roof is, and
+/// where the light stops being the sky's. Walking in is the whole demonstration
+/// of §6 M28: the opening faces -z, the fade is a metre and a bit, and the
+/// environment changes over the stride that crosses it rather than on one tick.
+pub const SHELTER: (sim::DVec3, sim::Vec3) = (
+    sim::DVec3::new(8.25, 1.05, 9.75),
+    sim::Vec3::new(3.75, 1.05, 2.25),
+);
+
+/// Half-thickness of the shelter's roof slab. Thick enough that [`MAX_FALL`]
+/// cannot cross it, as the floor is.
+const ROOF: sim::Vec3 = sim::Vec3::new(0.0, 0.25, 0.0);
+
+/// Metres over which the shelter's environment gives way to the sky's. A stride
+/// and a half at walking speed — long enough to read as a change in the light
+/// rather than as a switch, short enough that it happens in the doorway.
+pub const SHELTER_FADE: f32 = 1.4;
+
+/// What the shelter radiates: a dim, cool bounce with no sky in it. Not a
+/// darkened copy of [`Sky::daylight`] — under a roof the bright half of the
+/// world is gone and what is left is floor and wall, so the gradient is
+/// upside-down from the outdoor one and much flatter.
+pub const SHELTER_INTENSITY: f32 = 0.30;
 
 // ---------------------------------------------------------------- state -----
 
@@ -726,6 +775,19 @@ pub fn bootstrap(world: &mut GameWorld) {
     // row is black — a conductor has no diffuse lobe, so what it shows is
     // whatever is around it and nothing else.
     world.spawn_with(Sky::daylight(SKY_INTENSITY));
+    // And the shelter's own, bounded to the space under its roof (§6 M28). The
+    // room is open to the sky, so before this the light under a roof was the
+    // light beside it — which is the one thing a player standing in a doorway
+    // notices without being told to look.
+    world.spawn_with(
+        Sky {
+            zenith: 0x0056_5a60,
+            horizon: 0x006a_6862,
+            ground: 0x0048_423a,
+            ..Sky::daylight(SHELTER_INTENSITY)
+        }
+        .within(SHELTER.0, SHELTER.1, SHELTER_FADE),
+    );
 
     world.spawn_with(Light::sun(SUN, SUN_INK, SUN_INTENSITY));
     for at in LAMPS {

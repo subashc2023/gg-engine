@@ -8,6 +8,7 @@ pub gg_render::content::ContentError::Residency(gg_render::residency::ResidencyE
 pub struct gg_render::content::Content
 impl gg_render::content::Content
 pub fn gg_render::content::Content::destroy(&mut self, &mut impl gg_render::GpuHost) -> core::result::Result<(), gg_render::residency::ResidencyError>
+pub fn gg_render::content::Content::environment(&self, gg_assets::pack::AssetId) -> core::option::Option<&gg_assets::environment::Environment>
 pub fn gg_render::content::Content::material(&self, gg_assets::pack::AssetId) -> gg_render::content::DrawMaterial
 pub fn gg_render::content::Content::mesh(&self, gg_assets::pack::AssetId) -> core::option::Option<&gg_render::residency::ResidentMesh>
 pub fn gg_render::content::Content::open(&std::path::Path) -> core::result::Result<Self, gg_render::content::ContentError>
@@ -37,11 +38,18 @@ pub fn gg_render::content::DrawMaterial::default() -> Self
 pub mod gg_render::cvars
 pub static gg_render::cvars::AA: gg_core::cvar::CVar
 pub static gg_render::cvars::AMBIENT: gg_core::cvar::CVar
+pub static gg_render::cvars::CLUSTERS: gg_core::cvar::CVar
 pub static gg_render::cvars::DITHER: gg_core::cvar::CVar
 pub static gg_render::cvars::EXPOSURE: gg_core::cvar::CVar
 pub static gg_render::cvars::FOV: gg_core::cvar::CVar
 pub static gg_render::cvars::HDR: gg_core::cvar::CVar
 pub static gg_render::cvars::HISTOGRAM: gg_core::cvar::CVar
+pub static gg_render::cvars::LAMPS: gg_core::cvar::CVar
+pub static gg_render::cvars::LAMP_DEPTH_BIAS: gg_core::cvar::CVar
+pub static gg_render::cvars::LAMP_NORMAL_BIAS: gg_core::cvar::CVar
+pub static gg_render::cvars::LAMP_SHADOWS: gg_core::cvar::CVar
+pub static gg_render::cvars::LAMP_SIZE: gg_core::cvar::CVar
+pub static gg_render::cvars::LAMP_TAPS: gg_core::cvar::CVar
 pub static gg_render::cvars::MSAA: gg_core::cvar::CVar
 pub static gg_render::cvars::NEAR: gg_core::cvar::CVar
 pub static gg_render::cvars::ORTHO_FAR: gg_core::cvar::CVar
@@ -120,12 +128,18 @@ pub gg_render::ui::UiVertex::uv: [f32; 2]
 impl bytemuck::pod::Pod for gg_render::ui::UiVertex
 impl bytemuck::zeroable::Zeroable for gg_render::ui::UiVertex
 pub const gg_render::ui::MAX_VERTICES: usize
+pub struct gg_render::ClusterLoad
+pub gg_render::ClusterLoad::dropped: usize
+pub gg_render::ClusterLoad::froxels: usize
+pub gg_render::ClusterLoad::pairs: usize
+pub gg_render::ClusterLoad::worst: u32
 pub struct gg_render::OffscreenFrame
 pub gg_render::OffscreenFrame::dump: alloc::string::String
 pub gg_render::OffscreenFrame::order: alloc::vec::Vec<alloc::string::String>
 pub gg_render::OffscreenFrame::pixels: alloc::vec::Vec<u8>
 pub struct gg_render::OffscreenRenderer
 impl gg_render::OffscreenRenderer
+pub fn gg_render::OffscreenRenderer::cluster_load(&self) -> gg_render::ClusterLoad
 pub fn gg_render::OffscreenRenderer::device(&self) -> &gg_rhi::device::DeviceReport
 pub fn gg_render::OffscreenRenderer::draw_counts(&self) -> (usize, usize)
 pub fn gg_render::OffscreenRenderer::frame(&mut self, &gg_extract::Extracted, &gg_render::View, [f32; 4], &[gg_render::ui::UiVertex]) -> core::result::Result<gg_render::OffscreenFrame, gg_rhi::RhiError>
@@ -144,6 +158,7 @@ pub fn gg_render::OffscreenRenderer::shutdown(self) -> gg_rhi::ShutdownReport
 pub fn gg_render::OffscreenRenderer::view_extent(&self) -> (u32, u32)
 pub struct gg_render::Renderer
 impl gg_render::Renderer
+pub fn gg_render::Renderer::cluster_load(&self) -> gg_render::ClusterLoad
 pub fn gg_render::Renderer::device(&self) -> &gg_rhi::device::DeviceReport
 pub fn gg_render::Renderer::draw_counts(&self) -> (usize, usize)
 pub fn gg_render::Renderer::dump_graph(&mut self) -> core::result::Result<alloc::string::String, gg_rhi::RhiError>
@@ -170,6 +185,8 @@ pub gg_render::SceneFrame::clear: [f32; 4]
 pub gg_render::SceneFrame::depth: gg_render::graph::ResourceId
 pub gg_render::SceneFrame::forward_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::forward_samples: &'a [gg_render::graph::ResourceId]
+pub gg_render::SceneFrame::lamp_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::lamps: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::SceneFrame::post_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::prepass_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::samples: &'a [gg_render::graph::ResourceId]

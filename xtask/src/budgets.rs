@@ -125,6 +125,15 @@ const OVERLAY_BUDGET: usize = 1020;
 const WIDGET_PROTOCOL: &str = "crates/gg-ecs/src/boundary/ui.rs";
 const WIDGET_DRAW: &str = "crates/gg-ui/src/boundary.rs";
 
+/// Where the device-address blocks are declared and unpacked (§6 M28).
+///
+/// This file's structs are not read by the GPU as structs: they mirror a
+/// `repr(C)` Rust record byte for byte, and a hand-written loader lifts them out
+/// of a raw pointer. The size agreement is asserted on both sides — and *whether
+/// every field is actually assigned* was not, which is how §6 M27 shipped three
+/// fields the shader declared and `load_frame` never filled.
+const SHADER_BLOCKS: &str = "crates/gg-render/shaders/include/pbr.slang";
+
 /// §6 M12's exit row: the template reaches a spinning lit mesh in under 50
 /// lines. A budget rather than a claim, because the number is the whole point —
 /// it is what caps the ceremony a game pays, and the first time it was measured
@@ -156,6 +165,7 @@ pub fn check() -> anyhow::Result<()> {
     template_lines()?;
     overlay_lines()?;
     widget_provenance()?;
+    shader_block_loaders()?;
     dependencies()?;
     unused_dependencies()?;
     game_crate_pin()?;
@@ -256,6 +266,105 @@ fn widget_provenance() -> anyhow::Result<()> {
         kinds.len()
     );
     Ok(())
+}
+
+/// Every field of every block struct in the shader is assigned by a loader (§6
+/// M28).
+///
+/// The failure this exists for is silent in a way the stride assertions are not.
+/// A `Frame` field nobody writes is not a compile error in Slang and not a size
+/// change on either side; it reads as *whatever was in the register*, which on
+/// the pinned rasterizer is zero — so the feature it gates turns itself off and
+/// the picture that results is merely a plausible one. §6 M27's prefiltered
+/// chain reached the skybox and no shaded surface for exactly this reason, and
+/// three blessed references recorded the fallback as though it were the feature.
+///
+/// The rule is deliberately textual and deliberately weak: a field named `x` on
+/// a struct must appear as `.x =` somewhere in the same file. It cannot check
+/// that the *offset* is right — the stride assertions and the reference images
+/// do that — only that nothing was left behind, which is the half that had no
+/// gate at all.
+fn shader_block_loaders() -> anyhow::Result<()> {
+    let path = workspace_root().join(SHADER_BLOCKS);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("no shader blocks at {}: {e}", path.display()))?;
+    let blocks = shader_structs(&text);
+    anyhow::ensure!(
+        !blocks.is_empty(),
+        "no block structs found in {SHADER_BLOCKS} — a check that finds nothing to check passes \
+         vacuously (§5.8's rule)"
+    );
+    let fields: usize = blocks.iter().map(|(_, f)| f.len()).sum();
+    let offenders = judge_blocks(&text, &blocks);
+    anyhow::ensure!(
+        offenders.is_empty(),
+        "shader block loaders (§6 M28, and §6 M27's defect):\n  {}",
+        offenders.join("\n  ")
+    );
+    println!(
+        "xtask: {} shader block(s), {fields} field(s), each one loaded",
+        blocks.len()
+    );
+    Ok(())
+}
+
+/// Which declared fields nothing in `text` assigns.
+fn judge_blocks(text: &str, blocks: &[(String, Vec<String>)]) -> Vec<String> {
+    let mut offenders = Vec::new();
+    for (name, declared) in blocks {
+        for field in declared {
+            if !text.contains(&format!(".{field} =")) {
+                offenders.push(format!(
+                    "{name}::{field} is declared and never loaded — it reads as whatever the \
+                     register held, and the feature it gates silently does not run"
+                ));
+            }
+        }
+    }
+    offenders
+}
+
+/// `(name, fields)` per `struct` in a Slang source, by brace depth rather than
+/// by regex — a struct whose fields were reformatted onto one line each is the
+/// only shape this has to read, and it is the shape the house style writes.
+fn shader_structs(text: &str) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let Some(name) = line.trim().strip_prefix("struct ") else {
+            continue;
+        };
+        let name = name.trim().trim_end_matches('{').trim().to_string();
+        let mut fields = Vec::new();
+        for body in lines.by_ref() {
+            let body = body.trim();
+            if body == "}" || body == "};" {
+                break;
+            }
+            // The trailing comment first: the house style puts prose after the
+            // field, and a sentence with a semicolon in it would otherwise be
+            // parsed as a second field named after its last word.
+            let body = body.split("//").next().unwrap_or(body).trim();
+            // `type name;` or `type name; // why`. A method or a nested brace
+            // would end the field list rather than be misread as one.
+            let Some(declaration) = body.split(';').next().filter(|_| body.contains(';')) else {
+                continue;
+            };
+            if let Some(field) = declaration.split_whitespace().last() {
+                let field = field.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                // Arrays declare as `float y[N]`; the name is what precedes the
+                // bracket.
+                let field = field.split('[').next().unwrap_or(field);
+                if !field.is_empty() {
+                    fields.push(field.to_string());
+                }
+            }
+        }
+        if !fields.is_empty() {
+            out.push((name, fields));
+        }
+    }
+    out
 }
 
 /// `(offenders, one provenance line per covered kind)`.
@@ -660,6 +769,47 @@ fn check_one_game_crate(name: &str, root: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real shader, parsed — the same reason the widget scan pins its own
+    /// protocol: a block file reformatted into something this cannot read would
+    /// otherwise leave the gate finding nothing and passing.
+    #[test]
+    fn the_real_shader_blocks_parse_and_every_field_is_loaded() {
+        let text = std::fs::read_to_string(workspace_root().join(SHADER_BLOCKS)).unwrap();
+        let blocks = shader_structs(&text);
+        let names: Vec<&str> = blocks.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"Frame") && names.contains(&"Environment"),
+            "the two blocks the frame buffer is made of: {names:?}"
+        );
+        assert!(judge_blocks(&text, &blocks).is_empty());
+    }
+
+    /// Red in the direction that matters, which is §6 M27's actual defect: a
+    /// field declared in the struct and dropped from the loader.
+    #[test]
+    fn a_declared_field_no_loader_fills_is_named() {
+        let planted = "struct Frame\n{\n    uint light_count;\n    uint radiance_levels;\n}\n\
+                       Frame load_frame(uint64_t a)\n{\n    frame.light_count = u[20];\n}\n";
+        let blocks = shader_structs(planted);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].1, vec!["light_count", "radiance_levels"]);
+        let offenders = judge_blocks(planted, &blocks);
+        assert_eq!(offenders.len(), 1, "{offenders:?}");
+        assert!(offenders[0].contains("Frame::radiance_levels"));
+    }
+
+    /// An array field declares as `float y[N]`, and its name is what precedes
+    /// the bracket — a scan that took the whole token would look for `.y[N] =`
+    /// and forgive every array in the file.
+    #[test]
+    fn an_array_field_is_named_without_its_extent() {
+        let planted = "struct Cascade\n{\n    float4x4 view_projection;\n    float taps[4];\n}\n";
+        assert_eq!(
+            shader_structs(planted)[0].1,
+            vec!["view_projection", "taps"]
+        );
+    }
 
     /// The real protocol, parsed. Pins the shape the gate depends on rather than
     /// a planted imitation of it: a `widget` module reorganized into something

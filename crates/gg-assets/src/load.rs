@@ -42,6 +42,8 @@ pub mod asset {
     pub struct Material;
     /// A [`crate::Scene`]: the node list a demo instantiates.
     pub struct Scene;
+    /// A [`crate::Environment`]: an SH projection and its radiance chain's id.
+    pub struct Environment;
 }
 
 /// What a handle's type parameter promises about the entry behind it. The
@@ -63,6 +65,9 @@ impl Asset for asset::Material {
 }
 impl Asset for asset::Scene {
     const KIND: AssetKind = AssetKind::Scene;
+}
+impl Asset for asset::Environment {
+    const KIND: AssetKind = AssetKind::Environment;
 }
 
 /// Where an asset stands (§4.6). Read off a [`Handle`] with no registry in
@@ -520,6 +525,17 @@ impl Assets {
         handle: &Handle<asset::Material>,
     ) -> Result<crate::Material, crate::material::MaterialError> {
         crate::Material::read(self.blob(handle.id()))
+    }
+
+    /// An environment, read in place.
+    ///
+    /// # Errors
+    /// A blob of the wrong length.
+    pub fn environment(
+        &self,
+        handle: &Handle<asset::Environment>,
+    ) -> Result<crate::Environment, crate::environment::EnvironmentError> {
+        crate::Environment::read(self.blob(handle.id()))
     }
 
     /// A scene, read in place.

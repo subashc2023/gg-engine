@@ -9,7 +9,7 @@
 //! the diffuse term ([RH01]).
 //!
 //! So this module is the projection, and the game-declared `Sky` behind
-//! [`ExtractedSky`](gg_extract::ExtractedSky) is only what happens to feed it
+//! [`SkyLook`](gg_extract::SkyLook) is only what happens to feed it
 //! today. The quadrature below takes an arbitrary function of
 //! direction; the day the source is a loaded panorama, [`radiance`] samples it
 //! instead and nothing downstream — not the coefficients, not the shader, not
@@ -24,7 +24,7 @@
 //!          basis in the polynomial form used here, and the convolution weights
 //!          the specular path applies per band.
 
-use gg_extract::ExtractedSky as Sky;
+use gg_extract::SkyLook as Sky;
 use gg_math::render;
 
 use crate::srgb_to_linear;
@@ -163,6 +163,7 @@ mod tests {
             horizon: 0x00c8_d4e0,
             ground: 0x0035_3129,
             intensity: 1.0,
+            environment: 0,
         }
     }
 

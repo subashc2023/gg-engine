@@ -84,6 +84,15 @@ pub struct DrawSpec<'a> {
     /// dynamic state nothing set draws with undefined bias, which is a shadow
     /// that acnes on one driver and not another (§6 M11).
     pub depth_bias: Option<DepthBias>,
+    /// Where this one draw lands, overriding the pass's own rectangle. `None`
+    /// — every draw but §6 M31's — takes the pass's.
+    ///
+    /// It exists because a shadow *atlas* is one attachment written by one pass
+    /// at many rectangles, and the alternative was a pass per tile: twenty-four
+    /// of them for four lamps, declaring per pass a thing the recorder already
+    /// sets per draw. Clamped into the render area exactly as the pass's is, so
+    /// an override cannot scissor outside what the pass declared.
+    pub viewport: Option<Viewport>,
 }
 
 /// Depth bias, in the two terms Vulkan takes.

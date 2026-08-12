@@ -298,17 +298,19 @@ impl Light {
 /// — image-based lighting's *image*, declared the way everything else on this
 /// boundary is (§6 M24).
 ///
-/// # Why three colours and not a texture
+/// # Three colours, or a panorama
 ///
-/// An IBL is conventionally a captured HDR panorama, and a panorama is a file:
-/// it would need a pack format, an importer, and a decision about whose taste
-/// the default one is. What actually lights a surface is the low-frequency part
-/// of that panorama — a diffuse lobe integrates over a whole hemisphere and a
-/// rough specular one over most of it — so the machinery this protocol has to
-/// exist for is the *projection*, not the source. A vertical gradient is the
-/// smallest thing that exercises all of it: the host projects it to spherical
-/// harmonics exactly as it would project a panorama, and the day a panorama
-/// arrives it changes what feeds the projection and nothing downstream of it.
+/// The gradient came first and the reasoning held: what lights a surface is the
+/// low-frequency part of an environment, so the machinery worth building is the
+/// *projection* and a vertical ramp exercises all of it. §6 M27 is the day the
+/// panorama arrived, and the promise made here was kept — it changed what feeds
+/// the projection and nothing downstream of it.
+///
+/// What it did change is the *specular* half. Three SH bands hold nothing small,
+/// so a gradient can only ever be reflected as a blur; an
+/// [`environment`](Sky::environment) names a compiled `.hdr` whose prefiltered
+/// chain a mirror can actually show. Both halves come out of one asset, and a
+/// game that names none keeps the gradient.
 ///
 /// # Why the sun is not in here
 ///
@@ -318,6 +320,22 @@ impl Light {
 /// [`Light`], and this is everything else the sky does — which is also why a
 /// surface facing away from the sun is lit at all.
 ///
+/// # Where it applies (§6 M28)
+///
+/// Until M28 there was exactly one, and §6 M24 said why in as many words: an
+/// environment is a property of *where the frame is*, and two of them was a
+/// question about volumes the protocol had not been asked. It is asked here.
+/// [`half_extent`](Sky::half_extent) is that question's answer — a box the
+/// environment is the environment *inside*, and [`fade`](Sky::fade) the metres
+/// over which it gives way to whatever contains it.
+///
+/// A world may declare several. The innermost one containing a surface wins,
+/// and what "wins" means is a weight rather than a choice: an order-2 projection
+/// is *linear*, so two environments mix by mixing their coefficients and the
+/// result is the projection of the mixed radiance rather than an approximation
+/// of it. That is what makes a doorway a fade instead of a pop, and it is why
+/// this is nine multiply-adds rather than a second lighting path.
+///
 /// # The zero
 ///
 /// [`intensity`](Sky::intensity) of zero is *no environment*, and a world that
@@ -325,10 +343,33 @@ impl Light {
 /// (§6 M11). So the migration `World::restore` performs — every field zeroed —
 /// puts a world back to the lighting it had, and every scene blessed before
 /// this component existed still renders itself.
+///
+/// M28's fields are zeroed by the same rule and mean the same thing they always
+/// meant: a zero [`half_extent`](Sky::half_extent) is **unbounded**, which is
+/// the one sky every world had before there could be two.
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
 #[component(id = "gg.sky")]
 #[repr(C)]
 pub struct Sky {
+    /// Where the volume is centred, world space and un-narrowed — as
+    /// [`Light::position`]. Unread when the volume is unbounded.
+    pub center: sim::DVec3,
+    /// Half the box's size along each axis, metres. **Zero is unbounded**: the
+    /// sky of the whole world, which is what a `Sky` has always been and what a
+    /// migration that could not carry this field restores.
+    ///
+    /// `f32` beside an `f64` centre for [`Renderable::half_extent`]'s reason — a
+    /// size is a size wherever the thing is, and only positions gain planetary
+    /// magnitude (§1.4).
+    pub half_extent: sim::Vec3,
+    /// Metres *outside* the box over which this environment falls to nothing.
+    ///
+    /// [`Light::range`]'s idiom rather than an inward taper: the box is the
+    /// shape at full strength and this is the distance to exactly zero, so the
+    /// author draws the box on the room's walls instead of guessing how much
+    /// smaller than the room to make it. Zero is a hard edge, which is a pop
+    /// across the doorway and is occasionally what a level wants.
+    pub fade: f32,
     /// `0x00RRGGBB`, sRGB — straight up.
     pub zenith: u32,
     /// The same, at the horizon. Reached along a square root of altitude rather
@@ -343,6 +384,19 @@ pub struct Sky {
     /// at all. Separate from the colours for [`Light::intensity`]'s reason — a
     /// sky brighter than white is not expressible in eight bits.
     pub intensity: f32,
+    /// A compiled `.hdr` in the pack, or 0 for the gradient above (§6 M27).
+    /// `gg_assets::AssetId`'s value, a `u64` for [`Model::asset`]'s reason.
+    ///
+    /// It replaces the three colours rather than tinting them, and it carries
+    /// its own [`intensity`](Sky::intensity) scale — a panorama is already a
+    /// radiance in absolute units, so the multiplier is exposure and not a
+    /// colour knob. Zero is the gradient for the whole component's reason: a
+    /// migration that cannot carry this field leaves a world lit as it was.
+    ///
+    /// A name the pack does not hold falls back to the gradient, not to black —
+    /// `ggc watch` rewrites a pack under a running game (§4.6), and a sky that
+    /// went out while an artist saved would read as a crash.
+    pub environment: u64,
 }
 
 impl Sky {
@@ -352,10 +406,45 @@ impl Sky {
     #[must_use]
     pub fn daylight(intensity: f32) -> Self {
         Sky {
+            center: sim::DVec3::ZERO,
+            half_extent: sim::Vec3::ZERO,
+            fade: 0.0,
             zenith: 0x0059_8fd8,
             horizon: 0x00c8_d4e0,
             ground: 0x0035_3129,
             intensity,
+            environment: 0,
+        }
+    }
+
+    /// A compiled panorama, by the pack-relative name of the `.hdr` it came
+    /// from — `sky/kloofendal` for `assets/sky/kloofendal.hdr` (§6 M27).
+    ///
+    /// The gradient fields keep [`Self::daylight`]'s values rather than zero, so
+    /// a pack that has not finished loading — or a build without the asset —
+    /// shows a plausible sky instead of a black one.
+    #[must_use]
+    pub fn image(name: &str, intensity: f32) -> Self {
+        Sky {
+            environment: asset_id(name),
+            ..Sky::daylight(intensity)
+        }
+    }
+
+    /// The same environment, bounded to a box and fading over `fade` metres
+    /// outside it (§6 M28).
+    ///
+    /// A builder rather than a fourth constructor, because a volume is
+    /// orthogonal to *what* the environment is: `Sky::image(…).within(…)` is a
+    /// panorama in a room, and `Sky::daylight(…).within(…)` is a tinted pocket
+    /// of one. An unbounded sky is what a world gets by not calling this.
+    #[must_use]
+    pub fn within(self, center: sim::DVec3, half_extent: sim::Vec3, fade: f32) -> Self {
+        Sky {
+            center,
+            half_extent,
+            fade,
+            ..self
         }
     }
 }
@@ -484,8 +573,11 @@ mod tests {
         assert_eq!(align_of::<Model>(), 8);
         assert_eq!(size_of::<Light>(), 56);
         assert_eq!(align_of::<Light>(), 8);
-        assert_eq!(size_of::<Sky>(), 16);
-        assert_eq!(align_of::<Sky>(), 4);
+        // 64 and align 8 since §6 M28's volume: a `DVec3`, a `Vec3`, five
+        // 4-byte scalars and a `u64` — the `u64` lands at 56 on its own
+        // alignment, so this is still a struct with no padding to name.
+        assert_eq!(size_of::<Sky>(), 64);
+        assert_eq!(align_of::<Sky>(), 8);
     }
 
     /// The migration law this protocol's zeros are chosen against (§4.2.2): a
@@ -498,6 +590,15 @@ mod tests {
             sky.intensity, 0.0,
             "which is the flat ambient term, as before"
         );
+        assert_eq!(
+            sky.environment, 0,
+            "a world that lost this field comes back on the gradient it had"
+        );
+        assert_eq!(
+            sky.half_extent,
+            sim::Vec3::ZERO,
+            "and unbounded, which is the only kind of sky there was before M28"
+        );
         let mut box3 = Renderable::boxed(sim::DVec3::ZERO, sim::Vec3::splat(0.5), 0x00ff_ffff);
         box3.smoothness = 0.0;
         box3.metallic = 0.0;
@@ -507,6 +608,52 @@ mod tests {
             zeroed.shape,
             shape::BOX,
             "a world that lost this field on a reload comes back the boxes it was"
+        );
+    }
+
+    /// A named panorama keeps the gradient behind it, so a pack that has not
+    /// arrived — or a build without the asset — is a plausible sky rather than a
+    /// black one (§6 M27).
+    #[test]
+    fn a_sky_naming_an_image_still_carries_the_gradient_it_falls_back_to() {
+        let image = Sky::image("sky/kloofendal", 2.0);
+        assert_eq!(image.environment, asset_id("sky/kloofendal"));
+        assert_ne!(image.environment, 0, "a named asset is never the zero id");
+        let daylight = Sky::daylight(2.0);
+        assert_eq!(
+            Sky {
+                environment: 0,
+                ..image
+            },
+            daylight,
+            "the fallback is daylight exactly, not an approximation of it"
+        );
+    }
+
+    /// `within` is orthogonal to what the environment *is* — it moves three
+    /// fields and nothing else, which is the whole claim that lets a panorama
+    /// and a gradient both be bounded by the same call (§6 M28).
+    #[test]
+    fn a_volume_bounds_a_sky_without_changing_what_it_radiates() {
+        let unbounded = Sky::image("sky/room", 0.5);
+        let center = sim::DVec3::new(4.0, 1.0, -2.0);
+        let bounded = unbounded.within(center, sim::Vec3::new(6.0, 2.0, 6.0), 1.5);
+        assert_eq!(bounded.center, center);
+        assert_eq!(bounded.fade, 1.5);
+        assert_eq!(
+            Sky {
+                center: sim::DVec3::ZERO,
+                half_extent: sim::Vec3::ZERO,
+                fade: 0.0,
+                ..bounded
+            },
+            unbounded,
+            "the radiating half is untouched"
+        );
+        assert_eq!(
+            unbounded.half_extent,
+            sim::Vec3::ZERO,
+            "and a sky nobody bounded is the whole world's"
         );
     }
 

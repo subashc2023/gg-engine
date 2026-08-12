@@ -183,6 +183,7 @@ impl UiPass {
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         })
     }
 

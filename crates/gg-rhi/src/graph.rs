@@ -518,6 +518,7 @@ fn resolve_draws<'a>(gpu: &Gpu, draws: &[DrawSpec<'a>]) -> Result<Vec<ResolvedDr
                 index_buffer,
                 indirect,
                 depth_bias: d.depth_bias,
+                viewport: d.viewport,
             })
         })
         .collect()
@@ -751,6 +752,10 @@ unsafe fn render(
     unsafe {
         device.raw().cmd_begin_rendering(cmd, &rendering);
         for draw in draws {
+            // A draw's own rectangle if it declared one (§6 M31's atlas tiles),
+            // clamped by the same rule so an override is no more able to scissor
+            // past the render area than the pass's is.
+            let region = draw.viewport.map_or(region, |v| v.clamped(extent));
             record_draw(device, cmd, region, set, draw);
         }
         device.raw().cmd_end_rendering(cmd);

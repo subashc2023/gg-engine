@@ -126,6 +126,11 @@ pub struct Content {
     /// Scene handles, so [`Scenes::expand`] reads without loading — that method
     /// takes `&self` and expansion must never be what triggers a load.
     scenes: BTreeMap<AssetId, Handle<asset::Scene>>,
+    /// Compiled environments, keyed by their own id — nine SH coefficients and
+    /// the id of the radiance chain beside them (§6 M27). Copied out of the
+    /// mapping at request time rather than read per frame, because the frame
+    /// block wants them as floats and the blob is 160 bytes either way.
+    environments: BTreeMap<AssetId, gg_assets::Environment>,
     /// Every id a game has named, so a reload can ask for them all again.
     wanted: BTreeMap<AssetId, ()>,
     path: PathBuf,
@@ -156,6 +161,7 @@ impl Content {
             materials: BTreeMap::new(),
             bounds: BTreeMap::new(),
             scenes: BTreeMap::new(),
+            environments: BTreeMap::new(),
             wanted: BTreeMap::new(),
             path: path.to_path_buf(),
             stamp: Stamp::of(path),
@@ -179,6 +185,7 @@ impl Content {
             // A game naming a material or a texture directly asks for nothing:
             // both are reached *through* a mesh, and a texture with no mesh
             // behind it has no draw to be sampled by.
+            AssetKind::Environment => self.request_environment(id),
             AssetKind::Material | AssetKind::Texture => {}
         }
     }
@@ -258,6 +265,31 @@ impl Content {
                 DrawMaterial::default()
             }
         }
+    }
+
+    /// An environment and the chain it names. Both halves are requested here,
+    /// because a scene that names one and not the other is not expressible —
+    /// the id of the chain is *in* the blob (§6 M27).
+    fn request_environment(&mut self, id: AssetId) {
+        let handle = match self.assets.load_id::<asset::Environment>(id) {
+            Ok(Some(handle)) => handle,
+            Ok(None) => return,
+            Err(error) => return warn(id, &error),
+        };
+        let environment = match self.assets.environment(&handle) {
+            Ok(environment) => environment,
+            Err(error) => return warn(id, &error),
+        };
+        self.environments.insert(id, environment);
+        self.request_texture(environment.radiance);
+    }
+
+    /// What `id` compiled to, or `None` if it is not an environment this pack
+    /// holds. The caller falls back to the game's gradient `Sky`, which is why
+    /// this is an `Option` rather than a default (§6 M27).
+    #[must_use]
+    pub fn environment(&self, id: AssetId) -> Option<&gg_assets::Environment> {
+        self.environments.get(&id)
     }
 
     fn request_texture(&mut self, id: AssetId) {

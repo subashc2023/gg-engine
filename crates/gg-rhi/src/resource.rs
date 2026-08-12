@@ -74,6 +74,10 @@ pub enum ImageFormat {
     Bc5Unorm,
     /// BC4, one linear channel — masks. Half the block size of the other two.
     Bc4Unorm,
+    /// BC6H, three channels of unsigned half float — the environment (§6 M27).
+    /// The one block format here that does not clamp at 1.0, which is the whole
+    /// reason it exists: a sky is a radiance and a sun is four digits of it.
+    Bc6hUfloat,
     /// 16-bit float RGBA — the scene attachment since M11. Radiance leaves the
     /// forward pass unbounded above 1.0 and the tonemapper is what brings it
     /// down, so an 8-bit target would clip every highlight before the curve that
@@ -92,6 +96,7 @@ impl ImageFormat {
             ImageFormat::Bc7Srgb => vk::Format::BC7_SRGB_BLOCK,
             ImageFormat::Bc5Unorm => vk::Format::BC5_UNORM_BLOCK,
             ImageFormat::Bc4Unorm => vk::Format::BC4_UNORM_BLOCK,
+            ImageFormat::Bc6hUfloat => vk::Format::BC6H_UFLOAT_BLOCK,
             ImageFormat::Rgba16F => vk::Format::R16G16B16A16_SFLOAT,
             ImageFormat::Depth32 => vk::Format::D32_SFLOAT,
         }
@@ -115,7 +120,10 @@ impl ImageFormat {
     /// which is what makes a banded upload legal (§4.3).
     pub fn block_extent(self) -> u32 {
         match self {
-            ImageFormat::Bc7Srgb | ImageFormat::Bc5Unorm | ImageFormat::Bc4Unorm => 4,
+            ImageFormat::Bc7Srgb
+            | ImageFormat::Bc5Unorm
+            | ImageFormat::Bc4Unorm
+            | ImageFormat::Bc6hUfloat => 4,
             ImageFormat::Rgba8Srgb
             | ImageFormat::Rgba8Unorm
             | ImageFormat::Rgba16F
@@ -129,7 +137,9 @@ impl ImageFormat {
     pub fn packed_size(self, extent: (u32, u32)) -> u64 {
         let (w, h) = (u64::from(extent.0), u64::from(extent.1));
         match self {
-            ImageFormat::Bc7Srgb | ImageFormat::Bc5Unorm => w.div_ceil(4) * h.div_ceil(4) * 16,
+            ImageFormat::Bc7Srgb | ImageFormat::Bc5Unorm | ImageFormat::Bc6hUfloat => {
+                w.div_ceil(4) * h.div_ceil(4) * 16
+            }
             ImageFormat::Bc4Unorm => w.div_ceil(4) * h.div_ceil(4) * 8,
             ImageFormat::Rgba8Srgb | ImageFormat::Rgba8Unorm | ImageFormat::Depth32 => w * h * 4,
             ImageFormat::Rgba16F => w * h * 8,

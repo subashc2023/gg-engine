@@ -31,7 +31,7 @@
 //! a buffer to land in that the mesh path does not.
 //!
 //! **The reader is strict, and deliberately narrower than KTX2.** It accepts the
-//! subset [`encode`] writes — 2D, one face, no array layers, one of three block
+//! subset [`encode`] writes — 2D, one face, no array layers, one of four block
 //! formats, always zstd — and refuses everything else by name. A permissive
 //! reader would be a second importer running at load time, on the ship, on the
 //! player's machine; `ggc` is where a file gets interpreted.
@@ -97,6 +97,11 @@ pub enum TextureFormat {
     Bc5Unorm = 141,
     /// BC4, one channel, linear. Occlusion and other masks.
     Bc4Unorm = 139,
+    /// BC6H, three channels, *unsigned half float*, linear. The environment and
+    /// nothing else (§6 M27). The only format here whose texels may exceed one:
+    /// a sky is the one measurement in a pack that is a radiance rather than a
+    /// reflectance, and eight bits per channel cannot hold a sun.
+    Bc6hUfloat = 143,
 }
 
 impl TextureFormat {
@@ -105,6 +110,7 @@ impl TextureFormat {
             146 => Some(Self::Bc7Srgb),
             141 => Some(Self::Bc5Unorm),
             139 => Some(Self::Bc4Unorm),
+            143 => Some(Self::Bc6hUfloat),
             _ => None,
         }
     }
@@ -119,7 +125,7 @@ impl TextureFormat {
     #[must_use]
     pub const fn block_bytes(self) -> u32 {
         match self {
-            Self::Bc7Srgb | Self::Bc5Unorm => 16,
+            Self::Bc7Srgb | Self::Bc5Unorm | Self::Bc6hUfloat => 16,
             Self::Bc4Unorm => 8,
         }
     }
@@ -653,17 +659,30 @@ pub fn encode(
 /// agree.
 fn data_format_descriptor(format: TextureFormat) -> Vec<u8> {
     // (channel type, bit offset, bit length) per sample. Channel ids are the
-    // per-model ones: BC7_COLOR = 0; BC5_RED = 0, BC5_GREEN = 1; BC4_DATA = 0.
+    // per-model ones: BC7_COLOR = 0; BC5_RED = 0, BC5_GREEN = 1; BC4_DATA = 0;
+    // BC6H_COLOR = 0, with KHR_DF_SAMPLE_DATATYPE_FLOAT (0x80) set in the high
+    // nibble — the one format here whose decoded texels are floats, and the one
+    // bit that says so to a reader not consulting `vkFormat`.
     let samples: &[(u8, u16, u8)] = match format {
         TextureFormat::Bc7Srgb => &[(0, 0, 127)],
         TextureFormat::Bc5Unorm => &[(0, 0, 63), (1, 64, 63)],
         TextureFormat::Bc4Unorm => &[(0, 0, 63)],
+        TextureFormat::Bc6hUfloat => &[(0x80, 0, 127)],
     };
-    // KHR_DF_MODEL_BC7 = 134, BC5 = 132, BC4 = 131.
+    // KHR_DF_MODEL_BC7 = 134, BC6H = 133, BC5 = 132, BC4 = 131.
     let color_model: u8 = match format {
         TextureFormat::Bc7Srgb => 134,
+        TextureFormat::Bc6hUfloat => 133,
         TextureFormat::Bc5Unorm => 132,
         TextureFormat::Bc4Unorm => 131,
+    };
+    // The range one sample spans, as the spec's own bit patterns. Normalized
+    // formats say 0..=u32::MAX; BC6H says 0.0..=1.0 *as float bits*, because a
+    // float channel's bounds are read as floats and `u32::MAX` reinterpreted
+    // that way is a NaN.
+    let (lower, upper): (u32, u32) = match format {
+        TextureFormat::Bc6hUfloat => (0, 0x3f80_0000),
+        _ => (0, u32::MAX),
     };
     // BT709 primaries for the one format carrying a colour; UNSPECIFIED for the
     // two carrying measurements, which have no primaries to speak of.
@@ -692,12 +711,12 @@ fn data_format_descriptor(format: TextureFormat) -> Vec<u8> {
     dfd.extend_from_slice(&planes);
     for &(channel, offset, length) in samples {
         dfd.extend_from_slice(&offset.to_le_bytes());
-        // No qualifier bits: these formats are unsigned, non-float, and their
-        // channels are not linear-in-a-non-linear-format.
+        // `channel` carries its own qualifier nibble — zero for the three
+        // unsigned normalized formats, FLOAT for BC6H.
         dfd.extend_from_slice(&[length, channel]);
         dfd.extend_from_slice(&[0u8; 4]); // samplePosition, all axes
-        dfd.extend_from_slice(&0u32.to_le_bytes()); // sampleLower
-        dfd.extend_from_slice(&u32::MAX.to_le_bytes()); // sampleUpper
+        dfd.extend_from_slice(&lower.to_le_bytes()); // sampleLower
+        dfd.extend_from_slice(&upper.to_le_bytes()); // sampleUpper
     }
     debug_assert_eq!(dfd.len(), 4 + block_size);
     dfd

@@ -133,6 +133,7 @@ fn render_reading(index: u32) -> gg_rhi::ShutdownReport {
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }],
     )
     .unwrap();

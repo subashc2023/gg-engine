@@ -47,9 +47,62 @@ pub struct Import {
     pub textures: usize,
 }
 
-/// Compile one glTF document. `stem` is the source's pack-relative path with
-/// its extension removed, and every asset name is built from it.
+/// Compile one source. `stem` is its pack-relative path with the extension
+/// removed, and every asset name is built from it.
+///
+/// Dispatch is on the extension because the extension is what [`crate::build`]
+/// walked for. An `.hdr` is not a document with meshes in it and shares nothing
+/// with the glTF path below but this function's signature.
 pub fn document(path: &std::path::Path, stem: &str) -> Result<Import> {
+    if path.extension().and_then(|e| e.to_str()) == Some("hdr") {
+        return panorama(path, stem);
+    }
+    gltf_document(path, stem)
+}
+
+/// Compile one equirectangular `.hdr` into an environment and its prefiltered
+/// radiance chain (§6 M27) — two assets, named off one source, because the SH
+/// and the chain are two integrals of the same panorama.
+fn panorama(path: &std::path::Path, stem: &str) -> Result<Import> {
+    let image = image::open(path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .into_rgb32f();
+    let (width, height) = (image.width(), image.height());
+    let texels: Vec<[f32; 3]> = image.pixels().map(|p| p.0).collect();
+    let compiled = crate::environment::compile(&texels, width, height)
+        .with_context(|| format!("prefiltering {}", path.display()))?;
+
+    let radiance_name = format!("{stem}/radiance");
+    let environment = gg_assets::Environment {
+        sh: compiled.sh,
+        radiance: AssetId::of(&radiance_name),
+        levels: crate::environment::LEVELS,
+        _pad: 0,
+    };
+    Ok(Import {
+        assets: vec![
+            Compiled {
+                name: radiance_name,
+                kind: AssetKind::Texture,
+                blob: compiled.radiance,
+            },
+            // The environment is named by the *stem* alone, so a game writes
+            // `Sky::image("sky/kloofendal")` — the path it put the file at, with
+            // no suffix to remember. The chain hanging off it is an
+            // implementation detail of that name.
+            Compiled {
+                name: stem.to_string(),
+                kind: AssetKind::Environment,
+                blob: environment.encode(),
+            },
+        ],
+        meshes: 0,
+        triangles: 0,
+        textures: 1,
+    })
+}
+
+fn gltf_document(path: &std::path::Path, stem: &str) -> Result<Import> {
     let gltf = gltf::Gltf::open(path).with_context(|| format!("reading {}", path.display()))?;
     let base = path.parent();
     let buffers = gltf::import_buffers(&gltf.document, base, gltf.blob.clone())

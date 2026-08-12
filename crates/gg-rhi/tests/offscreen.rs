@@ -94,6 +94,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }],
     )
     .unwrap();
@@ -113,6 +114,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }],
     )
     .unwrap_err();
@@ -199,6 +201,7 @@ float4 fs_main() : SV_Target { return push.color; }
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }],
     )
     .unwrap_err();
@@ -218,6 +221,7 @@ float4 fs_main() : SV_Target { return push.color; }
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }],
     )
     .unwrap();
@@ -316,6 +320,7 @@ float4 fs_main() : SV_Target { return push.color; }
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }
     }
     let pixels = common::render(
@@ -335,6 +340,110 @@ float4 fs_main() : SV_Target { return push.color; }
     };
     assert_eq!(pixel(4, 8), [255, 0, 0, 255], "the first draw is missing");
     assert_eq!(pixel(12, 8), [0, 0, 255, 255], "the last draw must win");
+
+    let report = rhi.shutdown();
+    assert!(report.clean(), "unclean: {report:?}");
+}
+
+/// A draw's own rectangle confines it, and two in one pass land in two places
+/// (§6 M31). What the shadow atlas rests on: a pass viewport could put every
+/// draw in *one* tile, so the property under test is that the second draw goes
+/// somewhere the first did not without a second pass to say so.
+#[test]
+fn a_draw_lands_in_its_own_rectangle() {
+    init_tracing();
+    let dir = std::env::temp_dir().join(format!("gg-rhi-tiles-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("fullscreen.slang"),
+        r#"
+struct VOut { float4 pos : SV_Position; }
+
+[shader("vertex")]
+VOut vs_main(uint vid: SV_VertexID)
+{
+    static const float2 verts[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
+    VOut o;
+    o.pos = float4(verts[vid], 0.0, 1.0);
+    return o;
+}
+
+[shader("fragment")]
+float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
+"#,
+    )
+    .unwrap();
+    let module = gg_shaders::compile_module(&dir.to_string_lossy(), "fullscreen.slang").unwrap();
+    let find = |stage| {
+        module
+            .entry_points
+            .iter()
+            .find(|e| e.stage == stage)
+            .unwrap()
+    };
+    let vs = find(gg_shaders::Stage::Vertex);
+    let fs = find(gg_shaders::Stage::Fragment);
+
+    const EDGE: u32 = 16;
+    let mut rhi = OffscreenRhi::new((EDGE, EDGE)).unwrap();
+    let pipeline = rhi
+        .create_pipeline(&PipelineDesc {
+            name: "test-tiles",
+            vs_spirv: &vs.spirv,
+            vs_entry: &vs.spirv_entry,
+            fs_spirv: &fs.spirv,
+            fs_entry: &fs.spirv_entry,
+            push_constant_size: 0,
+            color: gg_rhi::ColorTarget::Backbuffer,
+            blend: gg_rhi::Blend::Off,
+            depth: gg_rhi::DepthMode::Off,
+            samples: gg_rhi::Samples::X1,
+            depth_bias: false,
+        })
+        .unwrap();
+    // Opposite corners, a quarter each: adjacent halves would pass under a
+    // scissor that leaked one tile in either direction.
+    let tile = |x, y| gg_rhi::Viewport {
+        x,
+        y,
+        width: EDGE / 4,
+        height: EDGE / 4,
+    };
+    let draw = |viewport| DrawSpec {
+        pipeline,
+        push_constants: &[],
+        count: 3,
+        index_buffer: None,
+        indirect: None,
+        depth_bias: None,
+        viewport: Some(viewport),
+    };
+    let pixels = common::render(
+        &mut rhi,
+        [1.0, 0.0, 0.0, 1.0],
+        &[draw(tile(0, 0)), draw(tile(EDGE * 3 / 4, EDGE * 3 / 4))],
+    )
+    .unwrap();
+
+    let at = |x: u32, y: u32| {
+        let i = ((y * EDGE + x) * 4) as usize;
+        [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+    };
+    let quarter = EDGE / 4;
+    for y in 0..EDGE {
+        for x in 0..EDGE {
+            let inside =
+                (x < quarter && y < quarter) || (x >= EDGE - quarter && y >= EDGE - quarter);
+            // The clear is what "no draw reached here" looks like, which is why
+            // it is a colour the fragment shader cannot produce.
+            let want = if inside {
+                [0, 255, 0, 255]
+            } else {
+                [255, 0, 0, 255]
+            };
+            assert_eq!(at(x, y), want, "at ({x}, {y}), inside={inside}");
+        }
+    }
 
     let report = rhi.shutdown();
     assert!(report.clean(), "unclean: {report:?}");

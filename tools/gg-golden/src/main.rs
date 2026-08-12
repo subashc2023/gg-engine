@@ -76,10 +76,11 @@ struct Scene {
     render: fn() -> Render,
 }
 
-/// The roster. Sixteen scenes across six sources — seven demos, the engine's own
-/// v1 pass list, two replay-driven captures, and the UI layer — each with its
-/// own policy, because "how strictly" is a property of what the frame contains
-/// and not of the harness (§4.10 per-test config).
+/// The roster. Nineteen scenes — seven demos, the engine's own v1 pass list, two
+/// replay-driven captures, the UI layer, and three the harness builds itself to
+/// put a lighting feature on its own against nothing else (§6 M26-M28) — each
+/// with its own policy, because "how strictly" is a property of what the frame
+/// contains and not of the harness (§4.10 per-test config).
 const SCENES: &[Scene] = &[
     Scene {
         name: "triangle",
@@ -269,6 +270,113 @@ const SCENES: &[Scene] = &[
         render: render_atrium_noon,
     },
     Scene {
+        name: "mirror",
+        // §6 M27's subject, and the only scene in the roster lit by *nothing but*
+        // the environment: no sun, no lamps, no ambient worth the name. Every
+        // photon in this frame came through the prefiltered chain, so a chain
+        // that stopped being sampled renders a black frame rather than a
+        // slightly different one — which is the property a reference is for.
+        //
+        // Judged on the perceptual side like the atrium: it is five smooth
+        // spheres of curved gradient, where a driver's rounding moves many
+        // pixels a little. What it must not forgive is *structure* — the window
+        // panes reflected in the mirror end, which is exactly what the three-band
+        // convolution this replaced could not produce at all.
+        policy: Policy {
+            tolerance: 4,
+            max_diff_pixels: 512,
+            benign_delta: 8,
+            max_dssim: 0.03,
+            max_bias: 0.2,
+        },
+        render: render_mirror,
+    },
+    Scene {
+        name: "volumes",
+        // §6 M28's subject: two environments and the fade between them. Same
+        // policy as `mirror` and for the same reasons — smooth curved gradients
+        // over a large fraction of the frame — with one difference that matters
+        // here. The bias bound is tight, because the failure this scene exists
+        // to catch is *the wrong environment winning*, and one sky standing in
+        // for another is a whole-frame level shift long before it is a
+        // structural one.
+        policy: Policy {
+            tolerance: 4,
+            max_diff_pixels: 512,
+            benign_delta: 8,
+            max_dssim: 0.03,
+            max_bias: 0.1,
+        },
+        render: render_volumes,
+    },
+    Scene {
+        name: "parallax",
+        // §6 M29's subject, and it is deliberately *one* environment: the camera
+        // stands inside a single bounded room, so nothing here blends and what
+        // moves can only be the correction. Judged as `mirror` is — the same
+        // chain reflected in the same smooth metal — because the failure it
+        // catches is structural rather than a level shift: without the
+        // correction every ball reflects the same picture from the same
+        // directions, and the windows land at the same place on all five.
+        policy: Policy {
+            tolerance: 4,
+            max_diff_pixels: 512,
+            benign_delta: 8,
+            max_dssim: 0.03,
+            max_bias: 0.2,
+        },
+        render: render_parallax,
+    },
+    Scene {
+        name: "lanterns",
+        // §6 M30's subject: ninety-six point lights, three times the cap this
+        // roster lived under until now, arranged so that most of them reach no
+        // part of most of the frame. What it grades is the *assignment* — a
+        // froxel list that under-includes shows here as a pool of light with a
+        // straight edge across it, which is a structural failure and not a level
+        // one.
+        //
+        // Judged like `atrium`, whose subject it shares: many smooth falloff
+        // gradients over flat surfaces, where a driver's rounding moves a great
+        // many pixels a little. The bias bound is the atrium's rather than the
+        // volumes' — a missing lamp darkens a patch, and a whole-frame level
+        // shift is not the failure mode.
+        policy: Policy {
+            tolerance: 4,
+            max_diff_pixels: 512,
+            benign_delta: 8,
+            max_dssim: 0.03,
+            max_bias: 0.2,
+        },
+        render: render_lanterns,
+    },
+    Scene {
+        name: "lampshade",
+        // §6 M31's subject, and it is the one thing a *sun's* shadow can never
+        // show: three pillars around one low lamp throw shadows that **diverge**
+        // — each one widening away from its own pillar, each pointing a
+        // different way, none of them parallel. A cascade's are parallel by
+        // construction, so a lookup that had quietly fallen back to the sun's
+        // path would render this frame as three stripes going the same way.
+        //
+        // It also grades the two failure directions the offscreen test measures
+        // in numbers: a lamp that shadows nothing (three lit pillars on an even
+        // floor) and one that shadows everything (a dark frame, or the acne band
+        // at each pillar's foot that a wrong bias makes).
+        //
+        // Judged tightly. Nothing here is a smooth falloff over a huge surface
+        // the way the atrium is — the subject is a hard boundary in a small
+        // frame, and a hard boundary that moves is exactly what must fail.
+        policy: Policy {
+            tolerance: 2,
+            max_diff_pixels: 128,
+            benign_delta: 4,
+            max_dssim: 0.03,
+            max_bias: 0.15,
+        },
+        render: render_lampshade,
+    },
+    Scene {
         name: "ui-overlay",
         // §6 M13's acceptance test as a picture: the real debug overlay, frozen.
         // Flat fills over a translucent panel and a bitmap font under a nearest
@@ -408,6 +516,563 @@ const SCENES: &[Scene] = &[
 /// The eye is the harness's, and deliberately not the player's: `START` faces
 /// the stairs, and a reference for image-based lighting has to hold the sky, the
 /// floor and all twenty-five samples at once.
+/// A row of spheres lit only by the compiled environment (§6 M27).
+///
+/// Deliberately austere: five balls, one base colour, smoothness running from
+/// mirror to matte, and **no light entity at all**. The atrium proves the chain
+/// composes with everything else in a lit room; this proves it is the thing
+/// doing the lighting, and separating the two is what makes a regression here
+/// readable rather than a change in a frame with six contributions to it.
+///
+/// The balls are metal. A dielectric would show mostly its diffuse lobe, which
+/// is the SH half of this feature and was already gated at §6 M24 — the half
+/// that is new is the specular one, and a conductor has nothing else.
+fn render_mirror() -> Render {
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Renderable, Sky};
+    use gg_math::sim;
+
+    let extent = BOXES_EXTENT;
+    let pack = atrium_pack()?;
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    world.register::<Sky>()?;
+    let sky = world.spawn();
+    world.insert(
+        sky,
+        Sky::image(demo_06_lit::SKY, demo_06_lit::SKY_INTENSITY),
+    )?;
+    // Five, across the whole smoothness axis. Large and close: the chain is 256
+    // texels around a whole sphere, so a ball has to fill a good part of the
+    // frame before its reflection has texels to resolve — a small mirror is a
+    // correct reflection nobody can read.
+    for i in 0..5 {
+        let smoothness = 1.0 - i as f32 * 0.22;
+        let ball = world.spawn();
+        world.insert(
+            ball,
+            Renderable::ball(
+                sim::DVec3::new(-2.0 + f64::from(i) * 1.0, 0.0, 0.0),
+                0.45,
+                0x00d8_d8dc,
+            )
+            .surfaced(smoothness, 1.0),
+        )?;
+    }
+
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    renderer.open_pack(&pack)?;
+    let view = gg_render::View::default();
+    let eye = sim::DVec3::new(0.0, 0.0, 3.4);
+    let mut extracted = gg_extract::Extracted::default();
+    let mut frame = None;
+    for _ in 0..HALL_FRAMES {
+        extracted.clear(eye, view.frustum(extent));
+        extracted.append::<Renderable>(&world)?;
+        extracted.append_lights(&world)?;
+        let _capture = gg_debug::capture::frame();
+        frame = Some(renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?);
+    }
+    let pending = renderer
+        .pack()
+        .map_or(0, gg_render::content::Content::pending);
+    anyhow::ensure!(
+        pending == 0,
+        "the environment was still streaming after {HALL_FRAMES} frames ({pending} pending) — a          half-resident chain is a reference of the fallback, not of the feature"
+    );
+    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
+    // No light casts, so no cascade is fitted and no shadow pass runs. Asserted
+    // rather than assumed: a stray directional light would light these spheres
+    // directly and quietly turn this into a second atrium.
+    anyhow::ensure!(
+        !frame.order.iter().any(|name| name.starts_with("shadow")),
+        "nothing in this scene casts, so no shadow pass may run: {:?}",
+        frame.order
+    );
+    ensure_clean(&renderer.shutdown())?;
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
+
+/// Two environments and the seam between them (§6 M28).
+///
+/// The one scene in the roster with more than one sky, and it is built so the
+/// failure modes separate. A **panorama** bounded to the left half of the frame,
+/// a strongly tinted **gradient** unbounded behind everything, and a fade band
+/// down the middle: the balls are metal, so what they show is the specular half
+/// — a compiled chain on the left, a three-band convolution on the right, and
+/// both at once in the band. The slab under them is chalk, so what it shows is
+/// the diffuse half, which is where a blend that popped rather than faded would
+/// be a line across the floor nobody could miss.
+///
+/// No lights at all, `mirror`'s reason: every photon in the frame came through
+/// an environment, so a selection that broke renders black or renders one sky
+/// everywhere, and neither is a small difference.
+fn render_volumes() -> Render {
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Renderable, Sky};
+    use gg_math::sim;
+
+    let extent = BOXES_EXTENT;
+    let pack = atrium_pack()?;
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    world.register::<Sky>()?;
+
+    // The room, bounded to x < -0.5 with a 2 m fade — wide enough that the band
+    // covers several balls, because a seam narrower than a ball is a seam this
+    // frame cannot show.
+    let room = world.spawn();
+    world.insert(
+        room,
+        Sky::image(demo_06_lit::SKY, demo_06_lit::SKY_INTENSITY).within(
+            sim::DVec3::new(-3.5, 0.0, 0.0),
+            sim::Vec3::new(3.0, 4.0, 4.0),
+            2.0,
+        ),
+    )?;
+    // The outdoors: a gradient, and deliberately nothing like the room. Its
+    // colours are not `daylight`'s — a blend is only legible against a sky the
+    // other one could not be mistaken for.
+    let outside = world.spawn();
+    world.insert(
+        outside,
+        Sky {
+            zenith: 0x00ff_7a2a,
+            horizon: 0x00ff_c060,
+            ground: 0x0060_2010,
+            ..Sky::daylight(0.35)
+        },
+    )?;
+
+    // Metal, and smooth: the specular half is the one that reads the chain.
+    for i in 0..7 {
+        let ball = world.spawn();
+        world.insert(
+            ball,
+            Renderable::ball(
+                sim::DVec3::new(-3.0 + f64::from(i) * 1.0, 0.35, 0.0),
+                0.42,
+                0x00d8_d8dc,
+            )
+            .surfaced(0.85, 1.0),
+        )?;
+    }
+    // The floor, chalk — the diffuse half, and the only thing in frame wide
+    // enough to show the fade as a gradient rather than as an edge.
+    let floor = world.spawn();
+    world.insert(
+        floor,
+        Renderable::boxed(
+            sim::DVec3::new(0.0, -0.4, 0.0),
+            sim::Vec3::new(6.0, 0.1, 3.0),
+            0x00c8_c4bc,
+        ),
+    )?;
+
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    renderer.open_pack(&pack)?;
+    let view = gg_render::View::default();
+    let eye = sim::DVec3::new(0.0, 1.2, 5.2);
+    let mut extracted = gg_extract::Extracted::default();
+    let mut frame = None;
+    for _ in 0..HALL_FRAMES {
+        extracted.clear(eye, view.frustum(extent));
+        extracted.append::<Renderable>(&world)?;
+        extracted.append_lights(&world)?;
+        // The order the shader composites in, asserted where it is decided: the
+        // bounded room first, the unbounded sky last. Reversed, every fragment
+        // would take the world's sky and the room would never be reached.
+        anyhow::ensure!(
+            extracted.skies.len() == 2
+                && !extracted.skies[0].unbounded()
+                && extracted.skies[1].unbounded(),
+            "the room must composite before the world it stands in: {:?}",
+            extracted.skies
+        );
+        let _capture = gg_debug::capture::frame();
+        frame = Some(renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?);
+    }
+    let pending = renderer
+        .pack()
+        .map_or(0, gg_render::content::Content::pending);
+    anyhow::ensure!(
+        pending == 0,
+        "the environment was still streaming after {HALL_FRAMES} frames ({pending} pending)"
+    );
+    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
+    anyhow::ensure!(
+        !frame.order.iter().any(|name| name.starts_with("shadow")),
+        "nothing in this scene casts, so no shadow pass may run: {:?}",
+        frame.order
+    );
+    ensure_clean(&renderer.shutdown())?;
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
+
+/// An environment that is a *place* rather than a direction (§6 M29).
+///
+/// One sky, bounded, with the camera well inside it — so no blending happens and
+/// the only thing this frame can be about is the parallax correction. Five
+/// mirror balls spread across the room and a smooth metal floor under them:
+/// each ball is a different distance from each wall, so with the correction the
+/// bright window strips land at a different place on every one and the floor
+/// shows the walls converging. Without it, an environment is infinitely far
+/// away, every ball reflects the same directions of the same picture, and the
+/// five come out near-identical — which is what the reference refuses.
+///
+/// No lights, `mirror`'s reason: every photon here came through the chain.
+fn render_parallax() -> Render {
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Renderable, Sky};
+    use gg_math::sim;
+
+    let extent = BOXES_EXTENT;
+    let pack = atrium_pack()?;
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    world.register::<Sky>()?;
+
+    // The room, and the camera stands in it. Wider than it is tall, so the
+    // near and far walls are at different distances from every ball — a cube
+    // would make the correction symmetric and half of it invisible.
+    const CENTRE: sim::DVec3 = sim::DVec3::new(0.0, 1.0, 0.0);
+    const HALF: sim::Vec3 = sim::Vec3::new(6.0, 3.0, 7.0);
+    let room = world.spawn();
+    world.insert(
+        room,
+        Sky::image(demo_06_lit::SKY, demo_06_lit::SKY_INTENSITY).within(CENTRE, HALF, 1.0),
+    )?;
+
+    // Mirror-grade, which is the roughness the correction is most legible at:
+    // a lobe wide enough to blur the windows would blur the parallax with them.
+    for i in 0..5 {
+        let ball = world.spawn();
+        world.insert(
+            ball,
+            Renderable::ball(
+                sim::DVec3::new(-4.0 + f64::from(i) * 2.0, 0.55, 0.0),
+                0.55,
+                0x00d8_d8dc,
+            )
+            .surfaced(0.96, 1.0),
+        )?;
+    }
+    // Smooth metal rather than the chalk `volumes` uses: a floor that reflects
+    // is the widest surface in the frame, and a correction that is wrong shows
+    // there as walls that do not meet the ones behind them.
+    let floor = world.spawn();
+    world.insert(
+        floor,
+        Renderable::boxed(
+            sim::DVec3::new(0.0, -0.1, 0.0),
+            sim::Vec3::new(7.0, 0.1, 5.0),
+            0x0090_9498,
+        )
+        .surfaced(0.88, 1.0),
+    )?;
+
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    renderer.open_pack(&pack)?;
+    let view = gg_render::View::default();
+    let eye = sim::DVec3::new(0.0, 1.4, 6.0);
+    let mut extracted = gg_extract::Extracted::default();
+    let mut frame = None;
+    for _ in 0..HALL_FRAMES {
+        extracted.clear(eye, view.frustum(extent));
+        extracted.append::<Renderable>(&world)?;
+        extracted.append_lights(&world)?;
+        // What makes this scene about the correction and nothing else: one sky,
+        // bounded, and the camera fully inside it. A camera that drifted into
+        // the fade would put a blend in the picture and this reference would
+        // start grading two features at once.
+        anyhow::ensure!(
+            extracted.skies.len() == 1
+                && !extracted.skies[0].unbounded()
+                && extracted.skies[0].weight_at(gg_math::render::Vec3::ZERO) == 1.0,
+            "one bounded sky, and the camera inside it: {:?}",
+            extracted.skies
+        );
+        let _capture = gg_debug::capture::frame();
+        frame = Some(renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?);
+    }
+    let pending = renderer
+        .pack()
+        .map_or(0, gg_render::content::Content::pending);
+    anyhow::ensure!(
+        pending == 0,
+        "the environment was still streaming after {HALL_FRAMES} frames ({pending} pending)"
+    );
+    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
+    anyhow::ensure!(
+        !frame.order.iter().any(|name| name.starts_with("shadow")),
+        "nothing in this scene casts, so no shadow pass may run: {:?}",
+        frame.order
+    );
+    ensure_clean(&renderer.shutdown())?;
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
+
+/// A hall of lanterns — more lights than the engine could carry before §6 M30.
+///
+/// Ninety-six of them, alternating down two walls, each with a range short
+/// enough that it lights its own bay and not the next one. That is the property
+/// the frame is for: a fragment in the far bay must be shaded by the two or
+/// three lamps that reach it and by none of the ninety-three that do not, and
+/// the reference is what "and by none of the others" looks like. Assignment that
+/// under-includes puts a straight edge through a pool of light where a froxel
+/// boundary runs; assignment that over-includes costs time and changes no pixel,
+/// which is why this scene grades correctness and `gg-tools lights` grades cost.
+///
+/// The sun is deliberately absent and the ambient is low: a lit floor here has
+/// to have been lit by a lamp.
+fn render_lanterns() -> Render {
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Light, Renderable};
+    use gg_math::sim;
+
+    let extent = BOXES_EXTENT;
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    world.register::<Light>()?;
+
+    /// Three times the pre-M30 cap, and the number the assertions below are
+    /// written against — a scene that quietly lost lamps would otherwise still
+    /// render something plausible.
+    const LANTERNS: usize = 96;
+    /// Metres a lamp reaches zero at. Long enough to cross the hall and short
+    /// against its length, which is the arrangement that puts the selectivity on
+    /// the *depth* axis — where a screen tile cannot help and a froxel can.
+    const REACH: f32 = 3.0;
+
+    let floor = world.spawn();
+    world.insert(
+        floor,
+        Renderable::boxed(
+            sim::DVec3::new(0.0, -0.1, -30.0),
+            sim::Vec3::new(3.3, 0.1, 40.0),
+            0x0086_8a8e,
+        )
+        .surfaced(0.7, 0.0),
+    )?;
+    for side in [-1.0, 1.0] {
+        let wall = world.spawn();
+        world.insert(
+            wall,
+            Renderable::boxed(
+                sim::DVec3::new(side * 2.9, 2.2, -30.0),
+                sim::Vec3::new(0.2, 2.4, 40.0),
+                0x008e_8a82,
+            )
+            .surfaced(0.8, 0.0),
+        )?;
+        // A rail down each wall at lamp height, so a lamp has something near it
+        // to fall off across — a falloff read on a distant floor is a gradient,
+        // and a falloff read on the surface beside it is a shape.
+        let rail = world.spawn();
+        world.insert(
+            rail,
+            Renderable::boxed(
+                sim::DVec3::new(side * 2.3, 0.7, -30.0),
+                sim::Vec3::new(0.15, 0.15, 40.0),
+                0x00b0_a898,
+            )
+            .surfaced(0.6, 0.0),
+        )?;
+    }
+    for i in 0..LANTERNS {
+        let side = if i.is_multiple_of(2) { -1.0 } else { 1.0 };
+        let lamp = world.spawn();
+        world.insert(
+            lamp,
+            Light::point(
+                sim::DVec3::new(side * 2.5, 1.35, -1.5 - f64::from(i as u32 / 2) * 1.2),
+                // Three colours down the hall, so a lamp assigned to the wrong
+                // froxel is the wrong *hue* there and not merely the wrong
+                // brightness — a difference a per-channel gate sees at once.
+                match i % 3 {
+                    0 => 0x00ff_c890,
+                    1 => 0x0090_c8ff,
+                    _ => 0x00c0_ffa0,
+                },
+                7.0,
+                REACH,
+            ),
+        )?;
+    }
+
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    let view = gg_render::View::default();
+    let eye = sim::DVec3::new(0.0, 1.5, 4.0);
+    let mut extracted = gg_extract::Extracted::default();
+    extracted.clear(eye, view.frustum(extent));
+    extracted.append::<Renderable>(&world)?;
+    extracted.append_lights(&world)?;
+    // The scene's own claim, checked before the picture is: every lamp survived
+    // the frustum and the cap. Without this the reference could be blessed from
+    // a frame that had quietly dropped sixty of them and would then pass forever.
+    anyhow::ensure!(
+        extracted.lights.len() == LANTERNS && extracted.lights_dropped == 0,
+        "{} of {LANTERNS} lamps reached the frame ({} dropped)",
+        extracted.lights.len(),
+        extracted.lights_dropped
+    );
+    let _capture = gg_debug::capture::frame();
+    let frame = renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?;
+    // And the claim that makes it a §6 M30 scene rather than a scene with a lot
+    // of lights in it: the busiest froxel holds a small fraction of them, so the
+    // picture was produced by *selecting* and not by looping the frame.
+    let load = renderer.cluster_load();
+    // On the *total* rather than on the worst froxel, which is the number that
+    // says how much of the frame's loop was removed. The worst froxel here is a
+    // far one — log slices are thick at depth, so the froxel around the
+    // vanishing point holds a third of the hall — and bounding it would be
+    // bounding the distribution rather than the selection.
+    anyhow::ensure!(
+        load.dropped == 0
+            && load.pairs * 40 < load.froxels * LANTERNS
+            && load.worst * 2 < LANTERNS as u32,
+        "the grid is not selecting here: {load:?} of {LANTERNS}"
+    );
+    tracing::info!(worst = load.worst, pairs = load.pairs, "froxel occupancy");
+    // No *sun* — nothing here is directional, so no cascade may be fitted — but
+    // since §6 M31 the lamps themselves cast, and the atlas pass having run is
+    // what makes the rail shadows across this floor the engine's answer rather
+    // than a gradient that happens to darken there.
+    anyhow::ensure!(
+        !frame.order.iter().any(|name| name.starts_with("shadow"))
+            && frame.order.iter().any(|name| name == "lamp-shadows"),
+        "this scene has no sun and four casting lamps: {:?}",
+        frame.order
+    );
+    ensure_clean(&renderer.shutdown())?;
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
+
+/// §6 M31: one lamp, three pillars, and shadows that diverge.
+fn render_lampshade() -> Render {
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Light, Renderable};
+    use gg_math::sim;
+
+    let extent = BOXES_EXTENT;
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    world.register::<Light>()?;
+
+    /// Where the lamp hangs. **Below the pillars' tops**, which is what makes
+    /// each shadow run outward along the floor and widen as it goes — a lamp
+    /// above them would throw three short stubs and grade almost nothing.
+    const LAMP_HEIGHT: f64 = 1.15;
+    /// Half-height of a pillar; its top is twice this.
+    const PILLAR: f64 = 0.9;
+    /// Three, at three unrelated bearings from the lamp. Not a ring: equal
+    /// spacing about a central light is a symmetry a mirrored lookup would
+    /// survive, and §6 M30's grid shipped mirrored.
+    const PILLARS: [(f64, f64); 3] = [(-1.9, -0.5), (1.5, -1.8), (2.0, 1.3)];
+
+    let floor = world.spawn();
+    world.insert(
+        floor,
+        Renderable::boxed(
+            sim::DVec3::new(0.0, -0.1, 0.0),
+            sim::Vec3::new(7.0, 0.1, 7.0),
+            0x009a_9a96,
+        )
+        .surfaced(0.75, 0.0),
+    )?;
+    // A back wall, so the frame holds a *vertical* surface too: a shadow's
+    // shape on the floor and its shape climbing a wall fail differently, and a
+    // face-selection bug shows on the second while the first still looks right.
+    let wall = world.spawn();
+    world.insert(
+        wall,
+        Renderable::boxed(
+            sim::DVec3::new(0.0, 1.6, -4.2),
+            sim::Vec3::new(7.0, 1.7, 0.15),
+            0x008e_9298,
+        )
+        .surfaced(0.8, 0.0),
+    )?;
+    for (x, z) in PILLARS {
+        let pillar = world.spawn();
+        world.insert(
+            pillar,
+            Renderable::boxed(
+                sim::DVec3::new(x, PILLAR, z),
+                sim::Vec3::new(0.22, PILLAR as f32, 0.22),
+                0x00b0_a898,
+            )
+            .surfaced(0.6, 0.0),
+        )?;
+    }
+    // Off centre in both axes, for `PILLARS`' reason.
+    let lamp = world.spawn();
+    world.insert(
+        lamp,
+        Light::point(
+            sim::DVec3::new(0.35, LAMP_HEIGHT, 0.2),
+            0x00ff_f0d8,
+            26.0,
+            14.0,
+        ),
+    )?;
+
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    let view = gg_render::View {
+        pitch: -0.42,
+        ..gg_render::View::default()
+    };
+    let eye = sim::DVec3::new(0.0, 3.4, 5.6);
+    let mut extracted = gg_extract::Extracted::default();
+    extracted.clear(eye, view.frustum(extent));
+    extracted.append::<Renderable>(&world)?;
+    extracted.append_lights(&world)?;
+    anyhow::ensure!(
+        extracted.lights.len() == 1 && extracted.lights_dropped == 0,
+        "the one lamp this scene is about did not reach the frame: {} light(s), {} dropped",
+        extracted.lights.len(),
+        extracted.lights_dropped
+    );
+    let _capture = gg_debug::capture::frame();
+    let frame = renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?;
+    // The scene's own claim: every shadow here is a *lamp's*. No directional
+    // light exists, so a cascade pass running at all would mean the reference
+    // was blessed from a frame whose shadows came from somewhere else.
+    anyhow::ensure!(
+        frame.order.iter().any(|name| name == "lamp-shadows")
+            && !frame.order.iter().any(|name| name.starts_with("shadow")),
+        "this scene's shadows must be the lamp's and only the lamp's: {:?}",
+        frame.order
+    );
+    ensure_clean(&renderer.shutdown())?;
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
+
 fn render_chart() -> Render {
     use demo_12_shooter as shooter;
     use gg_ecs::World;
@@ -591,6 +1256,7 @@ fn render_mesh_of(sim: demo_02_mesh::sim::Sim) -> Render {
             index_buffer: Some(scene.indices),
             indirect: None,
             depth_bias: None,
+            viewport: None,
         })
         .collect();
 
@@ -948,7 +1614,7 @@ fn atrium_pack() -> anyhow::Result<std::path::PathBuf> {
 /// reference move when the sweep does.
 fn render_atrium_at(phase: u64) -> Render {
     use gg_ecs::World;
-    use gg_ecs::boundary::{Light, Model};
+    use gg_ecs::boundary::{Light, Model, Sky};
     use gg_math::sim;
 
     let extent = BOXES_EXTENT;
@@ -956,6 +1622,15 @@ fn render_atrium_at(phase: u64) -> Render {
     let mut world = World::new();
     world.register::<Model>()?;
     world.register::<Light>()?;
+    world.register::<Sky>()?;
+    // The compiled panorama out of the same pack (§6 M27) — what the mirror in
+    // the back row reflects, and the half of this reference that would go dark
+    // if the chain stopped being resident before the frame was captured.
+    let sky = world.spawn();
+    world.insert(
+        sky,
+        Sky::image(demo_06_lit::SKY, demo_06_lit::SKY_INTENSITY),
+    )?;
     let atrium = world.spawn();
     world.insert(atrium, Model::at(demo_06_lit::ATRIUM, sim::DVec3::ZERO))?;
     // The sun first, which is what makes it the light the single cascade casts
@@ -1888,6 +2563,7 @@ fn render_triangle_scaled(scale: f32) -> Render {
         index_buffer: None,
         indirect: None,
         depth_bias: None,
+        viewport: None,
     }];
 
     let dest = readback_buffer(&mut rhi, extent)?;

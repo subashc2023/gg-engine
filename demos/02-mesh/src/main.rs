@@ -234,6 +234,7 @@ fn main() -> anyhow::Result<()> {
                     index_buffer: Some(s.indices),
                     indirect: None,
                     depth_bias: None,
+                    viewport: None,
                 })
                 .collect();
             match frame(r, &mut transients, &draws) {

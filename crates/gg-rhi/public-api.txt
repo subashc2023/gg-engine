@@ -38,6 +38,7 @@ pub gg_rhi::FrameStart::Skipped(gg_rhi::FrameOutcome)
 pub enum gg_rhi::ImageFormat
 pub gg_rhi::ImageFormat::Bc4Unorm
 pub gg_rhi::ImageFormat::Bc5Unorm
+pub gg_rhi::ImageFormat::Bc6hUfloat
 pub gg_rhi::ImageFormat::Bc7Srgb
 pub gg_rhi::ImageFormat::Depth32
 pub gg_rhi::ImageFormat::Rgba16F
@@ -137,6 +138,7 @@ pub gg_rhi::DrawSpec::index_buffer: core::option::Option<gg_rhi::BufferHandle>
 pub gg_rhi::DrawSpec::indirect: core::option::Option<gg_rhi::Indirect>
 pub gg_rhi::DrawSpec::pipeline: gg_rhi::PipelineHandle
 pub gg_rhi::DrawSpec::push_constants: &'a [u8]
+pub gg_rhi::DrawSpec::viewport: core::option::Option<gg_rhi::Viewport>
 pub struct gg_rhi::FrameToken
 impl gg_rhi::FrameToken
 pub fn gg_rhi::FrameToken::extent(&self) -> (u32, u32)

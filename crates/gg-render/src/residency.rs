@@ -63,6 +63,11 @@ pub struct ResidentTexture {
     pub index: TextureIndex,
     /// Level 0's extent in texels.
     pub extent: (u32, u32),
+    /// Levels actually on the device. A texture enters this map only once every
+    /// level has been uploaded, so this is the whole chain and not a high-water
+    /// mark — which is what lets a shader index the last mip without asking
+    /// whether the budget got that far (§6 M27).
+    pub levels: u32,
 }
 
 /// What one [`Residency::pump`] managed.
@@ -409,6 +414,7 @@ impl Residency {
                 image: handle_image,
                 index: rhi.register_texture(handle_image)?,
                 extent: data.extent,
+                levels: data.levels.len() as u32,
             },
         );
         Ok(true)
@@ -477,6 +483,7 @@ fn rhi_format(format: TextureFormat) -> Option<ImageFormat> {
         TextureFormat::Bc7Srgb => ImageFormat::Bc7Srgb,
         TextureFormat::Bc5Unorm => ImageFormat::Bc5Unorm,
         TextureFormat::Bc4Unorm => ImageFormat::Bc4Unorm,
+        TextureFormat::Bc6hUfloat => ImageFormat::Bc6hUfloat,
     })
 }
 

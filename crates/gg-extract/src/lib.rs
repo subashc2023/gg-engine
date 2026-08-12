@@ -197,12 +197,26 @@ pub const MAX_DIRECTIONAL: usize = 4;
 
 /// Point lights one frame may carry.
 ///
-/// A forward pass loops over every one of these per fragment, so the cap is a
-/// per-pixel cost and not a memory one — which is why it is a small number
-/// rather than a large one, and why raising it is a measurement rather than a
-/// preference. Clustered assignment is the answer that makes it large, and it
-/// is P1.
-pub const MAX_POINT: usize = 32;
+/// **256 since §6 M30**, where it was 32 for four milestones because a forward
+/// pass looped over every one of them per fragment and the cap was therefore a
+/// per-pixel cost. It is a memory cost now: the frame's lights are assigned to
+/// froxels (`gg_render::cluster`) and a fragment iterates its own froxel's list,
+/// which in a scene with a hundred lamps holds single digits.
+///
+/// What decides the number is still a measurement rather than a preference —
+/// `gg-tools lights` is the sweep, and what it prices is the *assignment*, which
+/// is per-light-per-froxel on the host and is what grows here. A frame past this
+/// keeps the nearest and counts the rest, as it always has.
+pub const MAX_POINT: usize = 256;
+
+/// Environments one frame may carry (§6 M28).
+///
+/// Four, matching [`MAX_DIRECTIONAL`] and the cascade count, and for a related
+/// reason: a fragment composites them front to back, so this is a per-pixel loop
+/// bound. Four is one room, the corridor outside it, a pocket inside the room
+/// and the world — deeper nesting than any level here has, and the drop is
+/// counted rather than silent.
+pub const MAX_SKY: usize = 4;
 
 /// One light in render space: camera-relative, narrowed, ready to shade with.
 ///
@@ -228,7 +242,33 @@ pub struct ExtractedLight {
     pub kind: u32,
 }
 
-/// The environment in render space (§6 M24).
+/// What a sky *radiates*, with nothing about where it applies (§6 M28).
+///
+/// Split out for one reason and it is a performance trap rather than a taste:
+/// the projection is a 2048-sample quadrature cached on its input, and
+/// [`ExtractedSky`]'s volume is camera-relative, so a cache keyed on the whole
+/// thing would miss on every frame the camera moved. This half is what the
+/// projection actually depends on, and it is stationary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SkyLook {
+    /// `0x00RRGGBB`, sRGB — straight up.
+    pub zenith: u32,
+    /// The same, at the horizon.
+    pub horizon: u32,
+    /// The same, straight down.
+    pub ground: u32,
+    /// Linear multiplier over all three. Always positive here: a zero-intensity
+    /// sky is dropped on the way in, so downstream has one answer to the
+    /// question "is there an environment" rather than two.
+    pub intensity: f32,
+    /// A compiled panorama in the pack, or 0 for the gradient (§6 M27). Carried
+    /// un-resolved: this crate does not know what a pack holds, and an id the
+    /// renderer cannot find is the gradient rather than an error.
+    pub environment: u64,
+}
+
+/// The environment in render space (§6 M24), and since §6 M28 the volume it is
+/// the environment *of*.
 ///
 /// A distinct type from [`Sky`](gg_ecs::boundary::Sky) for
 /// [`ExtractedLight`]'s reason and one more: `gg-render` does not link `gg-ecs`
@@ -237,16 +277,79 @@ pub struct ExtractedLight {
 /// extract converts geometry, never colour.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExtractedSky {
-    /// `0x00RRGGBB`, sRGB — straight up.
-    pub zenith: u32,
-    /// The same, at the horizon.
-    pub horizon: u32,
-    /// The same, straight down.
-    pub ground: u32,
-    /// Linear multiplier over all three. Always positive here: a zero-intensity
-    /// sky is filtered to `None` on the way in, so downstream has one answer to
-    /// the question "is there an environment" rather than two.
-    pub intensity: f32,
+    /// What it radiates.
+    pub look: SkyLook,
+    /// The volume's centre, **camera-relative** and narrowed — as
+    /// [`ExtractedLight::offset`], and for §1.4's reason. Meaningless when
+    /// [`unbounded`](ExtractedSky::unbounded).
+    pub offset: render::Vec3,
+    /// Half the box's size. Zero is unbounded, which is the whole of "this is
+    /// the world's sky" — see [`Sky::half_extent`](gg_ecs::boundary::Sky::half_extent).
+    pub half_extent: render::Vec3,
+    /// Metres outside the box over which it falls to nothing.
+    pub fade: f32,
+}
+
+impl ExtractedSky {
+    /// Whether this is the world's sky rather than a room's.
+    #[must_use]
+    pub fn unbounded(&self) -> bool {
+        self.half_extent == render::Vec3::ZERO
+    }
+
+    /// Distance from the camera to the volume — zero when the camera is inside
+    /// it, and zero for an unbounded sky, which contains everything.
+    ///
+    /// What [`Extracted::append_lights`] keeps the nearest of, on
+    /// [`MAX_POINT`]'s reasoning: a cap has to drop the ones that matter least,
+    /// and for an environment that is the one furthest from being looked out of.
+    #[must_use]
+    pub fn camera_distance(&self) -> f32 {
+        if self.unbounded() {
+            return 0.0;
+        }
+        // The camera sits at the origin of this space, so the point-to-box
+        // distance is the box's own offset pushed outward by its extent.
+        let outside = (self.offset.abs() - self.half_extent).max(render::Vec3::ZERO);
+        outside.length()
+    }
+
+    /// The box's volume, as the compositing order sorts on. Infinite when
+    /// unbounded, which is what puts the world's sky underneath every room's
+    /// without a second rule.
+    #[must_use]
+    pub fn scale(&self) -> f32 {
+        if self.unbounded() {
+            return f32::INFINITY;
+        }
+        self.half_extent.x * self.half_extent.y * self.half_extent.z
+    }
+
+    /// How much of this environment applies at `point`, camera-relative: 1
+    /// inside the box, 0 beyond [`fade`](ExtractedSky::fade) metres outside it,
+    /// smoothstepped between.
+    ///
+    /// **Duplicated in `include/pbr.slang`'s `environment_weight`**, on the same
+    /// terms as the SH basis and the octahedral mapping: the two never meet at
+    /// runtime — this decides which background to draw, that decides how to
+    /// shade — so there is nothing to assert against, and the only defence is
+    /// that both are three lines of the same arithmetic. A drift shows as a
+    /// reflection that does not match the sky behind it.
+    #[must_use]
+    pub fn weight_at(&self, point: render::Vec3) -> f32 {
+        if self.unbounded() {
+            return 1.0;
+        }
+        let outside = ((point - self.offset).abs() - self.half_extent).max(render::Vec3::ZERO);
+        let distance = outside.length();
+        if self.fade <= 0.0 {
+            // A hard edge, and the comparison rather than a division: `fade` of
+            // zero would otherwise be a NaN weight and a black room.
+            return f32::from(distance <= 0.0);
+        }
+        let t = (distance / self.fade).clamp(0.0, 1.0);
+        1.0 - t * t * (3.0 - 2.0 * t)
+    }
 }
 
 /// One mesh placed inside a scene asset, in that scene's own space (§4.6).
@@ -341,15 +444,21 @@ pub struct Extracted {
     /// Counted rather than logged: a corner of a room going dark is the symptom,
     /// and a number on the overlay is what turns it into a diagnosis.
     pub lights_dropped: usize,
-    /// The environment this frame is lit by, or `None` for a world that
-    /// declared no [`Sky`](gg_ecs::boundary::Sky) — which is the flat ambient
-    /// term §6 M11 shipped with, and every scene blessed before M24.
+    /// The environments this frame is lit by, empty for a world that declared
+    /// no [`Sky`](gg_ecs::boundary::Sky) — which is the flat ambient term §6 M11
+    /// shipped with, and every scene blessed before M24.
     ///
-    /// One, and the first the query walks. More than one sky is not an error
-    /// and not a blend: an environment is a property of *where the frame is*,
-    /// and two of them is a question about volumes that this protocol has not
-    /// been asked yet.
-    pub sky: Option<ExtractedSky>,
+    /// **Innermost first**, by box volume, with an unbounded sky last (§6 M28):
+    /// the shader composites them in this order and stops when the weight runs
+    /// out, so the order *is* the priority and a room does not have to know what
+    /// contains it. Never more than [`MAX_SKY`].
+    pub skies: Vec<ExtractedSky>,
+    /// Environments this frame had and could not carry. [`lights_dropped`]'s
+    /// reasoning exactly — a room lit as though it were outdoors is a symptom
+    /// with no other diagnosis on the overlay.
+    ///
+    /// [`lights_dropped`]: Extracted::lights_dropped
+    pub skies_dropped: usize,
     /// Per-chunk staging for the parallel pass, kept so a frame allocates
     /// nothing. Never read by a consumer: [`gather`] is what turns it into the
     /// arrays above, in chunk order.
@@ -384,7 +493,8 @@ impl Default for Extracted {
             culled: 0,
             lights: Vec::new(),
             lights_dropped: 0,
-            sky: None,
+            skies: Vec::new(),
+            skies_dropped: 0,
             scratch: Vec::new(),
             previous: Poses::default(),
             previous_models: Poses::default(),
@@ -484,7 +594,8 @@ impl Extracted {
         self.culled = 0;
         self.lights.clear();
         self.lights_dropped = 0;
-        self.sky = None;
+        self.skies.clear();
+        self.skies_dropped = 0;
     }
 
     /// Widen *instance* culling to whatever can cast a shadow into the view
@@ -700,27 +811,49 @@ impl Extracted {
     pub fn append_lights(&mut self, world: &World) -> Result<(), AliasError> {
         use gg_ecs::boundary::{Light, Sky, light};
 
-        // The environment, taken here rather than through a call of its own: a
-        // sky *is* a light, it is read on the same tick as the rest of them, and
-        // a second entry point is a second thing a host can forget — which
+        let origin = self.camera_origin;
+        // The environments, taken here rather than through a call of their own:
+        // a sky *is* a light, it is read on the same tick as the rest of them,
+        // and a second entry point is a second thing a host can forget — which
         // would show up as a scene that lights itself flatly for no visible
-        // reason. A world with none leaves it `None` (§6 M24).
+        // reason. A world with none leaves the array empty (§6 M24).
         let skies = Query::<&Sky>::new()?;
         world.each_ref(&skies, |_, sky: &Sky| {
             // Zero intensity is *no environment* rather than a black one, so it
             // is filtered here and the renderer downstream sees one answer.
-            if self.sky.is_none() && sky.intensity > 0.0 {
-                self.sky = Some(ExtractedSky {
-                    zenith: sky.zenith,
-                    horizon: sky.horizon,
-                    ground: sky.ground,
-                    intensity: sky.intensity,
+            if sky.intensity > 0.0 {
+                self.skies.push(ExtractedSky {
+                    look: SkyLook {
+                        zenith: sky.zenith,
+                        horizon: sky.horizon,
+                        ground: sky.ground,
+                        intensity: sky.intensity,
+                        environment: sky.environment,
+                    },
+                    offset: render::camera_relative(sky.center, origin),
+                    half_extent: render::to_render(sky.half_extent).abs(),
+                    fade: sky.fade.max(0.0),
                 });
             }
         });
+        // Two orders, and they are different questions (§6 M28). The **cap**
+        // keeps what is nearest, on `MAX_POINT`'s reasoning — a volume the
+        // camera is far outside of shades the fewest fragments, and an unbounded
+        // sky measures zero here, so the fallback can never be the one dropped.
+        // The **composite** order is by volume, innermost first, which is what
+        // makes "the smallest box containing this fragment wins" fall out of
+        // walking the array rather than out of a rule the shader has to know.
+        // Both stable and both `total_cmp`: a NaN would otherwise make the
+        // picture depend on the comparison order.
+        if self.skies.len() > MAX_SKY {
+            self.skies
+                .sort_by(|a, b| a.camera_distance().total_cmp(&b.camera_distance()));
+            self.skies_dropped += self.skies.len() - MAX_SKY;
+            self.skies.truncate(MAX_SKY);
+        }
+        self.skies.sort_by(|a, b| a.scale().total_cmp(&b.scale()));
 
         let query = Query::<&Light>::new()?;
-        let origin = self.camera_origin;
         let frustum = self.frustum;
         // Two passes over a handful of rows, because directional lights go
         // first in the output and the point ones need ranking before they can
@@ -1765,6 +1898,127 @@ mod tests {
             let again = extract_lights(&world, sim::DVec3::ZERO, Frustum::UNBOUNDED);
             assert_eq!(again.lights, first.lights);
         }
+    }
+
+    fn skied_world(skies: &[gg_ecs::boundary::Sky]) -> World {
+        use gg_ecs::boundary::Sky;
+        let mut world = World::new();
+        world.register::<Sky>().unwrap();
+        for &sky in skies {
+            let e = world.spawn();
+            world.insert(e, sky).unwrap();
+        }
+        world
+    }
+
+    /// The compositing order, which is the whole of "the innermost volume wins"
+    /// (§6 M28) — the shader walks the array and spends a budget, so the array's
+    /// order *is* the priority and nothing downstream re-decides it.
+    #[test]
+    fn the_smallest_volume_composites_first_and_the_unbounded_one_last() {
+        use gg_ecs::boundary::Sky;
+        let boxed = |half: f32| {
+            Sky::daylight(1.0).within(sim::DVec3::ZERO, sim::Vec3::new(half, half, half), 0.5)
+        };
+        // Spawned largest-first with the world's sky in the middle, so world
+        // order is not the answer in any of the three positions.
+        let world = skied_world(&[boxed(10.0), Sky::daylight(1.0), boxed(2.0), boxed(6.0)]);
+        let out = extract_lights(&world, sim::DVec3::ZERO, Frustum::UNBOUNDED);
+        let extents: Vec<f32> = out.skies.iter().map(|s| s.half_extent.x).collect();
+        assert_eq!(extents, vec![2.0, 6.0, 10.0, 0.0]);
+        assert!(out.skies[3].unbounded(), "the world's sky is the fallback");
+        assert_eq!(out.skies_dropped, 0);
+    }
+
+    /// The cap keeps what is *nearest*, and can never drop the fallback: an
+    /// unbounded sky measures zero distance because it contains everything, so
+    /// it sorts first however far the camera has walked (§6 M28).
+    #[test]
+    fn past_the_cap_the_nearest_volumes_win_and_the_world_sky_survives() {
+        use gg_ecs::boundary::Sky;
+        let at = |x: f64| {
+            Sky::daylight(1.0).within(
+                sim::DVec3::new(x, 0.0, 0.0),
+                sim::Vec3::new(1.0, 1.0, 1.0),
+                0.0,
+            )
+        };
+        // Six bounded volumes marching away from the camera, and the world's sky
+        // spawned last so a truncation in spawn order would drop exactly it.
+        let mut skies: Vec<Sky> = (0..MAX_SKY + 2).map(|i| at(4.0 * i as f64)).collect();
+        skies.push(Sky::daylight(1.0));
+        let out = extract_lights(&skied_world(&skies), sim::DVec3::ZERO, Frustum::UNBOUNDED);
+        assert_eq!(out.skies.len(), MAX_SKY);
+        assert_eq!(out.skies_dropped, 3);
+        assert!(
+            out.skies.last().is_some_and(ExtractedSky::unbounded),
+            "the fallback is never the one dropped: {:?}",
+            out.skies
+        );
+        let kept: Vec<f32> = out.skies[..MAX_SKY - 1]
+            .iter()
+            .map(|s| s.offset.x)
+            .collect();
+        assert_eq!(kept, vec![0.0, 4.0, 8.0], "the three nearest boxes");
+    }
+
+    /// A zero-intensity sky is no environment, as it has been since §6 M24 — and
+    /// it is dropped rather than carried as a black one, so a room that switched
+    /// its light off falls through to whatever contains it.
+    #[test]
+    fn a_dark_volume_is_absent_rather_than_black() {
+        use gg_ecs::boundary::Sky;
+        let world = skied_world(&[
+            Sky::daylight(0.0).within(sim::DVec3::ZERO, sim::Vec3::splat(2.0), 0.0),
+            Sky::daylight(1.0),
+        ]);
+        let out = extract_lights(&world, sim::DVec3::ZERO, Frustum::UNBOUNDED);
+        assert_eq!(out.skies.len(), 1);
+        assert!(out.skies[0].unbounded());
+    }
+
+    /// The weight the shader duplicates: 1 inside, 0 past the fade, and *smooth*
+    /// between — a monotone ramp with no step in it, because the step is exactly
+    /// what a per-volume environment is built to avoid.
+    #[test]
+    fn a_volume_fades_outward_from_its_face_and_never_jumps() {
+        use gg_ecs::boundary::Sky;
+        let world = skied_world(&[Sky::daylight(1.0).within(
+            sim::DVec3::ZERO,
+            sim::Vec3::new(1.0, 1.0, 1.0),
+            2.0,
+        )]);
+        let sky = extract_lights(&world, sim::DVec3::ZERO, Frustum::UNBOUNDED).skies[0];
+        assert_eq!(sky.weight_at(render::Vec3::ZERO), 1.0, "inside is whole");
+        assert_eq!(
+            sky.weight_at(render::Vec3::new(1.0, 0.0, 0.0)),
+            1.0,
+            "the face is inside"
+        );
+        assert_eq!(
+            sky.weight_at(render::Vec3::new(3.5, 0.0, 0.0)),
+            0.0,
+            "past the fade is nothing"
+        );
+        let mut previous = 1.0;
+        for step in 0..=40 {
+            let x = 1.0 + step as f32 * 0.05;
+            let weight = sky.weight_at(render::Vec3::new(x, 0.0, 0.0));
+            assert!(weight <= previous + 1e-6, "the ramp must not rise: at {x}");
+            assert!(
+                (weight - previous).abs() < 0.15,
+                "a fade with a step of {} in it is a pop at {x}",
+                (weight - previous).abs()
+            );
+            previous = weight;
+        }
+        // And a zero fade is the hard edge it is documented to be, which is the
+        // one case the smoothstep cannot be asked to compute.
+        let hard = Sky::daylight(1.0).within(sim::DVec3::ZERO, sim::Vec3::splat(1.0), 0.0);
+        let hard =
+            extract_lights(&skied_world(&[hard]), sim::DVec3::ZERO, Frustum::UNBOUNDED).skies[0];
+        assert_eq!(hard.weight_at(render::Vec3::new(1.0, 0.0, 0.0)), 1.0);
+        assert_eq!(hard.weight_at(render::Vec3::new(1.01, 0.0, 0.0)), 0.0);
     }
 
     #[test]

@@ -79,6 +79,33 @@ pub fn perspective_reverse_z(vertical_fov: f32, aspect_ratio: f32, near: f32) ->
     )
 }
 
+/// One face of a point light's shadow cube (§6 M31): square, reverse-Z with an
+/// infinite far plane, and taken from the **tangent** of its half-angle rather
+/// than from an angle.
+///
+/// A face is 90° across, whose half-angle tangent is exactly 1 — and a gutter
+/// widening it by a few texels makes that tangent a ratio of two integers, also
+/// exact. Going through [`perspective_reverse_z`] would mean `2 * atan(ratio)`
+/// on the way in and a cotangent on the way back out, putting a host's libm
+/// under a blessed reference (§6 M17 item 6) to arrive at a number that was
+/// already exact. Everything else — the Y-down clip space, the infinite far
+/// plane, the `w` carrying `-z` — is that function's, and deliberately written
+/// the same way so the two cannot drift.
+///
+/// `tan_half` is the tangent of the half-angle: 1.0 for exactly 90°, larger for
+/// a face that overshoots its neighbours.
+#[must_use]
+pub fn cube_face_reverse_z(tan_half: f32, near: f32) -> Mat4 {
+    let h = 1.0 / tan_half;
+    Mat4::from_cols(
+        Vec4::new(h, 0.0, 0.0, 0.0),
+        // Vulkan's clip space is Y-down.
+        Vec4::new(0.0, -h, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 0.0, -1.0),
+        Vec4::new(0.0, 0.0, near, 0.0),
+    )
+}
+
 /// The engine's other projection: right-handed Y-up view space in, Vulkan NDC
 /// out, **reverse-Z with a finite far plane** — `near` maps to depth 1 and
 /// `far` to depth 0. Born as the shadow map's (§6 M11); since §6 M20 also the
@@ -244,6 +271,40 @@ mod tests {
         assert_eq!(rows(m)[0][3], 1.0);
         assert_eq!(rows(m)[1][3], 2.0);
         assert_eq!(rows(m)[2][3], 3.0);
+    }
+
+    /// The two properties §6 M31's atlas rests on: a face is a 90° pyramid, and
+    /// widening it moves the *boundary between two faces* inward by exactly the
+    /// gutter — which is what makes clamping a filter to a tile lossless rather
+    /// than a seam.
+    #[test]
+    fn a_cube_face_is_ninety_degrees_and_its_gutter_is_where_it_was_asked_for() {
+        let m = cube_face_reverse_z(1.0, 0.05);
+        // The 45° ray — the edge of a face — lands exactly on the NDC edge. Not
+        // approximately: `h` is 1/1, so this is the tangent arriving unrounded.
+        let corner = m * Vec4::new(1.0, 0.0, -1.0, 1.0);
+        assert_eq!(corner.x / corner.w, 1.0);
+        // And Y-down, like every other projection here: +Y in view space comes
+        // out negative in NDC.
+        let above = m * Vec4::new(0.0, 1.0, -1.0, 1.0);
+        assert_eq!(above.y / above.w, -1.0);
+        // Reverse-Z, infinite far: the near plane is depth 1 and far away is 0.
+        let near = m * Vec4::new(0.0, 0.0, -0.05, 1.0);
+        assert_eq!(near.z / near.w, 1.0);
+        let far = m * Vec4::new(0.0, 0.0, -1.0e9, 1.0);
+        assert!(far.z / far.w < 1.0e-7);
+
+        // Two texels of gutter on a 512 tile: the face's own edge now sits two
+        // texels inside the tile's, so a kernel reaching that far still reads
+        // depth this face rendered rather than its neighbour's.
+        let tile = 512.0_f32;
+        let widened = cube_face_reverse_z(tile / (tile - 4.0), 0.05);
+        let edge = widened * Vec4::new(1.0, 0.0, -1.0, 1.0);
+        let inside_texels = (1.0 - edge.x / edge.w) * tile * 0.5;
+        assert!(
+            (inside_texels - 2.0).abs() < 1.0e-3,
+            "face edge sits {inside_texels} texels in, wanted 2"
+        );
     }
 
     #[test]

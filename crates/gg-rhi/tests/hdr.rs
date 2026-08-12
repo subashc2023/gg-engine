@@ -126,6 +126,7 @@ float4 fs_main() : SV_Target {{ return float4({BRIGHT}, 0.5, 0.0, 1.0); }}
         index_buffer: None,
         indirect: None,
         depth_bias: None,
+        viewport: None,
     }];
     let to_attachment = [Transition {
         target: Target::Image(target),
@@ -308,6 +309,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
         index_buffer: None,
         indirect: None,
         depth_bias,
+        viewport: None,
     };
 
     let mut run = |draw| {

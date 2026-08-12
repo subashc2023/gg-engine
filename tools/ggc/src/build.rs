@@ -24,7 +24,9 @@ use crate::import;
 /// every source hash, which is what makes that statement true rather than
 /// aspirational.
 /// 2 since M11: meshes carry a tangent, generated where the document has none.
-pub const IMPORT_VERSION: u32 = 2;
+/// 3 since M27: `.hdr` sources compile, and every prefilter constant beside them
+/// is part of what a blob means.
+pub const IMPORT_VERSION: u32 = 3;
 
 /// What a build did, for the log and for the tests.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -138,7 +140,7 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>> {
                 stack.push(path);
             } else if matches!(
                 path.extension().and_then(|e| e.to_str()),
-                Some("gltf" | "glb")
+                Some("gltf" | "glb" | "hdr")
             ) {
                 found.push(path);
             }
@@ -204,6 +206,14 @@ pub fn source_hash_at(path: &Path, import_version: u32) -> Result<u64> {
     core::hash::Hasher::write_u32(&mut hasher, crate::texture::encoder_isa());
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     core::hash::Hasher::write(&mut hasher, &bytes);
+
+    // An `.hdr` is a single self-contained file: its bytes above are the whole
+    // source, and there is no document to walk for references. Checked here
+    // rather than by trying glTF first, because "it did not parse as glTF" is
+    // also what a corrupt glTF looks like.
+    if path.extension().and_then(|e| e.to_str()) == Some("hdr") {
+        return Ok(core::hash::Hasher::finish(&hasher));
+    }
 
     let gltf =
         gltf::Gltf::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
@@ -294,6 +304,7 @@ pub fn list(path: &Path) -> Result<()> {
             Some(AssetKind::Texture) => "texture",
             Some(AssetKind::Material) => "material",
             Some(AssetKind::Scene) => "scene",
+            Some(AssetKind::Environment) => "environment",
             None => "?",
         };
         println!(

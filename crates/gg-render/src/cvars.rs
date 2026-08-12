@@ -60,10 +60,32 @@ pub static EXPOSURE: CVar = CVar::new_float("r.exposure", 0.0, "exposure, in sto
 /// operator who suspects the noise can turn it off and look.
 pub static DITHER: CVar = CVar::new_float("r.dither", 1.0, "output dither, in code values");
 
-/// A flat ambient term, linear. Standing in for indirect light, which is an
-/// irradiance probe or a lightmap and is P1 — what this buys today is that a
-/// face pointing away from every light is dim rather than pure black.
+/// A flat ambient term, linear, and what a world declaring no `Sky` still gets —
+/// a face pointing away from every light is dim rather than pure black.
+///
+/// Indirect light itself is §6 M24's environment, and since M28 it varies with
+/// *where a fragment is* rather than only with which way it faces. What is still
+/// P1 is that the variation is **authored**: a level says where its rooms are,
+/// and nothing here derives an irradiance field from the geometry the way a probe
+/// bake or a lightmap would. A hand-placed volume is the coarse version of that
+/// and is honest about being one.
 pub static AMBIENT: CVar = CVar::new_float("r.ambient", 0.03, "flat ambient light, linear");
+
+/// Whether a fragment reads its own froxel's light list or the whole frame's
+/// (§6 M30).
+///
+/// **Off is not a second code path.** `cluster::Assignment::build` answers false
+/// by giving every froxel the same run — the entire point-light array — so the
+/// shader is unchanged and what the knob selects is a *value*. That is what
+/// makes it a measurement rather than a comparison between two implementations
+/// with two sets of bugs: `gg-tools lights` sweeps it, and
+/// `gg-render/tests/clusters.rs` requires the two renders to be byte-identical,
+/// which is the assertion that assignment never under-includes.
+pub static CLUSTERS: CVar = CVar::new_bool(
+    "r.clusters",
+    true,
+    "assign lights to froxels instead of looping the frame's",
+);
 
 /// Whether the frame resamples its radiance for the overlay's luminance
 /// histogram (§6 M11's exit row, §4.8).
@@ -125,6 +147,52 @@ pub static SHADOW_DISTANCE: CVar = CVar::new_float(
 /// control a measurement wants.
 pub static SHADOW_CASCADES: CVar =
     CVar::new_int("r.shadow_cascades", 4, "shadow cascades over the range");
+
+/// Point lights cast shadows (§6 M31). Off is every lamp lighting through every
+/// wall, which is what the engine did until this milestone and is still the
+/// control any measurement of it wants.
+pub static LAMP_SHADOWS: CVar = CVar::new_bool(
+    "r.lamp_shadows",
+    true,
+    "point lights cast shadows (0 = they light through walls, as before §6 M31)",
+);
+
+/// How many of the frame's point lights cast, clamped to
+/// `[0, MAX_LAMPS](crate::lamp::MAX_LAMPS)`. The nearest ones, on extract's own
+/// ordering — see `lamp`'s header for why this module invents no second ranking.
+///
+/// Six faces each, so this multiplies the shadow pass's draw *lists* by six and
+/// the atlas's memory by one row. Four is what `gg-tools lamps` reads as the
+/// knee on both devices; it is a frame-time knob and not a memory one, which is
+/// the opposite of [`LAMP_SIZE`].
+pub static LAMPS: CVar = CVar::new_int("r.lamps", 4, "point lights that cast shadows");
+
+/// Edge of one lamp face in texels, clamped to `[128, 512]` and rounded up to a
+/// power of two.
+///
+/// The clamp's ceiling is about the atlas's *width*: six faces across at 512 is
+/// 3072, and `maxImageDimension2D` is only guaranteed to be 4096 (§4.3 asks for
+/// no more). At the default four lamps a 512 tile is a 3072×2048 `D32_SFLOAT`
+/// atlas — 24 MiB, against the sun's 64.
+pub static LAMP_SIZE: CVar = CVar::new_int("r.lamp_size", 512, "lamp shadow face edge, texels");
+
+/// Normal-offset reach for the lamp lookup, in **face texels** —
+/// [`SHADOW_NORMAL_BIAS`]'s unit and its reasoning, against a texel whose world
+/// size a lamp face grows with distance rather than holding fixed.
+pub static LAMP_NORMAL_BIAS: CVar = CVar::new_float(
+    "r.lamp_normal_bias",
+    2.0,
+    "lamp normal-offset reach, face texels",
+);
+
+/// The angle-free part of the lamp offset, in face texels — [`SHADOW_DEPTH_BIAS`]'s
+/// half of the same pair.
+pub static LAMP_DEPTH_BIAS: CVar =
+    CVar::new_float("r.lamp_depth_bias", 1.0, "lamp depth bias, face texels");
+
+/// Taps in the lamp filter. Lower than [`SHADOW_TAPS`] on purpose: a lamp's
+/// filter is paid per casting lamp per fragment, where the sun's is paid once.
+pub static LAMP_TAPS: CVar = CVar::new_int("r.lamp_taps", 8, "lamp shadow filter taps");
 
 /// Cull casters, `1` on. **A diagnostic switch, not a quality setting.**
 ///
@@ -346,6 +414,7 @@ pub fn register() -> Result<(), CVarError> {
         &PAPER_WHITE,
         &PEAK_NITS,
         &AMBIENT,
+        &CLUSTERS,
         &HISTOGRAM,
         &AA,
         &MSAA,
@@ -361,5 +430,66 @@ pub fn register() -> Result<(), CVarError> {
         &SHADOW_PENUMBRA,
         &SHADOW_NORMAL_BIAS,
         &SHADOW_DEPTH_BIAS,
+        &LAMP_SHADOWS,
+        &LAMPS,
+        &LAMP_SIZE,
+        &LAMP_NORMAL_BIAS,
+        &LAMP_DEPTH_BIAS,
+        &LAMP_TAPS,
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    /// Every CVar this module declares is in [`super::register`].
+    ///
+    /// A declared-but-unregistered CVar is invisible rather than broken: the
+    /// engine reads it through its static and gets the default, so nothing
+    /// fails — it is simply absent from the console, from a config file and
+    /// from the editor's panel, which is exactly where a session would go
+    /// looking for it. `r.clusters` shipped that way at §6 M30 and nothing
+    /// noticed, so the class gets a gate rather than the instance getting a fix.
+    ///
+    /// Reads its own source because there is no reflection over statics. Both
+    /// sides are shapes this file controls, and a rename that broke the parse
+    /// would fail here rather than pass silently — an empty list is refused.
+    #[test]
+    fn every_cvar_declared_here_is_registered() {
+        const SOURCE: &str = include_str!("cvars.rs");
+        let declared: Vec<&str> = SOURCE
+            .lines()
+            .filter_map(|line| line.strip_prefix("pub static "))
+            .filter_map(|rest| rest.split_once(": CVar"))
+            .map(|(name, _)| name)
+            .collect();
+        let body = SOURCE
+            .split_once("cvar::register_all(&[")
+            .and_then(|(_, rest)| rest.split_once("])"))
+            .expect("register_all's list has moved")
+            .0;
+        let registered: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('&'))
+            .filter_map(|name| name.strip_suffix(','))
+            .collect();
+        assert!(declared.len() > 20, "the declaration parse found nothing");
+        let missing: Vec<&&str> = declared
+            .iter()
+            .filter(|name| !registered.contains(name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "declared but never registered: {missing:?}"
+        );
+        let unknown: Vec<&&str> = registered
+            .iter()
+            .filter(|name| !declared.contains(name))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "registered but not declared here: {unknown:?}"
+        );
+    }
 }

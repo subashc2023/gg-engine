@@ -15,7 +15,8 @@ use demo_12_shooter::{
     MENU_LOOK, MENU_LOOK_DOWN, MENU_LOOK_UP, MENU_QUIT, MENU_RESTART, MENU_RESUME, MENU_SETTINGS,
     MENU_TITLE, MENU_VOLUME, MENU_VOLUME_DOWN, MOVE_FORWARD, MOVE_RIGHT, Menu, PAGE_MAIN,
     PAGE_SETTINGS, PAUSE, RESTART, ROOM, SENS_DEFAULT, SENS_MAX, SENS_MIN, SENS_ONE, SENS_STEP,
-    SKIN, START, STEP_HEIGHT, Session, Solid, WALK_SPEED, Walker, counts_per_turn, look_per_count,
+    SHELTER, SKIN, START, STEP_HEIGHT, Session, Solid, WALK_SPEED, Walker, counts_per_turn,
+    look_per_count,
 };
 use gg_ecs::boundary::{
     self, AbiInfo, ActionId, AxisId, ComponentsTable, Eye, HostApiV1, InputFrame, Light, Prefs,
@@ -334,7 +335,11 @@ fn one_tick_deals_the_room_the_body_and_the_hud() {
         ROOM.len() + CHART_BALLS,
         "the room and the chart, and nothing else"
     );
-    assert_eq!(game.all::<Sky>().len(), 1, "one environment (§6 M24)");
+    assert_eq!(
+        game.all::<Sky>().len(),
+        2,
+        "the sky over the room and the shelter's own (§6 M28)"
+    );
     assert_eq!(game.all::<Eye>().len(), 1);
     assert_eq!(game.all::<Light>().len(), 3, "a sun and two lamps");
     assert_eq!(game.all::<Sound>().len(), CUES);
@@ -449,6 +454,57 @@ fn a_wall_stops_the_body_at_its_face() {
         "against the wall's inner face"
     );
     assert_eq!(walker.position.y, resting_on(0.0), "a wall is never a step");
+}
+
+/// The space that is covered and the space that is lit differently are the same
+/// space (§6 M28).
+///
+/// The two are placed from one constant, so this is not a tautology but the
+/// assertion that the derivation is right: the roof has to be *above* the volume
+/// and *cover* it in both horizontal axes, and the shelter's sky has to be the
+/// bounded one rather than the room's. A roof half a metre short would light a
+/// strip of open floor as though it were indoors, which is exactly the mistake a
+/// number typed twice makes.
+#[test]
+fn the_shelter_is_lit_over_exactly_the_ground_its_roof_covers() {
+    let (centre, half) = SHELTER;
+    // The slab standing over the volume's centre, not merely the first one
+    // higher than it — the room has floating platforms above this height
+    // elsewhere, and a search by height alone would grade one of those.
+    let roof = ROOM
+        .iter()
+        .find(|(at, extent, _)| {
+            at.y > centre.y
+                && (centre.x - at.x).abs() <= f64::from(extent.x)
+                && (centre.z - at.z).abs() <= f64::from(extent.z)
+        })
+        .expect("the shelter has a roof");
+    assert!(
+        roof.0.y - f64::from(roof.1.y) >= centre.y + f64::from(half.y) - 1e-9,
+        "the roof's underside must not dip into the volume: {roof:?}"
+    );
+    for (axis, at, extent, covered, reach) in [
+        ("x", roof.0.x, roof.1.x, centre.x, half.x),
+        ("z", roof.0.z, roof.1.z, centre.z, half.z),
+    ] {
+        assert!(
+            at - f64::from(extent) <= covered - f64::from(reach)
+                && at + f64::from(extent) >= covered + f64::from(reach),
+            "the roof does not cover the lit volume in {axis}"
+        );
+    }
+
+    let mut game = Game::load();
+    game.step();
+    let mut skies = game.all::<Sky>();
+    skies.retain(|sky| sky.half_extent != gg_math::sim::Vec3::ZERO);
+    assert_eq!(skies.len(), 1, "one bounded sky, and it is the shelter's");
+    assert_eq!(skies[0].center, centre);
+    assert_eq!(skies[0].half_extent, half);
+    assert!(
+        skies[0].fade > 0.0,
+        "a doorway is a fade, not a tick (§6 M28)"
+    );
 }
 
 /// Six 0.30 m rises walked end to end onto the mezzanine, and not one tick of

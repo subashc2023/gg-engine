@@ -857,6 +857,7 @@ impl Editor {
                     Some(gg_assets::AssetKind::Texture) => "tex",
                     Some(gg_assets::AssetKind::Material) => "mat",
                     Some(gg_assets::AssetKind::Scene) => "scn",
+                    Some(gg_assets::AssetKind::Environment) => "env",
                     None => "?",
                 };
                 format!(

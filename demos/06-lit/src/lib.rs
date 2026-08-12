@@ -17,15 +17,19 @@
 //! floor. What it does *not* ask is the one thing scale asks — thousands of
 //! draws with hundreds of materials — and that is demo 05's subject already.
 //!
-//! # The smooth metal is nearly black, and that is correct
+//! # The smooth metal reflects a room, and that is the point of the row
 //!
-//! The leftmost sphere in the back row is metal at roughness 0.05 — a mirror.
-//! A mirror has no diffuse lobe and reflects whatever is around it, and what is
-//! around it here is *nothing*: there is no environment probe, so it reflects a
-//! sun it mostly does not point at and four small lamps. Rougher metals to its
-//! right spread those same highlights wide enough to read as gold. Image-based
-//! lighting is what fills that in, and it is P1 — this row is here partly so the
-//! gap is visible rather than discovered later.
+//! The leftmost sphere in the back row is metal at roughness 0.05 — a mirror. A
+//! mirror has no diffuse lobe and reflects whatever is around it, so until §6
+//! M27 it reflected *nothing*: a sun it mostly did not point at and four small
+//! lamps, which is why it was nearly black. That gap was left visible on purpose
+//! for five milestones. [`SKY`] closes it — a compiled panorama, and the sphere
+//! now shows the room it stands in, four coloured walls and a strip of windows,
+//! sharpening as the row runs left.
+//!
+//! The panorama is generated rather than photographed (`gg-tools panorama`), and
+//! it deliberately holds no sun: the sun is a [`Light`], and a disc burnt into
+//! the environment as well would be the same photon counted twice (§6 M24).
 //!
 //! # What a game says about light
 //!
@@ -35,13 +39,36 @@
 //! to the game (§4.8). The sun below sweeps because a static sun makes a shadow
 //! look like a texture; the lamps flicker on a schedule for the same reason.
 
-use gg_ecs::boundary::{ActionId, AxisId, Eye, GameWorld, Light, Model, log_level};
+use gg_ecs::boundary::{ActionId, AxisId, Eye, GameWorld, Light, Model, Sky, log_level};
 use gg_ecs::{Component, Entity};
 use gg_math::sim;
 
 /// The pack asset this demo draws — `demos/06-lit/assets/atrium.gltf` as `ggc`
 /// names it: the source's path under the asset root, then what it produced.
 pub const ATRIUM: &str = "atrium/scene";
+
+/// The environment, named the same way: `demos/06-lit/assets/sky/room.hdr`
+/// compiled by `ggc` (§6 M27). Written by `gg-tools panorama`, which is where
+/// its shape is argued.
+pub const SKY: &str = "sky/room";
+
+/// Exposure over the panorama's own radiance.
+///
+/// Small, and chosen against the sun rather than by eye. The file's mean
+/// radiance is about 2, so this puts the environment's irradiance near 0.25
+/// against [`SUN_INTENSITY`]'s 4 — a fill at a sixteenth of the key.
+///
+/// It reads low written down and it is not: an environment lights *every* face
+/// from *every* direction and is never shadowed, where a sun lights one side of
+/// one thing and is blocked by everything. Matched by irradiance rather than by
+/// eye, an environment at a quarter of the key light flattens a room — every
+/// shadow fills, and a demo whose subject is a sun casting one has lost it.
+///
+/// The *specular* half is unaffected by that restraint, which is the point: the
+/// window strip is two orders of magnitude over the walls, so at this exposure a
+/// mirror still reflects panes at radiance 3 while a diffuse surface gathers a
+/// tenth of one.
+pub const SKY_INTENSITY: f32 = 0.04;
 
 /// Metres per tick at full deflection.
 pub const MOVE_PER_TICK: f64 = 0.08;
@@ -185,6 +212,11 @@ pub fn bootstrap(world: &mut GameWorld) {
     // takes the first directional light it is given (§6 M11).
     let sun = world.spawn();
     world.put(sun, Light::sun(sun_direction(0), SUN_COLOR, SUN_INTENSITY));
+
+    // The environment, as a compiled panorama in the same pack the room came
+    // out of (§6 M27). It is what the mirror in the back row reflects, and the
+    // intensity is exposure rather than a tint — the file is already a radiance.
+    world.spawn_with(Sky::image(SKY, SKY_INTENSITY));
 
     for (x, z) in LAMP_AT {
         let lamp = world.spawn();

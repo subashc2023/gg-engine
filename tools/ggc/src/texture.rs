@@ -212,8 +212,12 @@ fn compress(
     let channels = role.channels();
     let data = gather(rgba, w, h, pw, ph, channels);
     let stride = pw * channels.len() as u32;
-    match role.format() {
-        TextureFormat::Bc7Srgb => bc7::compress_blocks(
+    // On the *role* and not on `role.format()`: the format enum has a fourth
+    // variant no role names (BC6H is the environment's, and it is compressed in
+    // `crate::environment`), and matching the four roles keeps this total by
+    // construction rather than by an arm asserting a case cannot happen.
+    match role {
+        Role::BaseColor => bc7::compress_blocks(
             settings.unwrap_or(&bc7::opaque_basic_settings()),
             &RgbaSurface {
                 data: &data,
@@ -222,13 +226,13 @@ fn compress(
                 stride,
             },
         ),
-        TextureFormat::Bc5Unorm => bc5::compress_blocks(&RgSurface {
+        Role::Normal | Role::MetallicRoughness => bc5::compress_blocks(&RgSurface {
             data: &data,
             width: pw,
             height: ph,
             stride,
         }),
-        TextureFormat::Bc4Unorm => bc4::compress_blocks(&RSurface {
+        Role::Occlusion => bc4::compress_blocks(&RSurface {
             data: &data,
             width: pw,
             height: ph,

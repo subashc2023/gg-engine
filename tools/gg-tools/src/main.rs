@@ -17,10 +17,17 @@
 //!                                   in a room standing still around it
 //!   gg-tools shadow-edge            how straight a distant shadow's edge is,
 //!                                   against how soft the filter made it
+//!   gg-tools lights                 what a light costs a frame, swept over
+//!                                   count and over `r.clusters` (§6 M30)
+//!   gg-tools lamps [--cost|--bias]  what a *casting* lamp costs, swept over
+//!                                   `r.lamps` and face size, and where its
+//!                                   bias belongs — lost against leaked (§6 M31)
 //!   gg-tools banding                what the 8-bit output does to a smooth
 //!                                   gradient, swept over `r.dither`
 //!   gg-tools pace                   what a display rate does to a turn the hand
 //!                                   made at a constant speed
+//!   gg-tools panorama [--out P]   write the synthetic equirectangular `.hdr`
+//!                                   demo 06's environment is compiled from
 //!   gg-tools fp-isa [--target T]    which floating-point instructions the
 //!                                   determinism path contains, by how much
 //!                                   freedom the ISA leaves them (§8's qemu row)
@@ -29,8 +36,11 @@
 
 mod banding;
 mod fp_isa;
+mod lamps;
+mod lights;
 mod mcp;
 mod pace;
+mod panorama;
 mod shadow_bias;
 mod shadow_edge;
 mod shadow_fit;
@@ -61,14 +71,17 @@ fn main() -> anyhow::Result<()> {
         "shadow-flat" => shadow_flat::run(rest),
         "shadow-sweep" => shadow_sweep::run(rest),
         "shadow-edge" => shadow_edge::run(rest),
+        "lights" => lights::run(rest),
+        "lamps" => lamps::run(rest),
         "banding" => banding::run(rest),
         "pace" => pace::run(rest),
+        "panorama" => panorama::run(rest),
         "fp-isa" => fp_isa::run(rest),
         "mcp" => mcp::run(rest),
         other => {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
-                 shadow-flat, shadow-sweep, shadow-edge, banding, pace, fp-isa, mcp. A new instrument is a new \
+                 shadow-flat, shadow-sweep, shadow-edge, lights, lamps, banding, pace, fp-isa, mcp. A new instrument is a new \
                  subcommand here, not a \
                  new crate"
             )

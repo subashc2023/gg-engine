@@ -117,6 +117,9 @@ pub enum AssetKind {
     Material = 3,
     /// A scene blob: the node list a demo instantiates.
     Scene = 4,
+    /// An environment blob: an order-2 SH projection and the id of the
+    /// prefiltered radiance chain it shares a source with (§6 M27).
+    Environment = 5,
 }
 
 impl AssetKind {
@@ -126,6 +129,7 @@ impl AssetKind {
             2 => Some(Self::Texture),
             3 => Some(Self::Material),
             4 => Some(Self::Scene),
+            5 => Some(Self::Environment),
             _ => None,
         }
     }

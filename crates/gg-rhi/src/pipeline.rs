@@ -436,6 +436,7 @@ pub(crate) struct ResolvedDraw<'a> {
     pub index_buffer: Option<vk::Buffer>,
     pub indirect: Option<(vk::Buffer, u64)>,
     pub depth_bias: Option<crate::DepthBias>,
+    pub viewport: Option<crate::Viewport>,
 }
 
 /// Record one draw inside an active dynamic-rendering pass: viewport/scissor

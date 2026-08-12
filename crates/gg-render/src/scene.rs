@@ -42,7 +42,7 @@ use gg_math::render;
 use gg_rhi::{
     Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthMode, DeviceAddress, DrawSpec,
     FRAMES_IN_FLIGHT, ImageDesc, ImageFormat, ImageHandle, ImageUse, Indirect, IndirectCommand,
-    PipelineDesc, PipelineHandle, RhiError, Sampler, Samples, TextureIndex,
+    PipelineDesc, PipelineHandle, RhiError, Sampler, Samples, TextureIndex, Viewport,
 };
 
 use crate::content::Content;
@@ -153,6 +153,15 @@ pub(crate) struct ScenePass {
     /// draws borrow that one, and rewriting it per cascade would rewrite what
     /// they are still pointing at.
     shadow_pushes: Vec<Vec<shader::ScenePush>>,
+    /// The same, one list per lamp face (§6 M31), flat as `lamp * 6 + face`.
+    ///
+    /// Uncalled, exactly as `shadow_pushes` is: a batch still has no bounds, so
+    /// this pass draws every batch into every face the way it already draws
+    /// every batch into every cascade. That is §6 M15.3's standing P2 arriving
+    /// with a larger multiplier rather than a new defect — six faces per lamp
+    /// against four cascades — and it is what `gg-tools lamps` prices for a
+    /// scene whose casters come out of a pack.
+    lamp_pushes: Vec<Vec<shader::ScenePush>>,
     written: Vec<IndirectCommand>,
     /// This frame's lighting block, patched into every batch's push.
     frame: DeviceAddress,
@@ -213,6 +222,7 @@ impl ScenePass {
             batches: Vec::new(),
             written: Vec::new(),
             shadow_pushes: Vec::new(),
+            lamp_pushes: Vec::new(),
             frame: 0,
         })
     }
@@ -238,10 +248,13 @@ impl ScenePass {
         content: Option<&Content>,
         frame: DeviceAddress,
         cascades: usize,
+        lamp_faces: usize,
     ) -> Result<(), RhiError> {
         self.frame = frame;
         self.shadow_pushes.resize_with(cascades, Vec::new);
         self.shadow_pushes.truncate(cascades);
+        self.lamp_pushes.resize_with(lamp_faces, Vec::new);
+        self.lamp_pushes.truncate(lamp_faces);
         self.keyed.clear();
         self.built.clear();
         self.staged.clear();
@@ -421,7 +434,17 @@ impl ScenePass {
             pushes.clear();
             pushes.extend(self.batches.iter().map(|batch| {
                 let mut push = batch.push;
-                push.cascade = index as u32;
+                push.shadow_view = index as u32;
+                push
+            }));
+        }
+        // Lamp faces continue the same index space — cascades first, then faces
+        // — because `vs_shadow` takes one number and branches on it.
+        for (index, pushes) in self.lamp_pushes.iter_mut().enumerate() {
+            pushes.clear();
+            pushes.extend(self.batches.iter().map(|batch| {
+                let mut push = batch.push;
+                push.shadow_view = (crate::lighting::MAX_CASCADES + index) as u32;
                 push
             }));
         }
@@ -453,6 +476,20 @@ impl ScenePass {
         self.draws_with(self.shadow, &pushes.iter().collect::<Vec<_>>())
     }
 
+    /// The same batches through one lamp face, landing in that face's tile.
+    ///
+    /// The tile is the *draw's* rectangle rather than the pass's: six faces of
+    /// eight lamps share one atlas and one pass, so a pass-level viewport could
+    /// only ever have named one of them (§6 M31).
+    pub(crate) fn lamp_draws(&self, face: usize, tile: Viewport) -> Vec<DrawSpec<'_>> {
+        let pushes = self.lamp_pushes.get(face).map_or(&[][..], Vec::as_slice);
+        let mut draws = self.draws_with(self.shadow, &pushes.iter().collect::<Vec<_>>());
+        for draw in &mut draws {
+            draw.viewport = Some(tile);
+        }
+        draws
+    }
+
     fn draws_with<'a>(
         &'a self,
         pipeline: PipelineHandle,
@@ -464,6 +501,7 @@ impl ScenePass {
             .map(|(batch, push)| DrawSpec {
                 pipeline,
                 depth_bias: None,
+                viewport: None,
                 push_constants: bytemuck::bytes_of(*push),
                 // Unread: the indirect command carries the counts (§6 M10).
                 count: 0,

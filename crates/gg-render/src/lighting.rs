@@ -3,8 +3,11 @@
 //! Every shading pipeline reads the same block through one device address rather
 //! than through push constants: the sun's matrix alone is 64 bytes and Vulkan
 //! guarantees 128 of push, so a per-draw copy would leave no room for a draw's
-//! own parameters. It is also the shape a clustered light list wants when
-//! [`MAX_POINT`](gg_extract::MAX_POINT) stops being a small number (P1).
+//! own parameters. It was also the shape a clustered light list wanted, which is
+//! what §6 M30 cashed in: the froxel ranges and their indices follow the lights
+//! in this same region, at constant offsets, so the grid cost the shader no
+//! second address and [`MAX_POINT`](gg_extract::MAX_POINT) could go from 32 to
+//! 256 without one.
 //!
 //! # What is stated rather than implemented
 //!
@@ -24,11 +27,14 @@
 //! sphere: a snap can only lock a grid whose *spacing* is already stable.
 
 use bytemuck::Zeroable as _;
-use gg_extract::{Extracted, ExtractedLight, ExtractedSky, MAX_DIRECTIONAL, MAX_POINT};
+use gg_extract::{
+    Extracted, ExtractedLight, ExtractedSky, MAX_DIRECTIONAL, MAX_POINT, MAX_SKY, SkyLook, light,
+};
 use gg_math::render;
 use gg_rhi::{BufferDesc, BufferHandle, DeviceAddress, FRAMES_IN_FLIGHT, RhiError, Sampler};
 
-use crate::{GpuHost, View, cvars, sky, srgb_to_linear};
+use crate::cluster::{self, Assignment, Grid};
+use crate::{GpuHost, View, cvars, lamp, sky, srgb_to_linear};
 
 /// The per-frame block, mirroring `include/pbr.slang`'s `Frame`. The shader
 /// reads it as scalars through a device address, so this layout is the whole of
@@ -72,30 +78,188 @@ pub(crate) struct GpuFrame {
     shadow_penumbra: f32,
     /// Taps in the filter disk. The search uses a quarter of them.
     shadow_taps: u32,
-    /// Whether this frame has an environment at all, which is
-    /// [`Sky::intensity`](gg_ecs::boundary::Sky::intensity) already folded into
-    /// [`sh`](GpuFrame::sh) — so it is a *flag* here and not a scale, and the
-    /// shader multiplies by nothing. Zero means fall back to the flat
-    /// [`ambient`](GpuFrame::ambient), which is every scene blessed before §6
-    /// M24 and every game that declares no sky.
-    sky: f32,
+    /// How many of [`environments`](GpuFrame::environments) are live, innermost
+    /// first. Zero is the whole of "this frame has no environment" — fall back
+    /// to the flat [`ambient`](GpuFrame::ambient), which is every scene blessed
+    /// before §6 M24 and every game that declares no sky.
+    ///
+    /// A count where M24 had a flag (§6 M28), and the same thing at one: the
+    /// shader's guard is still `> 0` and a scene with one sky reads exactly the
+    /// bytes it read before.
+    environment_count: u32,
+    /// Directional lights at the **front** of the light array (§6 M30).
+    ///
+    /// The shader loops these by count and the rest by froxel list, which is the
+    /// whole of the split: a light with no position is in every froxel, so
+    /// putting it in one would be storing the same answer three thousand times.
+    /// Extract is what makes the front of the array the right place to look.
+    directional_count: u32,
+    /// The direction the camera looks, unit — what a fragment's camera-relative
+    /// position projects onto to get the view depth its froxel is chosen by.
+    ///
+    /// Carried rather than derived: under perspective the projection's row 2 is
+    /// `[0, 0, 0, near]` by construction, so the matrix the shader already holds
+    /// does not contain it.
+    view_forward: [f32; 3],
+    /// `slice = log2(depth) * scale + bias`, floored and clamped — `cluster.rs`.
+    cluster_scale: f32,
+    cluster_bias: f32,
+    /// Froxels per pixel, across and down. The shader multiplies
+    /// `SV_Position.xy` by this, so a viewport-sized attachment and a
+    /// window-sized one give the same grid over their own pixels.
+    cluster_tile: [f32; 2],
+    /// Point lights that cast, sitting immediately after the directional ones
+    /// (§6 M31). The shader's whole test for "does this light occlude" is
+    /// `index < directional_count + lamp_count` — extract's nearest-first order
+    /// is what makes a prefix the right answer, and `lamp`'s header is where
+    /// that is argued.
+    lamp_count: u32,
+    /// The face atlas in the global sampled-image array. Unread at
+    /// [`lamp_count`](GpuFrame::lamp_count) zero, which is the only reason it
+    /// may be slot zero.
+    lamp_texture: u32,
+    /// Tile space → atlas uv: one sixth across, one row of live lamps down.
+    lamp_uv_scale: [f32; 2],
+    /// One face texel in tile space — the unit the lamp filter's taps are in,
+    /// and what its clamp insets by half of.
+    lamp_inv_tile: f32,
+    /// Normal-offset reach and the angle-free part, both in **face** texels —
+    /// [`shadow_normal_bias`](GpuFrame::shadow_normal_bias)'s unit against a
+    /// texel whose world size grows with distance from the lamp rather than
+    /// staying fixed across a slab.
+    lamp_normal_bias: f32,
+    lamp_depth_bias: f32,
+    /// Taps in the lamp filter. Its own knob rather than
+    /// [`shadow_taps`](GpuFrame::shadow_taps): this one is paid per casting
+    /// lamp per fragment, where the sun's is paid once.
+    lamp_taps: u32,
     /// Zero. Named rather than implicit: `Pod` refuses padding, and the shader's
     /// `FRAME_STRIDE` has to be a number both sides can write down. Padding to a
     /// multiple of 16 besides, so the arrays behind it start on the alignment a
     /// `float4` read would want.
-    reserved: [u32; 5],
-    /// The environment as order-2 spherical-harmonic **radiance** coefficients
-    /// (§6 M24) — not irradiance: the diffuse path applies the cosine kernel's
-    /// band factors and the specular path applies a roughness kernel's, and
-    /// pre-convolving here would serve one of them and lie to the other.
     ///
-    /// `float4` a piece with `w` unused, because a `float3` array's stride in a
-    /// block read as scalars is a fact nobody should have to hold in their head.
-    sh: [[f32; 4]; sky::SH_COEFFICIENTS],
+    /// Back to five at M28 — M27 had spent three on the chain a frame carried,
+    /// and M28 moved all three into [`GpuEnvironment`] where they belong to *an*
+    /// environment rather than to the frame. M30 spent seven of the eight that
+    /// left on the grid above, and M31 the last one plus sixteen fresh bytes on
+    /// the lamps.
+    reserved: [u32; 1],
+    /// This frame's environments, innermost first (§6 M28).
+    ///
+    /// A fixed array in the block rather than a second buffer, `cascades`'
+    /// reasoning at three times the size: it is 768 bytes against one address
+    /// the shader already holds, and the fragment reads only the entries whose
+    /// weight is nonzero — which in every scene with one sky is one of them.
+    environments: [GpuEnvironment; MAX_SKY],
     /// Nearest first, `cascade_count` of them live. A fixed array rather than a
     /// second buffer: it is 320 bytes, and one address the shader already has
     /// beats a second one it would have to be handed.
     cascades: [GpuCascade; MAX_CASCADES],
+    /// This frame's casting lamps, `lamp_count` of them live (§6 M31).
+    ///
+    /// Three kilobytes at the ceiling, which is the largest thing in this block
+    /// by some way and is still the same trade `cascades` and `environments`
+    /// made: one address the shader already holds, against a second one every
+    /// pipeline would have to be handed. The vertex shader reads a face's matrix
+    /// to render it and the fragment shader reads the same matrix to look it up,
+    /// so there is exactly one projection per face and no convention for the two
+    /// to disagree about — which is the bug §6 M30's grid shipped with.
+    lamps: [GpuLamp; lamp::MAX_LAMPS],
+}
+
+/// One casting lamp as the shader reads it, mirroring `include/pbr.slang`'s
+/// `Lamp`.
+///
+/// Nothing but the six projections: the light's position and range are already
+/// in its [`GpuLight`] record, which the fragment has in hand when it asks, and
+/// the lamp's row in the atlas is its index.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuLamp {
+    faces: [[[f32; 4]; 4]; lamp::FACES],
+}
+
+/// One environment as the shader reads it, mirroring `include/pbr.slang`'s
+/// `Environment` (§6 M28).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuEnvironment {
+    /// Order-2 spherical-harmonic **radiance** coefficients (§6 M24) — not
+    /// irradiance: the diffuse path applies the cosine kernel's band factors and
+    /// the specular path applies a roughness kernel's, and pre-convolving here
+    /// would serve one of them and lie to the other.
+    ///
+    /// `float4` a piece with `w` unused, because a `float3` array's stride in a
+    /// block read as scalars is a fact nobody should have to hold in their head.
+    ///
+    /// [`Sky::intensity`](gg_ecs::boundary::Sky::intensity) is already folded in
+    /// — nine multiplies once a frame rather than one per fragment.
+    sh: [[f32; 4]; sky::SH_COEFFICIENTS],
+    /// The volume's centre, camera-relative. Unread when
+    /// [`half_extent`](GpuEnvironment::half_extent) is zero.
+    offset: [f32; 3],
+    /// Metres outside the box over which this falls to nothing. Zero is a hard
+    /// edge.
+    fade: f32,
+    /// Half the box. **Zero is unbounded**, and that is the one value the
+    /// shader tests: an unbounded environment answers weight 1 everywhere, which
+    /// is what makes the last entry a fallback without a second flag.
+    half_extent: [f32; 3],
+    /// [`Sky::intensity`](gg_ecs::boundary::Sky::intensity) again, *unapplied* —
+    /// what the shader multiplies the chain's texels by.
+    ///
+    /// The texels are the panorama's own absolute radiance and are not scaled at
+    /// import: a pack holds the measurement, and exposure is the world's to set.
+    /// Both halves must carry the same number, or a mirror stops matching the
+    /// room it stands in (§6 M27).
+    radiance_scale: f32,
+    /// The prefiltered chain in the global sampled-image array, or zero — which
+    /// is slot zero and therefore not a valid answer on its own, so
+    /// [`radiance_levels`](GpuEnvironment::radiance_levels) is the flag.
+    radiance_texture: u32,
+    /// Levels in that chain, and the switch: zero is no chain at all, which is
+    /// every sky that is still a gradient. The shader turns a roughness into a
+    /// mip by scaling with this, so it has to be here rather than queried off
+    /// the texture.
+    radiance_levels: u32,
+    /// Zero, to a multiple of 16 — [`GpuFrame::reserved`]'s reason.
+    reserved: [u32; 2],
+}
+
+/// A compiled environment the pack resolved, ready for the frame block (§6 M27).
+///
+/// Assembled by the caller rather than looked up here, because it takes both
+/// halves of the content layer — the blob's SH out of [`Content`](crate::content::Content)
+/// and the chain's bindless index out of
+/// [`Residency`](crate::residency::Residency) — and `Lighting` holds neither. It
+/// exists at all only when *both* are ready: a chain still streaming falls back
+/// to the gradient for the frame rather than sampling slot zero.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Radiance {
+    /// The prefiltered chain's slot in the global sampled-image array.
+    pub texture: gg_rhi::TextureIndex,
+    /// Levels in it. Never zero — a chain with no levels is not one.
+    pub levels: u32,
+    /// The panorama's own order-2 projection, which *replaces* the gradient's
+    /// rather than adding to it. Scaled by the sky's intensity on the way in,
+    /// so the frame block's `sky` stays the flag it has been since M24.
+    pub sh: [[f32; 4]; sky::SH_COEFFICIENTS],
+    /// That same intensity, unapplied — what the shader multiplies the chain's
+    /// texels by, since those are the panorama's absolute radiance.
+    pub scale: f32,
+}
+
+/// The bindless slots the graph acquired for this frame's shadow maps: one per
+/// cascade, then the lamp atlas.
+///
+/// Handed in together rather than as two arguments because they are one fact —
+/// what the graph actually allocated — and because a `Lighting` that guessed
+/// either would be writing a block whose lookups land in whatever else is in
+/// those slots. Both are short of what was *planned* whenever the graph declined
+/// to allocate, and both truncate the block's counts rather than erroring.
+pub(crate) struct Maps<'a> {
+    pub(crate) cascades: &'a [gg_rhi::TextureIndex],
+    pub(crate) lamps: Option<gg_rhi::TextureIndex>,
 }
 
 /// One cascade as the shader reads it, mirroring `include/pbr.slang`'s
@@ -121,12 +285,30 @@ struct GpuCascade {
 
 const _: () = {
     assert!(core::mem::size_of::<GpuCascade>() == 80);
-    assert!(core::mem::size_of::<GpuFrame>() == 624);
+    assert!(core::mem::size_of::<GpuEnvironment>() == 192);
+    assert!(core::mem::size_of::<GpuLamp>() == 384);
+    assert!(core::mem::size_of::<GpuFrame>() == 4368);
     assert!(core::mem::offset_of!(GpuFrame, ambient) == 64);
     assert!(core::mem::offset_of!(GpuFrame, light_count) == 80);
     assert!(core::mem::offset_of!(GpuFrame, sun_direction) == 96);
-    assert!(core::mem::offset_of!(GpuFrame, sh) == 160);
-    assert!(core::mem::offset_of!(GpuFrame, cascades) == 304);
+    assert!(core::mem::offset_of!(GpuFrame, directional_count) == 140);
+    assert!(core::mem::offset_of!(GpuFrame, lamp_count) == 172);
+    assert!(core::mem::offset_of!(GpuFrame, environments) == 208);
+    assert!(core::mem::offset_of!(GpuFrame, cascades) == 976);
+    assert!(core::mem::offset_of!(GpuFrame, lamps) == 1296);
+    // `pbr.slang` derives these two from `FRAME_STRIDE`, `LIGHT_STRIDE` and its
+    // own grid constants. Written out here so the derivation has something to be
+    // wrong against — a froxel read at the wrong offset is a picture, not a
+    // crash.
+    assert!(MAX_LIGHTS == 260);
+    assert!(CLUSTER_BASE == 16848);
+    assert!(INDEX_BASE == 41424);
+    assert!(cluster::CLUSTERS == 3072);
+    // The coefficients are still the first thing in an environment, so the
+    // shader's `SH_BASE` is `ENV_BASE` and M24's loader reads the innermost
+    // environment by doing exactly what it always did.
+    assert!(core::mem::offset_of!(GpuEnvironment, sh) == 0);
+    assert!(core::mem::offset_of!(GpuEnvironment, half_extent) == 160);
 };
 
 /// One light as the shader reads it, mirroring `include/pbr.slang`'s `Light`.
@@ -150,8 +332,15 @@ const _: () = assert!(core::mem::size_of::<GpuLight>() == 48);
 /// only place they are decided.
 const MAX_LIGHTS: usize = MAX_DIRECTIONAL + MAX_POINT;
 
-const SLOT_BYTES: u64 =
+/// Where the froxel ranges start, and where their indices do (§6 M30). Both are
+/// constants because the grid is: a fixed count of froxels means a fixed offset,
+/// and a fixed offset means the shader needs neither a second address nor a
+/// third field to find them.
+const CLUSTER_BASE: u64 =
     (core::mem::size_of::<GpuFrame>() + MAX_LIGHTS * core::mem::size_of::<GpuLight>()) as u64;
+const INDEX_BASE: u64 = CLUSTER_BASE + (cluster::CLUSTERS * 8) as u64;
+
+const SLOT_BYTES: u64 = INDEX_BASE + (cluster::MAX_INDICES * 4) as u64;
 
 /// Cascades one frame may carry. Four, because the practical split scheme puts
 /// the fourth's far plane at ~30x the first's and a fifth buys range nothing in
@@ -453,18 +642,38 @@ pub(crate) struct Lighting {
     lights: Vec<GpuLight>,
     /// This frame's sun, once [`Lighting::plan`] has decided whether one casts.
     sun: Option<Sun>,
-    /// The last environment projected, and what it projected to (§6 M24).
+    /// This frame's casting lamps, decided by the same call (§6 M31).
+    lamps: lamp::Lamps,
+    /// The froxel lists [`Lighting::write`] built, kept for their allocation and
+    /// for the drop count a `gg::draws` line reports.
+    assignment: Assignment,
+    /// The environments projected lately, and what they projected to (§6 M24).
     ///
     /// Cached on the *value* and not on a dirty flag, because the value is a
-    /// 16-byte `Copy` component a game may rewrite every tick and comparing it
-    /// is cheaper than the projection by three orders of magnitude. A game that
+    /// small `Copy` record a game may rewrite every tick and comparing it is
+    /// cheaper than the projection by three orders of magnitude. A game that
     /// really does animate its sky pays the quadrature once a frame, which is
     /// what it asked for.
-    projected: Option<(ExtractedSky, [[f32; 4]; sky::SH_COEFFICIENTS])>,
-    /// The environment the last [`Lighting::write`] was handed — what
+    ///
+    /// Keyed on [`SkyLook`] and not on the whole [`ExtractedSky`], which is the
+    /// trap M28 had to avoid: the volume is *camera-relative*, so a key holding
+    /// it would miss on every frame the camera moved and turn a cache into a
+    /// 2048-sample quadrature per environment per frame. A linear scan because
+    /// it holds at most [`MAX_SKY`] entries.
+    projected: Vec<(SkyLook, [[f32; 4]; sky::SH_COEFFICIENTS])>,
+    /// This frame's environments as the shader will read them, and how many are
+    /// live — filled by [`Lighting::resolve`] and copied by
+    /// [`Lighting::write`].
+    ///
+    /// Two calls rather than one argument: resolving needs the content layer and
+    /// the projection cache, writing needs the RHI and the graph's shadow slots,
+    /// and one function taking all four is over §3's arity limit for no gain.
+    blocks: [GpuEnvironment; MAX_SKY],
+    block_count: u32,
+    /// The environments the last [`Lighting::resolve`] was handed — what
     /// `dump_graph` reports, on the same terms as [`Lighting::sun`]: whether
     /// the *next* frame has a sky is not knowable before it is extracted.
-    environment: Option<ExtractedSky>,
+    environments: Vec<ExtractedSky>,
 }
 
 impl Lighting {
@@ -483,8 +692,12 @@ impl Lighting {
             buffer,
             lights: Vec::new(),
             sun: None,
-            projected: None,
-            environment: None,
+            lamps: lamp::Lamps::default(),
+            assignment: Assignment::default(),
+            projected: Vec::new(),
+            blocks: [GpuEnvironment::zeroed(); MAX_SKY],
+            block_count: 0,
+            environments: Vec::new(),
         })
     }
 
@@ -501,7 +714,18 @@ impl Lighting {
         extent: (u32, u32),
     ) -> Option<Sun> {
         self.sun = Sun::of(extracted, view, extent);
+        // Beside the sun rather than at the call site, and for the same reason
+        // the sun is here: the atlas's extent is a function of how many lamps
+        // cast, so the count must exist before the graph acquires anything —
+        // and holding it here is what stops the frame that was *planned* from
+        // differing from the one that gets written.
+        self.lamps = lamp::Lamps::build(&extracted.lights);
         self.sun
+    }
+
+    /// The lamps the last [`Lighting::plan`] settled on (§6 M31).
+    pub(crate) fn lamps(&self) -> &lamp::Lamps {
+        &self.lamps
     }
 
     /// The sun the last [`Lighting::plan`] settled on — what a graph dump prints
@@ -525,25 +749,34 @@ impl Lighting {
         rhi: &mut impl GpuHost,
         slot: u64,
         view_projection: render::Mat4,
+        grid: &Grid,
         lights: &[ExtractedLight],
-        environment: Option<ExtractedSky>,
-        shadow: &[gg_rhi::TextureIndex],
+        maps: Maps<'_>,
     ) -> Result<(), RhiError> {
+        let Maps {
+            cascades: shadow,
+            lamps: atlas,
+        } = maps;
+        // Truncated first, so the froxel lists index the array the shader will
+        // actually read. Extract's own caps make this a no-op in every frame it
+        // produced; a caller assembling lights by hand is who it is for.
+        let lights = &lights[..lights.len().min(MAX_LIGHTS)];
         self.lights.clear();
-        self.lights
-            .extend(lights.iter().take(MAX_LIGHTS).map(|light| {
-                let color = srgb_to_linear(light.color);
-                GpuLight {
-                    position: light.offset.to_array(),
-                    range: light.range,
-                    direction: light.direction.to_array(),
-                    kind: light.kind,
-                    color: [color[0], color[1], color[2]],
-                    intensity: light.intensity,
-                }
-            }));
+        self.lights.extend(lights.iter().map(|light| {
+            let color = srgb_to_linear(light.color);
+            GpuLight {
+                position: light.offset.to_array(),
+                range: light.range,
+                direction: light.direction.to_array(),
+                kind: light.kind,
+                color: [color[0], color[1], color[2]],
+                intensity: light.intensity,
+            }
+        }));
+        self.assignment.build(grid, lights, cvars::CLUSTERS.bool());
 
         let sun = self.sun.filter(|_| !shadow.is_empty());
+        let (forward, cluster_scale, cluster_bias, cluster_tile) = grid.shader_terms();
         let ambient = cvars::AMBIENT.float().max(0.0) as f32;
         let mut cascades = [GpuCascade::zeroed(); MAX_CASCADES];
         let mut cascade_count = 0;
@@ -563,8 +796,18 @@ impl Lighting {
                 cascade_count += 1;
             }
         }
-        self.environment = environment;
-        let sh = environment.map_or([[0.0; 4]; sky::SH_COEFFICIENTS], |e| self.project(e));
+        // The same zip as the cascades', for the same reason: the atlas's
+        // bindless slot is the graph's to hand over, and a lamp array longer
+        // than the texture backing it would look its faces up in slot zero.
+        let planned = &self.lamps;
+        let mut gpu_lamps = [GpuLamp::zeroed(); lamp::MAX_LAMPS];
+        let mut lamp_count = 0;
+        if atlas.is_some() {
+            for (gpu, fitted) in gpu_lamps.iter_mut().zip(planned.lamps()) {
+                gpu.faces = core::array::from_fn(|face| render::rows(fitted.faces[face]));
+                lamp_count += 1;
+            }
+        }
         let frame = GpuFrame {
             view_projection: render::rows(view_projection),
             ambient: [ambient, ambient, ambient, 0.0],
@@ -583,10 +826,29 @@ impl Lighting {
             shadow_softness: (cvars::SHADOW_SOFTNESS.float() as f32).clamp(0.0, 8.0),
             shadow_penumbra: (cvars::SHADOW_PENUMBRA.float() as f32).clamp(1.0, 64.0),
             shadow_taps: cvars::SHADOW_TAPS.int().clamp(4, 32) as u32,
-            sky: f32::from(environment.is_some()),
-            reserved: [0; 5],
-            sh,
+            environment_count: self.block_count,
+            // The array's *prefix*, not its total: the shader loops these by
+            // count, so what it needs is how far the suns reach from index
+            // zero. Extract puts them there (`Extracted::append_lights`).
+            directional_count: lights
+                .iter()
+                .take_while(|l| l.kind == light::DIRECTIONAL)
+                .count() as u32,
+            view_forward: forward,
+            cluster_scale,
+            cluster_bias,
+            cluster_tile,
+            lamp_count,
+            lamp_texture: atlas.map_or(0, gg_rhi::TextureIndex::get),
+            lamp_uv_scale: planned.uv_scale(),
+            lamp_inv_tile: 1.0 / planned.tile() as f32,
+            lamp_normal_bias: cvars::LAMP_NORMAL_BIAS.float().max(0.0) as f32,
+            lamp_depth_bias: cvars::LAMP_DEPTH_BIAS.float().max(0.0) as f32,
+            lamp_taps: cvars::LAMP_TAPS.int().clamp(4, 32) as u32,
+            reserved: [0; 1],
+            environments: self.blocks,
             cascades,
+            lamps: gpu_lamps,
         };
 
         let slot = slot % FRAMES_IN_FLIGHT;
@@ -598,26 +860,93 @@ impl Lighting {
                 offset + core::mem::size_of::<GpuFrame>() as u64,
                 bytemuck::cast_slice(&self.lights),
             )?;
+            // The ranges always, the indices only up to what was used: the
+            // array behind them is 128 KiB and a frame that filled it would be
+            // one that had dropped pairs anyway.
+            rhi.write_buffer(
+                self.buffer,
+                offset + CLUSTER_BASE,
+                bytemuck::cast_slice(self.assignment.ranges()),
+            )?;
+            if !self.assignment.indices().is_empty() {
+                rhi.write_buffer(
+                    self.buffer,
+                    offset + INDEX_BASE,
+                    bytemuck::cast_slice(self.assignment.indices()),
+                )?;
+            }
         }
         Ok(())
     }
 
-    /// The environment the last frame was written with.
-    pub(crate) fn environment(&self) -> Option<ExtractedSky> {
-        self.environment
+    /// What the last [`Lighting::write`]'s assignment came to — reported on the
+    /// `gg::draws` line and read by `gg-tools lights`, on §6 M29's terms: a
+    /// number nothing prints is a number nobody checks.
+    pub(crate) fn cluster_load(&self) -> cluster::ClusterLoad {
+        self.assignment.load()
     }
 
-    /// This environment's coefficients, projected unless the last frame already
-    /// did it for the same sky.
-    fn project(&mut self, environment: ExtractedSky) -> [[f32; 4]; sky::SH_COEFFICIENTS] {
-        match self.projected {
-            Some((cached, sh)) if cached == environment => sh,
-            _ => {
-                let sh = sky::project(&environment);
-                self.projected = Some((environment, sh));
-                sh
-            }
+    /// Turn this frame's skies into the blocks the shader reads: each one's
+    /// coefficients, its volume, and the compiled chain it named if the pack
+    /// holds one and the chain is resident (§6 M28).
+    ///
+    /// Separate from [`Lighting::write`] because the two need different things —
+    /// this the content layer and the projection cache, that the RHI and the
+    /// graph's shadow slots — and because resolving must happen while the RHI
+    /// borrow is free.
+    pub(crate) fn resolve(
+        &mut self,
+        content: Option<&crate::content::Content>,
+        skies: &[ExtractedSky],
+    ) {
+        let mut blocks = [GpuEnvironment::zeroed(); MAX_SKY];
+        for (index, sky) in skies.iter().take(MAX_SKY).enumerate() {
+            let radiance = crate::radiance(content, *sky);
+            // The pack's projection wins outright where there is one. Not a
+            // blend: the two describe the same sky and averaging them would be a
+            // third sky neither half of the split sum was integrated against.
+            let sh = match radiance {
+                Some(radiance) => radiance.sh,
+                None => self.project(sky.look),
+            };
+            blocks[index] = GpuEnvironment {
+                sh,
+                offset: sky.offset.to_array(),
+                fade: sky.fade,
+                half_extent: sky.half_extent.to_array(),
+                radiance_scale: radiance.map_or(0.0, |r| r.scale),
+                radiance_texture: radiance.map_or(0, |r| r.texture.get()),
+                radiance_levels: radiance.map_or(0, |r| r.levels),
+                reserved: [0; 2],
+            };
         }
+        self.blocks = blocks;
+        self.block_count = skies.len().min(MAX_SKY) as u32;
+        self.environments.clear();
+        self.environments
+            .extend(skies.iter().take(MAX_SKY).copied());
+    }
+
+    /// The environments the last frame was resolved with, innermost first.
+    pub(crate) fn environments(&self) -> &[ExtractedSky] {
+        &self.environments
+    }
+
+    /// This environment's coefficients, projected unless a recent frame already
+    /// did it for the same sky.
+    fn project(&mut self, look: SkyLook) -> [[f32; 4]; sky::SH_COEFFICIENTS] {
+        if let Some((_, sh)) = self.projected.iter().find(|(cached, _)| *cached == look) {
+            return *sh;
+        }
+        let sh = sky::project(&look);
+        // Cleared rather than evicted when full: the cache exists for a sky that
+        // holds still, and a world genuinely animating more than `MAX_SKY` of
+        // them is paying the quadrature every frame whatever this does.
+        if self.projected.len() >= MAX_SKY {
+            self.projected.clear();
+        }
+        self.projected.push((look, sh));
+        sh
     }
 
     /// Where `slot`'s block starts on the device.
@@ -807,11 +1136,25 @@ mod tests {
     fn the_gpu_records_are_what_the_shader_strides_by() {
         // `include/pbr.slang` hardcodes FRAME_STRIDE and LIGHT_STRIDE; this is
         // the other half of that agreement, the way the vertex assertions are.
-        assert_eq!(core::mem::size_of::<GpuFrame>(), 624);
+        assert_eq!(core::mem::size_of::<GpuFrame>(), 4368);
         assert_eq!(core::mem::size_of::<GpuCascade>(), 80);
         assert_eq!(core::mem::size_of::<GpuLight>(), 48);
         assert_eq!(core::mem::offset_of!(GpuLight, direction), 16);
         assert_eq!(core::mem::offset_of!(GpuLight, color), 32);
+        // And where the froxel arrays begin (§6 M30) — `pbr.slang` derives both
+        // from the three constants above, so these are what the derivation is
+        // checked against.
+        assert_eq!(CLUSTER_BASE, 16848);
+        assert_eq!(INDEX_BASE, 41424);
+        // The lamps (§6 M31): a face is a bare 4x4, so the stride is six of them
+        // and `LAMP_BASE` is where the shader starts counting.
+        assert_eq!(core::mem::size_of::<GpuLamp>(), 384);
+        assert_eq!(core::mem::offset_of!(GpuFrame, lamps), 1296);
+        // ENV_STRIDE, and the offsets `load_environment` reads past the
+        // coefficients (§6 M28).
+        assert_eq!(core::mem::size_of::<GpuEnvironment>(), 192);
+        assert_eq!(core::mem::offset_of!(GpuEnvironment, offset), 144);
+        assert_eq!(core::mem::offset_of!(GpuEnvironment, radiance_texture), 176);
     }
 
     #[test]

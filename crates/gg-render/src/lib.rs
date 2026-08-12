@@ -20,11 +20,13 @@
 
 #![deny(missing_docs)]
 
+mod cluster;
 pub mod content;
 pub mod cvars;
 pub mod graph;
 #[cfg(feature = "hot-reload")]
 mod hot;
+mod lamp;
 mod lighting;
 /// The overlay's luminance histogram (§6 M11).
 pub mod luminance;
@@ -54,11 +56,13 @@ mod shaders_gen {
 
 use std::path::Path;
 
+pub use cluster::ClusterLoad;
 use content::{Content, ContentError};
 use gg_assets::AssetId;
 use gg_extract::{Extracted, Frustum, Instance, Scenes};
 use gg_math::render;
 pub use gg_rhi::Viewport;
+use lighting::Radiance;
 // Re-exported because [`View::samples`] is spelled in it and the shell sets
 // that field: a host would otherwise have to depend on `gg-rhi` to name a
 // count, which §3 keeps to this crate's own dependents.
@@ -349,6 +353,17 @@ impl Renderer {
         self.scene.counts()
     }
 
+    /// What the last frame's light assignment came to (§6 M30) — pairs written,
+    /// the busiest froxel, and what the grid had no room for.
+    ///
+    /// Public for [`Renderer::draw_counts`]'s reason: "a fragment iterates its
+    /// own froxel rather than the frame" is the claim this bought, and
+    /// `gg-tools lights` is what prices it.
+    #[must_use]
+    pub fn cluster_load(&self) -> ClusterLoad {
+        self.lighting.cluster_load()
+    }
+
     /// This frame's luminance histogram, or `None` when `r.histogram` is off
     /// (§6 M11's exit row). Bins are log2 luminance, darkest first.
     ///
@@ -592,11 +607,15 @@ impl Renderer {
             self.lighting.plan(extracted, view, view_extent)
         };
         let cascades = sun.map_or(0, |s| s.cascades().len());
+        // Beside the sun and for the same reason: the atlas's size depends on
+        // how many lamps cast, and the attachments are acquired below.
         {
             gg_core::zone!("render.build-boxes");
             self.pass.build(extracted, frame_address);
             self.pass
                 .build_shadow(extracted, frame_address, sun.as_ref());
+            self.pass
+                .build_lamps(extracted, frame_address, self.lighting.lamps());
         }
         let content = self.content.as_ref();
         {
@@ -610,9 +629,10 @@ impl Renderer {
                 content,
                 frame_address,
                 cascades,
+                self.lighting.lamps().lamps().len() * lamp::FACES,
             )?;
         }
-        report_draws(&self.scene, extracted);
+        report_draws(&self.scene, &self.lighting, extracted);
         {
             gg_core::zone!("render.build-ui");
             self.ui.write(&mut self.rhi, slot, ui)?;
@@ -636,17 +656,36 @@ impl Renderer {
         let (mut frame, att) = {
             gg_core::zone!("render.transients");
             let mut frame = self.transients.frame(&mut self.rhi, extent)?;
-            let att = scene_attachments(&mut frame, view_extent, sun, histogram, samples)?;
+            let att = scene_attachments(
+                &mut frame,
+                view_extent,
+                sun,
+                self.lighting.lamps(),
+                histogram,
+                samples,
+            )?;
             (frame, att)
         };
         let post_push = self
             .pass
             .post_push(&frame, att.scene, view_extent, view.aa)?;
-        let sky = sky_push(view.view_projection(att.view_extent), extracted.sky);
-        let sky = sky.as_ref().map(|push| (skybox, push));
+        let sky = sky_pushes(
+            view.view_projection(att.view_extent),
+            &extracted.skies,
+            frame_address,
+        );
+        let sky = (skybox, sky.as_slice());
         let (draws, ui_draws) = {
             gg_core::zone!("render.draw-lists");
-            let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push, sky, at);
+            let draws = SceneDraws::build(
+                &self.pass,
+                &self.scene,
+                &att,
+                &post_push,
+                sky,
+                self.lighting.lamps(),
+                at,
+            );
             let ui_draws: Vec<DrawSpec<'_>> = self.ui.draw(&ui_push).into_iter().collect();
             (draws, ui_draws)
         };
@@ -693,6 +732,7 @@ impl Renderer {
                 view,
                 &att,
                 extracted,
+                self.content.as_ref(),
             )?;
         }
         gg_core::zone!("render.execute");
@@ -728,20 +768,42 @@ impl Renderer {
         );
         let skybox = self.pass.skybox(&mut self.rhi, samples)?;
         let mut frame = self.transients.frame(&mut self.rhi, extent)?;
-        let att = scene_attachments(&mut frame, view_extent, sun, histogram, samples)?;
+        // The lamps the *last* frame planned, for the sun's reason above: this
+        // holds no `Extracted`, and a dump that invented an empty light list
+        // would print a graph with no lamp pass whatever the game is doing.
+        let att = scene_attachments(
+            &mut frame,
+            view_extent,
+            sun,
+            self.lighting.lamps(),
+            histogram,
+            samples,
+        )?;
         // The CVar rather than a `View` this has none of: FXAA is a push
         // constant, so what it changes is invisible here by construction.
         let post_push = self
             .pass
             .post_push(&frame, att.scene, view_extent, cvars::AA.bool())?;
-        // The environment as the last frame was written with, for the sun's
+        // The environments as the last frame was written with, for the sun's
         // reason. The matrix is the identity and that is not a shortcut being
-        // taken: nothing here is submitted, so what a dump reports about this
-        // draw is that it exists and against which attachment — the push bytes
+        // taken: nothing here is submitted, so what a dump reports about these
+        // draws is that they exist and against which attachment — the push bytes
         // are read by no GPU.
-        let sky = sky_push(render::Mat4::IDENTITY, self.lighting.environment());
-        let sky = sky.as_ref().map(|push| (skybox, push));
-        let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push, sky, at);
+        let sky = sky_pushes(
+            render::Mat4::IDENTITY,
+            self.lighting.environments(),
+            self.lighting.slot_address(slot),
+        );
+        let sky = (skybox, sky.as_slice());
+        let draws = SceneDraws::build(
+            &self.pass,
+            &self.scene,
+            &att,
+            &post_push,
+            sky,
+            self.lighting.lamps(),
+            at,
+        );
         // The UI pass as the *last* frame declared it: what the next one draws
         // is not knowable here, and a dump that always omitted it would print a
         // graph the screen never runs.
@@ -915,6 +977,17 @@ impl OffscreenRenderer {
         self.scene.counts()
     }
 
+    /// What the last frame's light assignment came to (§6 M30) — pairs written,
+    /// the busiest froxel, and what the grid had no room for.
+    ///
+    /// Public for [`Renderer::draw_counts`]'s reason: "a fragment iterates its
+    /// own froxel rather than the frame" is the claim this bought, and
+    /// `gg-tools lights` is what prices it.
+    #[must_use]
+    pub fn cluster_load(&self) -> ClusterLoad {
+        self.lighting.cluster_load()
+    }
+
     /// This frame's luminance histogram, or `None` when `r.histogram` is off.
     /// Current rather than two frames behind: an offscreen submit blocks.
     #[must_use]
@@ -1016,11 +1089,15 @@ impl OffscreenRenderer {
         };
         let histogram = luminance::Luminance::enabled();
         let cascades = sun.map_or(0, |s| s.cascades().len());
+        // Beside the sun and for the same reason: the atlas's size depends on
+        // how many lamps cast, and the attachments are acquired below.
         {
             gg_core::zone!("render.build-boxes");
             self.pass.build(extracted, frame_address);
             self.pass
                 .build_shadow(extracted, frame_address, sun.as_ref());
+            self.pass
+                .build_lamps(extracted, frame_address, self.lighting.lamps());
         }
         let content = self.content.as_ref();
         {
@@ -1034,9 +1111,10 @@ impl OffscreenRenderer {
                 content,
                 frame_address,
                 cascades,
+                self.lighting.lamps().lamps().len() * lamp::FACES,
             )?;
         }
-        report_draws(&self.scene, extracted);
+        report_draws(&self.scene, &self.lighting, extracted);
         {
             gg_core::zone!("render.build-ui");
             self.ui.write(&mut self.rhi, 0, ui)?;
@@ -1054,18 +1132,37 @@ impl OffscreenRenderer {
         let (mut frame, att) = {
             gg_core::zone!("render.transients");
             let mut frame = self.transients.frame(&mut self.rhi, self.extent)?;
-            let att = scene_attachments(&mut frame, view_extent, sun, histogram, samples)?;
+            let att = scene_attachments(
+                &mut frame,
+                view_extent,
+                sun,
+                self.lighting.lamps(),
+                histogram,
+                samples,
+            )?;
             (frame, att)
         };
         let into = frame.readback_buffer("render.offscreen.readback", self.readback);
         let post_push = self
             .pass
             .post_push(&frame, att.scene, view_extent, view.aa)?;
-        let sky = sky_push(view.view_projection(att.view_extent), extracted.sky);
-        let sky = sky.as_ref().map(|push| (skybox, push));
+        let sky = sky_pushes(
+            view.view_projection(att.view_extent),
+            &extracted.skies,
+            frame_address,
+        );
+        let sky = (skybox, sky.as_slice());
         let (draws, ui_draws) = {
             gg_core::zone!("render.draw-lists");
-            let draws = SceneDraws::build(&self.pass, &self.scene, &att, &post_push, sky, at);
+            let draws = SceneDraws::build(
+                &self.pass,
+                &self.scene,
+                &att,
+                &post_push,
+                sky,
+                self.lighting.lamps(),
+                at,
+            );
             let ui_draws: Vec<DrawSpec<'_>> = self.ui.draw(&ui_push).into_iter().collect();
             (draws, ui_draws)
         };
@@ -1106,7 +1203,15 @@ impl OffscreenRenderer {
         let order = passes.iter().map(|p| p.name.to_string()).collect();
         {
             gg_core::zone!("render.lighting");
-            write_lighting(&mut self.lighting, &mut self.rhi, 0, view, &att, extracted)?;
+            write_lighting(
+                &mut self.lighting,
+                &mut self.rhi,
+                0,
+                view,
+                &att,
+                extracted,
+                self.content.as_ref(),
+            )?;
         }
         {
             // A blocking submit: record, submit and wait for the device, all
@@ -1174,6 +1279,15 @@ fn stream(
     for instance in &extracted.models {
         content.request(AssetId(instance.asset));
     }
+    // The environments are named the same way and requested the same way (§6
+    // M27), and they are the one asset a frame asks for that nothing *draws* —
+    // an id on a `Sky` rather than on an instance. Requesting them here keeps
+    // that a property of what the frame shows, which is the rule the loop above
+    // states. Every one of them since M28: a room's chain has to be resident
+    // before the camera is in the room, not after.
+    for sky in &extracted.skies {
+        content.request(AssetId(sky.look.environment));
+    }
     // The watcher's other end (§4.6). Absent from dist rather than disabled —
     // there is no `ggc` there to rewrite the file.
     #[cfg(feature = "hot-reload")]
@@ -1192,7 +1306,7 @@ fn stream(
 /// `debug`, exactly like the per-tick hash (§5.6c) — a human's terminal must not
 /// see sixty of these a second, and "ten thousand objects, four draws" is a
 /// claim that should be countable rather than asserted (§6 M10).
-fn report_draws(scene: &ScenePass, extracted: &Extracted) {
+fn report_draws(scene: &ScenePass, lighting: &lighting::Lighting, extracted: &Extracted) {
     if tracing::enabled!(target: "gg::draws", tracing::Level::DEBUG) {
         let (instances, draws) = scene.counts();
         tracing::debug!(
@@ -1205,6 +1319,17 @@ fn report_draws(scene: &ScenePass, extracted: &Extracted) {
             // The number that explains a corner of a room going dark: extract
             // dropped a light because a cap was reached (§6 M11).
             lights_dropped = extracted.lights_dropped,
+            // The same pair for environments. Counted since M28 and reported
+            // since M29, which is the gap: `skies_dropped` was incremented,
+            // asserted in two tests, and printed by nothing — a fifth nested
+            // volume went missing with no line anywhere saying so.
+            skies = extracted.skies.len(),
+            skies_dropped = extracted.skies_dropped,
+            // And the third of the same shape (§6 M30): `(froxel, light)` pairs
+            // the grid had no room for. It is not `lights_dropped` one layer
+            // down — the light is still in the frame and still lights most of
+            // it; what is missing is a corner of the busiest froxel.
+            clusters_dropped = lighting.cluster_load().dropped,
         );
     }
 }
@@ -1333,25 +1458,36 @@ fn forward_draws<'a>(
     pass: &'a BoxPass,
     scene: &'a ScenePass,
     at: (Variant, Variant),
-    sky: Option<(PipelineHandle, &'a skybox_shader::SkyPush)>,
+    sky: (PipelineHandle, &'a [skybox_shader::SkyPush]),
 ) -> Vec<DrawSpec<'a>> {
     let mut draws = pass.draws(at.0.forward);
     draws.extend(scene.draws(at.1.forward));
-    // Last, which is what makes it nearly free: every pixel the scene covers has
-    // already failed this draw's depth test (§6 M24, `skybox.slang`).
-    draws.extend(sky.map(|(pipeline, push)| DrawSpec {
-        pipeline,
+    // Last, which is what makes them nearly free: every pixel the scene covers
+    // has already failed these draws' depth test (§6 M24, `skybox.slang`). One
+    // per environment reaching the camera, already outermost-first (§6 M29).
+    draws.extend(sky.1.iter().map(|push| DrawSpec {
+        pipeline: sky.0,
         push_constants: bytemuck::bytes_of(push),
         count: FULLSCREEN_VERTICES,
         index_buffer: None,
         indirect: None,
         depth_bias: None,
+        viewport: None,
     }));
     draws
 }
 
-/// The environment as the skybox pass reads it, or `None` when the frame has
-/// none — which is also what declares the draw out of existence.
+/// One background draw per environment whose volume reaches the camera, empty
+/// when the frame has no sky at all — which is what declares the pass out of
+/// existence (§6 M29).
+///
+/// **Outermost first**, and that ordering is the whole of why this composites
+/// correctly: back-to-front `over` with each environment's *raw* weight is
+/// algebraically the same sum as `ambient_light`'s front-to-back budget with the
+/// spent ones, so the background fades exactly where the shading does. The
+/// budget is still walked innermost-first here, to stop at the same place the
+/// shader's loop stops — an environment the ones inside it have already covered
+/// contributes nothing and does not earn a draw.
 ///
 /// The inverse projection is taken **here**, once per frame on the host, for the
 /// reason `skybox.slang` gives: the alternative is the shader rebuilding it from
@@ -1361,23 +1497,52 @@ fn forward_draws<'a>(
 /// `Sky::intensity` is folded into the three colours rather than crossing as a
 /// fourth number, so the shader is a `lerp` and holds no opinion about scale —
 /// the same fold `sky::radiance` performs for the projection, which is what
-/// keeps the drawn sky and the lit-by sky the same sky.
-fn sky_push(
+/// keeps the drawn sky and the lit-by sky the same sky. The chain, its scale and
+/// the volume are *not* here: they are in the frame block this hands an address
+/// to, which is the one copy both paths read.
+fn sky_pushes(
     view_projection: render::Mat4,
-    environment: Option<gg_extract::ExtractedSky>,
-) -> Option<skybox_shader::SkyPush> {
-    let sky = environment?;
-    let colour = |packed| {
-        let c = srgb_to_linear(packed);
-        let k = sky.intensity.max(0.0);
-        [c[0] * k, c[1] * k, c[2] * k, 0.0]
-    };
-    Some(skybox_shader::SkyPush::new(
-        render::rows(view_projection.inverse()),
-        colour(sky.zenith),
-        colour(sky.horizon),
-        colour(sky.ground),
-    ))
+    skies: &[gg_extract::ExtractedSky],
+    frame: u64,
+) -> Vec<skybox_shader::SkyPush> {
+    let mut kept: Vec<(u32, f32)> = Vec::new();
+    let mut budget = 1.0_f32;
+    for (index, sky) in skies.iter().take(gg_extract::MAX_SKY).enumerate() {
+        if budget <= 1e-3 {
+            break;
+        }
+        let raw = weight_at_camera(sky).clamp(0.0, 1.0);
+        let spent = raw * budget;
+        if spent <= 0.0 {
+            continue;
+        }
+        budget -= spent;
+        // The index is the block's, and it is the enumeration's because
+        // `Lighting::resolve` fills the array from this same slice in this same
+        // order — the one coupling that would be silent if it broke.
+        kept.push((index as u32, raw));
+    }
+    kept.reverse();
+    let inverse = render::rows(view_projection.inverse());
+    kept.into_iter()
+        .map(|(index, weight)| {
+            let look = skies[index as usize].look;
+            let colour = |packed| {
+                let c = srgb_to_linear(packed);
+                let k = look.intensity.max(0.0);
+                [c[0] * k, c[1] * k, c[2] * k, 0.0]
+            };
+            skybox_shader::SkyPush::new(
+                inverse,
+                colour(look.zenith),
+                colour(look.horizon),
+                colour(look.ground),
+                frame,
+                index,
+                weight,
+            )
+        })
+        .collect()
 }
 
 /// Whether `instance` can cast into `cascade`, for a sun travelling along
@@ -1467,6 +1632,26 @@ fn shadow_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass, cascade: usize) -> 
     draws
 }
 
+/// Every lamp face's draws in one list, each carrying the tile it lands in
+/// (§6 M31).
+///
+/// Flat rather than a list per face, because they share a pass: the atlas is one
+/// attachment, cleared once, and the six-by-lamps arrangement inside it is a
+/// property of the rectangles rather than of the graph.
+fn lamp_draws<'a>(
+    pass: &'a BoxPass,
+    scene: &'a ScenePass,
+    lamps: &lamp::Lamps,
+) -> Vec<DrawSpec<'a>> {
+    let mut draws = Vec::new();
+    for index in 0..lamps.lamps().len() * lamp::FACES {
+        let tile = lamps.tile_at(index / lamp::FACES, index % lamp::FACES);
+        draws.extend(pass.lamp_draws(index, tile));
+        draws.extend(scene.lamp_draws(index, tile));
+    }
+    draws
+}
+
 /// Every attachment a frame allocates, and the extent they were sized from.
 ///
 /// `view_extent` rides along rather than being recomputed by each caller: the
@@ -1494,6 +1679,20 @@ struct SceneAttachments {
     shadows: Vec<graph::ResourceId>,
     /// `shadows` as bindless slots, for the lighting block.
     shadow_textures: Vec<TextureIndex>,
+    /// The lamp face atlas, when any point light casts (§6 M31). One image for
+    /// every face of every lamp — see `lamp`'s header for why it is not
+    /// six-images-per-lamp the way a cascade is one-image-per-slab.
+    lamp_atlas: Option<graph::ResourceId>,
+    /// That atlas's bindless slot. `None` — including when the atlas exists but
+    /// never reached the array — is what makes the block's `lamp_count` zero,
+    /// so a frame cannot look faces up in a slot it does not have.
+    lamp_texture: Option<TextureIndex>,
+    /// Every depth image the forward pass reads: the cascades, then the lamp
+    /// atlas. Assembled here rather than at the declaration, because both are
+    /// sampled through the bindless array and the graph would therefore see no
+    /// dependency at all unless the pass names them — the hazard §4.5 warns an
+    /// index hides, and the second one arrived a milestone after the first.
+    forward_samples: Vec<graph::ResourceId>,
     /// The luminance target, when `r.histogram` is on (§6 M11).
     grid: Option<graph::ResourceId>,
 }
@@ -1503,6 +1702,7 @@ fn scene_attachments(
     frame: &mut graph::Frame<'_>,
     view_extent: (u32, u32),
     sun: Option<lighting::Sun>,
+    lamps: &lamp::Lamps,
     histogram: bool,
     samples: Samples,
 ) -> Result<SceneAttachments, RhiError> {
@@ -1518,6 +1718,13 @@ fn scene_attachments(
     let depth = frame.depth_at("scene.depth", view_extent, samples)?;
     let shadows = shadow_maps(frame, sun)?;
     let shadow_textures = shadows.iter().filter_map(|id| frame.texture(*id)).collect();
+    // One name for every lamp's every face, unlike the cascades' four: a dump
+    // reads "one atlas" because that is what the frame allocated, and the tiles
+    // inside it are the draws' rectangles rather than resources of their own.
+    let lamp_atlas = (!lamps.is_empty())
+        .then(|| frame.shadow("scene.lamps", lamps.extent()))
+        .transpose()?;
+    let lamp_texture = lamp_atlas.and_then(|id| frame.texture(id));
     let grid = histogram
         .then(|| frame.color_at("luminance.grid", luminance::GRID, SCENE_FORMAT, Samples::X1))
         .transpose()?;
@@ -1527,8 +1734,11 @@ fn scene_attachments(
         scene,
         scene_ms,
         depth,
+        forward_samples: shadows.iter().copied().chain(lamp_atlas).collect(),
         shadows,
         shadow_textures,
+        lamp_atlas,
+        lamp_texture,
         grid,
     })
 }
@@ -1539,6 +1749,9 @@ struct SceneDraws<'a> {
     prepass: Vec<DrawSpec<'a>>,
     /// One list per cascade, in `shadows` order.
     shadow: Vec<Vec<DrawSpec<'a>>>,
+    /// Every lamp face's draws, **flat**: one pass writes one atlas, and each
+    /// draw carries the tile it lands in (§6 M31).
+    lamp: Vec<DrawSpec<'a>>,
     forward: Vec<DrawSpec<'a>>,
     post: [DrawSpec<'a>; 1],
     /// The luminance resample — the post draw without the curve (§6 M11).
@@ -1553,7 +1766,8 @@ impl<'a> SceneDraws<'a> {
         scene: &'a ScenePass,
         att: &SceneAttachments,
         post_push: &'a post_shader::PostPush,
-        sky: Option<(PipelineHandle, &'a skybox_shader::SkyPush)>,
+        sky: (PipelineHandle, &'a [skybox_shader::SkyPush]),
+        lamps: &lamp::Lamps,
         at: (Variant, Variant),
     ) -> Self {
         SceneDraws {
@@ -1561,6 +1775,10 @@ impl<'a> SceneDraws<'a> {
             shadow: (0..att.shadows.len())
                 .map(|cascade| shadow_draws(pass, scene, cascade))
                 .collect(),
+            lamp: att
+                .lamp_atlas
+                .map(|_| lamp_draws(pass, scene, lamps))
+                .unwrap_or_default(),
             forward: forward_draws(pass, scene, at, sky),
             post: [pass.post_draw(post_push)],
             downsample: [pass.downsample_draw(post_push)],
@@ -1606,14 +1824,16 @@ fn declare_frame<'a>(
         scene_ms: att.scene_ms,
         depth: att.depth,
         shadows: &att.shadows,
+        lamps: att.lamp_atlas,
         clear: plan.clear,
         viewport: plan.viewport,
         prepass_draws: &draws.prepass,
         shadow_draws: shadow_slices,
+        lamp_draws: &draws.lamp,
         forward_draws: &draws.forward,
         post_draws: &draws.post,
         samples: &draws.samples,
-        forward_samples: &att.shadows,
+        forward_samples: &att.forward_samples,
     });
     if !plan.ui.is_empty() {
         declared.push(ui_pass(att.backbuffer, plan.ui));
@@ -1646,15 +1866,67 @@ fn write_lighting(
     view: &View,
     att: &SceneAttachments,
     extracted: &Extracted,
+    content: Option<&Content>,
 ) -> Result<(), RhiError> {
+    lighting.resolve(content, &extracted.skies);
     lighting.write(
         rhi,
         slot,
         view.view_projection(att.view_extent),
+        // Fitted here rather than kept on `Lighting`, for the same reason the
+        // matrix beside it is built here: both are functions of the view and the
+        // attachment, and a stored copy is a copy that can be a frame stale.
+        &cluster::Grid::new(view, att.view_extent),
         &extracted.lights,
-        extracted.sky,
-        &att.shadow_textures,
+        lighting::Maps {
+            cascades: &att.shadow_textures,
+            lamps: att.lamp_texture,
+        },
     )
+}
+
+/// How much of `sky` applies where the camera is — the camera being the origin,
+/// because everything in `Extracted` is camera-relative.
+fn weight_at_camera(sky: &gg_extract::ExtractedSky) -> f32 {
+    sky.weight_at(render::Vec3::ZERO)
+}
+
+/// The compiled chain a sky names, if the pack holds it and the chain is on the
+/// device (§6 M27).
+///
+/// Both conditions every frame, not once at load: `ggc watch` rewrites a pack
+/// under a running game and a reload re-uploads what it held, so "resident" is a
+/// question with a different answer on either side of a save. Returning `None`
+/// is the gradient, which is why nothing here logs — a chain arriving one frame
+/// late is streaming, not a fault.
+pub(crate) fn radiance(
+    content: Option<&Content>,
+    sky: gg_extract::ExtractedSky,
+) -> Option<Radiance> {
+    let content = content?;
+    let environment = content.environment(AssetId(sky.look.environment))?;
+    let texture = content.texture(environment.radiance)?;
+    let levels = environment.levels.min(texture.levels);
+    if levels == 0 {
+        return None;
+    }
+    // The sky's intensity is folded in here and nowhere else. A gradient's is
+    // folded during projection (`sky::radiance` multiplies), so doing it at the
+    // same point keeps the frame block's environment count a count for both
+    // paths — and the chain itself is sampled with this same scale in the shader.
+    let scale = sky.look.intensity.max(0.0);
+    let mut sh = environment.sh;
+    for coefficient in &mut sh {
+        for channel in &mut coefficient[..3] {
+            *channel *= scale;
+        }
+    }
+    Some(Radiance {
+        texture: texture.index,
+        levels,
+        sh,
+        scale,
+    })
 }
 
 /// The boxes, and the four pipelines that draw them: prepass, shadow, forward,
@@ -1680,6 +1952,9 @@ struct BoxPass {
     pushes: Vec<Push>,
     /// One list per cascade, culled — see [`BoxPass::build_shadow`].
     shadow_pushes: Vec<Vec<Push>>,
+    /// One list per lamp face, culled — see [`BoxPass::build_lamps`]. Flat, as
+    /// `lamp * 6 + face`.
+    lamp_pushes: Vec<Vec<Push>>,
 }
 
 /// One static primitive: its vertices, its indices, and the address the shader
@@ -1853,6 +2128,7 @@ impl BoxPass {
             geometry,
             pushes: Vec::new(),
             shadow_pushes: Vec::new(),
+            lamp_pushes: Vec::new(),
         })
     }
 
@@ -1925,7 +2201,7 @@ impl BoxPass {
                     .filter(|instance| casts_into(instance, cascade, sun))
                     .map(|instance| {
                         let mut push = Push::new(geometry, frame, instance);
-                        push.push.cascade = index as u32;
+                        push.push.shadow_view = index as u32;
                         push
                     }),
             );
@@ -1939,6 +2215,53 @@ impl BoxPass {
             .get(cascade)
             .map_or(&[][..], Vec::as_slice);
         self.draws_of(self.shadow, pushes)
+    }
+
+    /// This frame's lamp-face pushes: one list per face, holding only the boxes
+    /// that face can see (§6 M31).
+    ///
+    /// Culled per *face* and not merely per lamp, which is what keeps six faces
+    /// from being six times the pass: a box beside a lamp is in one of them.
+    fn build_lamps(&mut self, extracted: &Extracted, frame: DeviceAddress, lamps: &lamp::Lamps) {
+        let geometry = &self.geometry;
+        let faces = lamps.lamps().len() * lamp::FACES;
+        self.lamp_pushes.resize_with(faces, Vec::new);
+        self.lamp_pushes.truncate(faces);
+        for (index, pushes) in self.lamp_pushes.iter_mut().enumerate() {
+            let (lamp, face) = (index / lamp::FACES, index % lamp::FACES);
+            // The index space is the shader's, cascades first — `LAMP_VIEW_BASE`
+            // in `pbr.slang` is the other half of this sentence.
+            let view = (lighting::MAX_CASCADES + index) as u32;
+            let lamp = &lamps.lamps()[lamp];
+            pushes.clear();
+            pushes.extend(
+                extracted
+                    .instances
+                    .iter()
+                    .filter(|instance| {
+                        // `r.shadow_cull 0` is a diagnostic for the whole shadow
+                        // path, not the sun's alone: an artifact that survives it
+                        // is the fit's rather than a cull's, here as there.
+                        cvars::SHADOW_CULL.int() == 0
+                            || lamp.casts_into(instance.offset, instance.radius, face)
+                    })
+                    .map(|instance| {
+                        let mut push = Push::new(geometry, frame, instance);
+                        push.push.shadow_view = view;
+                        push
+                    }),
+            );
+        }
+    }
+
+    /// The boxes that reach one lamp face, drawn into that face's tile.
+    fn lamp_draws(&self, face: usize, tile: Viewport) -> Vec<DrawSpec<'_>> {
+        let pushes = self.lamp_pushes.get(face).map_or(&[][..], Vec::as_slice);
+        let mut draws = self.draws_of(self.shadow, pushes);
+        for draw in &mut draws {
+            draw.viewport = Some(tile);
+        }
+        draws
     }
 
     /// The prepass + forward pair for `samples`, built on first ask (§6 M21).
@@ -1977,6 +2300,7 @@ impl BoxPass {
                     index_buffer: Some(geometry.indices),
                     indirect: None,
                     depth_bias: None,
+                    viewport: None,
                 }
             })
             .collect()
@@ -2028,6 +2352,7 @@ impl BoxPass {
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }
     }
 
@@ -2041,6 +2366,7 @@ impl BoxPass {
             index_buffer: None,
             indirect: None,
             depth_bias: None,
+            viewport: None,
         }
     }
 
@@ -2130,6 +2456,9 @@ pub struct SceneFrame<'a> {
     /// One depth buffer per cascade, nearest first, empty when nothing casts
     /// (§6 M15.3).
     pub shadows: &'a [graph::ResourceId],
+    /// The lamp face atlas, when any point light casts (§6 M31). One resource
+    /// for every face of every lamp, written by one pass at many rectangles.
+    pub lamps: Option<graph::ResourceId>,
     /// Linear clear for the scene attachment.
     pub clear: [f32; 4],
     /// Where the post pass lands the scene in the backbuffer. `None` is all of
@@ -2144,6 +2473,12 @@ pub struct SceneFrame<'a> {
     /// order. Shorter than `shadows` is a cascade drawn empty, which is a black
     /// map and therefore a fully lit one — not a crash, and not a shadow.
     pub shadow_draws: &'a [&'a [DrawSpec<'a>]],
+    /// Lamp-pass draws — every face of every lamp in one list, each carrying its
+    /// own tile. Empty when `lamps` is `None`. An atlas nothing drew into is a
+    /// cleared one and therefore fully lit, exactly as an empty cascade is — the
+    /// failure mode of this pass is a lamp that stops occluding, never one that
+    /// blackens a room.
+    pub lamp_draws: &'a [DrawSpec<'a>],
     /// Forward-pass draws.
     pub forward_draws: &'a [DrawSpec<'a>],
     /// The one fullscreen resolve.
@@ -2185,6 +2520,25 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
                 viewport: None,
                 samples: &[],
                 draws: frame.shadow_draws.get(index).copied().unwrap_or(&[]),
+            },
+        });
+    }
+    // One pass for every face of every lamp (§6 M31): one attachment, one clear,
+    // and a rectangle per draw. Declared only when a lamp casts, on the same
+    // reasoning the cascades are — a scene with no point light pays nothing, and
+    // a graph dump is the frame rather than a superset of every frame.
+    if let Some(lamps) = frame.lamps {
+        declared.push(Declared {
+            name: "lamp-shadows",
+            body: Body::Draw {
+                color: None,
+                resolve: None,
+                depth: Some((lamps, DepthUse::WriteStore)),
+                // The whole atlas, so the clear reaches every tile — including
+                // the ones no caster reached, which must be *lit* and not stale.
+                viewport: None,
+                samples: &[],
+                draws: frame.lamp_draws,
             },
         });
     }
@@ -2313,7 +2667,12 @@ fn forward_desc(samples: Samples) -> PipelineDesc<'static> {
 /// `TestOnly` and a fragment emitted at 0.0: under reverse-Z that is the far
 /// plane *and* the clear value, so `GREATER_OR_EQUAL` passes exactly where no
 /// geometry landed. Writing depth would be harmless and is still off — the sky
-/// is behind everything by construction and nothing is drawn after it.
+/// is behind everything by construction, and since M29 there is more than one of
+/// these draws and each must meet the same test as the first.
+///
+/// `Alpha` rather than `Off` since M29, and it costs the single-environment case
+/// nothing: that draw carries a weight of 1, and straight-alpha `over` at alpha
+/// 1 is a replace. What it buys is the doorway, where two of them composite.
 fn skybox_desc(samples: Samples) -> PipelineDesc<'static> {
     PipelineDesc {
         name: "skybox",
@@ -2323,7 +2682,7 @@ fn skybox_desc(samples: Samples) -> PipelineDesc<'static> {
         fs_entry: skybox_shader::FS_MAIN_ENTRY,
         push_constant_size: core::mem::size_of::<skybox_shader::SkyPush>() as u32,
         color: ColorTarget::Format(SCENE_FORMAT),
-        blend: Blend::Off,
+        blend: Blend::Alpha,
         depth: DepthMode::TestOnly,
         samples,
         depth_bias: false,
@@ -3316,5 +3675,99 @@ mod tests {
         }
         assert_eq!(SRGB_EOTF[0], 0.0);
         assert_eq!(SRGB_EOTF[255], 1.0);
+    }
+
+    /// A volume at `centre` with `half`, tinted so the pushes it produces are
+    /// telling apart by their red channel alone.
+    fn a_sky(centre: [f32; 3], half: [f32; 3], fade: f32, red: u32) -> gg_extract::ExtractedSky {
+        gg_extract::ExtractedSky {
+            look: gg_extract::SkyLook {
+                zenith: red << 16,
+                horizon: red << 16,
+                ground: red << 16,
+                intensity: 1.0,
+                environment: 0,
+            },
+            offset: render::Vec3::from_array(centre),
+            half_extent: render::Vec3::from_array(half),
+            fade,
+        }
+    }
+
+    #[test]
+    fn the_background_is_one_draw_indoors_and_two_in_the_doorway() {
+        let unbounded = a_sky([0.0; 3], [0.0; 3], 0.0, 0x10);
+        // A room the camera (the origin, always) is 1 m outside of, over a 4 m
+        // fade — so it is well inside the band where both apply.
+        let room = a_sky([0.0, 0.0, 5.0], [1.0, 1.0, 4.0], 4.0, 0x80);
+        let m = render::Mat4::IDENTITY;
+
+        assert!(sky_pushes(m, &[], 0).is_empty(), "no sky, no draw");
+
+        let one = sky_pushes(m, &[unbounded], 0);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].weight, 1.0);
+        assert_eq!(one[0].environment, 0);
+
+        // Deep inside the room: the room weighs 1, spends the whole budget, and
+        // the world's sky never earns a draw.
+        let inside = a_sky([0.0; 3], [2.0, 2.0, 2.0], 1.0, 0x80);
+        let indoors = sky_pushes(m, &[inside, unbounded], 0);
+        assert_eq!(indoors.len(), 1, "{indoors:?}");
+        assert_eq!(indoors[0].environment, 0);
+        assert_eq!(indoors[0].weight, 1.0);
+
+        // In the doorway: two draws, and the *outermost* is first because
+        // `Blend::Alpha` is back to front.
+        let doorway = sky_pushes(m, &[room, unbounded], 0);
+        assert_eq!(doorway.len(), 2, "{doorway:?}");
+        assert_eq!(doorway[0].environment, 1, "the world's sky draws first");
+        assert_eq!(doorway[0].weight, 1.0);
+        assert_eq!(doorway[1].environment, 0);
+        assert!(
+            doorway[1].weight > 0.0 && doorway[1].weight < 1.0,
+            "{:?}",
+            doorway[1].weight
+        );
+    }
+
+    /// The load-bearing claim of §6 M29's background: back-to-front `over` with
+    /// each environment's raw weight is the *same sum* as `ambient_light`'s
+    /// front-to-back budget. Nothing at runtime can compare the two — one is a
+    /// blend state and the other is a loop in a shader — so it is checked here,
+    /// on three nested volumes with the camera in two of their fades at once.
+    #[test]
+    fn the_background_composites_to_what_the_shading_accumulates() {
+        let skies = [
+            a_sky([0.0, 0.0, 3.0], [1.0, 1.0, 1.0], 3.0, 0xc0),
+            a_sky([0.0, 0.0, 6.0], [2.0, 2.0, 3.0], 5.0, 0x60),
+            a_sky([0.0; 3], [0.0; 3], 0.0, 0x20),
+        ];
+        let pushes = sky_pushes(render::Mat4::IDENTITY, &skies, 0);
+        assert_eq!(pushes.len(), 3, "all three reach the camera");
+
+        // What the target holds after the draws, straight-alpha `over` a target
+        // the forward pass cleared to black.
+        let mut composited = 0.0_f32;
+        for push in &pushes {
+            composited = push.weight * push.zenith[0] + (1.0 - push.weight) * composited;
+        }
+
+        // What `ambient_light` accumulates over the same environments.
+        let mut accumulated = 0.0_f32;
+        let mut budget = 1.0_f32;
+        for sky in &skies {
+            let weight = weight_at_camera(sky).clamp(0.0, 1.0) * budget;
+            budget -= weight;
+            accumulated += weight * srgb_to_linear(sky.look.zenith)[0];
+        }
+
+        assert!(
+            (composited - accumulated).abs() < 1e-6,
+            "{composited} vs {accumulated}"
+        );
+        // And it is a real blend rather than three ways of writing the same
+        // number: the innermost alone would be a different picture.
+        assert!((composited - srgb_to_linear(skies[0].look.zenith)[0]).abs() > 1e-3);
     }
 }

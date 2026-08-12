@@ -215,12 +215,18 @@ pub const gg_ecs::boundary::Renderable::TYPE_NAME: &'static str
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 #[repr(C)] pub struct gg_ecs::boundary::Sky
+pub gg_ecs::boundary::Sky::center: gg_math::sim::DVec3
+pub gg_ecs::boundary::Sky::environment: u64
+pub gg_ecs::boundary::Sky::fade: f32
 pub gg_ecs::boundary::Sky::ground: u32
+pub gg_ecs::boundary::Sky::half_extent: gg_math::sim::Vec3
 pub gg_ecs::boundary::Sky::horizon: u32
 pub gg_ecs::boundary::Sky::intensity: f32
 pub gg_ecs::boundary::Sky::zenith: u32
 impl gg_ecs::boundary::Sky
 pub fn gg_ecs::boundary::Sky::daylight(f32) -> Self
+pub fn gg_ecs::boundary::Sky::image(&str, f32) -> Self
+pub fn gg_ecs::boundary::Sky::within(self, gg_math::sim::DVec3, gg_math::sim::Vec3, f32) -> Self
 impl bytemuck::pod::Pod for gg_ecs::boundary::Sky
 impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Sky
 impl gg_ecs::component::Component for gg_ecs::boundary::Sky

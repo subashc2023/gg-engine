@@ -25,6 +25,10 @@
 //   [Hei14] Heitz, "Understanding the Masking-Shadowing Function in
 //           Microfacet-Based BRDFs", JCGT 3(2) — the height-correlated Smith
 //           visibility term used below.
+//   [Lag12] Lagarde & Zanuttini, "Local Image-based Lighting With
+//           Parallax-corrected Cubemap", SIGGRAPH 2012 talks — intersect the
+//           reflected ray with the environment's own volume and re-aim from its
+//           centre, which is what makes a bounded environment a *place*.
 //   [LdR14] Lagarde & de Rousiers, "Moving Frostbite to Physically Based
 //           Rendering", SIGGRAPH 2014 course — the V-vs-G bookkeeping, and the
 //           argument for folding the 4*NdotL*NdotV denominator into V.
@@ -68,18 +72,56 @@ static const uint LIGHT_POINT = 1;
 // Strides written here and asserted against the Rust records beside them, the
 // same agreement `VERTEX_STRIDE` and `INSTANCE_STRIDE` are half of. HLSL has no
 // `sizeof`, so a drift is a build error rather than a garbled read.
-static const uint FRAME_STRIDE = 624;
+static const uint FRAME_STRIDE = 4368;
 static const uint LIGHT_STRIDE = 48;
 static const uint CASCADE_STRIDE = 80;
 // Where the cascade array starts inside the frame block.
-static const uint CASCADE_BASE = 304;
+static const uint CASCADE_BASE = 976;
 // Coefficients in the order-2 environment projection (§6 M24), and where they
 // start. Must equal `sky.rs`'s SH_COEFFICIENTS.
 static const uint SH_COEFFICIENTS = 9;
-static const uint SH_BASE = 160;
+// The environment array (§6 M28). Must equal `gg_extract::MAX_SKY`; the loop
+// below is bounded by it and a mismatch would read past the block.
+static const uint MAX_SKY = 4;
+static const uint ENV_STRIDE = 192;
+
+// The immutable sampler set's LinearClamp slot — `gg_rhi::Sampler::index`, and
+// the one this file names rather than reading out of the frame block: the
+// shadow sampler is a *choice* the block records, and this is a fixed property
+// of how an octahedral chain must be filtered.
+static const uint SAMPLER_LINEAR_CLAMP = 1;
+// Where the environment array starts, and therefore where the innermost
+// environment's coefficients start — `sh` is the first field of an environment
+// precisely so M24's read is still the read.
+static const uint ENV_BASE = 208;
 // Must equal `lighting.rs`'s MAX_CASCADES: the loops below are unrolled over it
 // and a mismatch would read past the block.
 static const uint MAX_CASCADES = 4;
+
+// The casting lamps (§6 M31). Must equal `lamp.rs`'s MAX_LAMPS and FACES; a lamp
+// is six 4x4 matrices and nothing else, because the light record beside it
+// already carries the position and range this needs.
+static const uint MAX_LAMPS = 8;
+static const uint LAMP_FACES = 6;
+static const uint LAMP_STRIDE = 384;
+static const uint LAMP_BASE = 1296;
+// A shadow draw's `shadow_view` index: cascades first, then lamp faces. One
+// number rather than a second push field, so the shadow vertex shader takes one
+// branch on a value that is uniform across the draw.
+static const uint LAMP_VIEW_BASE = MAX_CASCADES;
+
+// The froxel grid (§6 M30). Must equal `cluster.rs`'s GRID, which is where the
+// dimensions are argued; here they are only the arithmetic that finds a list.
+static const uint CLUSTER_X = 16;
+static const uint CLUSTER_Y = 8;
+static const uint CLUSTER_Z = 24;
+// Lights the frame's array holds — `gg_extract::MAX_DIRECTIONAL + MAX_POINT`,
+// and the only one of these five a stride change cannot derive.
+static const uint MAX_LIGHTS = 260;
+// Where the froxel ranges start, and where the indices they point into do.
+// Derived rather than written down, so a block that grows moves both.
+static const uint CLUSTER_BASE = FRAME_STRIDE + MAX_LIGHTS * LIGHT_STRIDE;
+static const uint INDEX_BASE = CLUSTER_BASE + CLUSTER_X * CLUSTER_Y * CLUSTER_Z * 8;
 
 // How far the receiver-plane extrapolation below is allowed to lean, in NDC
 // depth per unit of shadow uv. The slab `Sun::of` fits spans 2*radius across
@@ -120,7 +162,34 @@ struct Frame
     float shadow_softness;     // narrowest penumbra, in *screen pixels* (§6 M23)
     float shadow_penumbra;     // penumbra cap and blocker search radius, in texels
     uint shadow_taps;          // taps in the filter disk; the search uses a quarter
-    float sky;                 // nonzero when the block holds an environment (§6 M24)
+    uint environment_count;    // live entries in the environment array; 0 is "no sky" (§6 M28)
+    uint directional_count;    // suns at the front of the light array (§6 M30); the rest are froxel-listed
+    float3 view_forward;       // unit; what a camera-relative position projects onto to get view depth
+    float cluster_scale;       // slice = log2(depth) * scale + bias, floored
+    float cluster_bias;
+    float2 cluster_tile;       // froxels per pixel, across and down
+    uint lamp_count;           // point lights that cast, immediately after the suns (§6 M31)
+    uint lamp_texture;         // the face atlas's bindless slot; unread at lamp_count 0
+    float2 lamp_uv_scale;      // tile space -> atlas uv: 1/6 across, 1/lamps down
+    float lamp_inv_tile;       // one face texel in tile space
+    float lamp_normal_bias;    // *face* texels of normal offset, angle-scaled like the sun's
+    float lamp_depth_bias;     // the angle-free part, also in face texels
+    uint lamp_taps;            // taps in the lamp filter; its own knob because it is paid per lamp
+}
+
+// One environment: what it radiates, and the volume it radiates in (§6 M28).
+//
+// `sh` is loaded separately for `load_sh`'s measured reason — 27 scalars a
+// fragment is worth a branch — so this holds everything needed to decide
+// *whether* to load them.
+struct Environment
+{
+    float3 offset;         // the volume's centre, camera-relative
+    float fade;            // metres outside the box it falls to nothing over; 0 is a hard edge
+    float3 half_extent;    // zero is unbounded, which weighs 1 everywhere
+    float radiance_scale;  // Sky::intensity, applied to the chain's texels
+    uint radiance_texture; // the prefiltered chain's bindless slot (§6 M27)
+    uint radiance_levels;  // levels in it, and the switch: 0 is "SH only"
 }
 
 // One cascade. `texel_world` is per-cascade and that is the point: the bias is
@@ -166,23 +235,185 @@ Frame load_frame(uint64_t address)
     frame.shadow_softness = f[31];
     frame.shadow_penumbra = f[32];
     frame.shadow_taps = u[33];
-    frame.sky = f[34];
+    frame.environment_count = u[34];
+    frame.directional_count = u[35];
+    frame.view_forward = float3(f[36], f[37], f[38]);
+    frame.cluster_scale = f[39];
+    frame.cluster_bias = f[40];
+    frame.cluster_tile = float2(f[41], f[42]);
+    frame.lamp_count = u[43];
+    frame.lamp_texture = u[44];
+    frame.lamp_uv_scale = float2(f[45], f[46]);
+    frame.lamp_inv_tile = f[47];
+    frame.lamp_normal_bias = f[48];
+    frame.lamp_depth_bias = f[49];
+    frame.lamp_taps = u[50];
     return frame;
 }
 
-// The environment's coefficients, read out of the same block — but **not** by
+// One face of one lamp's projection, straight out of the block.
+//
+// Read a face at a time and never six: a fragment picks its face by major axis
+// before it asks, so five of them would be sixty scalar loads to discard.
+float4x4 load_lamp_face(uint64_t frame_address, uint lamp, uint face)
+{
+    float* f = (float*)(frame_address + LAMP_BASE + lamp * LAMP_STRIDE + face * 64);
+    return float4x4(f[0], f[1], f[2], f[3],
+                    f[4], f[5], f[6], f[7],
+                    f[8], f[9], f[10], f[11],
+                    f[12], f[13], f[14], f[15]);
+}
+
+// Which of a lamp's six faces a direction falls in: `2 * major axis + negative`.
+//
+// The same table `lamp.rs`'s `AXES` holds, and the agreement between them is the
+// whole of the convention — these are six ordinary 2D maps, so there is no cube
+// standard to defer to and nothing that would catch the two drifting apart
+// except the picture. `to` is light → fragment.
+uint lamp_face(float3 to)
+{
+    float3 a = abs(to);
+    if (a.x >= a.y && a.x >= a.z)
+    {
+        return to.x < 0.0 ? 1 : 0;
+    }
+    if (a.y >= a.z)
+    {
+        return to.y < 0.0 ? 3 : 2;
+    }
+    return to.z < 0.0 ? 5 : 4;
+}
+
+// The froxel this fragment is in: its tile from `SV_Position`, its slice from
+// the view depth. `cluster.rs`'s `Grid::slice_of` is the host's copy of the
+// second half, and the two are reconciled by widening every sphere there rather
+// than by hoping two `log2` implementations agree on a boundary.
+uint cluster_of(Frame frame, float3 world, float2 pixel)
+{
+    float depth = max(dot(world, frame.view_forward), 1e-6);
+    int k = int(floor(log2(depth) * frame.cluster_scale + frame.cluster_bias));
+    uint i = uint(clamp(int(pixel.x * frame.cluster_tile.x), 0, int(CLUSTER_X) - 1));
+    uint j = uint(clamp(int(pixel.y * frame.cluster_tile.y), 0, int(CLUSTER_Y) - 1));
+    // Clamped rather than discarded: the last slice reaches infinity and the
+    // first starts at the near plane, so a depth outside them belongs to the
+    // froxel at the end — whose list was built for a froxel that reaches it.
+    uint slice = uint(clamp(k, 0, int(CLUSTER_Z) - 1));
+    return (slice * CLUSTER_Y + j) * CLUSTER_X + i;
+}
+
+// One froxel's run: where it starts in the index array, and how long it is.
+uint2 load_cluster(uint64_t frame_address, uint cluster)
+{
+    uint* u = (uint*)(frame_address + uint64_t(CLUSTER_BASE) + uint64_t(cluster) * 8);
+    return uint2(u[0], u[1]);
+}
+
+// One entry of a run: an index into the frame's light array.
+uint load_cluster_index(uint64_t frame_address, uint at)
+{
+    uint* u = (uint*)(frame_address + uint64_t(INDEX_BASE));
+    return u[at];
+}
+
+Environment load_environment(uint64_t frame_address, uint index)
+{
+    uint64_t at = frame_address + uint64_t(ENV_BASE) + uint64_t(index) * ENV_STRIDE;
+    // Past the coefficients: they are the first 144 bytes and are read only if
+    // this record says the environment applies here.
+    float* f = (float*)(at + 144);
+    uint* u = (uint*)(at + 144);
+    Environment e;
+    e.offset = float3(f[0], f[1], f[2]);
+    e.fade = f[3];
+    e.half_extent = float3(f[4], f[5], f[6]);
+    e.radiance_scale = f[7];
+    e.radiance_texture = u[8];
+    e.radiance_levels = u[9];
+    return e;
+}
+
+// How much of `e` applies at `world`, camera-relative — 1 inside the box, 0
+// beyond `fade` metres outside it, smoothstepped between.
+//
+// **Duplicated in `gg_extract::ExtractedSky::weight_at`**, which decides which
+// background to draw where this decides how to shade. The two never meet at
+// runtime, so nothing can assert them equal; both are three lines of the same
+// arithmetic, and a drift shows as a reflection that does not match the sky
+// behind it.
+float environment_weight(Environment e, float3 world)
+{
+    if (all(e.half_extent == 0.0))
+    {
+        return 1.0;
+    }
+    float3 outside = max(abs(world - e.offset) - e.half_extent, 0.0);
+    float distance = length(outside);
+    // The comparison and not a division: a zero `fade` is a hard edge, and
+    // dividing by it would be a NaN weight and a black room.
+    if (e.fade <= 0.0)
+    {
+        return distance <= 0.0 ? 1.0 : 0.0;
+    }
+    return 1.0 - smoothstep(0.0, e.fade, distance);
+}
+
+// `direction` re-aimed at where it actually leaves `e`'s volume (§6 M29).
+//
+// An environment is a function of direction alone, which is a statement that its
+// contents are infinitely far away. That is true of a sky and false of a room:
+// inside a bounded volume the wall a reflection lands on is metres away, so two
+// points on a floor reflecting the *same* direction must see different parts of
+// it. Intersecting the ray with the volume and re-aiming from the box centre —
+// where the chain was integrated from — is [Lag12]'s correction, and it is what
+// makes a reflection slide along a wall instead of riding the camera.
+//
+// Unbounded environments are returned unchanged: infinitely far away is what
+// they are, and there is no box to leave. Returned **unnormalized** — every
+// consumer normalizes — because the exit point relative to the centre is already
+// the direction wanted.
+float3 parallax_direction(Environment e, float3 world, float3 direction)
+{
+    if (all(e.half_extent == 0.0))
+    {
+        return direction;
+    }
+    // The reciprocal is taken against a floored magnitude rather than the
+    // component: a ray exactly parallel to a slab gives 0 * inf = NaN in the
+    // products below, and a NaN t survives `min` on some drivers and not others.
+    float3 inverse = select(direction >= 0.0, 1.0, -1.0) / max(abs(direction), 1e-5);
+    float3 local = world - e.offset;
+    float3 far = max((e.half_extent - local) * inverse, (-e.half_extent - local) * inverse);
+    float t = min(min(far.x, far.y), far.z);
+    // Outside the box and pointing away from it: there is no exit point, and the
+    // honest answer is the uncorrected direction rather than a point behind the
+    // viewer. Written as `!(t > 0)` so a NaN that got this far falls here too.
+    if (!(t > 0.0))
+    {
+        return direction;
+    }
+    return local + direction * t;
+}
+
+// One environment's coefficients, read out of the same block — but **not** by
 // `load_frame`, and that is a measured decision. Loading them eagerly is 27
 // scalar loads a fragment for the environment's sake in every scene that has
 // none, and it cost the frame macro 6 % on the pinned rasterizer with nothing
-// to show for it. `Frame::sky` is uniform across a draw, so the branch that
-// guards this splits no quad and a scene without a sky pays nothing.
-void load_sh(uint64_t address, out float3 sh[SH_COEFFICIENTS])
+// to show for it. `Frame::environment_count` is uniform across a draw, so the
+// branch that guards this splits no quad and a scene without a sky pays nothing.
+//
+// **Accumulated with a weight rather than assigned** (§6 M28). An order-2
+// projection is linear, so the weighted sum of two environments' coefficients is
+// the projection of the weighted sum of the two environments — not an
+// approximation of it. That is the whole of why blending environments costs nine
+// multiply-adds and one evaluation instead of a second lighting path, and it is
+// why a doorway is a fade instead of a pop.
+void accumulate_sh(uint64_t address, uint index, float weight, inout float3 sh[SH_COEFFICIENTS])
 {
-    float* f = (float*)(address + uint64_t(SH_BASE));
+    float* f = (float*)(address + uint64_t(ENV_BASE) + uint64_t(index) * ENV_STRIDE);
     [ForceUnroll]
     for (uint i = 0; i < SH_COEFFICIENTS; ++i)
     {
-        sh[i] = float3(f[i * 4], f[i * 4 + 1], f[i * 4 + 2]);
+        sh[i] += weight * float3(f[i * 4], f[i * 4 + 1], f[i * 4 + 2]);
     }
 }
 
@@ -201,6 +432,22 @@ Cascade load_cascade(uint64_t frame_address, uint index)
     c.split_far = f[18];
     c.depth_world = f[19];
     return c;
+}
+
+// The projection one shadow draw renders through: a cascade below
+// `LAMP_VIEW_BASE`, a lamp face at or above it.
+//
+// One index and one branch, rather than a second push field the forward passes
+// would carry and never read. The branch is uniform across a draw — the shadow
+// pass is recorded once per view — so it costs a shadow vertex nothing.
+float4x4 shadow_view_projection(uint64_t frame_address, uint view)
+{
+    if (view < LAMP_VIEW_BASE)
+    {
+        return load_cascade(frame_address, view).view_projection;
+    }
+    uint at = view - LAMP_VIEW_BASE;
+    return load_lamp_face(frame_address, at / LAMP_FACES, at % LAMP_FACES);
 }
 
 Light load_light(uint64_t frame_address, uint index)
@@ -390,6 +637,52 @@ float3 sh_radiance(float3 sh[SH_COEFFICIENTS], float3 direction, float alpha)
     return max(l, 0.0);
 }
 
+// The octahedral uv a direction lands at — the inverse of `ggc`'s
+// `octahedral_decode`, folded about **y** for the same reason.
+//
+// The two are written twice and never meet, exactly as the SH basis is. What
+// keeps them honest is that each is the textbook mapping and neither is derived
+// from the other; a disagreement would show as an environment reflected through
+// a crease, which is the one artifact here nobody could mistake for shading.
+float2 octahedral_uv(float3 d)
+{
+    float3 n = d / (abs(d.x) + abs(d.y) + abs(d.z));
+    float2 p = float2(n.x, n.z);
+    // The lower hemisphere folds outward across the diagonals. `sign` is wrong
+    // here at exactly zero — it returns 0 and would collapse the fold to the
+    // origin — so the comparison is written out.
+    float2 folded = (1.0 - abs(float2(n.z, n.x))) * select(p >= 0.0, 1.0, -1.0);
+    p = n.y >= 0.0 ? p : folded;
+    return p * 0.5 + 0.5;
+}
+
+// The prefiltered environment along `direction` at lobe width `alpha` — the
+// split-sum's *first* integral, as `ggc` actually computed it (§6 M27).
+//
+// Roughness picks the mip, linearly across the whole chain, because that is the
+// axis the levels were filtered along. `sqrt(alpha)` and not `alpha`: the chain
+// is parameterized by roughness and `alpha` is its square, and getting this
+// backwards puts every level's blur on the wrong surface — a subtle wrongness
+// that reads as "the rough things are too shiny" rather than as a bug.
+//
+// The clamp at half a texel from each edge is the seam, answered at the only
+// place it can still bite: every level was integrated over the sphere so the
+// texels are right, but a bilinear tap centred *on* the outer edge would blend
+// across the fold into the opposite hemisphere.
+float3 prefiltered_radiance(Environment e, float3 direction, float alpha,
+                            Texture2D<float4> textures[], SamplerState samplers[])
+{
+    float level = sqrt(alpha) * float(e.radiance_levels - 1);
+    float2 uv = octahedral_uv(normalize(direction));
+    // Scaled here and not at import: the pack holds the panorama's own absolute
+    // radiance, and exposure is the world's. The SH beside it is scaled on the
+    // host, and the two must agree or a mirror stops matching its room.
+    return textures[e.radiance_texture]
+               .SampleLevel(samplers[SAMPLER_LINEAR_CLAMP], uv, level)
+               .rgb
+           * e.radiance_scale;
+}
+
 // The split-sum's *second* integral — how much of the environment a surface of
 // this roughness reflects, and with what tint — as [Laz13]'s analytic fit rather
 // than as a lookup table. A 2D LUT would be a texture, a bindless slot, a
@@ -417,35 +710,100 @@ float3 f_schlick_ambient(float3 f0, float n_dot_v, float roughness)
     return f0 + (ceiling - f0) * exp2((-5.55473 * n_dot_v - 6.98316) * n_dot_v);
 }
 
-// Everything the environment contributes, or the flat ambient term when there
-// is no environment — the one place the two are chosen between, so a scene
-// blessed before §6 M24 and a scene with a sky do not each need their own path
-// through `shade_all`.
-float3 ambient_light(uint64_t frame_address, Frame frame, Surface s, float3 to_eye)
+// Everything the environments contribute, or the flat ambient term when there
+// are none — the one place the two are chosen between, so a scene blessed before
+// §6 M24 and a scene with a sky do not each need their own path through
+// `shade_all`.
+//
+// # Compositing, and why it is front to back (§6 M28)
+//
+// `frame.environments` is ordered innermost first, so walking it and spending a
+// budget of weight is exactly "the smallest volume containing this fragment
+// wins, and what it leaves over falls through to whatever contains *it*". The
+// world's sky is unbounded and last, which makes it the fallback without being a
+// special case. The loop stops when the budget runs out, so a fragment deep
+// inside a room reads one environment and a fragment in a doorway reads two.
+//
+// Two accumulators and not one, because the specular half has two sources that
+// cannot be summed before evaluation: an environment with a prefiltered chain
+// contributes a *sample*, and one without contributes a three-band convolution.
+// Both are linear in what they are given, so the chainless ones are accumulated
+// as coefficients and evaluated once at the end — which is why blending N
+// environments still costs one `sh_irradiance` and one `sh_radiance`.
+float3 ambient_light(uint64_t frame_address, Frame frame, Surface s, float3 world, float3 to_eye,
+                     Texture2D<float4> textures[], SamplerState samplers[])
 {
-    if (frame.sky <= 0.0)
+    if (frame.environment_count == 0)
     {
         // §6 M11's placeholder, unchanged: a flat term times albedo, occluded.
         return frame.ambient * s.diffuse * s.occlusion;
     }
-    float3 sh[SH_COEFFICIENTS];
-    load_sh(frame_address, sh);
     float n_dot_v = max(dot(s.normal, to_eye), 1e-4);
     float roughness = sqrt(s.alpha);
     float3 fresnel = f_schlick_ambient(s.f0, n_dot_v, roughness);
+    // `reflect` takes the incident direction, which is the negation of the one
+    // toward the eye — the sign that is wrong in half the implementations of
+    // this on the internet and which shows up as a reflection that slides the
+    // wrong way.
+    float3 reflected = reflect(-to_eye, s.normal);
+
+    float3 sh[SH_COEFFICIENTS];
+    float3 sh_specular[SH_COEFFICIENTS];
+    [ForceUnroll]
+    for (uint c = 0; c < SH_COEFFICIENTS; ++c)
+    {
+        sh[c] = float3(0.0, 0.0, 0.0);
+        sh_specular[c] = float3(0.0, 0.0, 0.0);
+    }
+    float3 sampled = float3(0.0, 0.0, 0.0);
+    float budget = 1.0;
+    for (uint i = 0; i < frame.environment_count && i < MAX_SKY; ++i)
+    {
+        if (budget <= 1e-3)
+        {
+            break;
+        }
+        Environment e = load_environment(frame_address, i);
+        float weight = min(environment_weight(e, world), 1.0) * budget;
+        if (weight <= 0.0)
+        {
+            continue;
+        }
+        budget -= weight;
+        accumulate_sh(frame_address, i, weight, sh);
+        // The chain when there is one, the three-band convolution when there is
+        // not. The fallback is not a degraded path — it is exact for a gradient,
+        // which is the only environment that has no chain (§6 M24).
+        //
+        // Parallax-corrected on this side only, and that is a claim rather than
+        // an omission (§6 M29): a chain is an image *of a place* and has a wall
+        // to slide against, while a gradient is a direction function with no
+        // spatial content at all — box-projecting one would invent detail it
+        // does not have, and would cost the chainless environments the single
+        // evaluation that makes blending them free.
+        if (e.radiance_levels > 0)
+        {
+            float3 aim = parallax_direction(e, world, reflected);
+            sampled += weight * prefiltered_radiance(e, aim, s.alpha, textures, samplers);
+        }
+        else
+        {
+            accumulate_sh(frame_address, i, weight, sh_specular);
+        }
+    }
 
     // Lambertian: irradiance over pi, times albedo, times what the specular
     // lobe did not already reflect. `s.diffuse` is albedo with metallic already
     // folded out, so a conductor's diffuse term is zero here by construction.
+    // No parallax here and there cannot be: irradiance is a hemispherical
+    // integral rather than a direction, so there is no ray to intersect — what
+    // corrects a diffuse term for position is a field of probes, not a box.
     float3 diffuse = (1.0 - fresnel) * s.diffuse * sh_irradiance(sh, s.normal) / PI;
 
-    // Specular: the reflected environment through the split-sum. `reflect`
-    // takes the incident direction, which is the negation of the one toward the
-    // eye — the sign that is wrong in half the implementations of this on the
-    // internet and which shows up as a reflection that slides the wrong way.
-    float3 reflected = reflect(-to_eye, s.normal);
+    // Specular: the reflected environment through the split-sum.
     float2 ab = env_brdf(roughness, n_dot_v);
-    float3 specular = sh_radiance(sh, reflected, s.alpha) * (s.f0 * ab.x + ab.y);
+    float3 environment = sampled + sh_radiance(sh_specular, reflected, s.alpha);
+    float3 specular = environment * (s.f0 * ab.x + ab.y);
 
     // Occlusion applies to both. Strictly it is a diffuse quantity — a specular
     // lobe is narrow and mostly misses whatever the occlusion term is standing
@@ -866,6 +1224,80 @@ float sun_shadow(uint64_t frame_address, Frame frame, float3 world, float3 norma
     return lit;
 }
 
+// Radius of the lamp filter, in face texels. At most `lamp.rs`'s GUTTER, which
+// is what lets the clamp below be lossless: every tap of a fragment that picked
+// this face reads depth this face rendered, never its neighbour's.
+static const float LAMP_FILTER_RADIUS = 1.5;
+
+// How much of lamp `lamp` reaches this fragment, in [0, 1] (§6 M31).
+//
+// # What this does not do that `sun_shadow` does
+//
+// No cascade choice — a lamp's six faces cover every direction at one
+// resolution, and which face is a property of the direction rather than of the
+// view. No contact hardening: PCSS sizes a penumbra from a blocker search, and
+// four lamps' worth of searches is four times the cost of the sun's for a
+// softness a lamp with no angular size does not have. And **no receiver-plane
+// extrapolation** — `receiver_plane_slope` is derived from an orthographic
+// slab's mutually-orthogonal rows, which a perspective face does not have, so
+// what carries the kernel's own acne here is the normal offset alone. That is
+// the trade a small radius buys: 1.5 texels of filter is close enough to the
+// depth the fragment recorded that the plane term has little left to correct.
+float lamp_shadow(uint64_t frame_address, Frame frame, uint lamp, Light light, float3 world,
+                  float3 normal, float rotation, Texture2D<float4> textures[],
+                  SamplerState samplers[])
+{
+    float3 to = world - light.position;
+    uint face = lamp_face(to);
+    // The face's own axis distance, which is what its 90 degrees are measured
+    // from — a face spans 2*major metres across `tile` texels at that distance,
+    // so a texel is worth that much world here. Growing with distance is the
+    // difference from a cascade, whose texel is one size across its whole slab.
+    float major = max(max(abs(to.x), abs(to.y)), abs(to.z));
+    float texel_world = 2.0 * major * frame.lamp_inv_tile;
+    // `to` points away from the light, so the direction *to* the light is its
+    // negation — the same n_dot_l the shading term uses, and the same
+    // sin(incidence) scaling `to_light_clip` explains at length.
+    float n_dot_l = dot(normal, -normalize(to));
+    float sin_incidence = sqrt(saturate(1.0 - n_dot_l * n_dot_l));
+    float offset = texel_world * (frame.lamp_depth_bias + frame.lamp_normal_bias * sin_incidence);
+
+    float4 clip = mul(load_lamp_face(frame_address, lamp, face),
+                      float4(world + normal * offset, 1.0));
+    // Behind the face's own eye. Only reachable when the normal offset pushed a
+    // fragment at the light's own position through it, and lit is the answer
+    // that does not put a black speck at a lamp's centre.
+    if (clip.w <= 0.0)
+    {
+        return 1.0;
+    }
+    float3 ndc = clip.xyz / clip.w;
+    float2 centre = ndc.xy * 0.5 + 0.5;
+
+    // Half a texel in from the tile's edge, and the gutter is what makes that
+    // inset land inside the face's own 90 degrees rather than short of it.
+    float inset = 0.5 * frame.lamp_inv_tile;
+    float2 origin = float2(float(face), float(lamp));
+    uint taps = max(frame.lamp_taps, 4u);
+    float2 dir = float2(cos(rotation), sin(rotation));
+    float lit = 0.0;
+    for (uint i = 0; i < taps; ++i)
+    {
+        float2 offset_uv =
+            dir * (spiral_radius(i, taps) * LAMP_FILTER_RADIUS * frame.lamp_inv_tile);
+        dir = spin(dir);
+        float2 uv = clamp(centre + offset_uv, inset, 1.0 - inset);
+        float caster = textures[frame.lamp_texture]
+                           .SampleLevel(samplers[frame.shadow_sampler],
+                                        (origin + uv) * frame.lamp_uv_scale, 0)
+                           .r;
+        // Reverse-Z, exactly as the sun's filter compares: nearer the light is
+        // greater, and a tap at least as near as the recorded depth is lit.
+        lit += ndc.z >= caster ? 1.0 : 0.0;
+    }
+    return lit / float(taps);
+}
+
 // Every light in the frame, over one surface. `world` is camera-relative, so under
 // perspective the eye is the origin and the view vector is just its negation — the
 // same property that lets a camera 10^12 m out render without jitter (§1.4).
@@ -886,34 +1318,54 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world, f
     float3 to_eye = dot(axis, axis) > 1e-12 ? normalize(axis) : normalize(-world);
     // The environment, before any light with a direction — image-based since
     // §6 M24, and the flat placeholder in a frame that declared no sky.
-    float3 total = ambient_light(frame_address, frame, s, to_eye);
-    bool shadowed_sun_seen = false;
-    for (uint i = 0; i < frame.light_count; ++i)
+    float3 total = ambient_light(frame_address, frame, s, world, to_eye, textures, samplers);
+    // The suns, by count. A light with no position reaches every fragment, so a
+    // froxel list holding one would be the same answer stored three thousand
+    // times — they are the front of the array instead (§6 M30), which is where
+    // `Extracted::append_lights` puts them.
+    for (uint i = 0; i < frame.directional_count; ++i)
     {
         Light light = load_light(frame_address, i);
         float3 radiance = light.color * light.intensity;
-        float3 to_light;
-        if (light.kind == LIGHT_DIRECTIONAL)
+        // The *first* directional light casts, and only it: a second shadow map
+        // is a second pass and a cascade decision, and cascades are P1 (§6 M11).
+        // The rest still light, they just do not occlude.
+        if (i == 0)
         {
-            to_light = -light.direction;
-            // The *first* directional light casts, and only it: a second shadow
-            // map is a second pass and a cascade decision, and cascades are P1
-            // (§6 M11). The rest still light, they just do not occlude.
-            if (!shadowed_sun_seen)
-            {
-                shadowed_sun_seen = true;
-                radiance *= sun_shadow(frame_address, frame, world, s.normal, s.plane,
-                                       pixel, footprint, textures, samplers);
-            }
+            radiance *= sun_shadow(frame_address, frame, world, s.normal, s.plane,
+                                   pixel, footprint, textures, samplers);
         }
-        else
+        total += shade(s, to_eye, -light.direction, radiance);
+    }
+    // And the lamps this froxel was handed. Ascending, which is what makes this
+    // sum a *subsequence* of the pre-M30 loop's rather than a reordering of it —
+    // the falloff is exactly zero past `range`, so what was dropped was adding
+    // zero and the two sums agree bit for bit.
+    uint2 run = load_cluster(frame_address, cluster_of(frame, world, pixel));
+    // The lamps that cast are the front of the point half (§6 M31), so "does
+    // this one occlude" is a comparison against a count and not a search — the
+    // same shape the suns above are found by, one array segment along.
+    uint lamp_end = frame.directional_count + frame.lamp_count;
+    float rotation = tap_rotation(pixel);
+    for (uint n = 0; n < run.y; ++n)
+    {
+        uint index = load_cluster_index(frame_address, run.x + n);
+        Light light = load_light(frame_address, index);
+        float3 offset = light.position - world;
+        float distance_squared = dot(offset, offset);
+        float3 radiance = light.color * light.intensity;
+        float falloff = point_falloff(distance_squared, light.range);
+        radiance *= falloff;
+        // Guarded on the falloff as well as the count: past `range` the term is
+        // exactly zero, so shadowing it would be six texture reads to scale a
+        // zero — and it is exactly zero rather than nearly, which is the
+        // property §6 M30's froxel lists are built on.
+        if (index < lamp_end && falloff > 0.0)
         {
-            float3 offset = light.position - world;
-            float distance_squared = dot(offset, offset);
-            radiance *= point_falloff(distance_squared, light.range);
-            to_light = offset * rsqrt(max(distance_squared, 1e-8));
+            radiance *= lamp_shadow(frame_address, frame, index - frame.directional_count, light,
+                                    world, s.normal, rotation, textures, samplers);
         }
-        total += shade(s, to_eye, to_light, radiance);
+        total += shade(s, to_eye, offset * rsqrt(max(distance_squared, 1e-8)), radiance);
     }
     return total;
 }

@@ -223,6 +223,7 @@ fn main() -> anyhow::Result<()> {
                 index_buffer: None,
                 indirect: None,
                 depth_bias: None,
+                viewport: None,
             };
             match frame(r, &mut transients, std::slice::from_ref(&draw)) {
                 Ok(FrameOutcome::Presented { .. }) => {

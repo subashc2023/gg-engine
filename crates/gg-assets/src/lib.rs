@@ -25,6 +25,7 @@
 
 #![warn(missing_docs)]
 
+pub mod environment;
 pub mod load;
 pub mod material;
 pub mod mesh;
@@ -33,6 +34,7 @@ pub mod scene;
 pub mod texture;
 pub mod write;
 
+pub use environment::Environment;
 pub use load::{AssetError, Assets, Handle, LoadState, TextureData, asset};
 pub use material::Material;
 pub use mesh::{Mesh, MeshError, MeshHeader, Vertex};
