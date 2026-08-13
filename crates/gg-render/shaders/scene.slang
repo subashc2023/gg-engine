@@ -165,6 +165,57 @@ float4 fs_main(VOut i) : SV_Target
                   1.0);
 }
 
+// The probe pass (§6 M36) — see `ugly.slang`'s pair for what the two halves are
+// and why the distance is signed. This is the reason a probe field sees *pack*
+// geometry rather than only what the box pass draws, which is the whole claim
+// behind gathering by rendering instead of by ray-casting.
+[shader("vertex")]
+VOut vs_probe(uint vid: SV_VertexID, uint iid: SV_InstanceID)
+{
+    float* v = (float*)(push.vertices + uint64_t(vid) * VERTEX_STRIDE);
+    Instance inst = load_instance(iid);
+    float3 local = float3(v[0], v[1], v[2]);
+    float3 scale = nonzero_scale(inst.scale);
+
+    VOut o;
+    // `mvp` is the *camera's* product and useless here, so this rebuilds the
+    // world position exactly as `vs_shadow` does — the one place the pack pass
+    // has to, and for the same reason.
+    o.world = inst.offset + rotate_by(inst.rotation, local * inst.scale);
+    o.pos = mul(shadow_view_projection(push.frame, push.shadow_view), float4(o.world, 1.0));
+    o.normal = normalize(rotate_by(inst.rotation, float3(v[3], v[4], v[5]) / scale));
+    o.tangent = float4(normalize(rotate_by(inst.rotation, float3(v[8], v[9], v[10]) * scale)),
+                       v[11]);
+    o.uv = float2(v[6], v[7]);
+    o.tint = inst.tint.rgb;
+    return o;
+}
+
+[shader("fragment")]
+float4 fs_probe(VOut i, bool front: SV_IsFrontFace) : SV_Target
+{
+    Frame frame = load_frame(push.frame);
+    SamplerState sampler = g_samplers[push.sampler_index];
+    float3 base = g_textures[push.base_color].Sample(sampler, i.uv).rgb * i.tint;
+    float2 mr = g_textures[push.metallic_rough].Sample(sampler, i.uv).rg;
+    float occlusion = g_textures[push.occlusion].Sample(sampler, i.uv).r;
+    float2 normal_sample = g_textures[push.normal_map].Sample(sampler, i.uv).rg;
+
+    Surface s = make_surface(apply_normal_map(i.normal, i.tangent, normal_sample), base,
+                             mr.g * push.metallic, mr.r * push.roughness, occlusion);
+    s.plane = normalize(i.normal);
+
+    float3 probe =
+        load_probe_position(load_probe_views(push.frame),
+                            (push.shadow_view - PROBE_VIEW_BASE) / PROBE_FACES);
+    float3 offset = probe - i.world;
+    float distance = length(offset);
+    float3 radiance = shade_all_from(push.frame, frame, s, i.world,
+                                     offset / max(distance, 1e-5), i.pos.xy, 0.0, false,
+                                     g_textures, g_samplers);
+    return float4(radiance, front ? distance : -distance);
+}
+
 // The depth prepass (§4.5 v1) and the shadow pass. Both are position-only, and
 // both share `ScenePush` and `load_instance` with the pass above — one loader,
 // not three.

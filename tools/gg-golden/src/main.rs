@@ -566,14 +566,19 @@ fn render_mirror() -> Render {
     let view = gg_render::View::default();
     let eye = sim::DVec3::new(0.0, 0.0, 3.4);
     let mut extracted = gg_extract::Extracted::default();
-    let mut frame = None;
     for _ in 0..HALL_FRAMES {
         extracted.clear(eye, view.frustum(extent));
         extracted.append::<Renderable>(&world)?;
         extracted.append_lights(&world)?;
         let _capture = gg_debug::capture::frame();
-        frame = Some(renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?);
+        renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?;
     }
+    // After the stream, because a probe renders whatever is resident and a
+    // field gathered over a half-loaded pack is a field of the fallback (§6 M36).
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?)
+    })?;
     let pending = renderer
         .pack()
         .map_or(0, gg_render::content::Content::pending);
@@ -581,7 +586,6 @@ fn render_mirror() -> Render {
         pending == 0,
         "the environment was still streaming after {HALL_FRAMES} frames ({pending} pending) — a          half-resident chain is a reference of the fallback, not of the feature"
     );
-    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
     // No light casts, so no cascade is fitted and no shadow pass runs. Asserted
     // rather than assumed: a stray directional light would light these spheres
     // directly and quietly turn this into a second atrium.
@@ -680,7 +684,6 @@ fn render_volumes() -> Render {
     let view = gg_render::View::default();
     let eye = sim::DVec3::new(0.0, 1.2, 5.2);
     let mut extracted = gg_extract::Extracted::default();
-    let mut frame = None;
     for _ in 0..HALL_FRAMES {
         extracted.clear(eye, view.frustum(extent));
         extracted.append::<Renderable>(&world)?;
@@ -696,8 +699,14 @@ fn render_volumes() -> Render {
             extracted.skies
         );
         let _capture = gg_debug::capture::frame();
-        frame = Some(renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?);
+        renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?;
     }
+    // After the stream, because a probe renders whatever is resident and a
+    // field gathered over a half-loaded pack is a field of the fallback (§6 M36).
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?)
+    })?;
     let pending = renderer
         .pack()
         .map_or(0, gg_render::content::Content::pending);
@@ -705,7 +714,6 @@ fn render_volumes() -> Render {
         pending == 0,
         "the environment was still streaming after {HALL_FRAMES} frames ({pending} pending)"
     );
-    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
     anyhow::ensure!(
         !frame.order.iter().any(|name| name.starts_with("shadow")),
         "nothing in this scene casts, so no shadow pass may run: {:?}",
@@ -787,7 +795,6 @@ fn render_parallax() -> Render {
     let view = gg_render::View::default();
     let eye = sim::DVec3::new(0.0, 1.4, 6.0);
     let mut extracted = gg_extract::Extracted::default();
-    let mut frame = None;
     for _ in 0..HALL_FRAMES {
         extracted.clear(eye, view.frustum(extent));
         extracted.append::<Renderable>(&world)?;
@@ -804,8 +811,14 @@ fn render_parallax() -> Render {
             extracted.skies
         );
         let _capture = gg_debug::capture::frame();
-        frame = Some(renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?);
+        renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?;
     }
+    // After the stream, because a probe renders whatever is resident and a
+    // field gathered over a half-loaded pack is a field of the fallback (§6 M36).
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?)
+    })?;
     let pending = renderer
         .pack()
         .map_or(0, gg_render::content::Content::pending);
@@ -813,7 +826,6 @@ fn render_parallax() -> Render {
         pending == 0,
         "the environment was still streaming after {HALL_FRAMES} frames ({pending} pending)"
     );
-    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
     anyhow::ensure!(
         !frame.order.iter().any(|name| name.starts_with("shadow")),
         "nothing in this scene casts, so no shadow pass may run: {:?}",
@@ -932,8 +944,10 @@ fn render_lanterns() -> Render {
         extracted.lights.len(),
         extracted.lights_dropped
     );
-    let _capture = gg_debug::capture::frame();
-    let frame = renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?;
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?)
+    })?;
     // And the claim that makes it a §6 M30 scene rather than a scene with a lot
     // of lights in it: the busiest froxel holds a small fraction of them, so the
     // picture was produced by *selecting* and not by looping the frame.
@@ -1054,8 +1068,10 @@ fn render_lampshade() -> Render {
         extracted.lights.len(),
         extracted.lights_dropped
     );
-    let _capture = gg_debug::capture::frame();
-    let frame = renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?;
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?)
+    })?;
     // The scene's own claim: every shadow here is a *lamp's*. No directional
     // light exists, so a cascade pass running at all would mean the reference
     // was blessed from a frame whose shadows came from somewhere else.
@@ -1134,10 +1150,10 @@ fn render_chart() -> Render {
         culled = extracted.culled,
         "offscreen device"
     );
-    let frame = {
+    let frame = gathered(&mut renderer, |r| {
         let _capture = gg_debug::capture::frame();
-        renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?
-    };
+        Ok(r.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?)
+    })?;
     ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
         pixels: frame.pixels,
@@ -1504,6 +1520,50 @@ fn load(pack: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Frames the field is given to gather itself before a reference is judged
+/// (§6 M36).
+///
+/// A probe renders the scene six times, so a frame gathers a batch and the field
+/// converges over several — and a reference blessed while probes are ungathered
+/// is a reference of the *fallback* rather than of the feature, which is
+/// `Content::pending`'s argument one milestone along. Bounded rather than a
+/// spin: a field that cannot converge is a defect, and hanging is a worse way to
+/// report one than failing.
+const FIELD_FRAMES: usize = 24;
+
+/// Render until the irradiance field holds every probe, and hand back the last
+/// frame.
+///
+/// The closure takes the renderer rather than capturing it, which is what lets
+/// this ask `field_pending` between calls without two borrows of the same thing.
+fn gathered<F>(
+    renderer: &mut gg_render::OffscreenRenderer,
+    mut once: F,
+) -> anyhow::Result<gg_render::OffscreenFrame>
+where
+    F: FnMut(&mut gg_render::OffscreenRenderer) -> anyhow::Result<gg_render::OffscreenFrame>,
+{
+    // As many probes a frame as one batch holds. A reference is not a session:
+    // nothing here is holding a frame rate, so the rate that matters is the one
+    // that converges the field in the fewest frames. `r.gi_rate`'s default is
+    // the other side of that trade — frames against frame time.
+    gg_render::cvars::GI_RATE.set_int(0);
+    let mut frame = once(renderer)?;
+    for _ in 0..FIELD_FRAMES {
+        if renderer.field_pending().0 == 0 {
+            return Ok(frame);
+        }
+        frame = once(renderer)?;
+    }
+    let (pending, probes) = renderer.field_pending();
+    anyhow::ensure!(
+        pending == 0,
+        "the field was still gathering after {FIELD_FRAMES} frames ({pending} of {probes} \
+         probes) — a half-built field is a reference of the warm-up, not of the feature"
+    );
+    Ok(frame)
+}
+
 /// How many frames the hall is streamed for before it is judged.
 ///
 /// Streaming is frames deep by design (§4.6): frame one is what *requests* the
@@ -1576,15 +1636,20 @@ fn render_hall() -> Render {
         ..gg_render::View::default()
     };
     let mut extracted = gg_extract::Extracted::default();
-    let mut frame = None;
     for _ in 0..HALL_FRAMES {
         extracted.clear(demo_04_scene::START_POSITION, view.frustum(extent));
         extracted.append::<Renderable>(&world)?;
         extracted.append_models::<Model>(&world, renderer.scenes())?;
         extracted.append_lights(&world)?;
         let _capture = gg_debug::capture::frame();
-        frame = Some(renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?);
+        renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?;
     }
+    // After the stream, because a probe renders whatever is resident and a
+    // field gathered over a half-loaded pack is a field of the fallback (§6 M36).
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?)
+    })?;
     let pending = renderer
         .pack()
         .map_or(0, gg_render::content::Content::pending);
@@ -1593,7 +1658,6 @@ fn render_hall() -> Render {
         "the hall was still streaming after {HALL_FRAMES} frames ({pending} asset(s) pending) — \
          judging a half-resident frame would make the reference a race"
     );
-    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
     ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
         pixels: frame.pixels,
@@ -1679,14 +1743,19 @@ fn render_atrium_at(phase: u64) -> Render {
         ..gg_render::View::default()
     };
     let mut extracted = gg_extract::Extracted::default();
-    let mut frame = None;
     for _ in 0..HALL_FRAMES {
         extracted.clear(demo_06_lit::START_POSITION, view.frustum(extent));
         extracted.append_models::<Model>(&world, renderer.scenes())?;
         extracted.append_lights(&world)?;
         let _capture = gg_debug::capture::frame();
-        frame = Some(renderer.frame(&extracted, &view, [0.01, 0.012, 0.02, 1.0], &[])?);
+        renderer.frame(&extracted, &view, [0.01, 0.012, 0.02, 1.0], &[])?;
     }
+    // After the stream, because a probe renders whatever is resident and a
+    // field gathered over a half-loaded pack is a field of the fallback (§6 M36).
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.01, 0.012, 0.02, 1.0], &[])?)
+    })?;
     let pending = renderer
         .pack()
         .map_or(0, gg_render::content::Content::pending);
@@ -1695,7 +1764,6 @@ fn render_atrium_at(phase: u64) -> Render {
         "the atrium was still streaming after {HALL_FRAMES} frames ({pending} asset(s) pending) — \
          judging a half-resident frame would make the reference a race"
     );
-    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
     // The claim the whole scene rests on, as a machine rather than as a look:
     // a frame with a casting sun runs the shadow pass, and one without does not
     // (§6 M11). A reference blessed from a frame that skipped it would be a
@@ -1789,14 +1857,19 @@ fn render_field() -> Render {
         ..gg_render::View::default()
     };
     let mut extracted = gg_extract::Extracted::default();
-    let mut frame = None;
     for _ in 0..HALL_FRAMES {
         extracted.clear(demo_05_many::START_POSITION, view.frustum(extent));
         extracted.append_models::<Model>(&world, renderer.scenes())?;
         extracted.append_lights(&world)?;
         let _capture = gg_debug::capture::frame();
-        frame = Some(renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?);
+        renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?;
     }
+    // After the stream, because a probe renders whatever is resident and a
+    // field gathered over a half-loaded pack is a field of the fallback (§6 M36).
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?)
+    })?;
     let pending = renderer
         .pack()
         .map_or(0, gg_render::content::Content::pending);
@@ -1827,7 +1900,6 @@ fn render_field() -> Render {
         "field batched"
     );
 
-    let frame = frame.ok_or_else(|| anyhow::anyhow!("no frame was rendered"))?;
     ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
         pixels: frame.pixels,
@@ -1909,10 +1981,10 @@ fn render_boxes_from(view: gg_render::View) -> Render {
     // No UI layer: these scenes gate the *renderer*, and an overlay in them
     // would put a frame counter in every reference image. The UI pass's own
     // pixels are gated offscreen in `gg-debug` instead.
-    let frame = {
+    let frame = gathered(&mut renderer, |r| {
         let _capture = gg_debug::capture::frame();
-        renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?
-    };
+        Ok(r.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?)
+    })?;
     ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
         pixels: frame.pixels,
@@ -1969,10 +2041,10 @@ fn render_platformer_far(far: Option<f32>) -> Render {
         culled = extracted.culled,
         "offscreen device"
     );
-    let frame = {
+    let frame = gathered(&mut renderer, |r| {
         let _capture = gg_debug::capture::frame();
-        renderer.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?
-    };
+        Ok(r.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?)
+    })?;
     ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
         pixels: frame.pixels,

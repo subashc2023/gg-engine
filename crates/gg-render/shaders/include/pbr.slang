@@ -46,6 +46,8 @@
 //   [ZSXL06] Zhang, Sun, Xu & Lu, "Parallel-Split Shadow Maps for Large-scale
 //           Virtual Environments", 2006 — the cascade split scheme the CPU side
 //           fits against, and the containment-based selection below.
+//   [Don05] Donnelly & Lauritzen, "Variance Shadow Maps", I3D 2005 — the two
+//           moments and the Chebyshev bound §6 M36's probes store distance as.
 
 static const float PI = 3.14159265358979323846;
 
@@ -76,11 +78,11 @@ static const uint LIGHT_POINT = 1;
 // Strides written here and asserted against the Rust records beside them, the
 // same agreement `VERTEX_STRIDE` and `INSTANCE_STRIDE` are half of. HLSL has no
 // `sizeof`, so a drift is a build error rather than a garbled read.
-static const uint FRAME_STRIDE = 4384;
+static const uint FRAME_STRIDE = 4432;
 static const uint LIGHT_STRIDE = 48;
 static const uint CASCADE_STRIDE = 80;
 // Where the cascade array starts inside the frame block.
-static const uint CASCADE_BASE = 992;
+static const uint CASCADE_BASE = 1040;
 // Coefficients in the order-2 environment projection (§6 M24), and where they
 // start. Must equal `sky.rs`'s SH_COEFFICIENTS.
 static const uint SH_COEFFICIENTS = 9;
@@ -97,7 +99,7 @@ static const uint SAMPLER_LINEAR_CLAMP = 1;
 // Where the environment array starts, and therefore where the innermost
 // environment's coefficients start — `sh` is the first field of an environment
 // precisely so M24's read is still the read.
-static const uint ENV_BASE = 224;
+static const uint ENV_BASE = 272;
 // Must equal `lighting.rs`'s MAX_CASCADES: the loops below are unrolled over it
 // and a mismatch would read past the block.
 static const uint MAX_CASCADES = 4;
@@ -108,11 +110,24 @@ static const uint MAX_CASCADES = 4;
 static const uint MAX_LAMPS = 8;
 static const uint LAMP_FACES = 6;
 static const uint LAMP_STRIDE = 384;
-static const uint LAMP_BASE = 1312;
-// A shadow draw's `shadow_view` index: cascades first, then lamp faces. One
-// number rather than a second push field, so the shadow vertex shader takes one
-// branch on a value that is uniform across the draw.
+static const uint LAMP_BASE = 1360;
+// A shadow draw's `shadow_view` index: cascades first, then lamp faces, then the
+// probe faces this frame is gathering (§6 M36). One number rather than a second
+// push field, so the shadow vertex shader takes one branch on a value that is
+// uniform across the draw.
 static const uint LAMP_VIEW_BASE = MAX_CASCADES;
+static const uint PROBE_VIEW_BASE = LAMP_VIEW_BASE + MAX_LAMPS * LAMP_FACES;
+
+// A probe's faces, and one slot of `Frame::probe_views` (§6 M36). Six matrices
+// and the probe's own camera-relative position, which the radiance pass needs
+// for its eye vector and its distance and cannot recover from the product.
+// Mirrored by `probe.rs`'s `GpuProbeView`.
+static const uint PROBE_FACES = 6;
+static const uint PROBE_SLOT_STRIDE = 400;
+// Texels one probe's irradiance record occupies, and where the state texel sits
+// in it — `probe.rs`'s `SH_TEXELS` and `STATE_TEXEL`.
+static const uint PROBE_SH_TEXELS = 4;
+static const uint PROBE_STATE_TEXEL = 3;
 
 // The froxel grid (§6 M30). Must equal `cluster.rs`'s GRID, which is where the
 // dimensions are argued; here they are only the arithmetic that finds a list.
@@ -182,6 +197,18 @@ struct Frame
     uint shading;              // SHADING_* bits (§6 M33, M34, M35)
     uint64_t split_sum;        // §6 M34's table: EXTENT^2 float pairs, n·v fastest and squared
     uint ao_texture;           // §6 M35's occlusion target, or 0; guarded by SHADING_AO
+    // The irradiance field (§6 M36). All six guarded by SHADING_GI, which is
+    // clear whenever the grid has not been fitted — there is then no field image
+    // to have a slot, and slot 0 is a legitimate texture (`lamp_texture`'s
+    // argument at M31).
+    uint gi_sh_texture;        // the L1 records: 4 texels a probe, x fastest
+    uint gi_moment_texture;    // the octahedral distance tiles beside them
+    float gi_moment_edge;      // one tile's edge in texels
+    float gi_spacing;          // metres between probes
+    uint3 gi_counts;           // probes along each axis
+    float3 gi_origin;          // the corner probe, camera-relative
+    float gi_bias;             // metres a shading point is pushed off its surface
+    uint64_t probe_views;      // this frame's gather batch, PROBE_SLOT_STRIDE apart
 }
 
 // What `Frame::shading` carries. Mirrored in `lighting.rs`, which is where the
@@ -190,6 +217,7 @@ static const uint SHADING_MULTISCATTER = 1u;
 static const uint SHADING_LOBE = 2u;
 static const uint SHADING_LUT = 4u;
 static const uint SHADING_AO = 8u;
+static const uint SHADING_GI = 16u;
 
 // The split-sum table's edge (§6 M34). Must equal `split_sum::EXTENT`; the read
 // below indexes by it and a mismatch is a wrong number rather than a crash.
@@ -229,6 +257,13 @@ struct Light
     uint kind;
     float3 color;     // linear rgb
     float intensity;
+}
+
+// `Frame::probe_views` on its own — 264 bytes in, the one field of the block a
+// probe *vertex* needs and the one it would otherwise load sixty scalars for.
+uint64_t load_probe_views(uint64_t address)
+{
+    return ((uint64_t*)address)[33];
 }
 
 Frame load_frame(uint64_t address)
@@ -272,7 +307,38 @@ Frame load_frame(uint64_t address)
     // 216, the first of the two words M34 set aside for the next milestone —
     // which is why this block did not grow and every offset below is unchanged.
     frame.ao_texture = u[54];
+    // 220 onward is §6 M36's, and it is what finally moved the arrays: 220 was
+    // the *second* of M34's two words and the field needed eleven.
+    frame.gi_sh_texture = u[55];
+    frame.gi_moment_texture = u[56];
+    frame.gi_moment_edge = f[57];
+    frame.gi_spacing = f[58];
+    frame.gi_counts = uint3(u[59], u[60], u[61]);
+    frame.gi_origin = float3(f[62], f[63], f[64]);
+    frame.gi_bias = f[65];
+    // 264, and 264 is a multiple of 8 — an address read at four would be a
+    // misaligned load rather than a wrong one, which is worse.
+    frame.probe_views = load_probe_views(address);
     return frame;
+}
+
+// One face of one gathering probe's projection (§6 M36) — [`load_lamp_face`]'s
+// shape against the out-of-band buffer, because the batch is a CVar's worth of
+// probes and the frame block holds fixed arrays.
+float4x4 load_probe_face(uint64_t views, uint slot, uint face)
+{
+    float* f = (float*)(views + uint64_t(slot) * PROBE_SLOT_STRIDE + uint64_t(face) * 64);
+    return float4x4(f[0], f[1], f[2], f[3],
+                    f[4], f[5], f[6], f[7],
+                    f[8], f[9], f[10], f[11],
+                    f[12], f[13], f[14], f[15]);
+}
+
+// Where that probe sits, camera-relative — the eye its faces are shaded from.
+float3 load_probe_position(uint64_t views, uint slot)
+{
+    float* f = (float*)(views + uint64_t(slot) * PROBE_SLOT_STRIDE + 384);
+    return float3(f[0], f[1], f[2]);
 }
 
 // One face of one lamp's projection, straight out of the block.
@@ -459,19 +525,26 @@ Cascade load_cascade(uint64_t frame_address, uint index)
 }
 
 // The projection one shadow draw renders through: a cascade below
-// `LAMP_VIEW_BASE`, a lamp face at or above it.
+// `LAMP_VIEW_BASE`, a lamp face below `PROBE_VIEW_BASE`, a probe face above it.
 //
-// One index and one branch, rather than a second push field the forward passes
-// would carry and never read. The branch is uniform across a draw — the shadow
-// pass is recorded once per view — so it costs a shadow vertex nothing.
+// One index and two branches, rather than a second push field the forward passes
+// would carry and never read. Both are uniform across a draw — every one of
+// these passes is recorded once per view — so they cost a vertex nothing.
 float4x4 shadow_view_projection(uint64_t frame_address, uint view)
 {
     if (view < LAMP_VIEW_BASE)
     {
         return load_cascade(frame_address, view).view_projection;
     }
-    uint at = view - LAMP_VIEW_BASE;
-    return load_lamp_face(frame_address, at / LAMP_FACES, at % LAMP_FACES);
+    if (view < PROBE_VIEW_BASE)
+    {
+        uint at = view - LAMP_VIEW_BASE;
+        return load_lamp_face(frame_address, at / LAMP_FACES, at % LAMP_FACES);
+    }
+    uint at = view - PROBE_VIEW_BASE;
+    // The address alone, not `load_frame`: a probe vertex wants one field of a
+    // block whose load is sixty-odd scalars.
+    return load_probe_face(load_probe_views(frame_address), at / PROBE_FACES, at % PROBE_FACES);
 }
 
 Light load_light(uint64_t frame_address, uint index)
@@ -691,6 +764,65 @@ float2 octahedral_uv(float3 d)
     return p * 0.5 + 0.5;
 }
 
+// The inverse: the direction an octahedral uv stands for (§6 M36).
+//
+// Written out rather than left to the tile's own face table because the moment
+// tiles are *read* by direction and *written* by texel, and the two halves have
+// to be each other exactly — an octahedral map whose two directions disagree by
+// a texel puts a wall's distance a texel away from the wall.
+float3 octahedral_direction(float2 uv)
+{
+    float2 p = uv * 2.0 - 1.0;
+    float y = 1.0 - abs(p.x) - abs(p.y);
+    float2 xz = y >= 0.0 ? p : (1.0 - abs(float2(p.y, p.x))) * select(p >= 0.0, 1.0, -1.0);
+    return normalize(float3(xz.x, y, xz.y));
+}
+
+// The six probe faces as (forward, up), and the third axis each implies.
+//
+// **The same table as `lamp.rs`'s `AXES`**, transcribed rather than derived —
+// this file's standing arrangement for a convention with two ends (`sh_basis`
+// against `sky.rs`, `octahedral_uv` against `ggc`). What keeps this one honest
+// is a test rather than a coincidence: `probe.rs`'s
+// `the_shader_reads_a_face_texel_as_the_direction_the_matrix_drew_it` projects
+// the direction this returns through the matrix the host actually built and
+// fails on a sign.
+static const float3 PROBE_FORWARD[PROBE_FACES] = {
+    float3(1.0, 0.0, 0.0),  float3(-1.0, 0.0, 0.0), float3(0.0, 1.0, 0.0),
+    float3(0.0, -1.0, 0.0), float3(0.0, 0.0, 1.0),  float3(0.0, 0.0, -1.0),
+};
+static const float3 PROBE_UP[PROBE_FACES] = {
+    float3(0.0, 1.0, 0.0), float3(0.0, 1.0, 0.0),  float3(0.0, 0.0, 1.0),
+    float3(0.0, 0.0, -1.0), float3(0.0, 1.0, 0.0), float3(0.0, 1.0, 0.0),
+};
+
+// The direction texel `(u, v)` of a probe face looks along, both in NDC.
+//
+// `look_to_mat4` puts `right = forward x up` in clip x and `up x forward` in
+// clip *minus* y — Vulkan's clip space being y-down — so the v term is
+// subtracted. A face's half-angle tangent is exactly 1 (`Probes::update` widens
+// nothing, unlike a lamp's gutter), which is what makes the NDC coordinate the
+// tangent itself.
+float3 probe_face_direction(uint face, float2 ndc)
+{
+    float3 forward = PROBE_FORWARD[face];
+    float3 right = cross(forward, PROBE_UP[face]);
+    float3 up = cross(right, forward);
+    return normalize(forward + ndc.x * right - ndc.y * up);
+}
+
+// The solid angle texel `(u, v)` of a face covers, for a face of `edge` texels.
+//
+// `da db / (1 + a^2 + b^2)^{3/2}` — the Jacobian of the gnomonic projection a
+// cube face is. Without it the corners of every face weigh as much as the
+// centres and a probe's integral over-counts the diagonals by a factor of three.
+float probe_face_solid_angle(float2 ndc, float edge)
+{
+    float step = 2.0 / edge;
+    float r = 1.0 + dot(ndc, ndc);
+    return step * step / (r * sqrt(r));
+}
+
 // The prefiltered environment along `direction` at lobe width `alpha` — the
 // split-sum's *first* integral, as `ggc` actually computed it (§6 M27).
 //
@@ -842,6 +974,163 @@ float3 f_schlick_ambient(float3 f0, float n_dot_v, float roughness)
     return f0 + (ceiling - f0) * exp2((-5.55473 * n_dot_v - 6.98316) * n_dot_v);
 }
 
+// What §6 M35's occlusion pass decided about this pixel, or 1 when it did not
+// run.
+//
+// A `Load` and not a `Sample`: the target is the same extent as the attachment
+// being shaded, so a fragment's occlusion is exactly one texel and any filtering
+// would be a blur across a neighbour's surface. The guard is the flag rather
+// than the index, because slot 0 is a legitimate texture — `lamp_texture`'s
+// argument at §6 M31.
+float screen_occlusion(Frame frame, float2 pixel, Texture2D<float4> textures[])
+{
+    if ((frame.shading & SHADING_AO) == 0)
+    {
+        return 1.0;
+    }
+    return textures[frame.ao_texture].Load(int3(int2(pixel), 0)).r;
+}
+
+// One probe's irradiance toward `normal`, out of its three L1 texels (§6 M36).
+//
+// [RH01]'s band factors again, at three coefficients where `sh_irradiance` has
+// nine — and returning `E` rather than `E/pi` for exactly that function's
+// reason, so the two are interchangeable at the one place they are chosen
+// between. The channel texels are `(c_y, c_z, c_x, c_0)`, `sh_basis`'s own order
+// with the constant last, which is what `probe.slang` writes.
+float3 probe_irradiance(Texture2D<float4> sh_image, uint2 texel, float3 normal)
+{
+    int3 at = int3(int2(texel), 0);
+    float4 r = sh_image.Load(at);
+    float4 g = sh_image.Load(at + int3(1, 0, 0));
+    float4 b = sh_image.Load(at + int3(2, 0, 0));
+    float3 y = 0.48860251 * float3(normal.y, normal.z, normal.x);
+    float3 band1 = float3(dot(r.xyz, y), dot(g.xyz, y), dot(b.xyz, y));
+    float3 band0 = 0.28209479 * float3(r.w, g.w, b.w);
+    return max(3.14159265 * band0 + 2.09439510 * band1, 0.0);
+}
+
+// How much of a probe reaches a point `distance` away in direction `to_point` —
+// [Don05]'s Chebyshev bound over the probe's octahedral distance tile.
+//
+// A **bound** and not a test, which is the whole reason distance is stored as
+// two moments: a shading point behind a wall from the probe's view is further
+// than everything the probe saw that way, so the bound collapses; a point on the
+// same side is not, and it stays 1. Where the tile's texel straddles both — a
+// wall's own edge — the variance is large and the bound is soft, which is a
+// gradient instead of a stair.
+//
+// Point-sampled, and that is what lets the tiles have no border: an octahedral
+// seam is exactly where a bilinear tap would fetch the far side of the probe.
+float probe_visibility(Texture2D<float4> moments, uint2 tile, float edge, float3 to_point,
+                       float distance)
+{
+    float2 uv = octahedral_uv(to_point);
+    uint2 at = tile + uint2(clamp(floor(uv * edge), 0.0, edge - 1.0));
+    float2 m = moments.Load(int3(int2(at), 0)).rg;
+    if (distance <= m.x)
+    {
+        return 1.0;
+    }
+    float variance = max(m.y - m.x * m.x, 1e-4);
+    float gap = distance - m.x;
+    return saturate(variance / (variance + gap * gap));
+}
+
+// The irradiance field at `world`, or `fallback` where it does not reach
+// (§6 M36).
+//
+// `fallback` rather than a flag, because every caller has one already: the
+// environment's own irradiance, or M11's flat ambient in a frame that declared
+// no sky. With `SHADING_GI` clear this is one uniform branch and the caller's
+// own value, which is what makes `r.gi 0` the pre-M36 renderer rather than a
+// reconstruction of it.
+//
+// The blend at the hull is deliberate. A grid ends somewhere, and a hard edge
+// between "lit by the field" and "lit by the box" is a seam running through the
+// scene at a plane nothing in the world corresponds to; fading over the last
+// half-cell puts the change where the field's own confidence is already lowest.
+float3 gi_irradiance(Frame frame, float3 world, float3 normal, float3 fallback,
+                     Texture2D<float4> textures[])
+{
+    if ((frame.shading & SHADING_GI) == 0)
+    {
+        return fallback;
+    }
+    // Off the surface first: a shading point sits exactly on geometry the probes
+    // saw, so its own wall is at distance zero from it and every visibility
+    // bound would read as occluded by the surface being shaded.
+    float3 at = world + normal * frame.gi_bias;
+    float3 local = (at - frame.gi_origin) / max(frame.gi_spacing, 1e-4);
+    float3 last = float3(frame.gi_counts) - 1.0;
+    float3 outside = max(max(-local, local - last), 0.0);
+    float blend = 1.0 - saturate(2.0 * length(outside));
+    if (blend <= 0.0)
+    {
+        return fallback;
+    }
+    float3 cell = clamp(floor(local), 0.0, max(last - 1.0, 0.0));
+    float3 t = saturate(local - cell);
+    float edge = frame.gi_moment_edge;
+
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float total = 0.0;
+    for (uint i = 0; i < 8; ++i)
+    {
+        float3 step = float3(float(i & 1u), float((i >> 1u) & 1u), float((i >> 2u) & 1u));
+        float3 trilinear = lerp(1.0 - t, t, step);
+        float w = trilinear.x * trilinear.y * trilinear.z;
+        uint3 c = uint3(cell + step);
+        uint row = c.z * frame.gi_counts.y + c.y;
+        uint2 texel = uint2(c.x * PROBE_SH_TEXELS, row);
+        // The state texel, and the two things it is read for.
+        //
+        // `a` is whether this probe has *ever* been gathered: `probe.slang`
+        // writes 1 there and `Probes::open` uploaded zeroes, so the round
+        // robin's own progress is in the field rather than in a second
+        // structure. Without it an ungathered probe contributes a tiny weight
+        // and an irradiance of zero, which is not "no opinion" — it is black,
+        // and it darkens every surface until the robin comes round.
+        //
+        // `g` is how much of the probe's sphere came back a back face: a probe
+        // that woke up inside a wall recorded the inside of that wall, and its
+        // record is a colour rather than a light. Faded rather than gated, so a
+        // probe half buried does not switch a whole cell off between frames.
+        float2 state = textures[frame.gi_sh_texture]
+                           .Load(int3(int2(texel) + int2(PROBE_STATE_TEXEL, 0), 0))
+                           .ga;
+        w *= state.y >= 0.5 ? saturate(1.0 - 2.0 * state.x) : 0.0;
+        float3 offset = frame.gi_origin + (cell + step) * frame.gi_spacing - at;
+        float distance = length(offset);
+        float3 to_probe = distance > 1e-5 ? offset / distance : normal;
+        // Wrapped rather than clamped: a probe a little behind the shading plane
+        // still knows what is beside it, and a hard cosine gate leaves a seam
+        // wherever the grid's own planes cross the geometry.
+        w *= max(0.05, 0.5 * (dot(normal, to_probe) + 1.0));
+        w *= probe_visibility(textures[frame.gi_moment_texture], uint2(c.x, row) * uint(edge),
+                              edge, -to_probe, distance);
+        if (w <= 1e-6)
+        {
+            continue;
+        }
+        sum += w * probe_irradiance(textures[frame.gi_sh_texture], texel, normal);
+        total += w;
+    }
+    // Almost every corner rejected is a point the field has nothing to say about
+    // — a crevice every probe is walled off from, or a cell the round robin has
+    // not reached — and the fallback is the honest answer there rather than
+    // black. The bar is a thousandth rather than an epsilon because the weights
+    // are a *product*: a fully visible cell comes to about a half, so anything
+    // this far under it is eight probes agreeing they cannot see the point.
+    if (total <= 1e-3)
+    {
+        return fallback;
+    }
+    // `/ PI` here and not in `probe_irradiance`, so that function stays the twin
+    // of `sh_irradiance` and this is the one place the convention is applied.
+    return lerp(fallback, sum / (total * PI), blend);
+}
+
 // Everything the environments contribute, or the flat ambient term when there
 // are none — the one place the two are chosen between, so a scene blessed before
 // §6 M24 and a scene with a sky do not each need their own path through
@@ -860,29 +1149,12 @@ float3 f_schlick_ambient(float3 f0, float n_dot_v, float roughness)
 // cannot be summed before evaluation: an environment with a prefiltered chain
 // contributes a *sample*, and one without contributes a three-band convolution.
 // Both are linear in what they are given, so the chainless ones are accumulated
-// What §6 M35's occlusion pass decided about this pixel, or 1 when it did not
-// run.
-//
-// A `Load` and not a `Sample`: the target is the same extent as the attachment
-// being shaded, so a fragment's occlusion is exactly one texel and any filtering
-// would be a blur across a neighbour's surface. The guard is the flag rather
-// than the index, because slot 0 is a legitimate texture — `lamp_texture`'s
-// argument at §6 M31.
-float screen_occlusion(Frame frame, float2 pixel, Texture2D<float4> textures[])
-{
-    if ((frame.shading & SHADING_AO) == 0)
-    {
-        return 1.0;
-    }
-    return textures[frame.ao_texture].Load(int3(int2(pixel), 0)).r;
-}
-
 // as coefficients and evaluated once at the end — which is why blending N
 // environments still costs one `sh_irradiance` and one `sh_radiance`.
 float3 ambient_light(uint64_t frame_address, Frame frame, Surface s, float3 world, float3 to_eye,
                      Texture2D<float4> textures[], SamplerState samplers[])
 {
-    if (frame.environment_count == 0)
+    if (frame.environment_count == 0 && (frame.shading & SHADING_GI) == 0)
     {
         // §6 M11's placeholder, unchanged: a flat term times albedo, occluded.
         return frame.ambient * s.diffuse * s.occlusion;
@@ -953,10 +1225,26 @@ float3 ambient_light(uint64_t frame_address, Frame frame, Surface s, float3 worl
     //
     // No parallax on the first and there cannot be: irradiance is a hemispherical
     // integral rather than a direction, so there is no ray to intersect — what
-    // corrects a diffuse term for position is a field of probes, not a box.
-    // `s.diffuse` is albedo with metallic already folded out, so a conductor's
-    // diffuse term is zero here by construction.
-    float3 irradiance = sh_irradiance(sh, s.normal) / PI;
+    // corrects a diffuse term for position is a field of probes, not a box, and
+    // since §6 M36 that is what the next line is. `s.diffuse` is albedo with
+    // metallic already folded out, so a conductor's diffuse term is zero here by
+    // construction.
+    //
+    // The field **replaces** the environments' diffuse term where it reaches
+    // rather than adding to it, and that is the only composition that is not
+    // double counting: a probe renders the sky as well as the walls, so its
+    // record already contains everything `sh` holds and the part of it the walls
+    // took away. The specular half below is untouched — an L1 record has no
+    // detail a reflection could show.
+    //
+    // M11's flat term is the fallback when a frame declared no sky at all: with
+    // the field on, this function no longer returns early there, so the constant
+    // has to arrive by the same door the environments do or a scene with probes
+    // and no sky would lose it outside the grid.
+    float3 environment_irradiance =
+        frame.environment_count > 0 ? sh_irradiance(sh, s.normal) / PI : frame.ambient;
+    float3 irradiance =
+        gi_irradiance(frame, world, s.normal, environment_irradiance, textures);
     // The mirror direction and not `lobe`: this is the three-band convolution a
     // chainless environment contributes, and §6 M29's argument for declining
     // parallax on a gradient is the same one here. A function with no detail at
@@ -1499,6 +1787,11 @@ float lamp_shadow(uint64_t frame_address, Frame frame, uint lamp, Light light, f
 // `pixel` and `footprint` are threaded through for the shadow filter alone — see
 // `sun_shadow` for why a shading term needs the screen grid, and `pixel_footprint`
 // for why the caller computes the second of them rather than this.
+// Declared here and defined below, so the camera's spelling reads first.
+float3 shade_all_from(uint64_t frame_address, Frame frame, Surface s, float3 world, float3 to_eye,
+                      float2 pixel, float footprint, bool screen, Texture2D<float4> textures[],
+                      SamplerState samplers[]);
+
 float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world, float2 pixel,
                  float footprint, Texture2D<float4> textures[], SamplerState samplers[])
 {
@@ -1511,13 +1804,41 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world, f
     // which is `[0, 0, 0, near]` by construction rather than by rounding.
     float3 axis = frame.view_projection[2].xyz;
     float3 to_eye = dot(axis, axis) > 1e-12 ? normalize(axis) : normalize(-world);
+    return shade_all_from(frame_address, frame, s, world, to_eye, pixel, footprint, true, textures,
+                          samplers);
+}
+
+// The same, from an eye the caller names — §6 M36's probe faces, which shade the
+// scene from a point that is not the camera and cannot derive one from
+// `frame.view_projection` because every face shares that block.
+//
+// A parameter rather than a second copy of the loop: this *is* `shade_all`, and
+// the wrapper above is the camera's spelling of it. Split this way round so the
+// two existing call sites are untouched and the instruction stream after
+// inlining is the one they had.
+//
+// `screen` is false where the fragment is not on the camera's own target, which
+// governs exactly the two terms that are screen-space and nothing else. The
+// occlusion target is the camera's picture, so a probe face reading it at its
+// own atlas pixel would be sampling an unrelated part of the screen. The froxel
+// grid is the camera's *frustum*, so the same is true of it — a probe lighting
+// a room the camera is not looking at would be handed a light list built for
+// somewhere else. The full array is the honest answer there, and it costs what
+// the pre-§6 M30 loop cost, on a target that is six eight-texel faces.
+float3 shade_all_from(uint64_t frame_address, Frame frame, Surface s, float3 world, float3 to_eye,
+                      float2 pixel, float footprint, bool screen, Texture2D<float4> textures[],
+                      SamplerState samplers[])
+{
     // §6 M35, folded into the map the material already carried rather than added
     // as a second term: `Surface::occlusion` is applied to the ambient and
     // indirect lobes and to nothing direct, which is exactly where a
     // screen-space estimate belongs. A material with a baked map and a
     // screen-space estimate gets both, which is the right composition — one is
     // the surface's own crevices, the other is the scene it is standing in.
-    s.occlusion *= screen_occlusion(frame, pixel, textures);
+    if (screen)
+    {
+        s.occlusion *= screen_occlusion(frame, pixel, textures);
+    }
     // The environment, before any light with a direction — image-based since
     // §6 M24, and the flat placeholder in a frame that declared no sky.
     float3 total = ambient_light(frame_address, frame, s, world, to_eye, textures, samplers);
@@ -1557,7 +1878,13 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world, f
     // sum a *subsequence* of the pre-M30 loop's rather than a reordering of it —
     // the falloff is exactly zero past `range`, so what was dropped was adding
     // zero and the two sums agree bit for bit.
-    uint2 run = load_cluster(frame_address, cluster_of(frame, world, pixel));
+    // The froxel's run, or the whole point half of the array where there is no
+    // froxel to have — the two are the same shape because a froxel list *is* a
+    // subsequence of that array, which is what made M30's sum agree with the
+    // loop it replaced bit for bit.
+    uint2 run = screen ? load_cluster(frame_address, cluster_of(frame, world, pixel))
+                       : uint2(frame.directional_count,
+                               frame.light_count - min(frame.light_count, frame.directional_count));
     // The lamps that cast are the front of the point half (§6 M31), so "does
     // this one occlude" is a comparison against a count and not a search — the
     // same shape the suns above are found by, one array segment along.
@@ -1565,7 +1892,7 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world, f
     float rotation = tap_rotation(pixel);
     for (uint n = 0; n < run.y; ++n)
     {
-        uint index = load_cluster_index(frame_address, run.x + n);
+        uint index = screen ? load_cluster_index(frame_address, run.x + n) : run.x + n;
         Light light = load_light(frame_address, index);
         float3 offset = light.position - world;
         float distance_squared = dot(offset, offset);

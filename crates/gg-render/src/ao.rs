@@ -33,6 +33,12 @@ use gg_math::sim;
 
 /// One primitive a ray can meet. Camera-relative, like everything downstream of
 /// `gg-extract` (§1.4) — the eye is the origin.
+///
+/// [`albedo`](Self::albedo) and [`emission`](Self::emission) are what a *bounce*
+/// needs ([`crate::bounce`], §6 M36) and [`occlusion`] ignores both: a shape
+/// blocks a ray whatever colour it is. They live here rather than in a parallel
+/// array because one scene with two slices to keep in step is a bug waiting for
+/// a caller who appends to one of them.
 #[derive(Clone, Copy, Debug)]
 pub struct Occluder {
     /// Centre, metres from the eye.
@@ -44,6 +50,15 @@ pub struct Occluder {
     /// An ellipsoid of the same half-extent rather than a box —
     /// [`shape::SPHERE`](gg_ecs::boundary::shape::SPHERE).
     pub sphere: bool,
+    /// Diffuse reflectance, **linear** and per channel. Physically below 1;
+    /// nothing here clamps it, and a scene that sets it higher is a furnace
+    /// whose series does not converge.
+    pub albedo: sim::Vec3,
+    /// Radiance this surface emits on its own, linear. Zero for everything the
+    /// engine can currently declare — a `Renderable` has no emissive term — and
+    /// present because the one closed form that grades a *bounce count* is an
+    /// enclosure that emits ([`bounce`](crate::bounce)).
+    pub emission: sim::Vec3,
 }
 
 /// Where a ray met something.
@@ -97,13 +112,29 @@ pub fn trace(
     near: f32,
     far: f32,
 ) -> Option<Hit> {
-    let mut best: Option<Hit> = None;
-    for occluder in scene {
+    nearest(origin, direction, scene, near, far).map(|(_, hit)| hit)
+}
+
+/// [`trace`], and *which* primitive was met — the index into `scene`.
+///
+/// A bounce needs it and occlusion does not: what leaves a surface is a property
+/// of the surface, so [`crate::bounce`] has to get back from a hit to the thing
+/// it hit.
+#[must_use]
+pub fn nearest(
+    origin: sim::Vec3,
+    direction: sim::Vec3,
+    scene: &[Occluder],
+    near: f32,
+    far: f32,
+) -> Option<(usize, Hit)> {
+    let mut best: Option<(usize, Hit)> = None;
+    for (index, occluder) in scene.iter().enumerate() {
         let Some(hit) = meet(origin, direction, occluder, near, far) else {
             continue;
         };
-        if best.is_none_or(|b| hit.distance < b.distance) {
-            best = Some(hit);
+        if best.is_none_or(|(_, b)| hit.distance < b.distance) {
+            best = Some((index, hit));
         }
     }
     best
@@ -298,6 +329,8 @@ mod tests {
             rotation: sim::Quat::IDENTITY,
             half_extent: half,
             sphere: false,
+            albedo: sim::Vec3::ZERO,
+            emission: sim::Vec3::ZERO,
         }
     }
 
@@ -392,6 +425,8 @@ mod tests {
             rotation: sim::Quat::IDENTITY,
             half_extent: sim::Vec3::splat(2.0),
             sphere: true,
+            albedo: sim::Vec3::ZERO,
+            emission: sim::Vec3::ZERO,
         };
         let hit = trace(
             sim::Vec3::ZERO,

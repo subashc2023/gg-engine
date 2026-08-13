@@ -81,7 +81,7 @@ const NEAR: f32 = 0.05;
 /// is a cube map — these are six ordinary 2D depth maps, and what matters is
 /// that this table and `pbr.slang`'s `lamp_face` are the *same* table. A
 /// standard one would be a second thing to be right about.
-const AXES: [(render::Vec3, render::Vec3); FACES] = [
+pub(crate) const AXES: [(render::Vec3, render::Vec3); FACES] = [
     (render::Vec3::X, render::Vec3::Y),
     (render::Vec3::NEG_X, render::Vec3::Y),
     // Y needs a different up, or the look-to basis is degenerate.

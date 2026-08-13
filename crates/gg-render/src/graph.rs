@@ -31,6 +31,11 @@ struct Resource {
     target: Target,
     /// Where it has got to, walked forward as passes are compiled.
     state: Access,
+    /// Where it must be left when the frame ends, if anywhere — the backbuffer's
+    /// `Present` and an imported image's `SampledRead`. `None` is a transient,
+    /// whose state at frame end is nobody's business because the next frame
+    /// declares it [`Access::None`] and discards it.
+    resting: Option<Access>,
 }
 
 /// What a pass does with the depth attachment.
@@ -144,8 +149,10 @@ pub struct Declared<'a> {
 /// borrows rather than allocates.
 pub struct Compiled<'a> {
     passes: Vec<Compiled1<'a>>,
-    /// Every resource, for the dump — including any nothing touched.
-    resources: Vec<(&'static str, Target)>,
+    /// Every resource, for the dump — including any nothing touched. The flag is
+    /// whether it outlives the frame, which is the one thing about a resource
+    /// the pass list cannot be read off.
+    resources: Vec<(&'static str, Target, bool)>,
 }
 
 struct Compiled1<'a> {
@@ -222,9 +229,10 @@ impl<'a> Compiled<'a> {
     pub fn dump(&self) -> String {
         let mut out = String::from("render graph\n");
         out.push_str("  resources\n");
-        for (name, target) in &self.resources {
+        for (name, target, imported) in &self.resources {
             let what = match target {
                 Target::Backbuffer => "backbuffer".to_owned(),
+                Target::Image(_) if *imported => "imported".to_owned(),
                 Target::Image(_) => "attachment".to_owned(),
                 Target::Buffer(_) => "buffer".to_owned(),
             };
@@ -284,7 +292,10 @@ impl<'p> Frame<'p> {
     /// Where this frame lands: the acquired swapchain image, or the offscreen
     /// target.
     pub fn backbuffer(&mut self) -> ResourceId {
-        self.push("backbuffer", Target::Backbuffer, None)
+        // `Present` only where something presents — an offscreen target put in a
+        // present layout is an image no WSI owns in a layout only a WSI reads.
+        let resting = self.presents.then_some(Access::Present);
+        self.push_resting("backbuffer", Target::Backbuffer, None, resting)
     }
 
     /// A pooled color attachment at the frame's extent, registered in the
@@ -450,6 +461,51 @@ impl<'p> Frame<'p> {
         self.push(name, Target::Buffer(handle), None)
     }
 
+    /// Import an image the caller owns and that **outlives the frame** — a field
+    /// accumulated over many frames rather than rebuilt in one (§6 M36's probe
+    /// field). The caller creates it, keeps the handle, and retires it; the graph
+    /// only barriers it.
+    ///
+    /// The contract is one invariant: an imported image **enters and leaves every
+    /// frame in [`Access::SampledRead`]**. That is what makes it usable with no
+    /// cross-frame state anywhere — the graph starts it where the last frame's
+    /// terminal pass left it, and [`Frame::compile`] puts it back whatever this
+    /// frame did to it.
+    ///
+    /// Including the *first* frame, and that is a requirement on the caller
+    /// rather than a case handled here: `register_texture` writes a descriptor
+    /// declaring `SHADER_READ_ONLY_OPTIMAL`, and a descriptor that existed before
+    /// the command buffer began is checked against the image's actual layout at
+    /// submit. An image created and left in `UNDEFINED` therefore fails
+    /// validation on the first draw of the frame — before any barrier this graph
+    /// would emit. Put it in the layout the ordinary way, by uploading its
+    /// initial contents (`probe::Probes::open` uploads zeroes), which also
+    /// removes the question of what an untouched texel reads as.
+    ///
+    /// Why this may be **one** image across frames in flight, where a pooled
+    /// attachment may not: a transient enters each frame as [`Access::None`],
+    /// whose layout is `UNDEFINED` and whose barrier orders nothing, so frame
+    /// N+1 clearing what frame N is still reading has no dependency anywhere —
+    /// which is why [`Transients`] keys on the frame slot. An import declares
+    /// where the image actually *is*, so the `SampledRead` → `ColorWrite` barrier
+    /// at the head of frame N+1's update names frame N's reads in its first scope
+    /// and waits for them. Correct, and the cost is that the wait is real.
+    pub fn imported(
+        &mut self,
+        name: &'static str,
+        image: ImageHandle,
+        texture: TextureIndex,
+    ) -> ResourceId {
+        let id = self.push_resting(
+            name,
+            Target::Image(image),
+            Some(texture),
+            Some(Access::SampledRead),
+        );
+        self.resources[id.0].state = Access::SampledRead;
+        id
+    }
+
     /// The bindless slot a pass samples `id` through — what goes in a post
     /// pass's push constants.
     pub fn texture(&self, id: ResourceId) -> Option<TextureIndex> {
@@ -462,10 +518,21 @@ impl<'p> Frame<'p> {
         target: Target,
         texture: Option<TextureIndex>,
     ) -> ResourceId {
+        self.push_resting(name, target, texture, None)
+    }
+
+    fn push_resting(
+        &mut self,
+        name: &'static str,
+        target: Target,
+        texture: Option<TextureIndex>,
+        resting: Option<Access>,
+    ) -> ResourceId {
         self.resources.push(Resource {
             name,
             target,
             state: Access::None,
+            resting,
         });
         self.textures.push(texture);
         ResourceId(self.resources.len() - 1)
@@ -589,21 +656,18 @@ impl<'p> Frame<'p> {
 
         // The frame's terminal states, and the ones no author should have to
         // remember: a swapchain image handed back in any layout but `Present`
-        // is a validation error, and a readback buffer the host reads without a
-        // dependency on the copy is a race the timeline wait only usually wins.
-        //
-        // `Present` only where something presents — an offscreen target put in
-        // a present layout is an image no WSI owns in a layout only a WSI reads.
+        // is a validation error, an imported image left anywhere but its resting
+        // layout is the *next* frame barriering from a state it is not in, and a
+        // readback buffer the host reads without a dependency on the copy is a
+        // race the timeline wait only usually wins.
         let mut edges = Vec::new();
         let terminal: Vec<(usize, Access)> = self
             .resources
             .iter()
             .enumerate()
-            .filter_map(|(i, r)| match (r.target, r.state) {
-                (Target::Backbuffer, state) if self.presents && state != Access::Present => {
-                    Some((i, Access::Present))
-                }
-                (Target::Buffer(_), Access::CopyDst) => Some((i, Access::HostRead)),
+            .filter_map(|(i, r)| match (r.resting, r.target, r.state) {
+                (Some(rest), _, state) if state != rest => Some((i, rest)),
+                (None, Target::Buffer(_), Access::CopyDst) => Some((i, Access::HostRead)),
                 _ => None,
             })
             .collect();
@@ -631,7 +695,11 @@ impl<'p> Frame<'p> {
 
         Ok(Compiled {
             passes,
-            resources: self.resources.iter().map(|r| (r.name, r.target)).collect(),
+            resources: self
+                .resources
+                .iter()
+                .map(|r| (r.name, r.target, r.resting == Some(Access::SampledRead)))
+                .collect(),
         })
     }
 
@@ -949,6 +1017,116 @@ mod tests {
             [large],
             "the old extent is gone, the new one stays"
         );
+        pool.destroy(&mut ctx).unwrap();
+        assert!(
+            ctx.rhi.shutdown().clean(),
+            "no leaks, no validation messages"
+        );
+    }
+
+    /// One pass's derived transitions, stripped of the resource they name — the
+    /// test has one resource, so the pair is the whole content.
+    type Moves = Vec<(Access, Access)>;
+
+    /// One frame over an imported field, returning the transitions its update
+    /// pass and its terminal pass derived.
+    fn field_frame(
+        pool: &mut Transients,
+        ctx: &mut Slotted,
+        image: ImageHandle,
+        texture: TextureIndex,
+    ) -> (Moves, Moves) {
+        let mut frame = pool.frame(ctx, (8, 8)).unwrap();
+        let field = frame.imported("probe.sh", image, texture);
+        let declared = [Declared {
+            name: "probe.integrate",
+            body: Body::Draw {
+                color: Some((field, Load::Keep)),
+                resolve: None,
+                depth: None,
+                depth_resolve: None,
+                viewport: None,
+                samples: &[],
+                draws: &[],
+            },
+        }];
+        let compiled = frame.compile(&declared).unwrap();
+        assert!(
+            compiled.dump().contains("probe.sh (imported)"),
+            "the dump distinguishes what outlives the frame: {}",
+            compiled.dump()
+        );
+        let passes = compiled.passes();
+        let of = |p: &Pass<'_>| p.transitions.iter().map(|t| (t.from, t.to)).collect();
+        let last = passes.last().unwrap();
+        assert_eq!(last.name, "frame-end");
+        (of(&passes[0]), of(last))
+    }
+
+    /// An imported image is entered where the last frame left it and is put back
+    /// there, whatever this frame did to it.
+    ///
+    /// The two halves fail differently, which is why both are asserted. Entering
+    /// at [`Access::None`] would be `UNDEFINED`, which *discards*: a field
+    /// accumulated over frames would be thrown away every frame, silently and
+    /// with no validation message, because discarding is a legal thing to ask
+    /// for. Leaving anywhere but the resting state makes the *next* frame
+    /// barrier from a layout the image is not in, which validation does catch,
+    /// one frame late.
+    #[test]
+    fn an_imported_image_comes_back_to_where_it_started() {
+        let mut pool = Transients::default();
+        let mut ctx = Slotted::new();
+        let image = ctx
+            .create_image(&ImageDesc {
+                name: "gg.test.field",
+                extent: (8, 8),
+                format: ImageFormat::Rgba16F,
+                usage: ImageUse::ColorTarget,
+                mip_levels: 1,
+                samples: Samples::X1,
+            })
+            .unwrap();
+        let texture = ctx.register_texture(image).unwrap();
+
+        // Twice, and identically: an import has no first-frame case, because
+        // the caller is required to hand over an image already in the layout its
+        // bindless descriptor declares.
+        for _ in 0..2 {
+            let (moves, end) = field_frame(&mut pool, &mut ctx, image, texture);
+            assert_eq!(
+                moves,
+                [(Access::SampledRead, Access::ColorWrite)],
+                "a field written from `None` is a field the driver may throw away"
+            );
+            assert_eq!(end, [(Access::ColorWrite, Access::SampledRead)]);
+        }
+
+        // A frame that only reads it moves it nowhere at all — an import costs a
+        // barrier when something writes it and nothing when nothing does.
+        {
+            let mut frame = pool.frame(&mut ctx, (8, 8)).unwrap();
+            let field = frame.imported("probe.sh", image, texture);
+            let samples = [field];
+            let declared = [Declared {
+                name: "forward",
+                body: Body::Draw {
+                    color: None,
+                    resolve: None,
+                    depth: None,
+                    depth_resolve: None,
+                    viewport: None,
+                    samples: &samples,
+                    draws: &[],
+                },
+            }];
+            let compiled = frame.compile(&declared).unwrap();
+            let order: Vec<&str> = compiled.order().collect();
+            assert_eq!(order, ["forward"], "no frame-end pass with nothing to do");
+            assert!(compiled.passes()[0].transitions.is_empty());
+        }
+
+        ctx.destroy_image(image).unwrap();
         pool.destroy(&mut ctx).unwrap();
         assert!(
             ctx.rhi.shutdown().clean(),

@@ -29,6 +29,11 @@
 //!                                   back along points where the lobe is (§6 M33)
 //!   gg-tools split-sum              what [Laz13]'s fit costs where §6 M33 spends
 //!                                   it, and what a table buys back (§6 M34)
+//!   gg-tools ao                     how much occlusion a scene has, and how far
+//!                                   a depth buffer gets toward it (§6 M35)
+//!   gg-tools bounce [--slow]        how much of a room's light got there by
+//!                                   bouncing, against the volume somebody drew
+//!                                   by hand (§6 M36)
 //!   gg-tools banding                what the 8-bit output does to a smooth
 //!                                   gradient, swept over `r.dither`
 //!   gg-tools pace                   what a display rate does to a turn the hand
@@ -43,6 +48,7 @@
 
 mod ao;
 mod banding;
+mod bounce;
 mod cull;
 mod fp_isa;
 mod furnace;
@@ -88,6 +94,7 @@ fn main() -> anyhow::Result<()> {
         "furnace" => furnace::run(rest),
         "split-sum" => split_sum::run(rest),
         "ao" => ao::run(rest),
+        "bounce" => bounce::run(rest),
         "banding" => banding::run(rest),
         "pace" => pace::run(rest),
         "panorama" => panorama::run(rest),
@@ -97,8 +104,8 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
                  shadow-flat, shadow-sweep, shadow-edge, lights, lamps, cull, furnace, \
-                 split-sum, banding, pace, panorama, fp-isa, mcp. A new instrument is a new \
-                 subcommand here, not a new crate"
+                 split-sum, ao, bounce, banding, pace, panorama, fp-isa, mcp. A new \
+                 instrument is a new subcommand here, not a new crate"
             )
         }
     }

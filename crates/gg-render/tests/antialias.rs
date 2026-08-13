@@ -156,6 +156,11 @@ fn the_default_frame_is_the_unfiltered_one() {
 #[test]
 fn each_mode_softens_a_silhouette_and_leaves_flat_colour_alone() {
     let world = world();
+    // The field off: this measures how many pixels an *edge* pass moves, and
+    // §6 M36 puts a gentle gradient across surfaces that were flat colour — which
+    // gives FXAA edges to find that have nothing to do with the silhouette, and
+    // turns "it is not a blur" into a claim about the lighting.
+    gg_render::cvars::GI.set_bool(false);
     let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
     let off = render(&mut renderer, &world, false, Samples::X1);
     let fxaa = render(&mut renderer, &world, true, Samples::X1);
@@ -172,6 +177,7 @@ fn each_mode_softens_a_silhouette_and_leaves_flat_colour_alone() {
         moved > 0,
         "fxaa and msaa produced identical frames — one of them is not wired"
     );
+    gg_render::cvars::GI.set_bool(true);
 }
 
 /// The count the renderer *reports* is one the device actually does, for every
@@ -268,6 +274,18 @@ fn the_forward_pass_resolves_and_everything_after_it_reads_one_image() {
             ao_blur_samples: &[],
             shadows: &[],
             lamps: None,
+            // Nor is §6 M36's field, for the same reason: this test's subject is
+            // the multisample colour attachment, and a frame that also gathered
+            // probes would assert it against a longer graph.
+            probe_atlas: None,
+            probe_depth: None,
+            field_sh: None,
+            field_moments: None,
+            probe_samples: &[],
+            record_samples: &[],
+            probe_draws: &[],
+            probe_sh_draws: &[],
+            probe_moment_draws: &[],
             clear: CLEAR,
             viewport: None,
             prepass_draws: &[],

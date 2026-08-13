@@ -34,7 +34,7 @@ use gg_math::render;
 use gg_rhi::{BufferDesc, BufferHandle, DeviceAddress, FRAMES_IN_FLIGHT, RhiError, Sampler};
 
 use crate::cluster::{self, Assignment, Grid};
-use crate::{GpuHost, View, cvars, lamp, sky, srgb_to_linear};
+use crate::{GpuHost, View, cvars, lamp, probe, sky, srgb_to_linear};
 
 /// The per-frame block, mirroring `include/pbr.slang`'s `Frame`. The shader
 /// reads it as scalars through a device address, so this layout is the whole of
@@ -168,7 +168,38 @@ pub(crate) struct GpuFrame {
     /// and the graph is what makes the two agree: with `r.ao` off neither pass
     /// is declared, so there is no target to have a slot.
     ao_texture: u32,
-    reserved: u32,
+    /// §6 M36's irradiance field: the L1 records, and the octahedral distance
+    /// tiles beside them. Both are images the renderer owns across frames rather
+    /// than graph transients (`graph::Frame::imported`), which is why their slots
+    /// are stable and this block carries them like any other texture.
+    ///
+    /// Zero is a legitimate slot, so `SHADING_GI` is the flag — `lamp_texture`'s
+    /// argument at §6 M31. It is clear whenever the grid has not been fitted,
+    /// and then nothing below is read.
+    gi_sh_texture: u32,
+    gi_moment_texture: u32,
+    /// One distance tile's edge in texels. A float because every use of it in
+    /// the shader is a uv scale.
+    gi_moment_edge: f32,
+    /// Metres between probes, and the grid's corner probe camera-relative — what
+    /// turns a shading point into a cell and three interpolants.
+    gi_spacing: f32,
+    gi_counts: [u32; 3],
+    gi_origin: [f32; 3],
+    /// Metres a shading point is pushed along its normal before it is located in
+    /// the grid. Without it every surface is at distance zero from the geometry
+    /// the probes recorded — itself — and every visibility bound reads as
+    /// occluded by the very surface being shaded.
+    gi_bias: f32,
+    /// This frame's gather batch: six projections and a position per probe,
+    /// `probe::SLOT_BYTES` apart.
+    ///
+    /// An address rather than an array in this block, unlike the lamps' — the
+    /// batch is `r.gi_rate` probes and that is a session's knob, so the fixed
+    /// array would have to be sized for the largest rate anyone might set and
+    /// written for the rate they did. Zero when nothing is gathering, which the
+    /// graph guarantees by declaring no probe pass then.
+    probe_views: u64,
     /// This frame's environments, innermost first (§6 M28).
     ///
     /// A fixed array in the block rather than a second buffer, `cascades`'
@@ -287,6 +318,15 @@ pub(crate) struct Maps<'a> {
     pub(crate) lamps: Option<gg_rhi::TextureIndex>,
     /// The occlusion target the AO pass wrote (§6 M35), if this frame ran one.
     pub(crate) occlusion: Option<gg_rhi::TextureIndex>,
+    /// The irradiance field, when one exists and both its images reached the
+    /// bindless array (§6 M36). `None` leaves `SHADING_GI` clear, which is the
+    /// shading path exactly as M35 left it.
+    pub(crate) field: Option<probe::Field>,
+    /// This frame's gather batch, staged. Separate from `field` because a frame
+    /// gathers before it samples: the first frame after the images are created
+    /// has no field to read and six projections per probe to render through, and
+    /// a shader handed zero for this would dereference it.
+    pub(crate) probe_views: gg_rhi::DeviceAddress,
 }
 
 /// One cascade as the shader reads it, mirroring `include/pbr.slang`'s
@@ -318,6 +358,8 @@ const SHADING_LOBE: u32 = 2;
 const SHADING_LUT: u32 = 4;
 /// The ambient terms are occluded by the depth buffer — `r.ao` (§6 M35).
 const SHADING_AO: u32 = 8;
+/// The diffuse term comes from the probe field — `r.gi` (§6 M36).
+const SHADING_GI: u32 = 16;
 
 /// [`GpuFrame::shading`], read off the CVars once a frame.
 ///
@@ -341,31 +383,38 @@ fn shading_flags() -> u32 {
 /// got. Separate because `r.ao` is a request and a slot is a fact: a frame that
 /// asked for AO and whose target never reached the bindless array must not tell
 /// the shader to sample slot zero.
-fn shading_flags_with(ao: Option<gg_rhi::TextureIndex>) -> u32 {
-    shading_flags() | if ao.is_some() { SHADING_AO } else { 0 }
+fn shading_flags_with(ao: Option<gg_rhi::TextureIndex>, gi: bool) -> u32 {
+    shading_flags() | if ao.is_some() { SHADING_AO } else { 0 } | if gi { SHADING_GI } else { 0 }
 }
 
 const _: () = {
     assert!(core::mem::size_of::<GpuCascade>() == 80);
     assert!(core::mem::size_of::<GpuEnvironment>() == 192);
     assert!(core::mem::size_of::<GpuLamp>() == 384);
-    assert!(core::mem::size_of::<GpuFrame>() == 4384);
+    assert!(core::mem::size_of::<GpuFrame>() == 4432);
     assert!(core::mem::offset_of!(GpuFrame, ambient) == 64);
     assert!(core::mem::offset_of!(GpuFrame, light_count) == 80);
     assert!(core::mem::offset_of!(GpuFrame, sun_direction) == 96);
     assert!(core::mem::offset_of!(GpuFrame, directional_count) == 140);
     assert!(core::mem::offset_of!(GpuFrame, lamp_count) == 172);
     assert!(core::mem::offset_of!(GpuFrame, split_sum) == 208);
-    assert!(core::mem::offset_of!(GpuFrame, environments) == 224);
-    assert!(core::mem::offset_of!(GpuFrame, cascades) == 992);
-    assert!(core::mem::offset_of!(GpuFrame, lamps) == 1312);
+    // §6 M36's eleven words, and the first block growth since M24: 220 was the
+    // second and last of the words M34 set aside, so the arrays moved from 224
+    // to 272 and every base in `pbr.slang` moved with them.
+    assert!(core::mem::offset_of!(GpuFrame, gi_sh_texture) == 220);
+    assert!(core::mem::offset_of!(GpuFrame, gi_counts) == 236);
+    assert!(core::mem::offset_of!(GpuFrame, gi_origin) == 248);
+    assert!(core::mem::offset_of!(GpuFrame, probe_views) == 264);
+    assert!(core::mem::offset_of!(GpuFrame, environments) == 272);
+    assert!(core::mem::offset_of!(GpuFrame, cascades) == 1040);
+    assert!(core::mem::offset_of!(GpuFrame, lamps) == 1360);
     // `pbr.slang` derives these two from `FRAME_STRIDE`, `LIGHT_STRIDE` and its
     // own grid constants. Written out here so the derivation has something to be
     // wrong against — a froxel read at the wrong offset is a picture, not a
     // crash.
     assert!(MAX_LIGHTS == 260);
-    assert!(CLUSTER_BASE == 16864);
-    assert!(INDEX_BASE == 41440);
+    assert!(CLUSTER_BASE == 16912);
+    assert!(INDEX_BASE == 41488);
     assert!(cluster::CLUSTERS == 3072);
     // The coefficients are still the first thing in an environment, so the
     // shader's `SH_BASE` is `ENV_BASE` and M24's loader reads the innermost
@@ -843,6 +892,7 @@ impl Lighting {
         let Maps {
             cascades: shadow,
             lamps: atlas,
+            field,
             ..
         } = maps;
         // Truncated first, so the froxel lists index the array the shader will
@@ -933,10 +983,17 @@ impl Lighting {
             lamp_normal_bias: cvars::LAMP_NORMAL_BIAS.float().max(0.0) as f32,
             lamp_depth_bias: cvars::LAMP_DEPTH_BIAS.float().max(0.0) as f32,
             lamp_taps: cvars::LAMP_TAPS.int().clamp(4, 32) as u32,
-            shading: shading_flags_with(maps.occlusion),
+            shading: shading_flags_with(maps.occlusion, field.is_some()),
             split_sum: self.lut_address,
             ao_texture: maps.occlusion.map_or(0, gg_rhi::TextureIndex::get),
-            reserved: 0,
+            gi_sh_texture: field.map_or(0, |f| f.sh.get()),
+            gi_moment_texture: field.map_or(0, |f| f.moments.get()),
+            gi_moment_edge: field.map_or(0.0, |f| f.moment_edge as f32),
+            gi_spacing: field.map_or(0.0, |f| f.grid.spacing()),
+            gi_counts: field.map_or([0; 3], |f| f.grid.counts()),
+            gi_origin: field.map_or([0.0; 3], |f| f.origin.to_array()),
+            gi_bias: field.map_or(0.0, |f| f.bias),
+            probe_views: maps.probe_views,
             environments: self.blocks,
             cascades,
             lamps: gpu_lamps,
@@ -1239,7 +1296,7 @@ mod tests {
     fn the_gpu_records_are_what_the_shader_strides_by() {
         // `include/pbr.slang` hardcodes FRAME_STRIDE and LIGHT_STRIDE; this is
         // the other half of that agreement, the way the vertex assertions are.
-        assert_eq!(core::mem::size_of::<GpuFrame>(), 4384);
+        assert_eq!(core::mem::size_of::<GpuFrame>(), 4432);
         assert_eq!(core::mem::size_of::<GpuCascade>(), 80);
         assert_eq!(core::mem::size_of::<GpuLight>(), 48);
         assert_eq!(core::mem::offset_of!(GpuLight, direction), 16);
@@ -1247,17 +1304,22 @@ mod tests {
         // And where the froxel arrays begin (§6 M30) — `pbr.slang` derives both
         // from the three constants above, so these are what the derivation is
         // checked against.
-        assert_eq!(CLUSTER_BASE, 16864);
-        assert_eq!(INDEX_BASE, 41440);
+        assert_eq!(CLUSTER_BASE, 16912);
+        assert_eq!(INDEX_BASE, 41488);
         // The lamps (§6 M31): a face is a bare 4x4, so the stride is six of them
         // and `LAMP_BASE` is where the shader starts counting.
         assert_eq!(core::mem::size_of::<GpuLamp>(), 384);
-        assert_eq!(core::mem::offset_of!(GpuFrame, lamps), 1312);
+        assert_eq!(core::mem::offset_of!(GpuFrame, lamps), 1360);
         // ENV_STRIDE, and the offsets `load_environment` reads past the
         // coefficients (§6 M28).
         assert_eq!(core::mem::size_of::<GpuEnvironment>(), 192);
         assert_eq!(core::mem::offset_of!(GpuEnvironment, offset), 144);
         assert_eq!(core::mem::offset_of!(GpuEnvironment, radiance_texture), 176);
+        // §6 M36's eleven words, and where they pushed the arrays to.
+        assert_eq!(core::mem::offset_of!(GpuFrame, gi_sh_texture), 220);
+        assert_eq!(core::mem::offset_of!(GpuFrame, probe_views), 264);
+        assert_eq!(core::mem::offset_of!(GpuFrame, environments), 272);
+        assert_eq!(core::mem::size_of::<probe::GpuProbeView>(), 400);
     }
 
     #[test]

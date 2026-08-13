@@ -30,7 +30,7 @@ use gg_math::render;
 use crate::srgb_to_linear;
 
 /// Coefficients in an order-2 real SH projection: bands 0, 1 and 2 are 1 + 3 + 5.
-pub(crate) const SH_COEFFICIENTS: usize = 9;
+pub const SH_COEFFICIENTS: usize = 9;
 
 /// Directions the quadrature below integrates over.
 ///
@@ -61,7 +61,7 @@ const GOLDEN_ANGLE: f32 = 2.399_963_2;
 /// projection and the evaluation use the same formulas. What it means in
 /// practice is that an altitude-only sky lands in coefficients 0, 1, 6 and 8
 /// rather than in 0, 2 and 6.
-pub(crate) fn basis(d: render::Vec3) -> [f32; SH_COEFFICIENTS] {
+pub fn basis(d: render::Vec3) -> [f32; SH_COEFFICIENTS] {
     [
         0.282_094_79,
         0.488_602_51 * d.y,
@@ -82,7 +82,7 @@ pub(crate) fn basis(d: render::Vec3) -> [f32; SH_COEFFICIENTS] {
 /// half of the sky, where a real one has almost none — the transition a person
 /// reads as "sky" is concentrated in the twenty degrees above the horizon, and
 /// the square root is the cheapest curve that puts it there.
-pub(crate) fn radiance(sky: &Sky, direction: render::Vec3) -> render::Vec3 {
+pub fn radiance(sky: &Sky, direction: render::Vec3) -> render::Vec3 {
     let horizon = linear(sky.horizon);
     let pole = if direction.y >= 0.0 {
         linear(sky.zenith)
@@ -112,7 +112,7 @@ fn linear(color: u32) -> render::Vec3 {
 /// projection, and the first environment that is not a vertical gradient would
 /// delete it. Two thousand samples of a smooth function, recomputed only when
 /// the sky changes, is not a cost worth specializing.
-pub(crate) fn project(sky: &Sky) -> [[f32; 4]; SH_COEFFICIENTS] {
+pub fn project(sky: &Sky) -> [[f32; 4]; SH_COEFFICIENTS] {
     let mut out = [[0.0f32; 4]; SH_COEFFICIENTS];
     // Monte Carlo over a uniform point set: the measure of the sphere divided
     // by the count, which is the weight every sample carries because the set is
@@ -129,6 +129,36 @@ pub(crate) fn project(sky: &Sky) -> [[f32; 4]; SH_COEFFICIENTS] {
         }
     }
     out
+}
+
+/// Irradiance rebuilt from the coefficients — `pbr.slang`'s `sh_irradiance` in
+/// Rust, and the quantity a Lambertian lobe multiplies by `albedo/π`.
+///
+/// [RH01]'s three band factors, and the shader divides the result by `π` to get
+/// the average radiance it shades with. Duplicated across the two languages for
+/// [`basis`]'s reason and defended the same way: both are the paper's, and
+/// neither is derived from the other.
+///
+/// It exists on this side because two things need it. The reconstruction test
+/// below has to have something to check the projection *against*, and
+/// `gg-tools bounce` (§6 M36) has to be able to say what the shipped
+/// environment delivers at a point where the path tracer says something else.
+#[must_use]
+pub fn irradiance(sh: &[[f32; 4]; SH_COEFFICIENTS], normal: render::Vec3) -> render::Vec3 {
+    // pi, 2pi/3, pi/4 — [RH01]'s A0, A1, A2, spelled as the fractions of pi they
+    // are rather than as decimals, which is both what the paper writes and what
+    // stops a transcription error from being invisible.
+    use core::f32::consts::{FRAC_PI_4, PI};
+    const A1: f32 = 2.0 * PI / 3.0;
+    const BANDS: [f32; SH_COEFFICIENTS] = [
+        PI, A1, A1, A1, FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, FRAC_PI_4,
+    ];
+    let basis = basis(normal);
+    let mut total = render::Vec3::ZERO;
+    for ((coefficient, y), band) in sh.iter().zip(basis).zip(BANDS) {
+        total += render::Vec3::from_slice(&coefficient[..3]) * (y * band);
+    }
+    total
 }
 
 /// Sample `k` of a Fibonacci sphere: equal-area in `z`, advanced by the golden
@@ -262,26 +292,6 @@ mod tests {
             let error = (rebuilt - integrated).length() / integrated.length();
             assert!(error < 0.06, "normal {normal}: {rebuilt} vs {integrated}");
         }
-    }
-
-    /// [RH01]'s three band factors, applied to the coefficients — the shader's
-    /// `sh_irradiance` in Rust, and the only reason it is here is that the claim
-    /// above needs something to check.
-    fn irradiance(sh: &[[f32; 4]; SH_COEFFICIENTS], normal: render::Vec3) -> render::Vec3 {
-        // pi, 2pi/3, pi/4 — [RH01]'s A0, A1, A2, spelled as the fractions of pi
-        // they are rather than as decimals, which is both what the paper writes
-        // and what stops a transcription error from being invisible.
-        use core::f32::consts::{FRAC_PI_4, PI};
-        const A1: f32 = 2.0 * PI / 3.0;
-        const BANDS: [f32; SH_COEFFICIENTS] = [
-            PI, A1, A1, A1, FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, FRAC_PI_4, FRAC_PI_4,
-        ];
-        let basis = basis(normal);
-        let mut total = render::Vec3::ZERO;
-        for ((coefficient, y), band) in sh.iter().zip(basis).zip(BANDS) {
-            total += render::Vec3::from_slice(&coefficient[..3]) * (y * band);
-        }
-        total
     }
 
     /// The definition: the environment integrated against a clamped cosine.

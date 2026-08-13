@@ -6,7 +6,9 @@ pub struct gg_render::ao::Hit
 pub gg_render::ao::Hit::distance: f32
 pub gg_render::ao::Hit::normal: gg_math::sim::Vec3
 pub struct gg_render::ao::Occluder
+pub gg_render::ao::Occluder::albedo: gg_math::sim::Vec3
 pub gg_render::ao::Occluder::center: gg_math::sim::Vec3
+pub gg_render::ao::Occluder::emission: gg_math::sim::Vec3
 pub gg_render::ao::Occluder::half_extent: gg_math::sim::Vec3
 pub gg_render::ao::Occluder::rotation: gg_math::sim::Quat
 pub gg_render::ao::Occluder::sphere: bool
@@ -15,8 +17,29 @@ pub gg_render::ao::Params::radius: f32
 pub gg_render::ao::Params::samples: u32
 impl core::default::Default for gg_render::ao::Params
 pub fn gg_render::ao::Params::default() -> gg_render::ao::Params
+pub fn gg_render::ao::nearest(gg_math::sim::Vec3, gg_math::sim::Vec3, &[gg_render::ao::Occluder], f32, f32) -> core::option::Option<(usize, gg_render::ao::Hit)>
 pub fn gg_render::ao::occlusion(gg_math::sim::Vec3, gg_math::sim::Vec3, &[gg_render::ao::Occluder], gg_render::ao::Params) -> f32
 pub fn gg_render::ao::trace(gg_math::sim::Vec3, gg_math::sim::Vec3, &[gg_render::ao::Occluder], f32, f32) -> core::option::Option<gg_render::ao::Hit>
+pub mod gg_render::bounce
+pub struct gg_render::bounce::Lamp
+pub gg_render::bounce::Lamp::position: gg_math::sim::Vec3
+pub gg_render::bounce::Lamp::radiance: gg_math::sim::Vec3
+pub gg_render::bounce::Lamp::range: f32
+pub struct gg_render::bounce::Params
+pub gg_render::bounce::Params::bounces: u32
+pub gg_render::bounce::Params::far: f32
+pub gg_render::bounce::Params::samples: u32
+impl core::default::Default for gg_render::bounce::Params
+pub fn gg_render::bounce::Params::default() -> gg_render::bounce::Params
+pub struct gg_render::bounce::Scene<'a>
+pub gg_render::bounce::Scene::lamps: &'a [gg_render::bounce::Lamp]
+pub gg_render::bounce::Scene::solids: &'a [gg_render::ao::Occluder]
+pub gg_render::bounce::Scene::suns: &'a [gg_render::bounce::Sun]
+pub struct gg_render::bounce::Sun
+pub gg_render::bounce::Sun::direction: gg_math::sim::Vec3
+pub gg_render::bounce::Sun::radiance: gg_math::sim::Vec3
+pub fn gg_render::bounce::direct(gg_math::sim::Vec3, gg_math::sim::Vec3, &gg_render::bounce::Scene<'_>) -> gg_math::sim::Vec3
+pub fn gg_render::bounce::irradiance<F: core::ops::function::Fn(gg_math::sim::Vec3) -> gg_math::sim::Vec3>(gg_math::sim::Vec3, gg_math::sim::Vec3, &gg_render::bounce::Scene<'_>, F, gg_render::bounce::Params) -> gg_math::sim::Vec3
 pub mod gg_render::content
 pub enum gg_render::content::ContentError
 pub gg_render::content::ContentError::Asset(gg_assets::load::AssetError)
@@ -66,6 +89,11 @@ pub static gg_render::cvars::CLUSTERS: gg_core::cvar::CVar
 pub static gg_render::cvars::DITHER: gg_core::cvar::CVar
 pub static gg_render::cvars::EXPOSURE: gg_core::cvar::CVar
 pub static gg_render::cvars::FOV: gg_core::cvar::CVar
+pub static gg_render::cvars::GI: gg_core::cvar::CVar
+pub static gg_render::cvars::GI_FACE: gg_core::cvar::CVar
+pub static gg_render::cvars::GI_MOMENTS: gg_core::cvar::CVar
+pub static gg_render::cvars::GI_RATE: gg_core::cvar::CVar
+pub static gg_render::cvars::GI_SPACING: gg_core::cvar::CVar
 pub static gg_render::cvars::HDR: gg_core::cvar::CVar
 pub static gg_render::cvars::HISTOGRAM: gg_core::cvar::CVar
 pub static gg_render::cvars::LAMPS: gg_core::cvar::CVar
@@ -134,6 +162,7 @@ pub fn gg_render::graph::Frame<'p>::compile<'a>(self, &'a [gg_render::graph::Dec
 pub fn gg_render::graph::Frame<'p>::depth(&mut self, &'static str) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
 pub fn gg_render::graph::Frame<'p>::depth_at(&mut self, &'static str, (u32, u32), gg_rhi::resource::Samples) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
 pub fn gg_render::graph::Frame<'p>::depth_sampled(&mut self, &'static str, (u32, u32)) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
+pub fn gg_render::graph::Frame<'p>::imported(&mut self, &'static str, gg_rhi::resource::ImageHandle, gg_rhi::bindless::TextureIndex) -> gg_render::graph::ResourceId
 pub fn gg_render::graph::Frame<'p>::readback_buffer(&mut self, &'static str, gg_rhi::resource::BufferHandle) -> gg_render::graph::ResourceId
 pub fn gg_render::graph::Frame<'p>::shadow(&mut self, &'static str, (u32, u32)) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
 pub fn gg_render::graph::Frame<'p>::texture(&self, gg_render::graph::ResourceId) -> core::option::Option<gg_rhi::bindless::TextureIndex>
@@ -146,6 +175,12 @@ pub fn gg_render::graph::readback_pass<'a>(gg_render::graph::ResourceId, gg_rend
 pub fn gg_render::graph::single_pass<'a>(&'static str, gg_render::graph::ResourceId, gg_render::graph::Load, &'a [gg_rhi::DrawSpec<'a>]) -> [gg_render::graph::Declared<'a>; 1]
 pub mod gg_render::luminance
 pub const gg_render::luminance::BINS: usize
+pub mod gg_render::sky
+pub const gg_render::sky::SH_COEFFICIENTS: usize
+pub fn gg_render::sky::basis(glam::f32::vec3::Vec3) -> [f32; 9]
+pub fn gg_render::sky::irradiance(&[[f32; 4]; 9], glam::f32::vec3::Vec3) -> glam::f32::vec3::Vec3
+pub fn gg_render::sky::project(&gg_extract::SkyLook) -> [[f32; 4]; 9]
+pub fn gg_render::sky::radiance(&gg_extract::SkyLook, glam::f32::vec3::Vec3) -> glam::f32::vec3::Vec3
 pub mod gg_render::split_sum
 pub const gg_render::split_sum::EXTENT: usize
 pub const gg_render::split_sum::SAMPLES: u32
@@ -179,6 +214,7 @@ impl gg_render::OffscreenRenderer
 pub fn gg_render::OffscreenRenderer::cluster_load(&self) -> gg_render::ClusterLoad
 pub fn gg_render::OffscreenRenderer::device(&self) -> &gg_rhi::device::DeviceReport
 pub fn gg_render::OffscreenRenderer::draw_counts(&self) -> (usize, usize)
+pub fn gg_render::OffscreenRenderer::field_pending(&self) -> (usize, usize)
 pub fn gg_render::OffscreenRenderer::frame(&mut self, &gg_extract::Extracted, &gg_render::View, [f32; 4], &[gg_render::ui::UiVertex]) -> core::result::Result<gg_render::OffscreenFrame, gg_rhi::RhiError>
 pub fn gg_render::OffscreenRenderer::luminance(&self) -> core::option::Option<&[u32; 64]>
 pub fn gg_render::OffscreenRenderer::memory(&self) -> gg_rhi::resource::MemoryUse
@@ -201,6 +237,7 @@ pub fn gg_render::Renderer::device(&self) -> &gg_rhi::device::DeviceReport
 pub fn gg_render::Renderer::draw_counts(&self) -> (usize, usize)
 pub fn gg_render::Renderer::dump_graph(&mut self) -> core::result::Result<alloc::string::String, gg_rhi::RhiError>
 pub fn gg_render::Renderer::extent(&self) -> (u32, u32)
+pub fn gg_render::Renderer::field_pending(&self) -> (usize, usize)
 pub fn gg_render::Renderer::frame(&mut self, &gg_extract::Extracted, &gg_render::View, [f32; 4], &[gg_render::ui::UiVertex]) -> core::result::Result<gg_rhi::FrameOutcome, gg_rhi::RhiError>
 pub fn gg_render::Renderer::gpu_clock(&self) -> core::option::Option<gg_rhi::timing::GpuClock>
 pub fn gg_render::Renderer::luminance(&self) -> core::option::Option<&[u32; 64]>
@@ -230,12 +267,21 @@ pub gg_render::SceneFrame::backbuffer: gg_render::graph::ResourceId
 pub gg_render::SceneFrame::clear: [f32; 4]
 pub gg_render::SceneFrame::depth: gg_render::graph::ResourceId
 pub gg_render::SceneFrame::depth_resolve: core::option::Option<gg_render::graph::ResourceId>
+pub gg_render::SceneFrame::field_moments: core::option::Option<gg_render::graph::ResourceId>
+pub gg_render::SceneFrame::field_sh: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::SceneFrame::forward_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::forward_samples: &'a [gg_render::graph::ResourceId]
 pub gg_render::SceneFrame::lamp_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::lamps: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::SceneFrame::post_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::prepass_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::probe_atlas: core::option::Option<gg_render::graph::ResourceId>
+pub gg_render::SceneFrame::probe_depth: core::option::Option<gg_render::graph::ResourceId>
+pub gg_render::SceneFrame::probe_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::probe_moment_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::probe_samples: &'a [gg_render::graph::ResourceId]
+pub gg_render::SceneFrame::probe_sh_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::record_samples: &'a [gg_render::graph::ResourceId]
 pub gg_render::SceneFrame::samples: &'a [gg_render::graph::ResourceId]
 pub gg_render::SceneFrame::scene: gg_render::graph::ResourceId
 pub gg_render::SceneFrame::scene_ms: core::option::Option<gg_render::graph::ResourceId>
@@ -305,4 +351,5 @@ pub fn gg_rhi::offscreen::OffscreenRhi::upload_buffer(&mut self, gg_rhi::resourc
 pub fn gg_rhi::offscreen::OffscreenRhi::upload_image(&mut self, gg_rhi::resource::ImageHandle, u32, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_rhi::offscreen::OffscreenRhi::write_buffer(&mut self, gg_rhi::resource::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_render::scene_graph<'a>(&gg_render::SceneFrame<'a>) -> alloc::vec::Vec<gg_render::graph::Declared<'a>>
+pub fn gg_render::srgb_to_linear(u32) -> [f32; 4]
 pub fn gg_render::ui_pass<'a>(gg_render::graph::ResourceId, &'a [gg_rhi::DrawSpec<'a>]) -> gg_render::graph::Declared<'a>

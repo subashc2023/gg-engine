@@ -20,6 +20,8 @@
 
 #![deny(missing_docs)]
 
+pub mod ao;
+pub mod bounce;
 mod cluster;
 pub mod content;
 mod cull;
@@ -36,10 +38,10 @@ pub mod luminance;
 // push-constant layout. A public `shaders_gen` would make every shader edit an
 // API event, which is exactly backwards: the generated structs are how this crate
 // talks to its own SPIR-V, not a contract it offers.
-pub mod ao;
+mod probe;
 mod residency;
 mod scene;
-mod sky;
+pub mod sky;
 pub mod split_sum;
 pub mod ui;
 
@@ -49,6 +51,8 @@ mod shaders_gen {
     pub mod ao;
     /// The fullscreen post pass.
     pub mod post;
+    /// The irradiance field's integration (§6 M36).
+    pub mod probe;
     /// The pack pass: mesh geometry and a base-colour map (§4.6).
     pub mod scene;
     /// The environment, drawn where nothing else was (§6 M24).
@@ -251,6 +255,9 @@ pub struct Renderer {
     lighting: lighting::Lighting,
     luminance: luminance::Luminance,
     transients: Transients,
+    /// The irradiance field and the two passes that reduce it (§6 M36).
+    probes: probe::Probes,
+    integrate: probe::Integrate,
     /// The pack, once a host has named one. `None` is a renderer that draws
     /// boxes and nothing else — which is every tier before M9 and every run
     /// without `--pack`.
@@ -324,6 +331,12 @@ impl Renderer {
         let ui = ui::UiPass::new(&mut rhi)?;
         let lighting = lighting::Lighting::new(&mut rhi)?;
         let luminance = luminance::Luminance::new(&mut rhi)?;
+        // The field's images and view buffer, once for the renderer's life
+        // (§6 M36): both are sized by the grid's ceiling rather than by the
+        // grid, so a refit costs no allocation and races no frame in flight.
+        let mut probes = probe::Probes::default();
+        probes.open(&mut rhi)?;
+        let integrate = probe::Integrate::new(&mut rhi)?;
         Ok(Renderer {
             rhi,
             pass,
@@ -332,12 +345,25 @@ impl Renderer {
             lighting,
             luminance,
             transients: Transients::default(),
+            probes,
+            integrate,
             content: None,
             viewport: None,
             samples: Samples::X1,
             #[cfg(feature = "hot-reload")]
             hot: hot::Shaders::new(),
         })
+    }
+
+    /// Probes whose record has never been written since the grid was fitted,
+    /// and how many the grid holds (§6 M36).
+    ///
+    /// Public because a reference render has to wait it out: a golden blessed
+    /// while this is nonzero is a reference of a half-built field rather than of
+    /// the feature — `Content::pending`'s argument, at one remove.
+    #[must_use]
+    pub fn field_pending(&self) -> (usize, usize) {
+        self.probes.progress()
     }
 
     /// Map a pack and start its load clock (§4.6). The game names what to draw
@@ -633,7 +659,15 @@ impl Renderer {
                 .build_shadow(extracted, frame_address, sun.as_ref());
             self.pass
                 .build_lamps(extracted, frame_address, self.lighting.lamps());
+            // The field's own schedule, before the pack pass and before the
+            // attachments: the batch is what the pack's cull runs against and
+            // what sizes the radiance atlas (§6 M36).
+            self.probes.refit(extracted);
+            self.pass
+                .build_probes(extracted, frame_address, self.probes.batch());
         }
+        let probe_views = self.probes.stage(&mut self.rhi, slot)?.unwrap_or(0);
+        let field = self.probes.field(extracted.camera_origin);
         let content = self.content.as_ref();
         {
             gg_core::zone!("render.build-scene");
@@ -647,6 +681,7 @@ impl Renderer {
                 frame_address,
                 sun.as_ref(),
                 self.lighting.lamps(),
+                self.probes.batch(),
             )?;
         }
         report_draws(&self.scene, &self.lighting, extracted, self.shadow_cull());
@@ -684,9 +719,16 @@ impl Renderer {
                 histogram,
                 samples,
                 ao,
+                &self.probes,
             )?;
             (frame, att)
         };
+        // After the attachments, because the atlas's bindless slot does not exist
+        // until the graph has acquired it — and before the draw lists, which
+        // borrow the pushes this writes (§6 M36).
+        if let Some(atlas) = att.probe_atlas.and_then(|id| frame.texture(id)) {
+            self.integrate.build(&self.probes, frame_address, atlas);
+        }
         let post_push = self
             .pass
             .post_push(&frame, att.scene, view_extent, view.aa)?;
@@ -716,6 +758,7 @@ impl Renderer {
                 sky,
                 self.lighting.lamps(),
                 at,
+                (&self.integrate, &self.probes),
             );
             let ui_draws: Vec<DrawSpec<'_>> = self.ui.draw(&ui_push).into_iter().collect();
             (draws, ui_draws)
@@ -764,8 +807,13 @@ impl Renderer {
                 &att,
                 extracted,
                 self.content.as_ref(),
+                field,
+                probe_views,
             )?;
         }
+        // After the block that reads it and before anything can be recorded:
+        // the field holds what this frame is about to write, so the next one
+        // imports it live and keeps it.
         gg_core::zone!("render.execute");
         self.rhi.execute(token, &compiled.passes())
     }
@@ -811,6 +859,7 @@ impl Renderer {
             histogram,
             samples,
             ao,
+            &self.probes,
         )?;
         // The CVar rather than a `View` this has none of: FXAA is a push
         // constant, so what it changes is invisible here by construction.
@@ -849,6 +898,7 @@ impl Renderer {
             sky,
             self.lighting.lamps(),
             at,
+            (&self.integrate, &self.probes),
         );
         // The UI pass as the *last* frame declared it: what the next one draws
         // is not knowable here, and a dump that always omitted it would print a
@@ -892,6 +942,8 @@ impl Renderer {
         drop(self.ui.destroy(&mut self.rhi));
         drop(self.lighting.destroy(&mut self.rhi));
         drop(self.luminance.destroy(&mut self.rhi));
+        drop(self.probes.close(&mut self.rhi));
+        drop(self.integrate.destroy(&mut self.rhi));
         self.rhi.shutdown()
     }
 }
@@ -923,6 +975,9 @@ pub struct OffscreenRenderer {
     lighting: lighting::Lighting,
     luminance: luminance::Luminance,
     transients: Transients,
+    /// As [`Renderer`]'s (§6 M36).
+    probes: probe::Probes,
+    integrate: probe::Integrate,
     readback: BufferHandle,
     extent: (u32, u32),
     content: Option<Content>,
@@ -963,6 +1018,12 @@ impl OffscreenRenderer {
         let ui = ui::UiPass::new(&mut rhi)?;
         let lighting = lighting::Lighting::new(&mut rhi)?;
         let luminance = luminance::Luminance::new(&mut rhi)?;
+        // The field's images and view buffer, once for the renderer's life
+        // (§6 M36): both are sized by the grid's ceiling rather than by the
+        // grid, so a refit costs no allocation and races no frame in flight.
+        let mut probes = probe::Probes::default();
+        probes.open(&mut rhi)?;
+        let integrate = probe::Integrate::new(&mut rhi)?;
         // One buffer for the renderer's life: a frame that allocated its own
         // readback would be measuring the allocator as much as the frame.
         let readback = rhi.create_buffer(&BufferDesc {
@@ -978,6 +1039,8 @@ impl OffscreenRenderer {
             lighting,
             luminance,
             transients: Transients::default(),
+            probes,
+            integrate,
             readback,
             extent,
             content: None,
@@ -986,6 +1049,13 @@ impl OffscreenRenderer {
             #[cfg(feature = "hot-reload")]
             hot: hot::Shaders::new(),
         })
+    }
+
+    /// As [`Renderer::field_pending`] — and the entry point that needs it, since
+    /// the golden harness is offscreen by linkage (§1.5).
+    #[must_use]
+    pub fn field_pending(&self) -> (usize, usize) {
+        self.probes.progress()
     }
 
     /// Put the frame inside `viewport` — see [`Renderer::set_viewport`].
@@ -1154,7 +1224,12 @@ impl OffscreenRenderer {
                 .build_shadow(extracted, frame_address, sun.as_ref());
             self.pass
                 .build_lamps(extracted, frame_address, self.lighting.lamps());
+            self.probes.refit(extracted);
+            self.pass
+                .build_probes(extracted, frame_address, self.probes.batch());
         }
+        let probe_views = self.probes.stage(&mut self.rhi, 0)?.unwrap_or(0);
+        let field = self.probes.field(extracted.camera_origin);
         let content = self.content.as_ref();
         {
             gg_core::zone!("render.build-scene");
@@ -1168,6 +1243,7 @@ impl OffscreenRenderer {
                 frame_address,
                 sun.as_ref(),
                 self.lighting.lamps(),
+                self.probes.batch(),
             )?;
         }
         report_draws(&self.scene, &self.lighting, extracted, self.shadow_cull());
@@ -1199,10 +1275,17 @@ impl OffscreenRenderer {
                 histogram,
                 samples,
                 ao,
+                &self.probes,
             )?;
             (frame, att)
         };
         let into = frame.readback_buffer("render.offscreen.readback", self.readback);
+        // After the attachments, because the atlas's bindless slot does not exist
+        // until the graph has acquired it — and before the draw lists, which
+        // borrow the pushes this writes (§6 M36).
+        if let Some(atlas) = att.probe_atlas.and_then(|id| frame.texture(id)) {
+            self.integrate.build(&self.probes, frame_address, atlas);
+        }
         let post_push = self
             .pass
             .post_push(&frame, att.scene, view_extent, view.aa)?;
@@ -1232,6 +1315,7 @@ impl OffscreenRenderer {
                 sky,
                 self.lighting.lamps(),
                 at,
+                (&self.integrate, &self.probes),
             );
             let ui_draws: Vec<DrawSpec<'_>> = self.ui.draw(&ui_push).into_iter().collect();
             (draws, ui_draws)
@@ -1281,6 +1365,8 @@ impl OffscreenRenderer {
                 &att,
                 extracted,
                 self.content.as_ref(),
+                field,
+                probe_views,
             )?;
         }
         {
@@ -1326,6 +1412,8 @@ impl OffscreenRenderer {
         drop(self.ui.destroy(&mut self.rhi));
         drop(self.lighting.destroy(&mut self.rhi));
         drop(self.luminance.destroy(&mut self.rhi));
+        drop(self.probes.close(&mut self.rhi));
+        drop(self.integrate.destroy(&mut self.rhi));
         self.rhi.shutdown()
     }
 }
@@ -1714,6 +1802,22 @@ fn lamp_draws<'a>(
     draws
 }
 
+/// Every gathering probe face's draws in one list, each carrying its tile
+/// (§6 M36) — [`lamp_draws`]'s shape, over the batch instead of over the lamps.
+fn probe_draws<'a>(
+    pass: &'a BoxPass,
+    scene: &'a ScenePass,
+    probes: &probe::Probes,
+) -> Vec<DrawSpec<'a>> {
+    let mut draws = Vec::new();
+    for index in 0..probes.batch().len() * probe::PROBE_FACES {
+        let tile = probes.tile_at(index / probe::PROBE_FACES, index % probe::PROBE_FACES);
+        draws.extend(pass.probe_draws(index, tile));
+        draws.extend(scene.probe_draws(index, tile));
+    }
+    draws
+}
+
 /// Every attachment a frame allocates, and the extent they were sized from.
 ///
 /// `view_extent` rides along rather than being recomputed by each caller: the
@@ -1778,9 +1882,27 @@ struct SceneAttachments {
     forward_samples: Vec<graph::ResourceId>,
     /// The luminance target, when `r.histogram` is on (§6 M11).
     grid: Option<graph::ResourceId>,
+    /// The probe radiance atlas and the depth it rasterizes against (§6 M36),
+    /// when this frame is gathering. Both transients: what survives the frame is
+    /// the two records the integration writes, not the faces they came from.
+    probe_atlas: Option<graph::ResourceId>,
+    probe_depth: Option<graph::ResourceId>,
+    /// The field's two images, imported (`graph::Frame::imported`). Present
+    /// whenever the renderer holds them and not only while gathering — the
+    /// forward pass samples them either way, and an import a frame declines to
+    /// name is an image the graph stops keeping in `SampledRead`.
+    field_sh: Option<graph::ResourceId>,
+    field_moments: Option<graph::ResourceId>,
+    /// What the probe radiance pass samples: everything the forward pass does,
+    /// because a probe face shades with the same maps — *and* the field itself,
+    /// which is how the second bounce arrives (§6 M36).
+    probe_samples: Vec<graph::ResourceId>,
+    /// What the two integration passes sample: the atlas their probe drew.
+    record_samples: Vec<graph::ResourceId>,
 }
 
 /// Acquire them, in the order the graph dump lists resources.
+#[expect(clippy::too_many_arguments, reason = "one frame's attachments")]
 fn scene_attachments(
     frame: &mut graph::Frame<'_>,
     view_extent: (u32, u32),
@@ -1789,6 +1911,7 @@ fn scene_attachments(
     histogram: bool,
     samples: Samples,
     ao: bool,
+    probes: &probe::Probes,
 ) -> Result<SceneAttachments, RhiError> {
     let backbuffer = frame.backbuffer();
     // Always allocated, always single-sample, always what is sampled
@@ -1834,6 +1957,26 @@ fn scene_attachments(
     let grid = histogram
         .then(|| frame.color_at("luminance.grid", luminance::GRID, SCENE_FORMAT, Samples::X1))
         .transpose()?;
+    // Imported before the atlas is acquired, so a dump lists the field where the
+    // frame actually reaches it: everything downstream of the radiance pass.
+    let (field_sh, field_moments) = match probes.import(frame) {
+        Some((sh, moments)) => (Some(sh), Some(moments)),
+        None => (None, None),
+    };
+    let gathering = !probes.batch().is_empty();
+    let probe_atlas = gathering
+        .then(|| {
+            frame.color_at(
+                "probe.radiance",
+                probes.atlas_extent(),
+                probe::FIELD_FORMAT,
+                Samples::X1,
+            )
+        })
+        .transpose()?;
+    let probe_depth = gathering
+        .then(|| frame.depth_at("probe.depth", probes.atlas_extent(), Samples::X1))
+        .transpose()?;
     Ok(SceneAttachments {
         view_extent,
         backbuffer,
@@ -1852,7 +1995,24 @@ fn scene_attachments(
             .copied()
             .chain(lamp_atlas)
             .chain(ao_target)
+            .chain(field_sh)
+            .chain(field_moments)
             .collect(),
+        // The occlusion target is deliberately absent: a probe face is not on
+        // the camera's screen, so it shades with `screen` false and never reads
+        // it (`shade_all_from`).
+        probe_samples: shadows
+            .iter()
+            .copied()
+            .chain(lamp_atlas)
+            .chain(field_sh)
+            .chain(field_moments)
+            .collect(),
+        record_samples: probe_atlas.into_iter().collect(),
+        probe_atlas,
+        probe_depth,
+        field_sh,
+        field_moments,
         shadows,
         shadow_textures,
         lamp_atlas,
@@ -1876,6 +2036,12 @@ struct SceneDraws<'a> {
     ao: Vec<DrawSpec<'a>>,
     ao_blur: Vec<DrawSpec<'a>>,
     post: [DrawSpec<'a>; 1],
+    /// Every gathering probe face's draws, **flat** — `lamp`'s arrangement, and
+    /// the same reason: one pass, one atlas, a rectangle per draw (§6 M36).
+    probe: Vec<DrawSpec<'a>>,
+    /// One fullscreen triangle per gathering probe, per record.
+    probe_sh: Vec<DrawSpec<'a>>,
+    probe_moments: Vec<DrawSpec<'a>>,
     /// The luminance resample — the post draw without the curve (§6 M11).
     downsample: [DrawSpec<'a>; 1],
     /// What the post and resample passes sample.
@@ -1894,6 +2060,7 @@ struct Pushes<'a> {
 }
 
 impl<'a> SceneDraws<'a> {
+    #[expect(clippy::too_many_arguments, reason = "one frame's draw lists")]
     fn build(
         pass: &'a BoxPass,
         scene: &'a ScenePass,
@@ -1902,9 +2069,17 @@ impl<'a> SceneDraws<'a> {
         sky: (PipelineHandle, &'a [skybox_shader::SkyPush]),
         lamps: &lamp::Lamps,
         at: (Variant, Variant),
+        field: (&'a probe::Integrate, &'a probe::Probes),
     ) -> Self {
         let (post_push, ao_push) = (pushes.post, pushes.ao);
+        let (integrate, probes) = field;
         SceneDraws {
+            probe: att
+                .probe_atlas
+                .map(|_| probe_draws(pass, scene, probes))
+                .unwrap_or_default(),
+            probe_sh: integrate.sh_draws(probes),
+            probe_moments: integrate.moment_draws(probes),
             ao: ao_push
                 .map(|push| vec![pass.ao_draw(push, false)])
                 .unwrap_or_default(),
@@ -1972,6 +2147,15 @@ fn declare_frame<'a>(
         ao_blur_samples: &att.ao_blur_samples,
         shadows: &att.shadows,
         lamps: att.lamp_atlas,
+        probe_atlas: att.probe_atlas,
+        probe_depth: att.probe_depth,
+        field_sh: att.field_sh,
+        field_moments: att.field_moments,
+        probe_samples: &att.probe_samples,
+        record_samples: &att.record_samples,
+        probe_draws: &draws.probe,
+        probe_sh_draws: &draws.probe_sh,
+        probe_moment_draws: &draws.probe_moments,
         clear: plan.clear,
         viewport: plan.viewport,
         prepass_draws: &draws.prepass,
@@ -2008,6 +2192,7 @@ fn declare_frame<'a>(
 /// Takes the attachments rather than an extent so there is no second number to
 /// pass wrongly: `ugly.slang` reads exactly this matrix for the box prepass and
 /// the forward pass, and under a viewport the surface's aspect is not it.
+#[expect(clippy::too_many_arguments, reason = "one frame's lighting block")]
 fn write_lighting(
     lighting: &mut lighting::Lighting,
     rhi: &mut impl GpuHost,
@@ -2016,6 +2201,8 @@ fn write_lighting(
     att: &SceneAttachments,
     extracted: &Extracted,
     content: Option<&Content>,
+    field: Option<probe::Field>,
+    probe_views: DeviceAddress,
 ) -> Result<(), RhiError> {
     lighting.resolve(content, &extracted.skies);
     lighting.write(
@@ -2031,6 +2218,8 @@ fn write_lighting(
             cascades: &att.shadow_textures,
             lamps: att.lamp_texture,
             occlusion: att.ao_texture,
+            field,
+            probe_views,
         },
     )
 }
@@ -2113,6 +2302,9 @@ struct BoxPass {
     /// One list per lamp face, culled — see [`BoxPass::build_lamps`]. Flat, as
     /// `lamp * 6 + face`.
     lamp_pushes: Vec<Vec<Push>>,
+    /// One list per gathering probe face (§6 M36), flat as `slot * 6 + face`.
+    probe_pushes: Vec<Vec<Push>>,
+    probe: PipelineHandle,
 }
 
 /// One static primitive: its vertices, its indices, and the address the shader
@@ -2290,6 +2482,8 @@ impl BoxPass {
             shadow_pushes: Vec::new(),
             cull: cull::ShadowCull::default(),
             lamp_pushes: Vec::new(),
+            probe_pushes: Vec::new(),
+            probe: rhi.create_pipeline(&probe_desc())?,
         })
     }
 
@@ -2433,6 +2627,57 @@ impl BoxPass {
     fn lamp_draws(&self, face: usize, tile: Viewport) -> Vec<DrawSpec<'_>> {
         let pushes = self.lamp_pushes.get(face).map_or(&[][..], Vec::as_slice);
         let mut draws = self.draws_of(self.shadow, pushes);
+        for draw in &mut draws {
+            draw.viewport = Some(tile);
+        }
+        draws
+    }
+
+    /// This frame's probe-face pushes (§6 M36) — [`BoxPass::build_lamps`]'s
+    /// shape against the gather batch, and culled for the same reason: six
+    /// faces of sixteen probes is ninety-six views of the scene, and a box
+    /// beside a probe is in one of them.
+    ///
+    /// The whole `instances` array rather than `visible()`: a probe is not the
+    /// camera, so what the view frustum rejected is exactly what a probe behind
+    /// it needs.
+    fn build_probes(
+        &mut self,
+        extracted: &Extracted,
+        frame: DeviceAddress,
+        batch: &[probe::Gather],
+    ) {
+        let geometry = &self.geometry;
+        let faces = batch.len() * lamp::FACES;
+        self.probe_pushes.resize_with(faces, Vec::new);
+        self.probe_pushes.truncate(faces);
+        for (index, pushes) in self.probe_pushes.iter_mut().enumerate() {
+            let (slot, face) = (index / lamp::FACES, index % lamp::FACES);
+            // The shader's index space again, one segment past the lamps'.
+            let view = (probe::VIEW_BASE + index) as u32;
+            let gather = &batch[slot];
+            pushes.clear();
+            pushes.extend(
+                extracted
+                    .instances
+                    .iter()
+                    .filter(|instance| {
+                        let view = cull::View::Probe { gather, face };
+                        view.fit(instance.offset, instance.radius) != cull::Fit::Outside
+                    })
+                    .map(|instance| {
+                        let mut push = Push::new(geometry, frame, instance);
+                        push.push.shadow_view = view;
+                        push
+                    }),
+            );
+        }
+    }
+
+    /// The boxes that reach one probe face, drawn into that face's tile.
+    fn probe_draws(&self, face: usize, tile: Viewport) -> Vec<DrawSpec<'_>> {
+        let pushes = self.probe_pushes.get(face).map_or(&[][..], Vec::as_slice);
+        let mut draws = self.draws_of(self.probe, pushes);
         for draw in &mut draws {
             draw.viewport = Some(tile);
         }
@@ -2621,6 +2866,7 @@ impl BoxPass {
         self.variants.destroy(rhi)?;
         self.skyboxes.destroy(rhi)?;
         rhi.destroy_pipeline(self.shadow)?;
+        rhi.destroy_pipeline(self.probe)?;
         rhi.destroy_pipeline(self.post)?;
         for geometry in self.geometry {
             rhi.destroy_buffer(geometry.vertices)?;
@@ -2723,6 +2969,31 @@ pub struct SceneFrame<'a> {
     /// The lamp face atlas, when any point light casts (§6 M31). One resource
     /// for every face of every lamp, written by one pass at many rectangles.
     pub lamps: Option<graph::ResourceId>,
+    /// The probe radiance atlas and the depth it rasterizes against (§6 M36).
+    /// `None` declares no probe passes at all — a frame gathering nothing pays
+    /// nothing, on the cascades' and the lamps' terms.
+    pub probe_atlas: Option<graph::ResourceId>,
+    /// The depth the faces rasterize against — a transient of the same extent,
+    /// discarded: what the field keeps of distance is written by the fragment.
+    pub probe_depth: Option<graph::ResourceId>,
+    /// The field's two images. Named even by a frame that gathers nothing,
+    /// because the forward pass samples them.
+    pub field_sh: Option<graph::ResourceId>,
+    /// The distance tiles beside them — see [`SceneFrame::field_sh`].
+    pub field_moments: Option<graph::ResourceId>,
+    /// What the probe radiance pass samples, and what the two integration
+    /// passes do — the field is read through the bindless array like any
+    /// texture, so the graph would see no dependency unless the pass names it.
+    pub probe_samples: &'a [graph::ResourceId],
+    /// What the two integration passes sample: the atlas their probe drew.
+    pub record_samples: &'a [graph::ResourceId],
+    /// Probe-pass draws — every face of every gathering probe in one list, each
+    /// carrying its own tile. Empty when `probe_atlas` is `None`.
+    pub probe_draws: &'a [DrawSpec<'a>],
+    /// One fullscreen triangle per gathering probe, per record.
+    pub probe_sh_draws: &'a [DrawSpec<'a>],
+    /// The distance record's — see [`SceneFrame::probe_sh_draws`].
+    pub probe_moment_draws: &'a [DrawSpec<'a>],
     /// Linear clear for the scene attachment.
     pub clear: [f32; 4],
     /// Where the post pass lands the scene in the backbuffer. `None` is all of
@@ -2810,6 +3081,57 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
                 viewport: None,
                 samples: &[],
                 draws: frame.lamp_draws,
+            },
+        });
+    }
+    // The field (§6 M36), after the shadow passes it shades with and before the
+    // camera's, which read what it writes. Three passes: the faces, then the two
+    // records they reduce to — separate because they land in different images
+    // and a pass writes one colour attachment.
+    if let (Some(atlas), Some(depth)) = (frame.probe_atlas, frame.probe_depth) {
+        declared.push(Declared {
+            name: "probe-radiance",
+            body: Body::Draw {
+                // Cleared to zero, and the zero is load-bearing: a face texel
+                // nothing drew into has `w == 0`, which is what the integration
+                // reads as "the sky is that way" rather than as black.
+                color: Some((atlas, Load::Clear([0.0; 4]))),
+                resolve: None,
+                // Its own depth, discarded: nothing samples a probe's depth —
+                // the distance the field keeps is written by the fragment.
+                depth: Some((depth, DepthUse::Write)),
+                depth_resolve: None,
+                viewport: None,
+                samples: frame.probe_samples,
+                draws: frame.probe_draws,
+            },
+        });
+    }
+    for (name, target, draws) in [
+        ("probe-sh", frame.field_sh, frame.probe_sh_draws),
+        (
+            "probe-moments",
+            frame.field_moments,
+            frame.probe_moment_draws,
+        ),
+    ] {
+        let (Some(target), false) = (target, draws.is_empty()) else {
+            continue;
+        };
+        declared.push(Declared {
+            name,
+            body: Body::Draw {
+                // `Keep`, always: this pass writes the probes it gathered and
+                // no others, and a clear would throw away every probe the round
+                // robin has not come back to. What makes an untouched texel
+                // readable is that `Probes::open` uploaded zeroes into it.
+                color: Some((target, Load::Keep)),
+                resolve: None,
+                depth: None,
+                depth_resolve: None,
+                viewport: None,
+                samples: frame.record_samples,
+                draws,
             },
         });
     }
@@ -3021,6 +3343,30 @@ fn shadow_desc() -> PipelineDesc<'static> {
     }
 }
 
+/// One probe face (§6 M36): the scene shaded into a tile of the radiance atlas.
+///
+/// `DepthMode::Write` and not `TestOnly`, which is the one place this pass
+/// differs from the forward one it otherwise is: a probe face has no prepass in
+/// front of it and six per probe would be six times a pass whose whole point is
+/// that it is small. Single-sample whatever the camera is running at — an eight
+/// texel face has no edges worth resolving, and the integration averages it into
+/// four coefficients anyway.
+fn probe_desc() -> PipelineDesc<'static> {
+    PipelineDesc {
+        name: "ugly.probe",
+        vs_spirv: shader::VS_PROBE_SPIRV,
+        vs_entry: shader::VS_PROBE_ENTRY,
+        fs_spirv: shader::FS_PROBE_SPIRV,
+        fs_entry: shader::FS_PROBE_ENTRY,
+        push_constant_size: core::mem::size_of::<shader::UglyPush>() as u32,
+        color: ColorTarget::Format(SCENE_FORMAT),
+        blend: Blend::Off,
+        depth: DepthMode::Write,
+        samples: Samples::X1,
+        depth_bias: false,
+    }
+}
+
 /// The fullscreen post pass, onto whatever the frame lands in.
 fn post_desc() -> PipelineDesc<'static> {
     PipelineDesc {
@@ -3111,7 +3457,7 @@ const AO_FORMAT: ImageFormat = ImageFormat::R8Unorm;
 
 /// The fullscreen triangle the post pass draws — three shader-generated
 /// vertices, no buffer.
-const FULLSCREEN_VERTICES: u32 = 3;
+pub(crate) const FULLSCREEN_VERTICES: u32 = 3;
 
 /// Push constants for one box.
 ///
@@ -3209,7 +3555,7 @@ const SRGB_EOTF: [f32; 256] = [
 /// the material tint it multiplies (`scene.rs`) and light colour (`lighting.rs`)
 /// both are — so the transfer function here is a systematic shading term, not a
 /// tint fudge. Byte-indexed [`SRGB_EOTF`], so it is the exact curve.
-fn srgb_to_linear(color: u32) -> [f32; 4] {
+pub fn srgb_to_linear(color: u32) -> [f32; 4] {
     // `& 0xff` is the table's whole domain, so the index cannot escape it.
     let channel = |shift: u32| SRGB_EOTF[((color >> shift) & 0xff) as usize];
     [channel(16), channel(8), channel(0), 1.0]
@@ -3528,6 +3874,11 @@ mod tests {
                 "shadow.1",
                 "shadow.2",
                 "shadow.3",
+                // §6 M36, after the maps it shades with and before the camera's
+                // passes, which read the field it writes.
+                "probe-radiance",
+                "probe-sh",
+                "probe-moments",
                 "depth-prepass",
                 // §6 M35, between the pass that writes the depth and the pass
                 // that reads the occlusion — the only place they can go.
@@ -3713,8 +4064,14 @@ mod tests {
             frame.pixels
         };
 
+        // The field off: a probe grid is snapped to the *world* (`probe::Grid`),
+        // so a box ten times further away sits at a different phase of it and is
+        // interpolated from different probes — which is what a spatial field is
+        // for and has nothing to do with the view vector this test is about.
+        cvars::GI.set_bool(false);
         let near = render(-5.0);
         let far = render(-50.0);
+        cvars::GI.set_bool(true);
 
         // Not vacuous in either direction: the box is actually on screen, and it
         // is *specular* — two black squares would compare equal and prove nothing
@@ -3749,6 +4106,12 @@ mod tests {
         assert_eq!(
             frame.order,
             [
+                // The field still gathers: what nothing casts costs is the
+                // shadow passes, and a probe renders a scene lit by whatever
+                // does light it (§6 M36).
+                "probe-radiance",
+                "probe-sh",
+                "probe-moments",
                 "depth-prepass",
                 "ao",
                 "ao-blur",
@@ -3759,17 +4122,19 @@ mod tests {
             ]
         );
 
-        // And with `r.ao` off the graph is the pre-§6 M35 graph *exactly*, not a
-        // graph with the passes doing nothing: neither pass is declared, the
-        // occlusion targets are not allocated, and the prepass target keeps the
-        // compressed depth layout `SAMPLED` would have cost it. That is what
-        // makes the knob a measurement rather than a comparison of two
+        // And with both knobs off the graph is the pre-§6 M35 graph *exactly*,
+        // not a graph with the passes doing nothing: nothing is declared, no
+        // occlusion or field target is allocated, and the prepass target keeps
+        // the compressed depth layout `SAMPLED` would have cost it. That is what
+        // makes a knob a measurement rather than a comparison of two
         // implementations (§6 M32's argument for `r.shadow_cull`).
         cvars::AO.set_bool(false);
+        cvars::GI.set_bool(false);
         let frame = renderer
             .frame(&extracted, &View::default(), [0.0, 0.0, 0.0, 1.0], &[])
             .unwrap();
         cvars::AO.set_bool(true);
+        cvars::GI.set_bool(true);
         assert_eq!(
             frame.order,
             [

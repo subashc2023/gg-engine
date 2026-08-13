@@ -113,6 +113,9 @@ fn occluders() -> Vec<ao::Occluder> {
             rotation: sim::Quat::IDENTITY,
             half_extent,
             sphere: false,
+            // Unread here: occlusion is a property of shape (§6 M36).
+            albedo: sim::Vec3::ZERO,
+            emission: sim::Vec3::ZERO,
         })
         .collect()
 }

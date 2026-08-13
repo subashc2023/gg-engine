@@ -128,6 +128,55 @@ float4 vs_depth(uint vid: SV_VertexID) : SV_Position
     return mul(load_frame(push.frame).view_projection, float4(world_of(vid), 1.0));
 }
 
+// The probe pass (§6 M36): the same geometry, through one probe face's
+// projection, shaded from the probe rather than from the camera.
+//
+// `vs_probe` is `vs_shadow` plus the two interpolants shading needs, and takes
+// its projection through the same `shadow_view` index — `shadow_view_projection`
+// is what resolves a cascade, a lamp face or a probe face out of one number.
+// Depth is *written* here, unlike the forward pass: a probe face has no prepass
+// in front of it, and six per probe would be six times a pass whose whole point
+// is that it is small.
+[shader("vertex")]
+VOut vs_probe(uint vid: SV_VertexID)
+{
+    float* v = (float*)(push.vertices + uint64_t(vid) * VERTEX_STRIDE);
+    float3 world = world_of(vid);
+    VOut o;
+    o.pos = mul(shadow_view_projection(push.frame, push.shadow_view), float4(world, 1.0));
+    o.world = world;
+    o.normal = normal_of(float3(v[3], v[4], v[5]));
+    return o;
+}
+
+// Radiance toward the probe in rgb, and how far away this fragment is in `w` —
+// **signed**, negative on a back face.
+//
+// The sign is the whole of "is this probe inside something": a probe in open air
+// sees the outsides of things, a probe buried in a wall sees the inside of it,
+// and the fraction of its sphere that came back negative is the number the
+// integration writes into the state texel. Cheaper and more direct than any
+// geometric test the host could do, because the rasterizer already knows.
+[shader("fragment")]
+float4 fs_probe(VOut i, bool front: SV_IsFrontFace) : SV_Target
+{
+    Frame frame = load_frame(push.frame);
+    float3 probe =
+        load_probe_position(load_probe_views(push.frame),
+                            (push.shadow_view - PROBE_VIEW_BASE) / PROBE_FACES);
+    float3 offset = probe - i.world;
+    float distance = length(offset);
+    Surface s = make_surface(normalize(i.normal), push.tint.rgb, push.material.y,
+                             1.0 - push.material.x, 1.0);
+    // No `pixel_footprint`: that is a screen-derivative estimate of a filter
+    // width, and the screen here is an eight-texel face. Zero asks the shadow
+    // filter for its floor, which is the right answer at this resolution.
+    float3 radiance = shade_all_from(push.frame, frame, s, i.world,
+                                     offset / max(distance, 1e-5), i.pos.xy, 0.0, false,
+                                     g_textures, g_samplers);
+    return float4(radiance, front ? distance : -distance);
+}
+
 // The shadow pass: the same geometry through one shadow view's projection,
 // chosen by the push rather than by the frame, because the pass is recorded once
 // per view. No normal offset here — the bias belongs on the lookup, so the depth

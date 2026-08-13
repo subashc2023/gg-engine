@@ -19,7 +19,7 @@
 
 use gg_math::render;
 
-use crate::{cvars, lamp, lighting};
+use crate::{cvars, lamp, lighting, probe};
 
 /// How a sphere sits against a shadow view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +109,13 @@ pub(crate) enum View<'a> {
     },
     /// One face's pyramid through the lamp, and the lamp's own reach.
     Face { lamp: &'a lamp::Lamp, face: usize },
+    /// One face's pyramid through a gathering probe (§6 M36) — [`View::Face`]
+    /// without the reach, because a probe has no range: what bounds a face is
+    /// its own ninety degrees and nothing else.
+    Probe {
+        gather: &'a probe::Gather,
+        face: usize,
+    },
 }
 
 impl View<'_> {
@@ -125,6 +132,7 @@ impl View<'_> {
         match *self {
             View::Slab { cascade, basis } => slab(cascade, &basis, centre, radius),
             View::Face { lamp, face } => lamp.fit(centre, radius, face),
+            View::Probe { gather, face } => gather.fit(centre, radius, face),
         }
     }
 }

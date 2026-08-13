@@ -590,6 +590,12 @@ impl Resources {
                 vk::ImageUsageFlags::COLOR_ATTACHMENT
                     | vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::TRANSFER_SRC
+                    // And written *into* by an upload, which is the fourth thing
+                    // a graph resource may be put to (§6 M36): an image that
+                    // outlives the frame has to start somewhere, and the ordinary
+                    // upload path is what puts it in the layout its bindless
+                    // descriptor declares before any frame runs.
+                    | vk::ImageUsageFlags::TRANSFER_DST
             }
         };
         let info = vk::ImageCreateInfo::default()

@@ -203,6 +203,9 @@ pub(crate) struct ScenePass {
     /// Prepass + forward, per sample count (§6 M21).
     variants: crate::Variants,
     shadow: PipelineHandle,
+    /// One probe face's shading pass (§6 M36) — the forward pipeline writing
+    /// depth, because a probe face has no prepass in front of it.
+    probe: PipelineHandle,
     white: ImageHandle,
     white_index: TextureIndex,
     /// The flat-normal fallback. A separate texel from `white`, because white
@@ -243,6 +246,8 @@ pub(crate) struct ScenePass {
     shadow_views: Vec<Vec<ViewDraw>>,
     /// The same per lamp face (§6 M31), flat as `lamp * 6 + face`.
     lamp_views: Vec<Vec<ViewDraw>>,
+    /// And per gathering probe face (§6 M36), flat as `slot * 6 + face`.
+    probe_views: Vec<Vec<ViewDraw>>,
     /// What the cull came to this frame, for the overlay and `gg-tools lamps` —
     /// a cull nothing reports is a cull nobody can tell stopped working.
     cull: cull::ShadowCull,
@@ -311,6 +316,8 @@ impl ScenePass {
             written: Vec::new(),
             shadow_views: Vec::new(),
             lamp_views: Vec::new(),
+            probe_views: Vec::new(),
+            probe: rhi.create_pipeline(&probe_desc())?,
             cull: cull::ShadowCull::default(),
             frame: 0,
         })
@@ -338,6 +345,7 @@ impl ScenePass {
         frame: DeviceAddress,
         sun: Option<&crate::lighting::Sun>,
         lamps: &crate::lamp::Lamps,
+        probes: &[crate::probe::Gather],
     ) -> Result<(), RhiError> {
         self.frame = frame;
         self.keyed.clear();
@@ -351,6 +359,7 @@ impl ScenePass {
         self.cull = cull::ShadowCull::default();
         let Some(content) = content else {
             self.shadow_views.clear();
+            self.probe_views.clear();
             self.lamp_views.clear();
             return Ok(());
         };
@@ -416,7 +425,7 @@ impl ScenePass {
         }
         {
             gg_core::zone!("scene.cull");
-            self.cull(sun, lamps);
+            self.cull(sun, lamps, probes);
         }
         gg_core::zone!("scene.stage");
         self.stage(rhi, slot)
@@ -571,7 +580,12 @@ impl ScenePass {
     ///
     /// Runs before [`ScenePass::stage`] because it appends to both streams that
     /// call writes.
-    fn cull(&mut self, sun: Option<&crate::lighting::Sun>, lamps: &crate::lamp::Lamps) {
+    fn cull(
+        &mut self,
+        sun: Option<&crate::lighting::Sun>,
+        lamps: &crate::lamp::Lamps,
+        batch: &[crate::probe::Gather],
+    ) {
         // Taken and put back so the per-view list being filled is not a borrow
         // of `self` while the compaction writes `self.staged`.
         let mut shadow = core::mem::take(&mut self.shadow_views);
@@ -603,7 +617,23 @@ impl ScenePass {
             self.cull_view(view, shadow_view, draws);
         }
         self.lamp_views = lamp_views;
-        self.cull.views = (cascades.len() + faces) as u32;
+
+        // The probes this frame is gathering, one segment further along the
+        // same index space (§6 M36). Six views a probe and no reach to reject
+        // by, so this is the cull that pays most per view.
+        let mut probe_views = core::mem::take(&mut self.probe_views);
+        let probes = batch.len() * crate::probe::PROBE_FACES;
+        probe_views.resize_with(probes, Vec::new);
+        probe_views.truncate(probes);
+        for (index, draws) in probe_views.iter_mut().enumerate() {
+            let view = cull::View::Probe {
+                gather: &batch[index / crate::probe::PROBE_FACES],
+                face: index % crate::probe::PROBE_FACES,
+            };
+            self.cull_view(view, (crate::probe::VIEW_BASE + index) as u32, draws);
+        }
+        self.probe_views = probe_views;
+        self.cull.views = (cascades.len() + faces + probes) as u32;
     }
 
     /// One view's draws, appending whatever compaction it needs to `staged` and
@@ -752,7 +782,8 @@ impl ScenePass {
         let views = self
             .shadow_views
             .iter_mut()
-            .chain(self.lamp_views.iter_mut());
+            .chain(self.lamp_views.iter_mut())
+            .chain(self.probe_views.iter_mut());
         for draw in views.flatten() {
             draw.push.instances = base;
             draw.command_offset += command_offset;
@@ -795,6 +826,21 @@ impl ScenePass {
             .iter()
             .map(|d| {
                 let mut spec = self.spec(self.shadow, &d.push, d.indices, d.command_offset);
+                spec.viewport = Some(tile);
+                spec
+            })
+            .collect()
+    }
+
+    /// The batches that reach one probe face, landing in that face's tile —
+    /// [`ScenePass::lamp_draws`]'s shape, through the probe pipeline because
+    /// this one shades rather than only recording depth.
+    pub(crate) fn probe_draws(&self, face: usize, tile: Viewport) -> Vec<DrawSpec<'_>> {
+        let draws = self.probe_views.get(face).map_or(&[][..], Vec::as_slice);
+        draws
+            .iter()
+            .map(|d| {
+                let mut spec = self.spec(self.probe, &d.push, d.indices, d.command_offset);
                 spec.viewport = Some(tile);
                 spec
             })
@@ -856,6 +902,7 @@ impl ScenePass {
     pub(crate) fn destroy(self, rhi: &mut impl GpuHost) -> Result<(), RhiError> {
         self.variants.destroy(rhi)?;
         rhi.destroy_pipeline(self.shadow)?;
+        rhi.destroy_pipeline(self.probe)?;
         rhi.destroy_buffer(self.instances)?;
         rhi.destroy_buffer(self.commands)?;
         rhi.destroy_image(self.flat)?;
@@ -994,6 +1041,25 @@ impl ScenePass {
             },
         ));
         crate::hot::swap_all(rhi, &mut swaps)
+    }
+}
+
+/// One probe face (§6 M36): pack geometry shaded into a tile of the radiance
+/// atlas. `crate::probe_desc`'s twin, and the reason the field sees a pack at
+/// all — see it for why depth is written rather than tested.
+fn probe_desc() -> PipelineDesc<'static> {
+    PipelineDesc {
+        name: "scene.probe",
+        vs_spirv: shader::VS_PROBE_SPIRV,
+        vs_entry: shader::VS_PROBE_ENTRY,
+        fs_spirv: shader::FS_PROBE_SPIRV,
+        fs_entry: shader::FS_PROBE_ENTRY,
+        push_constant_size: core::mem::size_of::<shader::ScenePush>() as u32,
+        color: ColorTarget::Format(crate::SCENE_FORMAT),
+        blend: Blend::Off,
+        depth: DepthMode::Write,
+        samples: Samples::X1,
+        depth_bias: false,
     }
 }
 

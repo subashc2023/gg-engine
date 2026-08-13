@@ -213,6 +213,60 @@ pub static AO_FALLOFF: CVar = CVar::new_float("r.ao_falloff", 1.0, "occlusion fa
 /// against the reference either way.
 pub static AO_BLUR: CVar = CVar::new_bool("r.ao_blur", true, "denoise the occlusion target");
 
+/// Whether the irradiance nobody authored is gathered at all (§6 M36).
+///
+/// Off is not "the field at zero": no probe renders, neither field image is
+/// created, the frame block's slot is zero, and `ambient_light` composites the
+/// authored [`Sky`](gg_ecs::boundary::Sky) volumes exactly as it did before this
+/// milestone. That is what makes the A/B in `gg-tools bounce` one binary
+/// (§6 M32's argument for `r.shadow_cull`) — and what a scene blessed before M36
+/// still renders.
+pub static GI: CVar = CVar::new_bool("r.gi", true, "gather bounced light from the scene itself");
+
+/// Metres between probes.
+///
+/// The knob that sets what the field can *resolve*: light changes over the
+/// distance a wall is from the floor beside it, and a spacing wider than that
+/// averages the two together. Two metres is read off `gg-tools bounce`'s bucket
+/// table — it is the widest spacing at which the bucket error stays under the
+/// authored volume's own worst bucket, which is the bar the milestone has to
+/// clear to be worth its cost.
+///
+/// It is also what bounds the field: [`crate::probe`] caps the grid at sixteen
+/// probes an axis, so this is metres per probe *and* the reach of the whole
+/// volume, thirty metres at the default.
+pub static GI_SPACING: CVar = CVar::new_float("r.gi_spacing", 2.0, "metres between probes");
+
+/// Probes gathered per frame, or `0` for all of them.
+///
+/// A probe is **six draws of the scene**, which is the price of a field that
+/// sees whatever the renderer draws rather than a second description of the
+/// world. So a session spreads them: the field converges over
+/// `probes / r.gi_rate` frames and `Probes::pending` is what is left, the way
+/// `Content::pending` is for a streaming pack.
+///
+/// Zero is for a *reference*: a harness that wants the whole field in one frame
+/// and will pay for it. It is not a sensible session value and is not the
+/// default for that reason.
+pub static GI_RATE: CVar = CVar::new_int("r.gi_rate", 16, "probes gathered per frame (0 = all)");
+
+/// Edge of one probe face, texels.
+///
+/// Six of these are the whole sphere around a probe, so the sample count is
+/// `6 * edge²` — 384 at the default. What it has to resolve is *irradiance*,
+/// which is the scene convolved with a cosine lobe, so it is a far smaller
+/// number than a shadow map's: [`GI_FACE`] trades against nothing visible until
+/// a small bright thing (a lamp, a window) falls between samples.
+pub static GI_FACE: CVar = CVar::new_int("r.gi_face", 8, "probe face edge, texels");
+
+/// Octahedral edge of a probe's distance tile.
+///
+/// Directions the visibility test can tell apart: `edge²` of them, 16 at the
+/// default. Small because a Chebyshev bound is soft — what it has to know is
+/// which side of a wall the probe is on, and that is a question with an answer
+/// at four directions a side.
+pub static GI_MOMENTS: CVar = CVar::new_int("r.gi_moments", 4, "probe distance tile edge, texels");
+
 /// Whether a fragment reads its own froxel's light list or the whole frame's
 /// (§6 M30).
 ///
@@ -567,6 +621,11 @@ pub fn register() -> Result<(), CVarError> {
         &AO_FALLOFF,
         &AO_BIAS,
         &AO_BLUR,
+        &GI,
+        &GI_SPACING,
+        &GI_RATE,
+        &GI_FACE,
+        &GI_MOMENTS,
         &CLUSTERS,
         &HISTOGRAM,
         &AA,

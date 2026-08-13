@@ -64,6 +64,10 @@ fn room() -> Vec<ao::Occluder> {
             rotation: sim::Quat::IDENTITY,
             half_extent,
             sphere: false,
+            // Occlusion is a property of shape: what a box is made of does not
+            // change what it blocks. `bounce` is where these matter (§6 M36).
+            albedo: sim::Vec3::ZERO,
+            emission: sim::Vec3::ZERO,
         })
         .collect()
 }
@@ -225,6 +229,10 @@ fn graded_occluders() -> Vec<ao::Occluder> {
             rotation: sim::Quat::IDENTITY,
             half_extent,
             sphere: false,
+            // Occlusion is a property of shape: what a box is made of does not
+            // change what it blocks. `bounce` is where these matter (§6 M36).
+            albedo: sim::Vec3::ZERO,
+            emission: sim::Vec3::ZERO,
         })
         .collect()
 }
