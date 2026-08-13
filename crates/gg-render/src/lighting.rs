@@ -133,17 +133,19 @@ pub(crate) struct GpuFrame {
     /// [`shadow_taps`](GpuFrame::shadow_taps): this one is paid per casting
     /// lamp per fragment, where the sun's is paid once.
     lamp_taps: u32,
-    /// Zero. Named rather than implicit: `Pod` refuses padding, and the shader's
-    /// `FRAME_STRIDE` has to be a number both sides can write down. Padding to a
-    /// multiple of 16 besides, so the arrays behind it start on the alignment a
-    /// `float4` read would want.
+    /// Which shading corrections are on — `SHADING_MULTISCATTER`,
+    /// `SHADING_LOBE`, mirrored in `include/pbr.slang` (§6 M33).
     ///
-    /// Back to five at M28 — M27 had spent three on the chain a frame carried,
-    /// and M28 moved all three into [`GpuEnvironment`] where they belong to *an*
-    /// environment rather than to the frame. M30 spent seven of the eight that
-    /// left on the grid above, and M31 the last one plus sixteen fresh bytes on
-    /// the lamps.
-    reserved: [u32; 1],
+    /// A bitfield where every knob above is its own field, and that is the
+    /// block's own arithmetic rather than a preference: this is the *last* word
+    /// of the padding M27–M31 spent down, and the arrays behind it start at 208
+    /// because 208 is a multiple of 16. A fifty-third scalar would have moved
+    /// every offset in the file to carry one bit.
+    ///
+    /// Both default on. Off is the pre-M33 shading exactly rather than a model
+    /// of it, which is what lets `gg-tools furnace` measure two algorithms in
+    /// one binary instead of two builds — `r.shadow_cull`'s argument at §6 M32.
+    shading: u32,
     /// This frame's environments, innermost first (§6 M28).
     ///
     /// A fixed array in the block rather than a second buffer, `cascades`'
@@ -281,6 +283,26 @@ struct GpuCascade {
     /// distance the penumbra grows with (§6 M23). Per cascade for the same
     /// reason `texel_world` is: each slab is fitted to its own sphere.
     depth_world: f32,
+}
+
+/// Multiple-scattering compensation is on — `r.multiscatter` (§6 M33).
+const SHADING_MULTISCATTER: u32 = 1;
+/// The chain is sampled along the lobe's dominant direction — `r.lobe` (§6 M33).
+const SHADING_LOBE: u32 = 2;
+
+/// [`GpuFrame::shading`], read off the CVars once a frame.
+///
+/// Read here and not in the shader because a CVar is a host thing and a bit is
+/// what crosses; the shader tests bits and has no idea either was a knob.
+fn shading_flags() -> u32 {
+    let mut flags = 0;
+    if cvars::MULTISCATTER.bool() {
+        flags |= SHADING_MULTISCATTER;
+    }
+    if cvars::LOBE.bool() {
+        flags |= SHADING_LOBE;
+    }
+    flags
 }
 
 const _: () = {
@@ -845,7 +867,7 @@ impl Lighting {
             lamp_normal_bias: cvars::LAMP_NORMAL_BIAS.float().max(0.0) as f32,
             lamp_depth_bias: cvars::LAMP_DEPTH_BIAS.float().max(0.0) as f32,
             lamp_taps: cvars::LAMP_TAPS.int().clamp(4, 32) as u32,
-            reserved: [0; 1],
+            shading: shading_flags(),
             environments: self.blocks,
             cascades,
             lamps: gpu_lamps,

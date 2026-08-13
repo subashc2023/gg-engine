@@ -50,7 +50,9 @@ pub static gg_render::cvars::LAMP_NORMAL_BIAS: gg_core::cvar::CVar
 pub static gg_render::cvars::LAMP_SHADOWS: gg_core::cvar::CVar
 pub static gg_render::cvars::LAMP_SIZE: gg_core::cvar::CVar
 pub static gg_render::cvars::LAMP_TAPS: gg_core::cvar::CVar
+pub static gg_render::cvars::LOBE: gg_core::cvar::CVar
 pub static gg_render::cvars::MSAA: gg_core::cvar::CVar
+pub static gg_render::cvars::MULTISCATTER: gg_core::cvar::CVar
 pub static gg_render::cvars::NEAR: gg_core::cvar::CVar
 pub static gg_render::cvars::ORTHO_FAR: gg_core::cvar::CVar
 pub static gg_render::cvars::PAPER_WHITE: gg_core::cvar::CVar

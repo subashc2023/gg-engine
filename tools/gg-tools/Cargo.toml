@@ -47,6 +47,16 @@ demo-05-many = { path = "../../demos/05-many", default-features = false }
 # `Node` parenting is the scene graph's to resolve, and `cull`'s field is
 # parented — extract reads world transforms, it does not compute them.
 gg-scene = { path = "../../crates/gg-scene" }
+# `furnace`'s lobe table grades one chain tap against the integral the chain
+# approximates (§6 M33), and `ggc` is where that integral lives — taken as a
+# library rather than reimplemented, because a reference written twice is two
+# things that can be wrong instead of one. It is a *compiler*, so this is the one
+# dependency here on the asset pipeline; `xtask dist` keeps both out of what
+# ships, and an instrument is not the runtime.
+ggc = { path = "../ggc" }
+# Reading the `.hdr` that table integrates — the same decoder `ggc::import`
+# uses, so the texels are the ones the pack was built from.
+image = { version = "0.25", default-features = false, features = ["hdr"] }
 # An instrument reports by writing an image under `target/gg-tools/`; it never
 # opens a viewer (§1.5).
 png.workspace = true

@@ -25,6 +25,10 @@
 //   [Hei14] Heitz, "Understanding the Masking-Shadowing Function in
 //           Microfacet-Based BRDFs", JCGT 3(2) — the height-correlated Smith
 //           visibility term used below.
+//   [FA19] Fdez-Aguera, "A Multiple-Scattering Microfacet Model for Real-Time
+//           Image-Based Lighting", JCGT 8(1) — the energy a single-scatter
+//           split-sum loses, returned in closed form from the same two numbers
+//           the split-sum already computed.
 //   [Lag12] Lagarde & Zanuttini, "Local Image-based Lighting With
 //           Parallax-corrected Cubemap", SIGGRAPH 2012 talks — intersect the
 //           reflected ray with the environment's own volume and re-aim from its
@@ -175,7 +179,13 @@ struct Frame
     float lamp_normal_bias;    // *face* texels of normal offset, angle-scaled like the sun's
     float lamp_depth_bias;     // the angle-free part, also in face texels
     uint lamp_taps;            // taps in the lamp filter; its own knob because it is paid per lamp
+    uint shading;              // SHADING_* bits; the frame block's last padding word (§6 M33)
 }
+
+// What `Frame::shading` carries. Mirrored in `lighting.rs`, which is where the
+// CVars behind them are read — a bit crosses, a knob does not.
+static const uint SHADING_MULTISCATTER = 1u;
+static const uint SHADING_LOBE = 2u;
 
 // One environment: what it radiates, and the volume it radiates in (§6 M28).
 //
@@ -248,6 +258,7 @@ Frame load_frame(uint64_t address)
     frame.lamp_normal_bias = f[48];
     frame.lamp_depth_bias = f[49];
     frame.lamp_taps = u[50];
+    frame.shading = u[51];
     return frame;
 }
 
@@ -531,7 +542,12 @@ float3 f_schlick(float3 f0, float v_dot_h)
 // One light's contribution. `to_light` is unit and points *from* the surface
 // toward the light; `radiance` is the light's colour times its intensity times
 // whatever attenuation applies.
-float3 shade(Surface s, float3 to_eye, float3 to_light, float3 radiance)
+//
+// `compensation` is what the multiple bounces this BRDF does not model would
+// have returned (§6 M33) — 1 when the correction is off, and computed once per
+// fragment by the caller rather than here, because it depends on the view and
+// the roughness and on nothing this light brings.
+float3 shade(Surface s, float3 to_eye, float3 to_light, float3 radiance, float3 compensation)
 {
     float3 h = normalize(to_eye + to_light);
     float n_dot_l = saturate(dot(s.normal, to_light));
@@ -547,7 +563,13 @@ float3 shade(Surface s, float3 to_eye, float3 to_light, float3 radiance)
     float v_dot_h = saturate(dot(to_eye, h));
 
     float3 fresnel = f_schlick(s.f0, v_dot_h);
-    float3 specular = fresnel * d_ggx(n_dot_h, s.alpha) * v_smith_correlated(n_dot_v, n_dot_l, s.alpha);
+    // Single-scatter GGX, then the bounces it dropped. D*V*F counts a ray that
+    // left the surface once; a rough microsurface shadows itself, and the ray
+    // that hits a second facet and *then* leaves is energy this term throws away
+    // (§6 M33). `compensation` is the tint-correct scale that puts it back, and
+    // it is exactly 1 at roughness 0 where there is no second facet to hit.
+    float3 specular = fresnel * d_ggx(n_dot_h, s.alpha)
+                      * v_smith_correlated(n_dot_v, n_dot_l, s.alpha) * compensation;
     // Energy conservation, the cheap way: what the surface reflected specularly
     // is not available to scatter. Exact only for a single interface, which is
     // the approximation every forward renderer of this class makes.
@@ -699,6 +721,59 @@ float2 env_brdf(float roughness, float n_dot_v)
     return float2(-1.04, 1.04) * a004 + r.zw;
 }
 
+// How much of the environment a surface of this roughness reflects when nothing
+// absorbs any of it — the split-sum's second integral at `f0 = 1`, which is what
+// `a + b` is by construction.
+//
+// This is the number the whole of §6 M33 turns on. It is the *single-scatter*
+// directional albedo, so it is below 1 wherever the microsurface can shadow
+// itself: ~1.0 at roughness 0 and ~0.68 at roughness 1, head-on. A renderer that
+// stops there has silently absorbed the difference, and `gg-tools furnace`
+// measures exactly this curve by rendering it.
+float directional_albedo(float2 ab)
+{
+    // Floored because it divides below, and because the analytic fit is free to
+    // return a hair under zero at a corner of its domain where the table it
+    // approximates does not.
+    return max(ab.x + ab.y, 1e-3);
+}
+
+// The scale that returns what a single-scatter lobe lost — [FA19], in the form
+// [LdR14] gives for direct lights.
+//
+// `1/E` is the whole idea: if a white surface only gave back `E` of what it
+// received, the bounces that never happened were worth `1/E` of what did. The
+// `f0` factor is what makes it tint-correct — the light went round again and was
+// Fresnel-filtered a second time, so a copper surface's returned energy is
+// copper-coloured and a dielectric's is nearly white and nearly nothing.
+float3 energy_compensation(float3 f0, float2 ab)
+{
+    return 1.0 + f0 * (1.0 / directional_albedo(ab) - 1.0);
+}
+
+// Where the lobe actually points — [LdR14] §4.9.3.
+//
+// The chain was prefiltered at `n = v = r` ([Kar13]), which is a statement that
+// the lobe is round and centred on the mirror direction. It is round only
+// head-on: toward the silhouette the GGX lobe stretches along the surface and
+// its centre of mass slides back toward the normal, so a lookup along `reflect`
+// asks the chain for a direction the lobe is no longer centred on. Two lines
+// move it, and at alpha 0 the interpolation returns the mirror direction
+// exactly, which is the one case that was already right.
+//
+// **`alpha`, not the perceptual roughness, and that was measured rather than
+// read.** The published listing says "roughness" and its own text uses that word
+// for both quantities; the two differ by a lot at the smooth end, where the
+// perceptual reading pulls a roughness-0.2 surface twelve per cent off its
+// mirror direction and this one pulls it two. `gg-tools furnace` prints both
+// against an importance-sampled reference over demo 06's panorama, and this is
+// the column that won (§6 M33).
+float3 dominant_direction(float3 normal, float3 reflected, float alpha)
+{
+    float smoothness = saturate(1.0 - alpha);
+    return normalize(lerp(normal, reflected, smoothness * (sqrt(smoothness) + alpha)));
+}
+
 // Fresnel for an *environment* rather than for one direction — [Kar13]. The
 // ceiling is pulled down by roughness because a rough surface's grazing
 // reflection is spread over directions that are no longer all grazing, and the
@@ -740,12 +815,19 @@ float3 ambient_light(uint64_t frame_address, Frame frame, Surface s, float3 worl
     }
     float n_dot_v = max(dot(s.normal, to_eye), 1e-4);
     float roughness = sqrt(s.alpha);
-    float3 fresnel = f_schlick_ambient(s.f0, n_dot_v, roughness);
     // `reflect` takes the incident direction, which is the negation of the one
     // toward the eye — the sign that is wrong in half the implementations of
     // this on the internet and which shows up as a reflection that slides the
     // wrong way.
     float3 reflected = reflect(-to_eye, s.normal);
+    // Where the chain is *asked*, which is not the mirror direction (§6 M33).
+    // Corrected before the parallax intersection and not after: the ray whose
+    // exit point the room wants is the one the lobe actually looks along, and
+    // doing it the other way round re-aims a direction that has already been
+    // turned into a point on a wall.
+    float3 lobe = (frame.shading & SHADING_LOBE) != 0
+                      ? dominant_direction(s.normal, reflected, s.alpha)
+                      : reflected;
 
     float3 sh[SH_COEFFICIENTS];
     float3 sh_specular[SH_COEFFICIENTS];
@@ -783,7 +865,7 @@ float3 ambient_light(uint64_t frame_address, Frame frame, Surface s, float3 worl
         // evaluation that makes blending them free.
         if (e.radiance_levels > 0)
         {
-            float3 aim = parallax_direction(e, world, reflected);
+            float3 aim = parallax_direction(e, world, lobe);
             sampled += weight * prefiltered_radiance(e, aim, s.alpha, textures, samplers);
         }
         else
@@ -792,18 +874,57 @@ float3 ambient_light(uint64_t frame_address, Frame frame, Surface s, float3 worl
         }
     }
 
-    // Lambertian: irradiance over pi, times albedo, times what the specular
-    // lobe did not already reflect. `s.diffuse` is albedo with metallic already
-    // folded out, so a conductor's diffuse term is zero here by construction.
-    // No parallax here and there cannot be: irradiance is a hemispherical
+    // The two quantities everything below is built from: the average radiance a
+    // Lambertian surface sees, and the radiance the specular lobe sees.
+    //
+    // No parallax on the first and there cannot be: irradiance is a hemispherical
     // integral rather than a direction, so there is no ray to intersect — what
     // corrects a diffuse term for position is a field of probes, not a box.
-    float3 diffuse = (1.0 - fresnel) * s.diffuse * sh_irradiance(sh, s.normal) / PI;
+    // `s.diffuse` is albedo with metallic already folded out, so a conductor's
+    // diffuse term is zero here by construction.
+    float3 irradiance = sh_irradiance(sh, s.normal) / PI;
+    // The mirror direction and not `lobe`: this is the three-band convolution a
+    // chainless environment contributes, and §6 M29's argument for declining
+    // parallax on a gradient is the same one here. A function with no detail at
+    // the scale the correction moves cannot be improved by moving it, and every
+    // gradient-lit scene would have shifted for nothing.
+    float3 radiance = sampled + sh_radiance(sh_specular, reflected, s.alpha);
 
-    // Specular: the reflected environment through the split-sum.
+    // The split-sum's second integral: how much of that radiance comes back, and
+    // tinted how. `f0 * a + b` is `FssEss` — the *single-scatter* answer, which
+    // is where every renderer of this class used to stop.
     float2 ab = env_brdf(roughness, n_dot_v);
-    float3 environment = sampled + sh_radiance(sh_specular, reflected, s.alpha);
-    float3 specular = environment * (s.f0 * ab.x + ab.y);
+    float3 fss_ess = s.f0 * ab.x + ab.y;
+    float3 diffuse;
+    float3 specular;
+    if ((frame.shading & SHADING_MULTISCATTER) != 0)
+    {
+        // [FA19], and it is bookkeeping rather than a model: `1 - Ess` is the
+        // fraction the single-scatter lobe dropped, `Favg` is what a bounce
+        // averaged over the hemisphere costs in Fresnel, and `Fms` is the sum of
+        // the geometric series of surviving bounces. The energy comes back as a
+        // *hemispherical* term — it left in every direction, so what it re-reads
+        // is the irradiance and not the lobe's own radiance.
+        float ems = 1.0 - directional_albedo(ab);
+        float3 favg = s.f0 + (1.0 - s.f0) / 21.0;
+        float3 fms = fss_ess * favg / max(1.0 - ems * favg, 1e-4);
+        float3 multiscatter = fms * ems;
+        specular = fss_ess * radiance + multiscatter * irradiance;
+        // The diffuse lobe gets what the specular one demonstrably did *not*
+        // take, which is the part this replaces rather than corrects: the old
+        // `1 - F` was a plausible split, and this is the same split derived from
+        // the energy actually accounted for above. A white furnace is what tells
+        // the two apart — the old one does not close, and this one does.
+        diffuse = s.diffuse * max(1.0 - fss_ess - multiscatter, 0.0) * irradiance;
+    }
+    else
+    {
+        // Pre-§6 M33 exactly, so `r.multiscatter 0` is the old renderer and not a
+        // reconstruction of it — including this `1 - F` split, which is the term
+        // the branch above stops using.
+        specular = fss_ess * radiance;
+        diffuse = (1.0 - f_schlick_ambient(s.f0, n_dot_v, roughness)) * s.diffuse * irradiance;
+    }
 
     // Occlusion applies to both. Strictly it is a diffuse quantity — a specular
     // lobe is narrow and mostly misses whatever the occlusion term is standing
@@ -1319,6 +1440,20 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world, f
     // The environment, before any light with a direction — image-based since
     // §6 M24, and the flat placeholder in a frame that declared no sky.
     float3 total = ambient_light(frame_address, frame, s, world, to_eye, textures, samplers);
+    // What the direct lobes below lost to bounces they do not model (§6 M33).
+    //
+    // Once here rather than inside `shade`, because it is a function of the view
+    // and the roughness and of nothing a light brings — a scene with twenty
+    // lamps on a froxel would otherwise evaluate the same fit twenty times. It
+    // is a second `env_brdf` after `ambient_light`'s and deliberately not shared
+    // with it: that one returns early in every frame that declared no sky, and a
+    // sun still lights a surface there.
+    float3 compensation = float3(1.0, 1.0, 1.0);
+    if ((frame.shading & SHADING_MULTISCATTER) != 0)
+    {
+        float n_dot_v = max(dot(s.normal, to_eye), 1e-4);
+        compensation = energy_compensation(s.f0, env_brdf(sqrt(s.alpha), n_dot_v));
+    }
     // The suns, by count. A light with no position reaches every fragment, so a
     // froxel list holding one would be the same answer stored three thousand
     // times — they are the front of the array instead (§6 M30), which is where
@@ -1335,7 +1470,7 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world, f
             radiance *= sun_shadow(frame_address, frame, world, s.normal, s.plane,
                                    pixel, footprint, textures, samplers);
         }
-        total += shade(s, to_eye, -light.direction, radiance);
+        total += shade(s, to_eye, -light.direction, radiance, compensation);
     }
     // And the lamps this froxel was handed. Ascending, which is what makes this
     // sum a *subsequence* of the pre-M30 loop's rather than a reordering of it —
@@ -1365,7 +1500,8 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world, f
             radiance *= lamp_shadow(frame_address, frame, index - frame.directional_count, light,
                                     world, s.normal, rotation, textures, samplers);
         }
-        total += shade(s, to_eye, offset * rsqrt(max(distance_squared, 1e-8)), radiance);
+        total += shade(s, to_eye, offset * rsqrt(max(distance_squared, 1e-8)), radiance,
+                       compensation);
     }
     return total;
 }

@@ -24,6 +24,9 @@
 //!                                   bias belongs — lost against leaked (§6 M31)
 //!   gg-tools cull                  what giving a batch bounds bought the
 //!                                   shadow passes, over *pack* geometry (§6 M32)
+//!   gg-tools furnace                whether a white metal gives back what it
+//!                                   was given, and whether the lobe it gives it
+//!                                   back along points where the lobe is (§6 M33)
 //!   gg-tools banding                what the 8-bit output does to a smooth
 //!                                   gradient, swept over `r.dither`
 //!   gg-tools pace                   what a display rate does to a turn the hand
@@ -39,6 +42,7 @@
 mod banding;
 mod cull;
 mod fp_isa;
+mod furnace;
 mod lamps;
 mod lights;
 mod mcp;
@@ -77,6 +81,7 @@ fn main() -> anyhow::Result<()> {
         "lights" => lights::run(rest),
         "lamps" => lamps::run(rest),
         "cull" => cull::run(rest),
+        "furnace" => furnace::run(rest),
         "banding" => banding::run(rest),
         "pace" => pace::run(rest),
         "panorama" => panorama::run(rest),

@@ -310,20 +310,90 @@ fn prefilter(working: &[[f32; 3]]) -> Result<Vec<u8>> {
 /// dimension. What it costs is the stretched highlight at grazing angles, which
 /// this renderer does not have and a reference render does.
 fn integrate(working: &[[f32; 3]], normal: Vec3, roughness: f32) -> Vec3 {
-    let alpha = roughness * roughness;
+    // The assumption, as an argument rather than as a sentence: this is the same
+    // integral the reference below takes, handed the one view direction that
+    // makes a single chain enough (§6 M33).
     // Sample count follows the lobe: a narrow one needs few taps to be smooth
     // and a wide one needs many, and spending the roughest level's budget on
     // level 1 would be most of the import time for none of the artifact.
     let samples = (MAX_SAMPLES as f32 * roughness).ceil().max(1.0) as u32;
+    integrate_view(working, normal, normal, roughness, samples)
+}
+
+/// The integral the chain *approximates*, with the view direction it actually
+/// has — the reference `gg-tools furnace` grades a chain lookup's aim against
+/// (§6 M33).
+///
+/// Public because it is the only ground truth for the question "does one tap
+/// along direction *d* return what the lobe would have returned", and that
+/// question cannot be answered by anything the renderer holds: the renderer has
+/// only the chain, which is this function with `to_eye` pinned to `normal`.
+///
+/// The estimator is a BRDF-weighted average of radiance, which is what the split
+/// sum's first term is defined to be — importance-sampling the half vector makes
+/// the `D` and the pdf cancel, leaving `n·l` as the whole weight.
+/// `samples` is the caller's because the question it is asked for is not the
+/// pack's. `prefilter` spends what a texel is worth; a reference spends whatever
+/// it takes for its own estimator noise to be smaller than the difference it is
+/// being used to resolve, which against a panorama holding hard-edged windows is
+/// two orders of magnitude more.
+pub fn reference_value(
+    working: &[[f32; 3]],
+    normal: Vec3,
+    to_eye: Vec3,
+    roughness: f32,
+    samples: u32,
+) -> Vec3 {
+    integrate_view(working, normal, to_eye, roughness, samples)
+}
+
+/// What the chain holds along `direction` at `roughness` — one texel of
+/// `prefilter`'s output, before octahedral storage and BC6H round it.
+///
+/// Public for the same instrument, and deliberately *not* a chain read: the
+/// storage's fidelity is a separate question from the lookup's aim, and mixing
+/// them would grade a mip filter for a lobe's mistake.
+/// Takes `samples` for [`reference_value`]'s reason, and the instrument passes
+/// the *same* count to both: what is being graded is the direction the lookup
+/// points, so anything else that could differ between the two must not.
+#[must_use]
+pub fn chain_value(working: &[[f32; 3]], direction: Vec3, roughness: f32, samples: u32) -> Vec3 {
+    integrate_view(working, direction, direction, roughness, samples)
+}
+
+/// The `WORKING`-sized box-average `prefilter` reads, exposed so the instrument
+/// integrates over the same texels the pack was built from.
+///
+/// # Errors
+/// An image with no texels, or one whose buffer disagrees with its extent.
+pub fn working_copy(source: &[[f32; 3]], width: u32, height: u32) -> Result<Vec<[f32; 3]>> {
+    ensure!(
+        width > 0 && height > 0 && source.len() == width as usize * height as usize,
+        "a {width}x{height} panorama is not {} texels",
+        source.len()
+    );
+    Ok(resample(source, width, height))
+}
+
+/// `integrate`, with the view direction free.
+fn integrate_view(
+    working: &[[f32; 3]],
+    normal: Vec3,
+    to_eye: Vec3,
+    roughness: f32,
+    samples: u32,
+) -> Vec3 {
+    let alpha = roughness * roughness;
     let (tangent, bitangent) = basis_around(normal);
     let mut total = Vec3::ZERO;
     let mut weight = 0.0f32;
     for i in 0..samples {
         let (e1, e2) = hammersley(i, samples);
         let half = ggx_half(e1, e2, alpha, tangent, bitangent, normal);
-        // `v = n`, so the reflected direction is the half vector mirrored about
-        // the normal rather than about a separate view.
-        let light = 2.0 * normal.dot(half) * half - normal;
+        // The view mirrored about the half vector. At `to_eye == normal` this is
+        // the half vector mirrored about the normal, which is the closed form
+        // the `n = v = r` chain is built on.
+        let light = 2.0 * to_eye.dot(half) * half - to_eye;
         let n_dot_l = normal.dot(light);
         if n_dot_l <= 0.0 {
             // Below the horizon. Dropped from the *weight* as well as the sum,

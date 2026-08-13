@@ -71,6 +71,50 @@ pub static DITHER: CVar = CVar::new_float("r.dither", 1.0, "output dither, in co
 /// and is honest about being one.
 pub static AMBIENT: CVar = CVar::new_float("r.ambient", 0.03, "flat ambient light, linear");
 
+/// Whether a surface gets back the light multiple microfacet bounces would have
+/// returned to it (§6 M33).
+///
+/// The split-sum's second integral is single-scatter: a ray that leaves the
+/// surface, hits it again and *then* leaves is counted as absorbed, so a rough
+/// conductor reflects less than it received and the difference goes nowhere. It
+/// is worth a third of the energy at roughness 1 and nothing at all at 0, which
+/// is why it reads as "the rough end of the chart is too dark" rather than as a
+/// bug — the smooth end, where anyone checks, is already right.
+///
+/// Off is the pre-M33 shading exactly and not a model of it, which is what makes
+/// `gg-tools furnace`'s two legs one binary (`r.shadow_cull`'s argument, §6 M32).
+pub static MULTISCATTER: CVar = CVar::new_bool(
+    "r.multiscatter",
+    true,
+    "return the energy multiple microfacet bounces would (0 = single scatter)",
+);
+
+/// Whether the prefiltered chain is read along the lobe's dominant direction
+/// instead of the mirror one (§6 M33).
+///
+/// The chain was integrated assuming the view, the normal and the reflection all
+/// point the same way ([Kar13]) — so one lookup along `reflect` is exact head-on
+/// and increasingly wrong toward the silhouette, where the real GGX lobe is
+/// stretched and its centre of mass has slid back toward the normal. [LdR14]
+/// §4.9.3's two lines move the lookup there.
+///
+/// Its own knob rather than a bit of [`MULTISCATTER`] because it is a claim
+/// about the lobe's *shape* and that one is about its *energy*: they are
+/// measured against different references and can be wrong independently — a
+/// white furnace cannot see this one at all, since every direction in a uniform
+/// environment returns the same radiance.
+///
+/// It is a *net* improvement and not a uniform one, which is why it is a knob
+/// and not a constant: `gg-tools furnace` grades it against an importance-
+/// sampled reference and finds the mean error over demo 06's panorama falling
+/// from 6.8 % to 5.4 %, roughly halved at the rough end where the error is
+/// largest, and slightly worse around roughness 0.4 where every aim is poor.
+pub static LOBE: CVar = CVar::new_bool(
+    "r.lobe",
+    true,
+    "read the chain along the lobe's dominant direction, not the mirror one",
+);
+
 /// Whether a fragment reads its own froxel's light list or the whole frame's
 /// (§6 M30).
 ///
@@ -414,6 +458,8 @@ pub fn register() -> Result<(), CVarError> {
         &PAPER_WHITE,
         &PEAK_NITS,
         &AMBIENT,
+        &MULTISCATTER,
+        &LOBE,
         &CLUSTERS,
         &HISTOGRAM,
         &AA,

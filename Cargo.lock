@@ -1173,6 +1173,8 @@ dependencies = [
  "gg-math",
  "gg-render",
  "gg-scene",
+ "ggc",
+ "image",
  "png",
  "serde_json",
  "tracing-subscriber",
