@@ -481,9 +481,13 @@ impl Editor {
         }
 
         let scroll = self.scrollable(Pane::Tree, list, self.scan.total as f32 * PITCH);
-        // Copied out: the loop declares buttons, which needs `&mut self`.
-        let rows: Vec<(gg_ecs::Entity, u64)> = self.rows.clone();
-        let slots: Vec<Slot> = self.scan.slots.clone();
+        // Moved out rather than copied: the loop declares buttons, which needs
+        // `&mut self`, and a clone to dodge that borrow buys nothing the swap
+        // back does not. Neither is ever observed empty — nothing between here
+        // and the restore reads either field — and the loop's only exit is the
+        // `continue` below, so the restore is unconditional.
+        let rows = std::mem::take(&mut self.rows);
+        let slots = std::mem::take(&mut self.scan.slots);
         let base = self.first_row;
         let names = ((scroll.view.w / EM) as usize).saturating_sub(7);
         self.list.push_clip(scroll.view);
@@ -507,6 +511,8 @@ impl Editor {
                 );
             }
         }
+        self.rows = rows;
+        self.scan.slots = slots;
         self.list.pop_clip();
     }
 

@@ -9,7 +9,8 @@
 //!
 //! Nothing here evicts. A full atlas refuses the insert and the caller draws the
 //! fallback's `?`, which is a visible wrong answer rather than a silent one —
-//! see [`font::EXTENT`](crate::font::EXTENT) for the P2 that fixes it.
+//! see [`font::EXTENT`](crate::font::EXTENT) for the P2 that fixes it, and for
+//! how much room is left, which is a measurement now and not a guess.
 
 use crate::font;
 use gg_render::ui::Coverage;
@@ -133,6 +134,19 @@ impl Atlas {
     #[must_use]
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// Rows the packer has committed, against the rows it has. Test-only: it
+    /// exists so [`crate::font::EXTENT`]'s deferral can be a measurement instead
+    /// of a guess, and a host has nothing to do with the answer — which is also
+    /// why it is not public surface `gg-ui`'s baseline would have to carry.
+    #[cfg(test)]
+    pub(crate) fn packed_rows(&self) -> (u32, u32) {
+        let used = self
+            .shelves
+            .last()
+            .map_or(font::BAND.1, |s| s.top + s.height);
+        (used, font::EXTENT.1)
     }
 
     /// Where `key` is, if it is here.

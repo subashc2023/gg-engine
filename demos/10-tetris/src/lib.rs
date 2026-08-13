@@ -70,11 +70,10 @@ pub const CELLS: usize = WIDTH * HEIGHT;
 /// The seven tetrominoes, four rotations each, as bits of a 4x4 box: bit
 /// `row * 4 + col`, row 0 at the top, col 0 at the left.
 ///
-/// Spawn orientations are SRS's. The *kicks* are not — see [`rotate`], which
-/// tries a short offset list rather than SRS's per-piece tables. That is a
-/// deliberate simplification and a P1: SRS kicks are what make T-spins
-/// possible, and a player who knows the game will feel their absence before
-/// anything else here.
+/// Spawn orientations are SRS's, and so are the kicks since §6 M19: the two
+/// per-piece tables [`rotate_kicked`] tries in order, which is what makes a
+/// T-spin reachable at all and what [`Play::last_rot`] reads to tell a mini
+/// from a full one.
 pub const SHAPES: [[u16; 4]; 7] = [
     [0x00f0, 0x4444, 0x0f00, 0x2222], // I
     [0x0066, 0x0066, 0x0066, 0x0066], // O

@@ -32,7 +32,15 @@ pub const BAND: (u32, u32) = (COLUMNS * CELL.0, ROWS * CELL.1);
 /// [`gg_render::ui`] expands it to RGBA.
 ///
 /// P2: when a real face at several sizes fills this, the answer is an LRU over
-/// [`crate::atlas`]'s shelves, not a bigger constant.
+/// [`crate::atlas`]'s shelves, not a bigger constant. **How far that is, now
+/// measured rather than guessed:** the editor's own face at four scales packs
+/// to 277 of these 512 rows — 54 %, which is closer than it reads. It is not
+/// reachable today for a reason that is not headroom, though:
+/// `gg_editor::rent_face` builds a fresh `Fonts` per size, so sizes never
+/// accumulate in one atlas and the full case needs a design change before it
+/// needs an LRU. `text::tests` packs the four-scale case anyway and fails at
+/// 75 %, so the change that makes this reachable arrives with the answer to
+/// whether it also made the LRU due.
 pub const EXTENT: (u32, u32) = (512, 512);
 /// The first character [`FONT`] covers.
 const FIRST: u8 = 0x20;

@@ -954,11 +954,16 @@ impl Editor {
     /// Run one tick of editor over `world` and return what it asks the host to
     /// do.
     ///
-    /// P2: the panels format their labels with `format!` and so allocate a few
-    /// dozen strings a tick — M13's zero-allocation gate covers `gg-ui` and the
-    /// overlay and deliberately does not reach here, because an editor is not
-    /// in a shipping frame budget. It is still the wrong shape at ten thousand
-    /// rows; `gg_ui::Scratch` is what it should be writing into.
+    /// The panels format their labels with `format!` and so allocate a few dozen
+    /// strings a tick. M13's zero-allocation gate covers `gg-ui` and the overlay
+    /// and deliberately does not reach here, because an editor is not in a
+    /// shipping frame budget — and the reason this was once a P2, that it is the
+    /// wrong shape at ten thousand rows, stopped being true when the tree became
+    /// paged: [`scan::Scan::page`] fills `rows` with a screenful, so the count
+    /// formatted is bounded by the pane's height and not by the world's size.
+    /// `gg_ui::Scratch` is still the shape that would allocate nothing, and it
+    /// costs every label a span lookup to dodge the `&mut self` the buttons
+    /// need — which is a worse trade here than the allocations are a cost.
     ///
     /// Called from the sim tick and not the frame, for `gg_ui::Ui`'s reason: an
     /// edit has to be in the world before the hash reads it, and a headless run

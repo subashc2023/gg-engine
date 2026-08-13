@@ -286,6 +286,46 @@ mod tests {
         (fonts, face)
     }
 
+    /// [`font::EXTENT`]'s deferral, turned into a number that can go red.
+    ///
+    /// It reads "when a real face at several sizes fills this, the answer is an
+    /// LRU" — and until now nothing said how far from filling it we are, so the
+    /// trigger was a guess and the failure it guards is *visible*: a refused
+    /// insert draws the fallback's `?`. This packs the editor's own face at four
+    /// scales into **one** atlas, which is deliberately harsher than the editor
+    /// does — `gg_editor::rent_face` builds a fresh `Fonts` per size, so sizes
+    /// cannot accumulate there at all, and reaching the full case needs a design
+    /// change before it needs an LRU. When that change lands this is what says
+    /// whether the LRU came due with it.
+    #[test]
+    fn the_editors_face_at_four_scales_leaves_the_atlas_most_of_its_room() {
+        let (mut fonts, face) = loaded();
+        // Printable ASCII: `rent_face`'s own warm-up string.
+        let warm: String = (0x20u8..0x7f).map(char::from).collect();
+        for px in [13, 16, 20, 26] {
+            fonts.layout(face, px, &warm);
+        }
+        let (used, total) = fonts.atlas.packed_rows();
+        let fraction = f64::from(used) / f64::from(total);
+        println!(
+            "four scales of FiraMono: {used}/{total} rows ({:.1}%)",
+            fraction * 100.0
+        );
+        assert!(
+            fraction < 0.75,
+            "the atlas is {:.1}% packed by one face at four sizes ({used}/{total} rows) — \
+             `font::EXTENT`'s P2 has come due, and the answer it names is an LRU over the \
+             shelves rather than a bigger constant",
+            fraction * 100.0,
+        );
+        // The other direction, because a packer that placed nothing would also
+        // pass the bound above and would mean the measurement graded nothing.
+        assert!(
+            used > font::BAND.1,
+            "nothing was packed below the bitmap band, so this measured no real glyphs"
+        );
+    }
+
     #[test]
     fn bytes_that_are_not_a_font_are_refused_by_name() {
         let mut fonts = Fonts::default();

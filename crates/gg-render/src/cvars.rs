@@ -63,12 +63,12 @@ pub static DITHER: CVar = CVar::new_float("r.dither", 1.0, "output dither, in co
 /// A flat ambient term, linear, and what a world declaring no `Sky` still gets —
 /// a face pointing away from every light is dim rather than pure black.
 ///
-/// Indirect light itself is §6 M24's environment, and since M28 it varies with
-/// *where a fragment is* rather than only with which way it faces. What is still
-/// P1 is that the variation is **authored**: a level says where its rooms are,
-/// and nothing here derives an irradiance field from the geometry the way a probe
-/// bake or a lightmap would. A hand-placed volume is the coarse version of that
-/// and is honest about being one.
+/// Indirect light itself is §6 M24's environment — varying with *where a
+/// fragment is* since M28, and derived from the geometry rather than authored
+/// since M36's field ([`GI`]). This stays the floor under both: what a world
+/// declaring neither still gets, and what a probe's ray returns when it escapes
+/// a world with no `Sky`, which is what makes `gg-tools bounce`'s ratio leg a
+/// measurement of the field alone.
 pub static AMBIENT: CVar = CVar::new_float("r.ambient", 0.03, "flat ambient light, linear");
 
 /// Whether a surface gets back the light multiple microfacet bounces would have
@@ -227,10 +227,10 @@ pub static GI: CVar = CVar::new_bool("r.gi", true, "gather bounced light from th
 ///
 /// The knob that sets what the field can *resolve*: light changes over the
 /// distance a wall is from the floor beside it, and a spacing wider than that
-/// averages the two together. Two metres is read off `gg-tools bounce`'s bucket
-/// table — it is the widest spacing at which the bucket error stays under the
-/// authored volume's own worst bucket, which is the bar the milestone has to
-/// clear to be worth its cost.
+/// averages the two together. Two metres is read off `gg-tools bounce`'s
+/// leak-against-loss plateau, which is 4.0–4.5 m *effective* — light invented
+/// through a wall against light the visibility term over-rejected, the two
+/// failures an absolute error averages into one improving number.
 ///
 /// It is a **floor** rather than a promise, and that is what the clamp costs:
 /// [`crate::probe`] caps the grid at eight probes an axis, so a scene wider than

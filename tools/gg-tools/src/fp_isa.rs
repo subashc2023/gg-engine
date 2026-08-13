@@ -415,7 +415,15 @@ fn disassembler(explicit: Option<&str>, target: &str) -> anyhow::Result<PathBuf>
 ///
 /// `true` when it cannot tell (no depfile, unreadable mtimes): an instrument
 /// that hid artifacts on a guess would be the failure it is here to prevent.
-fn built_from_current_sources(binary: &Path) -> bool {
+///
+/// **Cargo writes those dependencies workspace-relative**, so they resolve
+/// against `root` rather than against the process's directory. Found while
+/// hardening the same predicate into `xtask`'s import gate, and it is the one
+/// mistake this function cannot afford: an unresolvable path drops out of the
+/// iterator, an empty iterator satisfies `all`, and the filter then answers
+/// "current" for the whole attic — failing open, in exactly the direction the
+/// six-day-stale `sincosf` report went.
+fn built_from_current_sources(binary: &Path, root: &Path) -> bool {
     let Ok(built) = binary.metadata().and_then(|m| m.modified()) else {
         return true;
     };
@@ -428,7 +436,11 @@ fn built_from_current_sources(binary: &Path) -> bool {
     dep.lines()
         .filter_map(|line| line.split_once(": "))
         .flat_map(|(_, deps)| deps.split_whitespace())
-        .filter_map(|d| std::fs::metadata(d).and_then(|m| m.modified()).ok())
+        .filter_map(|d| {
+            std::fs::metadata(root.join(d))
+                .and_then(|m| m.modified())
+                .ok()
+        })
         .all(|source| source <= built)
 }
 
@@ -445,7 +457,7 @@ fn built_from_current_sources(binary: &Path) -> bool {
 /// the report after the import had been designed out of the tree. Returns
 /// `(current, stale)`; the caller prints the second rather than dropping it,
 /// because a silent filter is the same failure one layer down.
-fn artifacts(dir: &Path) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+fn artifacts(dir: &Path, root: &Path) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
     let (mut current, mut stale) = (Vec::new(), Vec::new());
     for entry in std::fs::read_dir(dir)
         .map_err(|e| anyhow::anyhow!("{}: {e} — build the target first", dir.display()))?
@@ -455,7 +467,7 @@ fn artifacts(dir: &Path) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
         if !path.is_file() || !matches!(ext, "" | "exe") {
             continue;
         }
-        match built_from_current_sources(&path) {
+        match built_from_current_sources(&path, root) {
             true => current.push(path),
             false => stale.push(path),
         }
@@ -505,7 +517,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     );
     println!("gg-tools fp-isa: reading {}", dir.display());
 
-    let (current, stale) = artifacts(&dir)?;
+    let (current, stale) = artifacts(&dir, &root)?;
     if !stale.is_empty() {
         println!(
             "gg-tools fp-isa: skipping {} artifact(s) whose sources changed after they were \
@@ -792,26 +804,36 @@ Disassembly of section .text:
         let source = dir.join("thing.rs");
         let binary = dir.join("thing");
 
-        // Source first, then the binary: built *after* what it reads.
+        // Source first, then the binary: built *after* what it reads. The
+        // depfile names it **relative**, the way cargo does — an absolute path
+        // here is what let this test pass while the predicate resolved every
+        // real dependency against the wrong directory and answered "current"
+        // for all of them.
         std::fs::write(&source, "fn main() {}").unwrap();
         std::fs::write(&binary, "elf").unwrap();
         std::fs::write(
             dir.join("thing.d"),
-            format!("{}: {}\n", binary.display(), source.display()),
+            format!("{}: thing.rs\n", binary.display()),
         )
         .unwrap();
-        assert!(built_from_current_sources(&binary));
+        assert!(built_from_current_sources(&binary, &dir));
 
         // Touch the source and it is a census of a program that changed. A
         // rewrite rather than a clock arithmetic, so the mtime is the real one
         // the filesystem records.
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(&source, "fn main() { /* edited */ }").unwrap();
-        assert!(!built_from_current_sources(&binary));
+        assert!(!built_from_current_sources(&binary, &dir));
+        // The same stale binary read from the wrong root: the dependency does
+        // not resolve, `all` sees nothing, and the answer flips to "current".
+        assert!(built_from_current_sources(
+            &binary,
+            Path::new("/nonexistent")
+        ));
 
         // No depfile is "cannot tell", which admits rather than hides.
         std::fs::remove_file(dir.join("thing.d")).unwrap();
-        assert!(built_from_current_sources(&binary));
+        assert!(built_from_current_sources(&binary, &dir));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

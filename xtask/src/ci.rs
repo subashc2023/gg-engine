@@ -953,7 +953,221 @@ fn aarch64_leg() -> anyhow::Result<()> {
             ]),
             &format!("the recorded platformer run on aarch64 under qemu ({profile} profile)"),
         )?;
+        no_imported_math(profile)?;
     }
+    Ok(())
+}
+
+/// Math routines that, imported rather than compiled in, are computed by a copy
+/// of libm the loader picks — which is precisely what §4.2.1 hazard 1 bans
+/// transcendentals to avoid, since glibc's `sin` is not correctly rounded and
+/// differs by version.
+///
+/// A second copy of `gg-tools fp-isa`'s list, deliberately. The two answer
+/// different questions — the instrument attributes and explains an import, this
+/// is a threshold — which is CLAUDE.md's split between a microscope and a gate,
+/// and the C library's math section is not a set that drifts.
+const IMPORTED_MATH: &[&str] = &[
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "atan2",
+    "sinh",
+    "cosh",
+    "tanh",
+    "exp",
+    "exp2",
+    "exp10",
+    "expm1",
+    "log",
+    "log2",
+    "log10",
+    "log1p",
+    "pow",
+    "cbrt",
+    "hypot",
+    "fmod",
+    "remainder",
+    "lgamma",
+    "tgamma",
+    "erf",
+    "erfc",
+    "sincos",
+    "ldexp",
+    "frexp",
+];
+
+/// Whether `binary` was built from the sources it currently depends on, read out
+/// of the `.d` cargo writes beside it — `gg-tools fp-isa`'s predicate, for the
+/// same reason and with the same default.
+///
+/// Per-artifact and not directory-wide: the depfile asks whether any file **this
+/// binary reads** changed after it was linked, which is cargo's own answer, so
+/// the scan and the build agree by construction. `true` when it cannot tell (no
+/// depfile, unreadable mtimes) — a gate that skipped an artifact on a guess
+/// would be the silent filter it exists to prevent.
+///
+/// **Cargo writes those dependencies as workspace-relative paths**, so they are
+/// resolved against `root` and never against the process's directory. That is
+/// not a detail: an unresolvable path drops out of the iterator, an empty
+/// iterator satisfies `all`, and the predicate then answers "current" for every
+/// artifact in the attic. It fails *open*, which is the wrong direction for the
+/// one filter standing between this gate and a permanent red.
+fn built_from_current_sources(binary: &std::path::Path, root: &std::path::Path) -> bool {
+    let Ok(built) = binary.metadata().and_then(|m| m.modified()) else {
+        return true;
+    };
+    let Ok(dep) = std::fs::read_to_string(binary.with_extension("d")) else {
+        return true;
+    };
+    // `<target>: <dep> <dep> …`, one rule per line. The separator is a colon
+    // *followed by a space* — a bare colon would split `C:\dev\…` in half on
+    // Windows, where the drive letter's colon is followed by a separator.
+    dep.lines()
+        .filter_map(|line| line.split_once(": "))
+        .flat_map(|(_, deps)| deps.split_whitespace())
+        .filter_map(|d| {
+            let path = root.join(d);
+            std::fs::metadata(path).and_then(|m| m.modified()).ok()
+        })
+        .all(|source| source <= built)
+}
+
+/// Undefined dynamic symbols in a `readelf -W --dyn-syms` table that name a math
+/// routine — see [`IMPORTED_MATH`]. Split out from its caller so the classifier
+/// can be shown to fail without an aarch64 toolchain in the room.
+fn math_imports(table: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in table.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // `… FUNC GLOBAL DEFAULT UND powf@GLIBC_2.17 (2)` — the name is
+        // whatever follows the undefined-section marker.
+        let Some(name) = fields
+            .iter()
+            .position(|f| *f == "UND")
+            .and_then(|i| fields.get(i + 1))
+        else {
+            continue;
+        };
+        let bare = name.split('@').next().unwrap_or(name);
+        // Both `f` (single) and bare (double) spellings, plus the `l`
+        // long-double forms, which would be a different hazard again.
+        let stem = bare
+            .strip_suffix('f')
+            .or_else(|| bare.strip_suffix('l'))
+            .unwrap_or(bare);
+        if IMPORTED_MATH.contains(&bare) || IMPORTED_MATH.contains(&stem) {
+            out.push(bare.to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// §8's aarch64 row is Low because its surface was *enumerated*: `gg-tools
+/// fp-isa` reports that the determinism artifact holds no instruction whose
+/// value an implementation may choose. That enumeration is only the whole
+/// arithmetic surface if nothing hides behind a **call**, so this asserts the
+/// other half — no artifact this leg just built imports a math routine.
+///
+/// Green on arrival (§6 M17 item 8 designed the projection's last `sincosf` out
+/// of the tree). What it buys is that reintroducing one turns a tier red instead
+/// of waiting for someone to run the instrument by hand — the failure it guards
+/// has happened once already.
+///
+/// Scans only artifacts built from the sources currently in the tree, and that
+/// is load-bearing twice over. `target/` is an attic: the `gg_extract` binary
+/// item 6's first report caught a `sincosf` in is *still there*, eight days
+/// stale, and a scan that read the directory would fail on it forever. The
+/// obvious filter — "newer than this leg started" — is wrong in the other
+/// direction, since a second nightly over an unchanged tree rebuilds nothing and
+/// would leave the gate with no artifact at all. [`built_from_current_sources`]
+/// is cargo's own answer to the precise question, which is why it is the one
+/// asked here and in the instrument.
+///
+/// An empty scan is a **failure** rather than a pass: a gate with nothing to
+/// read cannot fail.
+fn no_imported_math(profile: &str) -> anyhow::Result<()> {
+    // Cargo's directory for the dev profile is `debug`; every other names itself.
+    let profile_dir = if profile == "dev" { "debug" } else { profile };
+    let root = workspace_root();
+    let deps = root.join(format!(
+        "target/aarch64-unknown-linux-gnu/{profile_dir}/deps"
+    ));
+    let mut fresh = Vec::new();
+    for entry in std::fs::read_dir(&deps).map_err(|e| {
+        anyhow::anyhow!(
+            "{}: {e} — the leg above should have built it",
+            deps.display()
+        )
+    })? {
+        let path = entry?.path();
+        // Cargo leaves `.d`, `.rlib` and `.rmeta` beside each binary; a test
+        // executable is the extensionless one.
+        if !path.is_file() || path.extension().is_some() {
+            continue;
+        }
+        if built_from_current_sources(&path, &root) {
+            fresh.push(path);
+        }
+    }
+    fresh.sort();
+    anyhow::ensure!(
+        !fresh.is_empty(),
+        "no aarch64 {profile_dir} artifact in {} was built from the tree's current sources — the \
+         scan below would have passed by reading nothing",
+        deps.display(),
+    );
+
+    let readelf = ["aarch64-linux-gnu-readelf", "llvm-readelf", "readelf"]
+        .into_iter()
+        .find(|tool| {
+            std::process::Command::new(tool)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no readelf on PATH — this leg already needs the aarch64 cross toolchain that \
+                 ships one (`apt install binutils-aarch64-linux-gnu`). Skipping would make the \
+                 gate silently absent, which is worse than a red tier"
+            )
+        })?;
+
+    let mut found: Vec<String> = Vec::new();
+    for path in &fresh {
+        let table = run_capture(
+            std::process::Command::new(readelf)
+                .args(["-W", "--dyn-syms"])
+                .arg(path),
+            "readelf --dyn-syms",
+        )?;
+        let file = path.file_name().unwrap_or_default().to_string_lossy();
+        found.extend(
+            math_imports(&table)
+                .into_iter()
+                .map(|s| format!("{file}: {s}")),
+        );
+    }
+    found.sort();
+    found.dedup();
+    anyhow::ensure!(
+        found.is_empty(),
+        "aarch64 {profile_dir}: {} artifact(s) import a math routine, so §8's instruction census \
+         no longer covers the whole arithmetic surface and the row's `Low` is unearned — \
+         {}. Run `gg-tools fp-isa --profile {profile}` to attribute them",
+        found.len(),
+        found.join(", "),
+    );
+    println!(
+        "xtask: {} aarch64 {profile_dir} artifact(s) import no math routine (§8)",
+        fresh.len()
+    );
     Ok(())
 }
 
@@ -1730,6 +1944,95 @@ mod tests {
         // Vacuity: an empty listing must not read as "nothing wrong" by accident
         // of the parse — it reads that way by there being nothing to read.
         assert!(super::crlf_offenders("").is_empty());
+    }
+
+    /// §8's other half, planted red and green. The real table this was written
+    /// against is a `gg-extract` artifact that imported `sincosf` (§6 M17 item
+    /// 6) — the import the row's census could not see into, and the reason the
+    /// gate exists at all rather than being green forever by luck.
+    #[test]
+    fn the_import_scan_names_a_math_routine_and_forgives_everything_else() {
+        let table = "Symbol table '.dynsym' contains 4 entries:\n   \
+             Num:    Value          Size Type    Bind   Vis      Ndx Name\n     \
+             0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND \n     \
+             1: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND sincosf@GLIBC_2.17 (2)\n     \
+             2: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND memcpy@GLIBC_2.17 (2)\n     \
+             3: 0000000000021a40   132 FUNC    GLOBAL DEFAULT   12 powf\n";
+        assert_eq!(
+            super::math_imports(table),
+            ["sincosf"],
+            "the undefined math routine is named; a defined one and an undefined `memcpy` are not"
+        );
+        // The `f`/`l` stems and the double spelling are three ways to reach the
+        // same libm, so all three have to be reachable by the same list.
+        for spelling in ["pow", "powf", "powl"] {
+            let line = format!("  1: 0 0 FUNC GLOBAL DEFAULT UND {spelling}@GLIBC_2.17 (2)\n");
+            assert_eq!(
+                super::math_imports(&line),
+                [spelling],
+                "{spelling} is libm's"
+            );
+        }
+        // Vacuity, the line-ending gate's reasoning: an empty table must read
+        // clean by having nothing in it, not by the parse failing to find UND.
+        assert!(super::math_imports("").is_empty());
+        assert!(
+            super::math_imports("  1: 0 0 FUNC GLOBAL DEFAULT 12 sinf\n").is_empty(),
+            "a symbol the artifact defines is compiled in, which is the passing case"
+        );
+    }
+
+    /// The filter that keeps the attic out, planted both ways. Without it the
+    /// gate above would fail forever on one eight-day-old `gg_extract` binary
+    /// that really does import `sincosf` — the artifact §6 M17 item 6 caught,
+    /// still sitting in the WSL lane's `target/` because nothing rebuilds a
+    /// crate hash no longer in the tree.
+    #[test]
+    fn a_binary_older_than_its_own_sources_is_not_scanned() {
+        let root = plant(
+            "import-freshness",
+            &[("src/lib.rs", "// source\n"), ("deps/probe", "elf")],
+        );
+        let binary = root.join("deps/probe");
+        // Workspace-*relative*, the way cargo writes them — which is the whole
+        // hazard, since resolving these against the wrong directory drops every
+        // one and `all` over nothing answers "current".
+        std::fs::write(
+            binary.with_extension("d"),
+            format!("{}: src/lib.rs\n", binary.display()),
+        )
+        .unwrap();
+        assert!(
+            super::built_from_current_sources(&binary, &root),
+            "the depfile's source is older than the binary, so it is current"
+        );
+
+        // Touch the source forward. Cargo's own answer to "did anything this
+        // binary reads change after it was linked" flips, and so does ours.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("src/lib.rs"))
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(
+            !super::built_from_current_sources(&binary, &root),
+            "a source newer than the binary is exactly the stale case"
+        );
+        // That same stale binary, resolved from anywhere else: every dependency
+        // vanishes and the predicate answers "current". This is the fail-open
+        // the instrument has, pinned here so the root can never be quietly
+        // dropped back to the process's directory.
+        assert!(
+            super::built_from_current_sources(&binary, Path::new("/nonexistent")),
+            "unresolvable dependencies read as current, which is why they must resolve"
+        );
+
+        // No depfile at all reads as current, deliberately: a gate that dropped
+        // an artifact it could not classify would be a silent filter.
+        std::fs::remove_file(binary.with_extension("d")).unwrap();
+        assert!(super::built_from_current_sources(&binary, &root));
     }
 
     /// A throwaway source tree. Named after the test, and nextest gives each
