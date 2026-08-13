@@ -232,10 +232,13 @@ pub static GI: CVar = CVar::new_bool("r.gi", true, "gather bounced light from th
 /// authored volume's own worst bucket, which is the bar the milestone has to
 /// clear to be worth its cost.
 ///
-/// It is also what bounds the field: [`crate::probe`] caps the grid at sixteen
-/// probes an axis, so this is metres per probe *and* the reach of the whole
-/// volume, thirty metres at the default.
-pub static GI_SPACING: CVar = CVar::new_float("r.gi_spacing", 2.0, "metres between probes");
+/// It is a **floor** rather than a promise, and that is what the clamp costs:
+/// [`crate::probe`] caps the grid at eight probes an axis, so a scene wider than
+/// seven of these gets a whole multiple of it instead. Fourteen metres at the
+/// default, which is most demos and is not demo 12's room — `Grid::fit` says
+/// what happens there and why the alternative was worse.
+pub static GI_SPACING: CVar =
+    CVar::new_float("r.gi_spacing", 2.0, "metres between probes, at least");
 
 /// Probes gathered per frame, or `0` for all of them.
 ///

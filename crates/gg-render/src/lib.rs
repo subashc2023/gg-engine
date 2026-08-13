@@ -366,6 +366,20 @@ impl Renderer {
         self.probes.progress()
     }
 
+    /// Where the field's grid is: its origin probe (absolute, §1.4), the metres
+    /// between probes, and the count per axis (§6 M36).
+    ///
+    /// Public for the same reason [`Self::field_pending`] is, one question along.
+    /// The grid is **clamped** at `probe::MAX_PER_AXIS`, so `r.gi_spacing` is
+    /// metres per probe *and* — multiplied by the counts — the reach of the whole
+    /// volume; a shading point outside it is lit by the term M36 replaces. An
+    /// instrument grading the field against a reference has to know which of its
+    /// sample points those are, or it reports the fallback as the field's error.
+    #[must_use]
+    pub fn field_grid(&self) -> Option<(gg_math::sim::DVec3, f32, [u32; 3])> {
+        self.probes.grid().map(|grid| grid.report())
+    }
+
     /// Map a pack and start its load clock (§4.6). The game names what to draw
     /// out of it; this only says which file.
     ///
@@ -1056,6 +1070,20 @@ impl OffscreenRenderer {
     #[must_use]
     pub fn field_pending(&self) -> (usize, usize) {
         self.probes.progress()
+    }
+
+    /// Where the field's grid is: its origin probe (absolute, §1.4), the metres
+    /// between probes, and the count per axis (§6 M36).
+    ///
+    /// Public for the same reason [`Self::field_pending`] is, one question along.
+    /// The grid is **clamped** at `probe::MAX_PER_AXIS`, so `r.gi_spacing` is
+    /// metres per probe *and* — multiplied by the counts — the reach of the whole
+    /// volume; a shading point outside it is lit by the term M36 replaces. An
+    /// instrument grading the field against a reference has to know which of its
+    /// sample points those are, or it reports the fallback as the field's error.
+    #[must_use]
+    pub fn field_grid(&self) -> Option<(gg_math::sim::DVec3, f32, [u32; 3])> {
+        self.probes.grid().map(|grid| grid.report())
     }
 
     /// Put the frame inside `viewport` — see [`Renderer::set_viewport`].

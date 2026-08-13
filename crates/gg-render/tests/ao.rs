@@ -261,6 +261,12 @@ fn the_occlusion_pass_agrees_with_the_integral_it_estimates() {
     // The dither is a deliberate ±1 code value and this reads single pixels; the
     // ratio would carry it twice.
     cvars::DITHER.set_float(0.0);
+    // And the field off, for the reason stated at the top of the file: the ratio
+    // below is exact only while the ambient term is a *constant*, and §6 M36's
+    // field is neither constant nor still — it gathers a few probes a frame, so
+    // the two renders the ratio is taken between would be lit by two different
+    // ones. `gg-tools ao`'s tables hold it off for the same reason.
+    cvars::GI.set_bool(false);
     let world = world();
     let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
 
@@ -352,6 +358,7 @@ fn the_occlusion_pass_agrees_with_the_integral_it_estimates() {
     }
 
     cvars::DITHER.set_float(1.0);
+    cvars::GI.set_bool(true);
     let report = renderer.shutdown();
     assert!(report.clean(), "unclean render: {report:?}");
 }

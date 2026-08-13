@@ -148,12 +148,20 @@ fn the_cull_does_not_change_what_is_drawn() {
     let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
     cvars::LAMP_SHADOWS.set_bool(true);
     let world = world();
+    // The field held still, and this is the one place in the suite where that is
+    // not a convenience: it is **stateful across frames** (`r.gi_rate` gathers a
+    // few probes a frame), so two renders taken one after the other are two
+    // different fields, and a test whose whole assertion is byte equality would
+    // be grading the round robin. Off rather than converged — nothing here is
+    // about the field, and `probe::Probes::field` makes off mean off (§6 M36).
+    cvars::GI.set_bool(false);
 
     cvars::SHADOW_CULL.set_int(1);
     let (culled, on, _) = render(&mut renderer, &world);
     cvars::SHADOW_CULL.set_int(0);
     let (whole, off, _) = render(&mut renderer, &world);
     cvars::SHADOW_CULL.set_int(1);
+    cvars::GI.set_bool(true);
     renderer.shutdown();
 
     // The off switch means what it says: everything, in every view, uncompacted.

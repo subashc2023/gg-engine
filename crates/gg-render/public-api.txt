@@ -214,6 +214,7 @@ impl gg_render::OffscreenRenderer
 pub fn gg_render::OffscreenRenderer::cluster_load(&self) -> gg_render::ClusterLoad
 pub fn gg_render::OffscreenRenderer::device(&self) -> &gg_rhi::device::DeviceReport
 pub fn gg_render::OffscreenRenderer::draw_counts(&self) -> (usize, usize)
+pub fn gg_render::OffscreenRenderer::field_grid(&self) -> core::option::Option<(gg_math::sim::DVec3, f32, [u32; 3])>
 pub fn gg_render::OffscreenRenderer::field_pending(&self) -> (usize, usize)
 pub fn gg_render::OffscreenRenderer::frame(&mut self, &gg_extract::Extracted, &gg_render::View, [f32; 4], &[gg_render::ui::UiVertex]) -> core::result::Result<gg_render::OffscreenFrame, gg_rhi::RhiError>
 pub fn gg_render::OffscreenRenderer::luminance(&self) -> core::option::Option<&[u32; 64]>
@@ -237,6 +238,7 @@ pub fn gg_render::Renderer::device(&self) -> &gg_rhi::device::DeviceReport
 pub fn gg_render::Renderer::draw_counts(&self) -> (usize, usize)
 pub fn gg_render::Renderer::dump_graph(&mut self) -> core::result::Result<alloc::string::String, gg_rhi::RhiError>
 pub fn gg_render::Renderer::extent(&self) -> (u32, u32)
+pub fn gg_render::Renderer::field_grid(&self) -> core::option::Option<(gg_math::sim::DVec3, f32, [u32; 3])>
 pub fn gg_render::Renderer::field_pending(&self) -> (usize, usize)
 pub fn gg_render::Renderer::frame(&mut self, &gg_extract::Extracted, &gg_render::View, [f32; 4], &[gg_render::ui::UiVertex]) -> core::result::Result<gg_rhi::FrameOutcome, gg_rhi::RhiError>
 pub fn gg_render::Renderer::gpu_clock(&self) -> core::option::Option<gg_rhi::timing::GpuClock>

@@ -125,6 +125,13 @@ fn render(renderer: &mut OffscreenRenderer, world: &World) -> Vec<u8> {
 fn a_froxel_list_shades_exactly_as_the_whole_frame_did() {
     let world = world();
     let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
+    // The field held still, and this is not a convenience: it is **stateful
+    // across frames** (`r.gi_rate` gathers a few probes a frame), so two renders
+    // taken one after the other are two different fields and a test whose whole
+    // assertion is byte equality would be grading the round robin. Off rather
+    // than converged — nothing here is about the field, and
+    // `probe::Probes::field` makes off mean off (§6 M36).
+    cvars::GI.set_bool(false);
 
     cvars::CLUSTERS.set_bool(true);
     let clustered = render(&mut renderer, &world);
@@ -140,6 +147,7 @@ fn a_froxel_list_shades_exactly_as_the_whole_frame_did() {
         "`r.clusters 0` is supposed to be every light in every froxel",
     );
     cvars::CLUSTERS.set_bool(true);
+    cvars::GI.set_bool(true);
 
     // Two controls first, because equality is exactly what a grid that let
     // everybody into every froxel would also produce, and what an unlit framing

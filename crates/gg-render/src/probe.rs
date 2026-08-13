@@ -193,13 +193,29 @@ pub(crate) struct Grid {
 impl Grid {
     /// The grid covering `min..max`, snapped out to the spacing.
     ///
-    /// Clamped per axis, so a scene larger than [`MAX_PER_AXIS`] spacings gets a
-    /// grid that covers part of it rather than a spacing silently stretched to
-    /// cover all of it — a probe every eight metres is not an irradiance field,
-    /// and the shader's fallback outside the grid is the term M36 replaces,
-    /// which is the honest thing to leave a distant corner lit by.
+    /// **`r.gi_spacing` is a floor and not a promise**, and the measurement that
+    /// settled it is `gg-tools bounce`'s field table: with the spacing taken
+    /// literally and the counts clamped per axis, demo 12's room got a grid over
+    /// one corner of itself — **115 of 786 visible points inside the field** at
+    /// the shipped default — and the other 85 % were lit by the flat term M36
+    /// exists to replace. "The fallback is honest at a distant corner" was the
+    /// argument for clamping and it is true; what it does not survive is the
+    /// corner being most of the room. Widened to a whole multiple of the asked-for
+    /// spacing, which is what keeps this a function of the scene rather than of
+    /// the frame: an integer multiple of a constant, driven by bounds that move
+    /// only when the content does.
     pub(crate) fn fit(min: sim::DVec3, max: sim::DVec3, spacing: f64) -> Grid {
-        let spacing = spacing.max(0.05);
+        let asked = spacing.max(0.05);
+        let reach = f64::from(MAX_PER_AXIS - 1);
+        let widest = (max.x - min.x).max(max.y - min.y).max(max.z - min.z);
+        // `widest` may be non-finite; `max(1.0)` on a NaN takes the 1.0 branch,
+        // and the count below clamps whatever survives that.
+        let multiple = if widest.is_finite() {
+            (widest / (asked * reach)).ceil().clamp(1.0, 1e6)
+        } else {
+            1.0
+        };
+        let spacing = asked * multiple;
         let snap = |v: f64| (v / spacing).floor() * spacing;
         let origin = sim::DVec3::new(snap(min.x), snap(min.y), snap(min.z));
         let count = |lo: f64, hi: f64| {
@@ -248,6 +264,12 @@ impl Grid {
 
     pub(crate) fn counts(&self) -> [u32; 3] {
         self.counts
+    }
+
+    /// Origin, spacing and counts — what [`crate::Renderer::field_grid`] hands a
+    /// caller that has to know where the field reaches.
+    pub(crate) fn report(&self) -> (sim::DVec3, f32, [u32; 3]) {
+        (self.origin, self.spacing as f32, self.counts)
     }
 
     pub(crate) fn spacing(&self) -> f32 {
@@ -526,20 +548,33 @@ impl Probes {
         ))
     }
 
-    /// What the frame block carries, once the field holds something.
+    /// What the frame block carries, once the field holds something and `r.gi`
+    /// asks for it.
     ///
-    /// A probe the round robin has not reached yet needs no flag of its own: its
-    /// record is the zeroes [`Probes::open`] uploaded, whose mean distance is
-    /// zero, and a Chebyshev bound against a wall at distance zero rejects the
-    /// probe for every shading point that is not standing on it. An ungathered
-    /// probe therefore weighs nothing and the fallback carries the pixel, which
-    /// is the behaviour a flag would have had to implement.
+    /// **The CVar is read here and not only in [`Probes::refit`]**, and the
+    /// difference is a session rather than a fresh renderer: `refit` stops the
+    /// *gathering*, which is invisible to a frame that already has a grid, so
+    /// switching the term off left the last field it gathered lighting every
+    /// frame after. `gg-tools bounce`'s field table is what found it — it grades
+    /// a ratio of the two renders, and the ratio was exactly 1 everywhere.
+    /// Nothing is cleared: the grid and its records survive the toggle, so
+    /// turning it back on costs the frame it costs and not the field.
+    ///
+    /// A probe the round robin has not reached yet is a *different* question and
+    /// is answered in the field itself — `probe.slang` writes 1 into the state
+    /// texel's alpha and [`Probes::open`] uploaded 0, so the shader can tell a
+    /// record from the zeroes it started as. Without that an ungathered probe
+    /// contributes a tiny weight and an irradiance of zero, which is not "no
+    /// opinion" but black.
     ///
     /// The **view buffer's address is not in here**, and that separation is
     /// deliberate: a frame gathers whether or not it has a field to sample, so
     /// its probe vertex shaders read that address on frames when this is `None`
     /// — carrying it inside would hand them a null pointer.
     pub(crate) fn field(&self, camera_origin: sim::DVec3) -> Option<Field> {
+        if !cvars::GI.bool() {
+            return None;
+        }
         let (grid, images) = (self.grid?, self.images?);
         Some(Field {
             sh: images.sh_texture,
@@ -852,11 +887,37 @@ fn record_desc(
 
 /// The absolute box this frame's geometry occupies, widened back through the
 /// camera origin the instances were narrowed by.
+///
+/// A **box** per instance and not the bounding sphere the culler carries, which
+/// is the difference between a field over the room and a field over a corner of
+/// the sky above it. Demo 12's floor is 25 m across and half a metre thick, so
+/// its radius is 17.7: bounded as a sphere it puts the grid's ceiling eighteen
+/// metres over a room four metres tall, and with the per-axis clamp the eight
+/// probes an axis land in empty space. `gg-tools bounce`'s field table is what
+/// found it — every spacing from 0.75 m to 2 m graded *identically*, because at
+/// none of them did the grid reach the geometry at all.
+///
+/// A conservative bound is the right thing for a culler, which must not drop
+/// what it cannot see; it is the wrong thing for a grid, which spends a fixed
+/// number of probes on whatever it is told to cover. Models keep the radius:
+/// their `half_extent` is a scale rather than an extent (`gg_extract::Instance`),
+/// so a sphere is the only bound this has.
 fn bounds_of(extracted: &gg_extract::Extracted) -> Option<(sim::DVec3, sim::DVec3)> {
     let mut bounds: Option<(render::Vec3, render::Vec3)> = None;
-    for instance in extracted.visible().iter().chain(extracted.visible_models()) {
-        let reach = render::Vec3::splat(instance.radius);
-        let (lo, hi) = (instance.offset - reach, instance.offset + reach);
+    let boxes = extracted.visible().iter().map(|instance| {
+        // The rotated box's own axis-aligned reach: the absolute rotation matrix
+        // times the half-extent, which is the standard result and exact rather
+        // than conservative for the axis-aligned case every `Renderable` is.
+        let m = render::Mat3::from_quat(instance.rotation);
+        let absolute = render::Mat3::from_cols(m.x_axis.abs(), m.y_axis.abs(), m.z_axis.abs());
+        (instance.offset, absolute * instance.half_extent)
+    });
+    let models = extracted
+        .visible_models()
+        .iter()
+        .map(|instance| (instance.offset, render::Vec3::splat(instance.radius)));
+    for (offset, reach) in boxes.chain(models) {
+        let (lo, hi) = (offset - reach, offset + reach);
         bounds = Some(match bounds {
             Some((min, max)) => (min.min(lo), max.max(hi)),
             None => (lo, hi),
@@ -980,19 +1041,25 @@ mod tests {
             far.x - max.x < 1.5 && far.y - max.y < 1.5 && far.z - max.z < 1.5,
             "and does not overshoot by a whole spacing: {far:?} against {max:?}"
         );
-        // And the other half of the same sentence: a scene wider than
-        // [`MAX_PER_AXIS`] spacings gets a grid that covers *part* of it rather
-        // than a spacing stretched to cover all of it, so `covers` is false and
-        // the shading path's fallback carries the rest.
+        // And it keeps bracketing them when the scene is wider than
+        // [`MAX_PER_AXIS`] spacings, which is what `r.gi_spacing` being a floor
+        // buys: the spacing widens to a whole multiple of the asked-for one
+        // rather than the grid retreating into a corner of the scene.
         let wide = at(60.0, 3.9, 3.2);
         let coarse = Grid::fit(min, wide, 1.5);
         assert_eq!(coarse.counts()[0], MAX_PER_AXIS);
-        assert_eq!(
-            coarse.spacing(),
-            1.5,
-            "the spacing is the session's, always"
+        assert!(
+            coarse.covers(min, wide),
+            "the widened fit still does not reach"
         );
-        assert!(!coarse.covers(min, wide));
+        let multiple = f64::from(coarse.spacing()) / 1.5;
+        assert!(
+            (multiple - multiple.round()).abs() < 1e-9 && multiple >= 1.0,
+            "the spacing is a whole multiple of the session's: {multiple}"
+        );
+        // A scene that already fits keeps the spacing it asked for — the
+        // widening is a consequence of the clamp and not a policy of its own.
+        assert_eq!(grid.spacing(), 1.5);
     }
 
     /// Index → coordinate → texel is one ordering, used three times. A field
