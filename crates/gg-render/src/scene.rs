@@ -129,6 +129,10 @@ const COMMAND_SLOT_BYTES: u64 = (MAX_COMMANDS * core::mem::size_of::<IndirectCom
 struct Keyed {
     key: u64,
     mesh: u64,
+    /// Whether the *view* frustum admitted this instance, or only the swept
+    /// caster volume did (§6 M34). Sorted on ahead of [`Keyed::key`], so the
+    /// batches a main pass draws are a prefix of the batch list.
+    visible: bool,
     /// Index into [`ScenePass::built`], which stays in extract order.
     at: u32,
     /// The instance's world-space bounding radius, carried through the sort so
@@ -220,6 +224,10 @@ pub(crate) struct ScenePass {
     built: Vec<GpuInstance>,
     staged: Vec<GpuInstance>,
     batches: Vec<Batch>,
+    /// How many of the above the *view* frustum admits — the prefix
+    /// [`ScenePass::draws`] returns (§6 M34). The rest exist for the shadow
+    /// views, which walk all of them.
+    visible_batches: usize,
     /// Each instance's bounding sphere, in `staged` order and covering the main
     /// region only — what [`ScenePass::cull`] tests when a batch straddles a
     /// view. Compacted copies are appended past the end of this and never read
@@ -296,6 +304,7 @@ impl ScenePass {
             built: Vec::new(),
             staged: Vec::new(),
             batches: Vec::new(),
+            visible_batches: 0,
             spheres: Vec::new(),
             chunks: Vec::new(),
             survivors: Vec::new(),
@@ -337,6 +346,7 @@ impl ScenePass {
         self.spheres.clear();
         self.chunks.clear();
         self.batches.clear();
+        self.visible_batches = 0;
         self.written.clear();
         self.cull = cull::ShadowCull::default();
         let Some(content) = content else {
@@ -347,7 +357,8 @@ impl ScenePass {
         let view_projection = view.view_projection(extent);
         {
             gg_core::zone!("scene.key");
-            for instance in &extracted.models {
+            let seen = extracted.visible_models().len();
+            for (at, instance) in extracted.models.iter().enumerate() {
                 let id = gg_assets::AssetId(instance.asset);
                 let Some(mesh) = content.mesh(id) else {
                     continue;
@@ -384,6 +395,7 @@ impl ScenePass {
                 self.keyed.push(Keyed {
                     key: sort_key(instance.asset, instance.offset),
                     mesh: instance.asset,
+                    visible: at < seen,
                     at: (self.built.len() - 1) as u32,
                     radius: instance.radius,
                 });
@@ -393,7 +405,10 @@ impl ScenePass {
             // Stable: equal keys keep extract's order, which is a function of
             // world state and nothing else (§4.2).
             gg_core::zone!("scene.sort");
-            self.keyed.sort_by_key(|k| k.key);
+            // Visibility outermost (§6 M34), so `batches[..visible_batches]` is
+            // exactly what the main pass draws. Stable, so equal keys still keep
+            // extract's order, which is a function of world state alone (§4.2).
+            self.keyed.sort_by_key(|k| (!k.visible, k.key));
         }
         {
             gg_core::zone!("scene.batch");
@@ -411,9 +426,17 @@ impl ScenePass {
     fn batch(&mut self, content: &Content) {
         let mut start = 0;
         while start < self.keyed.len() {
-            let mesh = self.keyed[start].mesh;
+            let (mesh, visible) = (self.keyed[start].mesh, self.keyed[start].visible);
             let mut end = start;
-            while end < self.keyed.len() && self.keyed[end].mesh == mesh {
+            // Broken on visibility as well as on mesh: the two halves must not
+            // merge into one run, or the main pass's prefix would contain
+            // instances the view frustum rejected (§6 M34). One mesh present in
+            // both halves is two batches, which is the cost of the split and is
+            // paid only by a frame with a sun.
+            while end < self.keyed.len()
+                && self.keyed[end].mesh == mesh
+                && self.keyed[end].visible == visible
+            {
                 end += 1;
             }
             if self.staged.len() + (end - start) > MAX_INSTANCES
@@ -505,6 +528,11 @@ impl ScenePass {
                 chunk_first,
                 chunk_count,
             });
+            // The batch list is sorted visible-first, so the running high-water
+            // mark *is* the prefix boundary (§6 M34).
+            if visible {
+                self.visible_batches = self.batches.len();
+            }
             self.written.push(IndirectCommand {
                 index_count: resident.index_count,
                 instance_count: (end - start) as u32,
@@ -738,7 +766,7 @@ impl ScenePass {
     /// a bias the pipeline did not declare, and none of these declare one
     /// (`crate::shadow_draws` has the argument).
     pub(crate) fn draws(&self, pipeline: PipelineHandle) -> Vec<DrawSpec<'_>> {
-        self.batches
+        self.batches[..self.visible_batches]
             .iter()
             .map(|batch| self.spec(pipeline, &batch.push, batch.indices, batch.command_offset))
             .collect()

@@ -173,3 +173,175 @@ fn a_white_metal_gives_back_everything_the_sky_gave_it() {
     let report = renderer.shutdown();
     assert!(report.clean(), "unclean render: {report:?}");
 }
+
+/// Steps of the radiance→code-value calibration, from nothing to a little over
+/// [`RADIANCE`]. Measured rather than modelled, `gg-tools furnace`'s reason: the
+/// exposure, the tonemap and the sRGB encode are three curves this would
+/// otherwise hold a second, staleable copy of.
+const CALIBRATION: usize = 65;
+
+/// How far the rendered single-scatter albedo may sit from the integral, in
+/// units of `E`.
+///
+/// Everything between the two is in here: the table's own 1.45 % worst
+/// interpolation error, the shader's bilinear read of it, an eight-bit output
+/// inverted through a 65-step curve, and the dither. `gg-tools furnace` measures
+/// the whole path at 0.008 worst over a finer grid; this is that with room.
+const ALBEDO_TOLERANCE: f32 = 0.03;
+
+/// §6 M34: the split-sum's second integral has a view axis, and the table has it.
+///
+/// This is the assertion §6 M33 could not make and did not know it was missing.
+/// The furnace above is *structurally blind* to `Ess`: at `f0 = 1` the ambient
+/// path returns `Ess + (1 - Ess)`, which is 1 for any value at all, right or
+/// wrong. So it closed against [Laz13]'s fit and closes against the table, and
+/// between those two the fit was asking for 2.22x the light that arrived at a
+/// grazing rough metal where the truth is 1.00x. What catches that is measuring
+/// `Ess` itself — `r.multiscatter 0`, which is the same picture with the
+/// correction taken off — against the integral it approximates.
+///
+/// The control is the fit, which is the *other* value of `r.lut` rather than
+/// another build: it must fail here, and it must fail by being flat, because a
+/// view axis that cancels is the specific thing wrong with it.
+#[test]
+fn a_rough_metal_gives_back_what_the_integral_says_at_every_view_angle() {
+    cvars::DITHER.set_float(0.0);
+    let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
+    let curve = calibrate(&mut renderer);
+    // The correction off, so what is measured is the albedo and not 1 (above).
+    cvars::MULTISCATTER.set_bool(false);
+
+    cvars::LUT.set_bool(true);
+    let mut rendered = Vec::new();
+    for (roughness, cosine) in GRID {
+        let e = albedo(&mut renderer, &turned(roughness, cosine), &curve);
+        let (a, b) = gg_render::split_sum::integrate(roughness, cosine, 65_536);
+        assert!(
+            (e - (a + b)).abs() <= ALBEDO_TOLERANCE,
+            "at roughness {roughness}, n·v {cosine}: the wall returned {e:.3} of the sky against \
+             the integral's {:.3}. The single-scatter albedo is what §6 M33's correction divides \
+             by, so a wrong one is a wrong amount of invented light.",
+            a + b
+        );
+        rendered.push(e);
+    }
+    // The axis exists in the picture and not only in the arithmetic: a rough
+    // metal is darkest head-on and recovers toward the silhouette, where the
+    // facets a viewer can see are the ones turned toward them.
+    assert!(
+        // The real gap is 0.19; four tolerances is 0.12, and the control's is 0.
+        rendered[2] > rendered[0] + 4.0 * ALBEDO_TOLERANCE,
+        "roughness 1 returned {:.3} head-on and {:.3} at n·v 0.4 — barely apart, so whatever is \
+         being read has no view angle in it",
+        rendered[0],
+        rendered[2]
+    );
+
+    // The control. The fit's `scale + bias` is `r.z + r.w` with the view term
+    // cancelled, so this pair must come out identical — and wrong.
+    cvars::LUT.set_bool(false);
+    let flat: Vec<f32> = [GRID[0], GRID[2]]
+        .iter()
+        .map(|&(r, c)| albedo(&mut renderer, &turned(r, c), &curve))
+        .collect();
+    cvars::LUT.set_bool(true);
+    cvars::MULTISCATTER.set_bool(true);
+    cvars::DITHER.set_float(1.0);
+    assert!(
+        (flat[1] - flat[0]).abs() <= ALBEDO_TOLERANCE,
+        "with r.lut off the two view angles returned {:.3} and {:.3} — the analytic fit is \
+         supposed to be incapable of telling them apart, so this test is no longer measuring the \
+         thing that replaced it",
+        flat[0],
+        flat[1]
+    );
+
+    let report = renderer.shutdown();
+    assert!(report.clean(), "unclean render: {report:?}");
+}
+
+/// The `(roughness, n·v)` cells asserted. Two on the roughest row, where the fit
+/// is worst and the axis steepest, and one smooth cell that both must agree on —
+/// a table that had shifted a row would pass the rough pair and fail this one.
+const GRID: [(f32, f32); 3] = [(1.0, 1.0), (0.2, 1.0), (1.0, 0.4)];
+
+/// A white metal wall turned `cosine` away from an orthographic eye.
+///
+/// Orthographic for the reason [`measure`] is, and turned about `Y` so `n·v` is
+/// exactly the cosine asked for at every pixel of it rather than only at the
+/// centre. Wider than it is deep so the turned face still covers the window and
+/// the sky still reaches the corner.
+fn turned(roughness: f32, cosine: f32) -> World {
+    let mut world = World::new();
+    world.register::<Renderable>().unwrap();
+    world.register::<Sky>().unwrap();
+    let sky = world.spawn();
+    world
+        .insert(
+            sky,
+            Sky {
+                zenith: 0x00ff_ffff,
+                horizon: 0x00ff_ffff,
+                ground: 0x00ff_ffff,
+                intensity: RADIANCE,
+                ..Sky::daylight(RADIANCE)
+            },
+        )
+        .unwrap();
+    let angle = sim::acos(f64::from(cosine.clamp(-1.0, 1.0)));
+    let mut surface =
+        Renderable::boxed(sim::DVec3::ZERO, sim::Vec3::new(3.0, 3.0, 0.2), 0x00ff_ffff)
+            .surfaced(1.0 - roughness, 1.0);
+    surface.rotation = sim::DQuat::from_axis_angle(sim::DVec3::Y, angle);
+    let wall = world.spawn();
+    world.insert(wall, surface).unwrap();
+    world
+}
+
+/// Radiance → output code value, read off the *background* so the calibration
+/// and the measurement travel the identical post chain.
+fn calibrate(renderer: &mut OffscreenRenderer) -> Vec<(f32, f32)> {
+    (0..CALIBRATION)
+        .map(|step| {
+            let radiance = RADIANCE * 1.2 * step as f32 / (CALIBRATION - 1) as f32;
+            let mut world = World::new();
+            world.register::<Renderable>().unwrap();
+            world.register::<Sky>().unwrap();
+            let sky = world.spawn();
+            world
+                .insert(
+                    sky,
+                    Sky {
+                        zenith: 0x00ff_ffff,
+                        horizon: 0x00ff_ffff,
+                        ground: 0x00ff_ffff,
+                        intensity: radiance,
+                        ..Sky::daylight(radiance)
+                    },
+                )
+                .unwrap();
+            (radiance, measure(renderer, &world).0)
+        })
+        .collect()
+}
+
+/// What the wall returned, over [`RADIANCE`] — the furnace's own number, with
+/// the output curve inverted out of it.
+fn albedo(renderer: &mut OffscreenRenderer, world: &World, curve: &[(f32, f32)]) -> f32 {
+    let code = measure(renderer, world).0;
+    let at = curve.partition_point(|&(_, c)| c < code);
+    let radiance = if at == 0 {
+        curve[0].0
+    } else if at >= curve.len() {
+        curve[curve.len() - 1].0
+    } else {
+        let ((r0, c0), (r1, c1)) = (curve[at - 1], curve[at]);
+        // A flat run of the curve means the honest answer is its middle.
+        if (c1 - c0).abs() < f32::EPSILON {
+            (r0 + r1) * 0.5
+        } else {
+            r0 + (r1 - r0) * (code - c0) / (c1 - c0)
+        }
+    };
+    radiance / RADIANCE
+}

@@ -27,6 +27,8 @@
 //!   gg-tools furnace                whether a white metal gives back what it
 //!                                   was given, and whether the lobe it gives it
 //!                                   back along points where the lobe is (§6 M33)
+//!   gg-tools split-sum              what [Laz13]'s fit costs where §6 M33 spends
+//!                                   it, and what a table buys back (§6 M34)
 //!   gg-tools banding                what the 8-bit output does to a smooth
 //!                                   gradient, swept over `r.dither`
 //!   gg-tools pace                   what a display rate does to a turn the hand
@@ -54,6 +56,7 @@ mod shadow_fit;
 mod shadow_flat;
 mod shadow_image;
 mod shadow_sweep;
+mod split_sum;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -82,6 +85,7 @@ fn main() -> anyhow::Result<()> {
         "lamps" => lamps::run(rest),
         "cull" => cull::run(rest),
         "furnace" => furnace::run(rest),
+        "split-sum" => split_sum::run(rest),
         "banding" => banding::run(rest),
         "pace" => pace::run(rest),
         "panorama" => panorama::run(rest),
@@ -90,9 +94,9 @@ fn main() -> anyhow::Result<()> {
         other => {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
-                 shadow-flat, shadow-sweep, shadow-edge, lights, lamps, cull, banding, pace, fp-isa, mcp. A new instrument is a new \
-                 subcommand here, not a \
-                 new crate"
+                 shadow-flat, shadow-sweep, shadow-edge, lights, lamps, cull, furnace, \
+                 split-sum, banding, pace, panorama, fp-isa, mcp. A new instrument is a new \
+                 subcommand here, not a new crate"
             )
         }
     }

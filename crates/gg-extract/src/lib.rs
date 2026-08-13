@@ -416,11 +416,17 @@ impl Scenes for () {
 /// looks free in a demo and is not at scale.
 #[derive(Clone, Debug)]
 pub struct Extracted {
-    /// Instances the host draws as boxes, in world iteration order
-    /// (deterministic, §4.2).
+    /// Instances the host draws as boxes, **visible ones first** (§6 M34), each
+    /// half in world iteration order (deterministic, §4.2).
     pub instances: Vec<Instance>,
-    /// Instances that name pack content, same order and same narrowing.
+    /// How many of the above the *view* frustum admits — see
+    /// [`Extracted::visible`]. Equal to `instances.len()` in every frame nothing
+    /// widened the cull, which is every frame with no sun.
+    visible_instances: usize,
+    /// Instances that name pack content, same order, same narrowing, same split.
     pub models: Vec<Instance>,
+    /// [`Extracted::visible_instances`] for [`Extracted::models`].
+    visible_models: usize,
     /// The camera origin every offset in both arrays is relative to. Kept
     /// alongside so a consumer cannot pair offsets with the wrong eye.
     pub camera_origin: sim::DVec3,
@@ -483,6 +489,8 @@ impl Default for Extracted {
     fn default() -> Self {
         Extracted {
             instances: Vec::new(),
+            visible_instances: 0,
+            visible_models: 0,
             models: Vec::new(),
             // Not derived: `sim` types carry no `Default`, on purpose — a
             // zero position is a *place*, and defaulting to it silently is how
@@ -585,6 +593,8 @@ impl Extracted {
     pub fn clear(&mut self, camera_origin: sim::DVec3, frustum: Frustum) {
         self.instances.clear();
         self.models.clear();
+        self.visible_instances = 0;
+        self.visible_models = 0;
         self.camera_origin = camera_origin;
         self.frustum = frustum;
         // Reset, not kept: a caster volume outlives neither the frustum it was
@@ -615,12 +625,42 @@ impl Extracted {
     /// the overlay reports, because a light off screen lights nothing on it while
     /// a box off screen shadows plenty.
     ///
-    /// P2: what it admits costs a *main*-pass draw the rasterizer then discards —
-    /// the shadow pass re-culls each cascade's slab exactly. One array partitioned
-    /// into visible-then-casting would hand the main pass its own prefix back.
+    /// What it admits beyond the view is kept **behind** what the view admits
+    /// (§6 M34), so the main pass draws [`Extracted::visible`] and the shadow
+    /// passes walk the whole array. Before that the main pass submitted every
+    /// caster too and the rasterizer discarded them off screen — correct, and
+    /// paid for per frame in vertex work and draw calls.
     pub fn cast_shadows(&mut self, reach: f32) {
         let sun = self.sun().unwrap_or(render::Vec3::ZERO);
         self.casters = self.frustum.swept(sun, reach);
+    }
+
+    /// The prefix of [`Extracted::instances`] the *view* frustum admits — what
+    /// a main pass draws (§6 M34).
+    ///
+    /// The rest of the array is off screen and kept only because
+    /// [`Extracted::cast_shadows`] widened the cull, so a shadow pass wants all
+    /// of it and nothing else does. Equal to the whole array whenever nothing
+    /// widened it, which is every frame with no sun — the split costs a caller
+    /// that ignores it nothing, and a caller that uses it cannot forget the
+    /// tail exists, because the tail is where the array still is.
+    #[must_use]
+    pub fn visible(&self) -> &[Instance] {
+        &self.instances[..self.visible_instances]
+    }
+
+    /// [`Extracted::visible`] for [`Extracted::models`].
+    #[must_use]
+    pub fn visible_models(&self) -> &[Instance] {
+        &self.models[..self.visible_models]
+    }
+
+    /// How many instances across both arrays are kept for their shadows alone —
+    /// the number a `gg::draws` line reports beside `culled`, and the whole of
+    /// what §6 M34 stopped submitting to the main pass.
+    #[must_use]
+    pub fn casting_only(&self) -> usize {
+        (self.instances.len() - self.visible_instances) + (self.models.len() - self.visible_models)
     }
 
     /// The travel direction of the light this frame's shadows come from — the
@@ -706,9 +746,11 @@ impl Extracted {
     pub fn append<T: SimTransform>(&mut self, world: &World) -> Result<(), AliasError> {
         let query = Query::<&T>::new()?;
         let origin = self.camera_origin;
-        // The caster volume, which is the frustum itself unless someone widened
-        // it: an instance off screen may still be laying a shadow across it.
-        let frustum = self.casters;
+        // Both volumes: the view, and the caster volume it was swept into unless
+        // nobody widened it. An instance off screen may still be laying a shadow
+        // across it, and since §6 M34 which of the two admitted it is recorded
+        // rather than forgotten.
+        let (view, casters) = (self.frustum, self.casters);
         let blend = self.previous.blend(self.alpha);
         let chunks = chunks_of::<T>(world, &query);
         let scratch = fit(&mut self.scratch, chunks.len());
@@ -719,10 +761,19 @@ impl Extracted {
                 for (&entity, transform) in entities.iter().zip(rows.iter()) {
                     let radius = shape_radius(transform.shape(), transform.half_extent());
                     let pose = blend.pose(entity, transform);
-                    chunk.keep(place(entity, transform, origin, radius, pose), frustum);
+                    chunk.keep(
+                        place(entity, transform, origin, radius, pose),
+                        view,
+                        casters,
+                    );
                 }
             });
-        gather(scratch, &mut self.instances, &mut self.culled);
+        gather(
+            scratch,
+            &mut self.instances,
+            &mut self.visible_instances,
+            &mut self.culled,
+        );
         Ok(())
     }
 
@@ -743,7 +794,7 @@ impl Extracted {
     ) -> Result<(), AliasError> {
         let query = Query::<&T>::new()?;
         let origin = self.camera_origin;
-        let frustum = self.casters;
+        let (view, casters) = (self.frustum, self.casters);
         let blend = self.previous_models.blend(self.alpha);
         let chunks = chunks_of::<T>(world, &query);
         let scratch = fit(&mut self.scratch, chunks.len());
@@ -768,14 +819,23 @@ impl Extracted {
                         // exactly so the half of a building behind the camera
                         // costs nothing, and testing the whole scene's bound
                         // would hand that back.
-                        chunk.keep(compose(&placed, transform, origin, node, pose), frustum);
+                        chunk.keep(
+                            compose(&placed, transform, origin, node, pose),
+                            view,
+                            casters,
+                        );
                     });
                     if !expanded {
-                        chunk.keep(placed, frustum);
+                        chunk.keep(placed, view, casters);
                     }
                 }
             });
-        gather(scratch, &mut self.models, &mut self.culled);
+        gather(
+            scratch,
+            &mut self.models,
+            &mut self.visible_models,
+            &mut self.culled,
+        );
         Ok(())
     }
 
@@ -1117,15 +1177,27 @@ fn blend_angle(a: f32, b: f32, t: f32) -> f32 {
 /// avoid, and there are more chunks than there are arrays.
 #[derive(Clone, Debug, Default)]
 struct Chunk {
-    out: Vec<Instance>,
+    /// What the *view* frustum admits.
+    visible: Vec<Instance>,
+    /// What only the swept caster volume admits — off screen, but laying a
+    /// shadow across it (§6 M11). Empty in every frame nothing widened the cull.
+    casting: Vec<Instance>,
     culled: usize,
 }
 
 impl Chunk {
-    /// Keep `instance` if the frustum admits it, and count it if not.
-    fn keep(&mut self, instance: Instance, frustum: Frustum) {
-        if frustum.contains(instance.offset, instance.radius) {
-            self.out.push(instance);
+    /// Keep `instance` in the tighter of the two volumes that admits it, and
+    /// count it if neither does.
+    ///
+    /// Two tests where M11 did one, and the second is only reached by what the
+    /// first rejected — so a frame with no sun (`casters == view`) pays exactly
+    /// what it paid before, and one with a sun pays a second halfspace test on
+    /// the minority of instances that are off screen.
+    fn keep(&mut self, instance: Instance, view: Frustum, casters: Frustum) {
+        if view.contains(instance.offset, instance.radius) {
+            self.visible.push(instance);
+        } else if casters.contains(instance.offset, instance.radius) {
+            self.casting.push(instance);
         } else {
             self.culled += 1;
         }
@@ -1160,17 +1232,41 @@ fn fit(scratch: &mut Vec<Chunk>, chunks: usize) -> &mut [Chunk] {
     }
     let used = &mut scratch[..chunks];
     for chunk in used.iter_mut() {
-        chunk.out.clear();
+        chunk.visible.clear();
+        chunk.casting.clear();
         chunk.culled = 0;
     }
     used
 }
 
-/// Concatenate the chunks **in chunk order**, whatever order they ran in.
-fn gather(scratch: &[Chunk], into: &mut Vec<Instance>, culled: &mut usize) {
-    into.reserve(scratch.iter().map(|c| c.out.len()).sum());
+/// Concatenate the chunks **in chunk order**, whatever order they ran in,
+/// keeping `into` partitioned visible-then-casting across repeated appends
+/// (§6 M34).
+///
+/// The rotate is what makes a second `append` legal. `into` is already
+/// `[visible | casting]`; this appends the new visible block after the existing
+/// casters and turns `[casting | new visible]` back into `[new visible |
+/// casting]` in place — one memmove of the caster tail, no allocation, and the
+/// relative order inside each half is untouched, which is what the determinism
+/// argument above rests on. In a frame with no sun the tail is empty and the
+/// rotate is a no-op.
+fn gather(scratch: &[Chunk], into: &mut Vec<Instance>, visible: &mut usize, culled: &mut usize) {
+    into.reserve(
+        scratch
+            .iter()
+            .map(|c| c.visible.len() + c.casting.len())
+            .sum(),
+    );
+    let tail = into.len() - *visible;
+    let start = into.len();
     for chunk in scratch {
-        into.extend_from_slice(&chunk.out);
+        into.extend_from_slice(&chunk.visible);
+    }
+    let added = into.len() - start;
+    into[*visible..].rotate_left(tail);
+    *visible += added;
+    for chunk in scratch {
+        into.extend_from_slice(&chunk.casting);
         *culled += chunk.culled;
     }
 }
@@ -1674,6 +1770,78 @@ mod tests {
             "a sun from below casts nothing down"
         );
         assert_eq!(swept(&world, 5.0), 1, "and the reach is a reach");
+    }
+
+    /// §6 M34: the caster the sweep kept is kept **behind** what the view
+    /// admitted, so a main pass can draw a prefix and a shadow pass the whole.
+    ///
+    /// This is the half of the split a picture cannot show. Submitting the
+    /// casters to the main pass too renders the identical frame — the rasterizer
+    /// discards them off screen — so nothing in `tests/gg-images` would ever
+    /// notice the partition being lost, or an off-by-one putting a visible
+    /// instance in the tail. Both directions are asserted here, and the second
+    /// one is why the room's own box is checked rather than only the count: a
+    /// prefix that is merely the right *length* is not a prefix.
+    #[test]
+    fn what_only_the_sweep_kept_sits_behind_what_the_view_admitted() {
+        let world = a_room_under(sim::Vec3::new(0.0, -1.0, 0.0));
+        let mut out = Extracted::default();
+        out.clear(sim::DVec3::ZERO, looking_forward());
+        out.append_lights(&world).unwrap();
+        out.cast_shadows(40.0);
+        out.append::<Body>(&world).unwrap();
+
+        assert_eq!(out.culled, 0, "the sweep keeps both");
+        assert_eq!(out.instances.len(), 2);
+        assert_eq!(out.visible().len(), 1, "one of the two is on screen");
+        assert_eq!(out.casting_only(), 1);
+        // The prefix is the *right* instance and not merely one of them: the
+        // floor is in frame and the box above the camera is not.
+        assert!(
+            out.visible()[0].offset.y < out.instances[1].offset.y,
+            "the visible prefix holds the floor, the tail the box overhead — {:?}",
+            out.instances
+        );
+
+        // Nothing widened is the common frame, and it must cost nothing: the
+        // whole array is the prefix, so a caller using `visible()` and a caller
+        // using `instances` are reading the same slice.
+        out.clear(sim::DVec3::ZERO, looking_forward());
+        out.append::<Body>(&world).unwrap();
+        assert_eq!(out.visible().len(), out.instances.len());
+        assert_eq!(out.casting_only(), 0);
+    }
+
+    /// The partition survives a second append, which is the whole reason
+    /// [`gather`] rotates rather than concatenates (§6 M34).
+    ///
+    /// A frame whose instances come from two component types appends twice, and
+    /// the naive version leaves `[visible, casting, visible, casting]` — an
+    /// array whose prefix silently stops being the visible set on the second
+    /// call. Nothing downstream would report that; it would draw half a scene.
+    #[test]
+    fn a_second_append_keeps_the_visible_ones_in_front() {
+        let world = a_room_under(sim::Vec3::new(0.0, -1.0, 0.0));
+        let mut out = Extracted::default();
+        out.clear(sim::DVec3::ZERO, looking_forward());
+        out.append_lights(&world).unwrap();
+        out.cast_shadows(40.0);
+        out.append::<Body>(&world).unwrap();
+        out.append::<Body>(&world).unwrap();
+
+        assert_eq!(out.instances.len(), 4);
+        assert_eq!(out.visible().len(), 2, "both appends' visible ones, first");
+        assert_eq!(out.casting_only(), 2);
+        let overhead = out.instances[3].offset.y;
+        assert!(
+            out.visible().iter().all(|i| i.offset.y < overhead),
+            "a caster reached the prefix: {:?}",
+            out.instances
+        );
+        // And the halves kept their own order — the determinism argument
+        // `chunks_of` makes is about the sequence within each, not across both.
+        assert_eq!(out.instances[0].entity, out.instances[1].entity);
+        assert_eq!(out.instances[2].entity, out.instances[3].entity);
     }
 
     /// `clear` resets the sweep, so a frame that forgets to re-widen culls by its

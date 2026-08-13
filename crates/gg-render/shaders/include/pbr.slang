@@ -76,11 +76,11 @@ static const uint LIGHT_POINT = 1;
 // Strides written here and asserted against the Rust records beside them, the
 // same agreement `VERTEX_STRIDE` and `INSTANCE_STRIDE` are half of. HLSL has no
 // `sizeof`, so a drift is a build error rather than a garbled read.
-static const uint FRAME_STRIDE = 4368;
+static const uint FRAME_STRIDE = 4384;
 static const uint LIGHT_STRIDE = 48;
 static const uint CASCADE_STRIDE = 80;
 // Where the cascade array starts inside the frame block.
-static const uint CASCADE_BASE = 976;
+static const uint CASCADE_BASE = 992;
 // Coefficients in the order-2 environment projection (§6 M24), and where they
 // start. Must equal `sky.rs`'s SH_COEFFICIENTS.
 static const uint SH_COEFFICIENTS = 9;
@@ -97,7 +97,7 @@ static const uint SAMPLER_LINEAR_CLAMP = 1;
 // Where the environment array starts, and therefore where the innermost
 // environment's coefficients start — `sh` is the first field of an environment
 // precisely so M24's read is still the read.
-static const uint ENV_BASE = 208;
+static const uint ENV_BASE = 224;
 // Must equal `lighting.rs`'s MAX_CASCADES: the loops below are unrolled over it
 // and a mismatch would read past the block.
 static const uint MAX_CASCADES = 4;
@@ -108,7 +108,7 @@ static const uint MAX_CASCADES = 4;
 static const uint MAX_LAMPS = 8;
 static const uint LAMP_FACES = 6;
 static const uint LAMP_STRIDE = 384;
-static const uint LAMP_BASE = 1296;
+static const uint LAMP_BASE = 1312;
 // A shadow draw's `shadow_view` index: cascades first, then lamp faces. One
 // number rather than a second push field, so the shadow vertex shader takes one
 // branch on a value that is uniform across the draw.
@@ -179,13 +179,19 @@ struct Frame
     float lamp_normal_bias;    // *face* texels of normal offset, angle-scaled like the sun's
     float lamp_depth_bias;     // the angle-free part, also in face texels
     uint lamp_taps;            // taps in the lamp filter; its own knob because it is paid per lamp
-    uint shading;              // SHADING_* bits; the frame block's last padding word (§6 M33)
+    uint shading;              // SHADING_* bits (§6 M33, M34)
+    uint64_t split_sum;        // §6 M34's table: EXTENT^2 float pairs, n·v fastest and squared
 }
 
 // What `Frame::shading` carries. Mirrored in `lighting.rs`, which is where the
 // CVars behind them are read — a bit crosses, a knob does not.
 static const uint SHADING_MULTISCATTER = 1u;
 static const uint SHADING_LOBE = 2u;
+static const uint SHADING_LUT = 4u;
+
+// The split-sum table's edge (§6 M34). Must equal `split_sum::EXTENT`; the read
+// below indexes by it and a mismatch is a wrong number rather than a crash.
+static const uint SPLIT_SUM_EXTENT = 16;
 
 // One environment: what it radiates, and the volume it radiates in (§6 M28).
 //
@@ -259,6 +265,8 @@ Frame load_frame(uint64_t address)
     frame.lamp_depth_bias = f[49];
     frame.lamp_taps = u[50];
     frame.shading = u[51];
+    // 208 bytes in, which is where M33's last padding word left off.
+    frame.split_sum = ((uint64_t*)address)[26];
     return frame;
 }
 
@@ -705,14 +713,18 @@ float3 prefiltered_radiance(Environment e, float3 direction, float alpha,
            * e.radiance_scale;
 }
 
-// The split-sum's *second* integral — how much of the environment a surface of
-// this roughness reflects, and with what tint — as [Laz13]'s analytic fit rather
-// than as a lookup table. A 2D LUT would be a texture, a bindless slot, a
-// generation pass and a resource to bless; the fit is four constants and is
-// within a percent of the table over the whole domain.
+// [Laz13]'s analytic fit — the split-sum's second integral in four constants,
+// and what this shader used for it until §6 M34.
 //
-// Returns the scale and bias applied to F0: `f0 * a + b`.
-float2 env_brdf(float roughness, float n_dot_v)
+// Kept as the *other* value of `r.lut` rather than deleted: off is the pre-M34
+// shading exactly, so `gg-tools split-sum` and the furnace grade two algorithms
+// in one binary instead of two builds (`r.shadow_cull`'s argument, §6 M32).
+//
+// What it cannot express is the view: `scale + bias` is `r.z + r.w` with the
+// `a004` term cancelling, so the directional albedo it reports — the number §6
+// M33's compensation divides by — is the same at the silhouette as head-on. The
+// real one is not. 17.15 % mean and 121.68 % worst error on `1/E`.
+float2 env_brdf_fit(float roughness, float n_dot_v)
 {
     const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
     const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
@@ -721,13 +733,53 @@ float2 env_brdf(float roughness, float n_dot_v)
     return float2(-1.04, 1.04) * a004 + r.zw;
 }
 
+// The same integral out of §6 M34's table, bilinearly.
+//
+// The `n·v` axis is stored **squared** — texel `x` holds `n·v = (x/edge)^2` —
+// so this reads at `sqrt(n·v)`. One instruction, and worth more than four times
+// the texels: everything hard to interpolate here is packed against `n·v = 0`,
+// where a near-mirror seen edge-on turns sharply.
+//
+// Corners and not texel centres, which is the reason this is a buffer rather
+// than a sampled image: roughness 0 has to read the mirror's albedo of exactly
+// 1, because the compensation divides by it, and a half-texel offset puts the
+// first row somewhere else.
+float2 env_brdf_table(uint64_t table, float roughness, float n_dot_v)
+{
+    float edge = float(SPLIT_SUM_EXTENT - 1);
+    float fx = sqrt(saturate(n_dot_v)) * edge;
+    float fy = saturate(roughness) * edge;
+    uint x0 = uint(min(floor(fx), edge - 1.0));
+    uint y0 = uint(min(floor(fy), edge - 1.0));
+    float2 t = float2(fx - float(x0), fy - float(y0));
+    float* f = (float*)table;
+    uint row0 = (y0 * SPLIT_SUM_EXTENT + x0) * 2;
+    uint row1 = row0 + SPLIT_SUM_EXTENT * 2;
+    float2 c00 = float2(f[row0], f[row0 + 1]);
+    float2 c10 = float2(f[row0 + 2], f[row0 + 3]);
+    float2 c01 = float2(f[row1], f[row1 + 1]);
+    float2 c11 = float2(f[row1 + 2], f[row1 + 3]);
+    return lerp(lerp(c00, c10, t.x), lerp(c01, c11, t.x), t.y);
+}
+
+// How much of the environment a surface of this roughness reflects, and with
+// what tint. Returns the scale and bias applied to F0: `f0 * a + b`.
+float2 env_brdf(Frame frame, float roughness, float n_dot_v)
+{
+    return (frame.shading & SHADING_LUT) != 0
+               ? env_brdf_table(frame.split_sum, roughness, n_dot_v)
+               : env_brdf_fit(roughness, n_dot_v);
+}
+
 // How much of the environment a surface of this roughness reflects when nothing
 // absorbs any of it — the split-sum's second integral at `f0 = 1`, which is what
 // `a + b` is by construction.
 //
-// This is the number the whole of §6 M33 turns on. It is the *single-scatter*
-// directional albedo, so it is below 1 wherever the microsurface can shadow
-// itself: ~1.0 at roughness 0 and ~0.68 at roughness 1, head-on. A renderer that
+// This is the number the whole of §6 M33 turns on and the one §6 M34 found the
+// fit could not report. It is the *single-scatter* directional albedo, so it is
+// below 1 wherever the microsurface can shadow itself: 1.0 at roughness 0, 0.307
+// at roughness 1 head-on, and back up to ~1.0 at roughness 1 grazing, where the
+// facets the viewer can see are the ones turned toward them. A renderer that
 // stops there has silently absorbed the difference, and `gg-tools furnace`
 // measures exactly this curve by rendering it.
 float directional_albedo(float2 ab)
@@ -893,7 +945,7 @@ float3 ambient_light(uint64_t frame_address, Frame frame, Surface s, float3 worl
     // The split-sum's second integral: how much of that radiance comes back, and
     // tinted how. `f0 * a + b` is `FssEss` — the *single-scatter* answer, which
     // is where every renderer of this class used to stop.
-    float2 ab = env_brdf(roughness, n_dot_v);
+    float2 ab = env_brdf(frame, roughness, n_dot_v);
     float3 fss_ess = s.f0 * ab.x + ab.y;
     float3 diffuse;
     float3 specular;
@@ -1452,7 +1504,7 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world, f
     if ((frame.shading & SHADING_MULTISCATTER) != 0)
     {
         float n_dot_v = max(dot(s.normal, to_eye), 1e-4);
-        compensation = energy_compensation(s.f0, env_brdf(sqrt(s.alpha), n_dot_v));
+        compensation = energy_compensation(s.f0, env_brdf(frame, sqrt(s.alpha), n_dot_v));
     }
     // The suns, by count. A light with no position reaches every fragment, so a
     // froxel list holding one would be the same answer stored three thousand

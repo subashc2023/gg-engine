@@ -146,6 +146,21 @@ pub(crate) struct GpuFrame {
     /// of it, which is what lets `gg-tools furnace` measure two algorithms in
     /// one binary instead of two builds — `r.shadow_cull`'s argument at §6 M32.
     shading: u32,
+    /// §6 M34's split-sum table — `EXTENT²` pairs of `f32`, `n·v` fastest and
+    /// stored against `sqrt(n·v)`.
+    ///
+    /// An address and not a texture, which is §4.3's rule rather than a
+    /// preference: this is data a shader indexes, not an image, and a bindless
+    /// slot would additionally have made it a half-float — the one place in the
+    /// frame where precision is spent on a reciprocal.
+    ///
+    /// Where the padding went. M33's `shading` was the last of the words M27–M31
+    /// spent down, so this is a fresh 16 bytes and the arrays behind it moved
+    /// from 208 to 224. The three that follow are the next milestone's, and
+    /// naming them that way is what stops the *next* scalar from being the one
+    /// that moves every offset in the file.
+    split_sum: u64,
+    reserved: [u32; 2],
     /// This frame's environments, innermost first (§6 M28).
     ///
     /// A fixed array in the block rather than a second buffer, `cascades`'
@@ -289,6 +304,8 @@ struct GpuCascade {
 const SHADING_MULTISCATTER: u32 = 1;
 /// The chain is sampled along the lobe's dominant direction — `r.lobe` (§6 M33).
 const SHADING_LOBE: u32 = 2;
+/// The split-sum's second integral comes from the table — `r.lut` (§6 M34).
+const SHADING_LUT: u32 = 4;
 
 /// [`GpuFrame::shading`], read off the CVars once a frame.
 ///
@@ -302,6 +319,9 @@ fn shading_flags() -> u32 {
     if cvars::LOBE.bool() {
         flags |= SHADING_LOBE;
     }
+    if cvars::LUT.bool() {
+        flags |= SHADING_LUT;
+    }
     flags
 }
 
@@ -309,28 +329,32 @@ const _: () = {
     assert!(core::mem::size_of::<GpuCascade>() == 80);
     assert!(core::mem::size_of::<GpuEnvironment>() == 192);
     assert!(core::mem::size_of::<GpuLamp>() == 384);
-    assert!(core::mem::size_of::<GpuFrame>() == 4368);
+    assert!(core::mem::size_of::<GpuFrame>() == 4384);
     assert!(core::mem::offset_of!(GpuFrame, ambient) == 64);
     assert!(core::mem::offset_of!(GpuFrame, light_count) == 80);
     assert!(core::mem::offset_of!(GpuFrame, sun_direction) == 96);
     assert!(core::mem::offset_of!(GpuFrame, directional_count) == 140);
     assert!(core::mem::offset_of!(GpuFrame, lamp_count) == 172);
-    assert!(core::mem::offset_of!(GpuFrame, environments) == 208);
-    assert!(core::mem::offset_of!(GpuFrame, cascades) == 976);
-    assert!(core::mem::offset_of!(GpuFrame, lamps) == 1296);
+    assert!(core::mem::offset_of!(GpuFrame, split_sum) == 208);
+    assert!(core::mem::offset_of!(GpuFrame, environments) == 224);
+    assert!(core::mem::offset_of!(GpuFrame, cascades) == 992);
+    assert!(core::mem::offset_of!(GpuFrame, lamps) == 1312);
     // `pbr.slang` derives these two from `FRAME_STRIDE`, `LIGHT_STRIDE` and its
     // own grid constants. Written out here so the derivation has something to be
     // wrong against — a froxel read at the wrong offset is a picture, not a
     // crash.
     assert!(MAX_LIGHTS == 260);
-    assert!(CLUSTER_BASE == 16848);
-    assert!(INDEX_BASE == 41424);
+    assert!(CLUSTER_BASE == 16864);
+    assert!(INDEX_BASE == 41440);
     assert!(cluster::CLUSTERS == 3072);
     // The coefficients are still the first thing in an environment, so the
     // shader's `SH_BASE` is `ENV_BASE` and M24's loader reads the innermost
     // environment by doing exactly what it always did.
     assert!(core::mem::offset_of!(GpuEnvironment, sh) == 0);
     assert!(core::mem::offset_of!(GpuEnvironment, half_extent) == 160);
+    // `pbr.slang`'s SPLIT_SUM_EXTENT indexes the table by this; a drift reads
+    // the wrong row and returns a plausible wrong albedo rather than crashing.
+    assert!(crate::split_sum::EXTENT == 16);
 };
 
 /// One light as the shader reads it, mirroring `include/pbr.slang`'s `Light`.
@@ -660,6 +684,15 @@ fn up_for(direction: render::Vec3) -> render::Vec3 {
 pub(crate) struct Lighting {
     buffer: BufferHandle,
     address: DeviceAddress,
+    /// §6 M34's split-sum table, and where the shader reads it.
+    ///
+    /// Its own buffer rather than a region of the one above: it is written once
+    /// and read every frame, where everything else here is rebuilt every frame,
+    /// and a constant living in a slot-per-frame ring would be memcpy'd 4368
+    /// bytes at a time forever. Two kilobytes, so the address in the block costs
+    /// more than the contents do.
+    lut: BufferHandle,
+    lut_address: DeviceAddress,
     /// Scratch, reused across frames.
     lights: Vec<GpuLight>,
     /// This frame's sun, once [`Lighting::plan`] has decided whether one casts.
@@ -709,9 +742,21 @@ impl Lighting {
             size: SLOT_BYTES * FRAMES_IN_FLIGHT,
             kind: gg_rhi::BufferKind::Dynamic,
         })?;
+        let table = split_sum_table();
+        let lut = rhi.create_buffer(&BufferDesc {
+            name: "render.lighting.split-sum",
+            size: core::mem::size_of_val(table) as u64,
+            kind: gg_rhi::BufferKind::Storage,
+        })?;
+        // The staging ring and not `write_buffer`: this outlives every frame
+        // that reads it, which is exactly the line §4.3 draws between the two.
+        rhi.upload_buffer(lut, 0, bytemuck::cast_slice(table))?;
+        rhi.flush_uploads()?;
         Ok(Lighting {
             address: rhi.buffer_address(buffer)?,
             buffer,
+            lut_address: rhi.buffer_address(lut)?,
+            lut,
             lights: Vec::new(),
             sun: None,
             lamps: lamp::Lamps::default(),
@@ -868,6 +913,8 @@ impl Lighting {
             lamp_depth_bias: cvars::LAMP_DEPTH_BIAS.float().max(0.0) as f32,
             lamp_taps: cvars::LAMP_TAPS.int().clamp(4, 32) as u32,
             shading: shading_flags(),
+            split_sum: self.lut_address,
+            reserved: [0; 2],
             environments: self.blocks,
             cascades,
             lamps: gpu_lamps,
@@ -987,8 +1034,20 @@ impl Lighting {
     /// A handle the RHI does not recognise, which cannot happen for one issued
     /// through here.
     pub(crate) fn destroy(self, rhi: &mut impl GpuHost) -> Result<(), RhiError> {
+        rhi.destroy_buffer(self.lut)?;
         rhi.destroy_buffer(self.buffer)
     }
+}
+
+/// The split-sum table, built once per process (§6 M34).
+///
+/// A `OnceLock` because the table is a function of nothing — the same 2 KB for
+/// every renderer in the process — and building it costs ~8 ms of GGX sampling
+/// that a second `OffscreenRenderer` in the same test has no reason to pay
+/// again.
+fn split_sum_table() -> &'static [[f32; 2]] {
+    static TABLE: std::sync::OnceLock<Vec<[f32; 2]>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(crate::split_sum::table)
 }
 
 #[cfg(test)]
@@ -1158,7 +1217,7 @@ mod tests {
     fn the_gpu_records_are_what_the_shader_strides_by() {
         // `include/pbr.slang` hardcodes FRAME_STRIDE and LIGHT_STRIDE; this is
         // the other half of that agreement, the way the vertex assertions are.
-        assert_eq!(core::mem::size_of::<GpuFrame>(), 4368);
+        assert_eq!(core::mem::size_of::<GpuFrame>(), 4384);
         assert_eq!(core::mem::size_of::<GpuCascade>(), 80);
         assert_eq!(core::mem::size_of::<GpuLight>(), 48);
         assert_eq!(core::mem::offset_of!(GpuLight, direction), 16);
@@ -1166,12 +1225,12 @@ mod tests {
         // And where the froxel arrays begin (§6 M30) — `pbr.slang` derives both
         // from the three constants above, so these are what the derivation is
         // checked against.
-        assert_eq!(CLUSTER_BASE, 16848);
-        assert_eq!(INDEX_BASE, 41424);
+        assert_eq!(CLUSTER_BASE, 16864);
+        assert_eq!(INDEX_BASE, 41440);
         // The lamps (§6 M31): a face is a bare 4x4, so the stride is six of them
         // and `LAMP_BASE` is where the shader starts counting.
         assert_eq!(core::mem::size_of::<GpuLamp>(), 384);
-        assert_eq!(core::mem::offset_of!(GpuFrame, lamps), 1296);
+        assert_eq!(core::mem::offset_of!(GpuFrame, lamps), 1312);
         // ENV_STRIDE, and the offsets `load_environment` reads past the
         // coefficients (§6 M28).
         assert_eq!(core::mem::size_of::<GpuEnvironment>(), 192);

@@ -17,8 +17,9 @@
 //! returned as a fraction of `L`. **1.000 closes.**
 //!
 //! What a single-scatter renderer returns instead is the *directional albedo* of
-//! the GGX lobe, which is 1 at roughness 0 and falls to about two thirds at
-//! roughness 1: the microsurface shadows itself, the ray that would have bounced
+//! the GGX lobe, which is 1 at roughness 0 and falls to under a third at
+//! roughness 1 head-on (§6 M34 measured it; M33 read 0.450 through a fit that
+//! could not see the view): the microsurface shadows itself, the ray that would have bounced
 //! a second time is dropped, and nothing puts it back. That is the defect, and
 //! it is a curve rather than a constant, which is why it reads as "the rough end
 //! of the chart is too dark" and never as a bug.
@@ -74,7 +75,7 @@ use gg_ecs::World;
 use gg_ecs::boundary::{Light, Renderable, Sky};
 use gg_extract::Extracted;
 use gg_math::{render, sim};
-use gg_render::{OffscreenRenderer, View, cvars};
+use gg_render::{OffscreenRenderer, View, cvars, split_sum};
 
 /// Small: every measurement is a window at the middle of the frame, and the rest
 /// of the pixels are only there to prove the middle is not an edge.
@@ -108,7 +109,13 @@ const CALIBRATION: usize = 193;
 /// Where the direct leg's dimmer half is aimed, as a fraction of [`RADIANCE`],
 /// and the fraction above which a reading is treated as off the end of the
 /// curve. The gap between them is the headroom the compensated leg needs.
-const AIM: f32 = 0.3;
+///
+/// 0.2 since §6 M34 and it was 0.3 under M33's fit, which is worth recording
+/// because the reason is the milestone: the compensated leg is `1/E` brighter,
+/// and correcting `E` at roughness 1 head-on from the fit's 0.450 to the true
+/// 0.307 took that factor from 2.2 to 3.3. The instrument's own headroom was
+/// sized against a number that was wrong.
+const AIM: f32 = 0.2;
 const CLIPPING: f32 = 0.95;
 
 /// Roughness rows.
@@ -252,16 +259,38 @@ fn sky_and_sun() -> anyhow::Result<()> {
 /// change nothing here. A digit moving would mean the correction had become an
 /// energy term, which is the one way it could be wrong without looking wrong.
 fn view_dependence(renderer: &mut OffscreenRenderer, curve: &[(f32, f32)]) -> anyhow::Result<()> {
-    let mut spread = 0.0f32;
-    let mut lobe_spread = 0.0f32;
+    println!();
+    println!(
+        "single-scatter E by view angle — rendered / CPU reference / [Laz13] fit (§6 M34)\n  \
+         the third estimator: the first two are arithmetic, this one is a picture."
+    );
+    print!("  r\\n·v |");
+    for cosine in VIEW_COSINE {
+        print!("{cosine:>22.1}");
+    }
+    println!();
+    let (mut worst, mut fit_worst, mut lobe_spread) = (0.0f32, 0.0f32, 0.0f32);
     for roughness in ROUGHNESS {
-        let mut head_on = None;
+        print!("  {roughness:>4.1} |");
         for cosine in VIEW_COSINE {
             let world = wall(roughness, cosine, None)?;
             cvars::MULTISCATTER.set_bool(false);
             let e = energy(renderer, &world, curve)?;
-            let first = *head_on.get_or_insert(e);
-            spread = spread.max((e - first).abs());
+            // `integrate` and not `sample`: what is being graded is the whole
+            // path — the table, the shader's bilinear read of it, the BRDF, the
+            // tonemap and the calibration — against the integral, not the
+            // table against itself.
+            let truth = {
+                let (a, b) = split_sum::integrate(roughness, cosine, 65_536);
+                a + b
+            };
+            let fit = {
+                let (a, b) = split_sum::fit(roughness, cosine);
+                a + b
+            };
+            worst = worst.max((e - truth).abs());
+            fit_worst = fit_worst.max((fit - truth).abs());
+            print!(" {e:>6.3}/{truth:.3}/{fit:.3}");
 
             cvars::MULTISCATTER.set_bool(true);
             cvars::LOBE.set_bool(true);
@@ -271,16 +300,15 @@ fn view_dependence(renderer: &mut OffscreenRenderer, curve: &[(f32, f32)]) -> an
             cvars::LOBE.set_bool(true);
             lobe_spread = lobe_spread.max((aimed - mirrored).abs());
         }
+        println!();
     }
     anyhow::ensure!(
         lobe_spread < 5.0e-3,
         "r.lobe moved the furnace by {lobe_spread:.4} — aiming the lobe elsewhere changed how \
          much came back, so it has stopped being only a direction"
     );
-    println!();
     println!(
-        "  control | n·v swept over {VIEW_COSINE:?}: E moves {spread:.4} — the view term \n  \
-         cancels in [Laz13]'s `a + b` at f0 = 1, so this axis is flat by construction.\n  \
+        "\n  rendered vs reference: worst {worst:.4}; the fit it replaced: {fit_worst:.4}\n  \
          control | r.lobe moves E by {lobe_spread:.4} — a direction, not an energy."
     );
     Ok(())
@@ -330,8 +358,8 @@ fn calibrate(renderer: &mut OffscreenRenderer) -> anyhow::Result<Vec<(f32, f32)>
 /// one render and one multiplication land it exactly; the loop is there to walk
 /// in from a first guess that may be off by orders of magnitude.
 ///
-/// The target is low in the range because the *other* leg is up to 2.2x brighter
-/// and must fit above it.
+/// The target is low in the range because the *other* leg is up to 3.3x brighter
+/// and must fit above it (§6 M34; it was 2.2x under the fit).
 fn aim(
     renderer: &mut OffscreenRenderer,
     curve: &[(f32, f32)],

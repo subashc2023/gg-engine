@@ -116,6 +116,12 @@ struct Row {
     shadow_ms: f64,
     draws: usize,
     cull: gg_render::ShadowCull,
+    /// Instances the view frustum admitted, and the ones only the sweep did —
+    /// the main pass's own cull (§6 M34). The second number is what it stopped
+    /// submitting, and it is the same in both rows because it is extract's
+    /// arithmetic rather than the shadow cull's.
+    visible: usize,
+    casting: usize,
 }
 
 /// Every pass this milestone can touch: the four cascades and the lamp atlas.
@@ -162,6 +168,7 @@ fn measure(renderer: &mut OffscreenRenderer, world: &World) -> anyhow::Result<Ro
     let mut times: Vec<f64> = Vec::new();
     let mut shadows: Vec<f64> = Vec::new();
     let mut row = (0, gg_render::ShadowCull::default());
+    let mut split = (0usize, 0usize);
     for frame in 0..WARMUP + FRAMES {
         extracted.clear(eye, view.frustum(EXTENT));
         extracted.append_lights(world)?;
@@ -181,6 +188,7 @@ fn measure(renderer: &mut OffscreenRenderer, world: &World) -> anyhow::Result<Ro
                 .sum();
             shadows.push(shadow);
             row = (renderer.draw_counts().1, renderer.shadow_cull());
+            split = (extracted.visible_models().len(), extracted.casting_only());
         }
     }
     times.sort_by(f64::total_cmp);
@@ -190,6 +198,8 @@ fn measure(renderer: &mut OffscreenRenderer, world: &World) -> anyhow::Result<Ro
         shadow_ms: shadows[shadows.len() / 2],
         draws: row.0,
         cull: row.1,
+        visible: split.0,
+        casting: split.1,
     })
 }
 
@@ -216,6 +226,7 @@ pub fn run(_args: &[String]) -> anyhow::Result<()> {
         "", "", "off", "on", "off", "on", "off", "on", ""
     );
 
+    let mut split = (0usize, 0usize);
     for budget in BUDGETS {
         cvars::LAMPS.set_int(budget);
         cvars::LAMP_SHADOWS.set_bool(budget > 0);
@@ -237,6 +248,7 @@ pub fn run(_args: &[String]) -> anyhow::Result<()> {
         let on = measure(&mut renderer, &world)?;
         renderer.shutdown();
 
+        split = (on.visible, on.casting);
         let total = on.cull.drawn + on.cull.rejected;
         println!(
             "{:>6}  {:>6}  {:>8.2} {:>8.2}  {:>8.2} {:>8.2}  {:>4} {:>4}  {:>8}/{:<10}",
@@ -265,6 +277,20 @@ pub fn run(_args: &[String]) -> anyhow::Result<()> {
     println!(
         "  `draws` is the pack pass's batch count and is the same either way — what the cull \n  \
          removes is (batch, view) pairs in the shadow passes, which no frame-level count shows."
+    );
+    // §6 M34's half of the same sentence, and it is extract's rather than the
+    // shadow cull's: the sweep that lets a cascade see an off-screen caster used
+    // to hand that caster to the *main* pass as well, where the rasterizer threw
+    // it away after transforming it. Printed here because this is the scene the
+    // sweep matters in, and because the picture cannot show it — submitting them
+    // renders the same frame, for a price.
+    let seen = split.0 + split.1;
+    println!(
+        "  of {seen} instances extract kept, the view admits {} and the sweep keeps {} more for 
+           their shadows alone — {:.0}% of what the main pass used to submit (§6 M34).",
+        split.0,
+        split.1,
+        100.0 * split.1 as f64 / seen.max(1) as f64,
     );
     Ok(())
 }

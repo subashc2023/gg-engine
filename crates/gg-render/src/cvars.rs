@@ -115,6 +115,29 @@ pub static LOBE: CVar = CVar::new_bool(
     "read the chain along the lobe's dominant direction, not the mirror one",
 );
 
+/// Whether the split-sum's second integral is read from §6 M34's table or from
+/// [Laz13]'s analytic fit.
+///
+/// Off is the pre-M34 shading exactly, which is what makes the difference
+/// measurable in one binary. What the fit cannot express is the *view* axis: it
+/// returns `(-1.04a + z, 1.04a + w)`, so the directional albedo `scale + bias`
+/// is `z + w` and carries no view angle — and that albedo is what §6 M33's
+/// compensation divides by. `gg-tools split-sum` grades both against the
+/// integral itself: the fit is 17.15 % mean and 121.68 % worst on `1/E`, the
+/// table 0.21 % and 1.45 %.
+///
+/// The worst case is not an accuracy complaint, it is energy: at roughness 1
+/// and grazing incidence the true single-scatter albedo is 0.998, so the
+/// correction should be ~1, and the fit's constant 0.450 asked for 2.22 — a
+/// surface returning more than twice the light that reached it. A white furnace
+/// is blind to it, because at `f0 = 1` the ambient path sums to `Ess + (1 - Ess)`
+/// whatever `Ess` is.
+pub static LUT: CVar = CVar::new_bool(
+    "r.lut",
+    true,
+    "read the split-sum's second integral from the table, not the analytic fit",
+);
+
 /// Whether a fragment reads its own froxel's light list or the whole frame's
 /// (§6 M30).
 ///
@@ -460,6 +483,7 @@ pub fn register() -> Result<(), CVarError> {
         &AMBIENT,
         &MULTISCATTER,
         &LOBE,
+        &LUT,
         &CLUSTERS,
         &HISTOGRAM,
         &AA,

@@ -51,6 +51,7 @@ pub static gg_render::cvars::LAMP_SHADOWS: gg_core::cvar::CVar
 pub static gg_render::cvars::LAMP_SIZE: gg_core::cvar::CVar
 pub static gg_render::cvars::LAMP_TAPS: gg_core::cvar::CVar
 pub static gg_render::cvars::LOBE: gg_core::cvar::CVar
+pub static gg_render::cvars::LUT: gg_core::cvar::CVar
 pub static gg_render::cvars::MSAA: gg_core::cvar::CVar
 pub static gg_render::cvars::MULTISCATTER: gg_core::cvar::CVar
 pub static gg_render::cvars::NEAR: gg_core::cvar::CVar
@@ -119,6 +120,14 @@ pub fn gg_render::graph::readback_pass<'a>(gg_render::graph::ResourceId, gg_rend
 pub fn gg_render::graph::single_pass<'a>(&'static str, gg_render::graph::ResourceId, gg_render::graph::Load, &'a [gg_rhi::DrawSpec<'a>]) -> [gg_render::graph::Declared<'a>; 1]
 pub mod gg_render::luminance
 pub const gg_render::luminance::BINS: usize
+pub mod gg_render::split_sum
+pub const gg_render::split_sum::EXTENT: usize
+pub const gg_render::split_sum::SAMPLES: u32
+pub fn gg_render::split_sum::fit(f32, f32) -> (f32, f32)
+pub fn gg_render::split_sum::integrate(f32, f32, u32) -> (f32, f32)
+pub fn gg_render::split_sum::integrate_uniform(f32, f32, u32) -> f32
+pub fn gg_render::split_sum::sample(&[[f32; 2]], f32, f32) -> (f32, f32)
+pub fn gg_render::split_sum::table() -> alloc::vec::Vec<[f32; 2]>
 pub mod gg_render::ui
 pub struct gg_render::ui::Coverage<'a>
 pub gg_render::ui::Coverage::extent: (u32, u32)
