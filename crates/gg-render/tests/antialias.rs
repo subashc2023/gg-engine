@@ -256,11 +256,23 @@ fn the_forward_pass_resolves_and_everything_after_it_reads_one_image() {
             scene,
             scene_ms: Some(scene_ms),
             depth,
+            // §6 M35's occlusion is not this test's subject: it asserts what
+            // happens to the *multisample colour* attachment, and a frame that
+            // also declared occlusion passes would be asserting that against a
+            // longer graph for no reason.
+            depth_resolve: None,
+            ao_raw: None,
+            ao: None,
+            ao_source: None,
+            ao_samples: &[],
+            ao_blur_samples: &[],
             shadows: &[],
             lamps: None,
             clear: CLEAR,
             viewport: None,
             prepass_draws: &[],
+            ao_draws: &[],
+            ao_blur_draws: &[],
             shadow_draws: &[],
             lamp_draws: &[],
             forward_draws: &[],

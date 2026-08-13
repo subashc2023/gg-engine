@@ -41,6 +41,7 @@
 //!   gg-tools mcp                    serve a running session's reload record to
 //!                                   an agent over MCP on stdio (§6 M16)
 
+mod ao;
 mod banding;
 mod cull;
 mod fp_isa;
@@ -86,6 +87,7 @@ fn main() -> anyhow::Result<()> {
         "cull" => cull::run(rest),
         "furnace" => furnace::run(rest),
         "split-sum" => split_sum::run(rest),
+        "ao" => ao::run(rest),
         "banding" => banding::run(rest),
         "pace" => pace::run(rest),
         "panorama" => panorama::run(rest),

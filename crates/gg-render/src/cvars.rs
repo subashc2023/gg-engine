@@ -138,6 +138,81 @@ pub static LUT: CVar = CVar::new_bool(
     "read the split-sum's second integral from the table, not the analytic fit",
 );
 
+/// Whether the depth prepass's buffer is read for ambient occlusion (§6 M35).
+///
+/// The ambient and indirect terms multiply by a surface's occlusion, and until
+/// this that number came from a *texture* an artist authored — so a
+/// `Renderable`, which has no material maps at all, was lit as though it stood
+/// in the open however deep in a corner it was. `gg-tools ao` measures how much
+/// of demo 12's room that is: at the default radius, 27.5 % of the visible
+/// pixels are occluded and the mean where occluded is 0.777.
+///
+/// Off is not "AO with the knobs at zero" — the passes are not declared at all
+/// and the frame block's slot is zero, so a scene renders exactly the bytes it
+/// rendered before this milestone. That is what makes the A/B in `gg-tools ao`
+/// one binary and not two (§6 M32's argument for `r.shadow_cull`).
+pub static AO: CVar = CVar::new_bool("r.ao", true, "occlude ambient light using the depth buffer");
+
+/// How far ambient occlusion looks for an occluder, metres.
+///
+/// The knob with the widest defensible range on the list, because it is a
+/// statement about *content*: a centimetre-scale radius creases contacts and
+/// nothing else, a metre-scale one darkens whole alcoves. Half a metre is read
+/// off `gg-tools ao`'s error sweep against the ray-cast reference — past it the
+/// screen-space error grows faster than the term it is estimating, because a
+/// wider radius asks the depth buffer about geometry further outside the frame.
+pub static AO_RADIUS: CVar = CVar::new_float("r.ao_radius", 0.5, "occlusion radius, metres");
+
+/// Exponent on the occlusion value, applied in the AO pass.
+///
+/// One is the integral itself and is the honest default. It is a knob because
+/// the integral is *correct* rather than *pretty* — a scene lit almost entirely
+/// by ambient reads flat at 1.0 — and because the instrument needs to be able to
+/// prove the shipped value is 1.0 rather than a taste that drifted.
+pub static AO_INTENSITY: CVar = CVar::new_float("r.ao_intensity", 1.0, "occlusion exponent");
+
+/// Directions marched through each pixel, and taps along each half of one.
+///
+/// Both read off `gg-tools ao`. One slice is 0.1091 of mean error, two is
+/// 0.0299, three is 0.0247 and four is 0.0248 — so the knee is three and the
+/// shipped default is two, deliberately: on the pin three is a 28 % wider pass
+/// (+3.93 ms against +3.07) and on a real GPU the difference is inside run-to-run
+/// noise, while the 17 % it buys comes off the *smaller* half of the error —
+/// the structural 0.13 a depth buffer cannot see is untouched by any slice
+/// count. Steps matter far less once `r.ao_bias` is set (0.0312 → 0.0309 from 8
+/// to 16), because the 4x4 rotation means a pixel's neighbours march different
+/// directions and the denoiser recovers what one pixel's budget cannot.
+pub static AO_SLICES: CVar = CVar::new_int("r.ao_slices", 2, "occlusion directions per pixel");
+/// Taps along each half of a slice — see [`AO_SLICES`].
+pub static AO_STEPS: CVar = CVar::new_int("r.ao_steps", 8, "occlusion taps per half-slice");
+
+/// Nearest a tap may be taken, in **pixels**.
+///
+/// The knob that fails in opposite directions, which is why it is measured and
+/// not chosen (`r.shadow_normal_bias`'s shape, §6 M11): too small and a surface
+/// at a grazing angle occludes itself, because a tap a fraction of a pixel away
+/// differs from the fragment almost entirely along the view axis and the normal
+/// that would forgive it is itself reconstructed from depths; too large and the
+/// contact crease this term exists to draw is stepped straight over. `gg-tools
+/// ao` prints both failures as separate columns — invented occlusion on open
+/// surfaces, missed occlusion in creases — and this is the plateau between them.
+pub static AO_BIAS: CVar = CVar::new_float("r.ao_bias", 2.0, "nearest occlusion tap, pixels");
+
+/// Radius multiples over which a horizon's contribution fades to nothing.
+///
+/// What makes the radius a radius: without it a distant wall occludes as hard as
+/// a crate on the floor, because the horizon it raises is just as high.
+pub static AO_FALLOFF: CVar = CVar::new_float("r.ao_falloff", 1.0, "occlusion falloff, in radii");
+
+/// Whether the raw occlusion target is denoised before the forward pass reads it.
+///
+/// A 4x4 box, which is exactly one period of the AO pass's rotation pattern and
+/// is therefore an unbiased average of sixteen slice orientations rather than a
+/// blur. A knob because "is the denoiser doing anything" is a question the
+/// instrument should answer with a number: `gg-tools ao` prints the error
+/// against the reference either way.
+pub static AO_BLUR: CVar = CVar::new_bool("r.ao_blur", true, "denoise the occlusion target");
+
 /// Whether a fragment reads its own froxel's light list or the whole frame's
 /// (§6 M30).
 ///
@@ -484,6 +559,14 @@ pub fn register() -> Result<(), CVarError> {
         &MULTISCATTER,
         &LOBE,
         &LUT,
+        &AO,
+        &AO_RADIUS,
+        &AO_INTENSITY,
+        &AO_SLICES,
+        &AO_STEPS,
+        &AO_FALLOFF,
+        &AO_BIAS,
+        &AO_BLUR,
         &CLUSTERS,
         &HISTOGRAM,
         &AA,

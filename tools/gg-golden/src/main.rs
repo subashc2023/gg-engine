@@ -1416,6 +1416,18 @@ fn load(pack: Option<&str>) -> anyhow::Result<()> {
         None => hall_pack()?,
     };
     let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    // What this harness times is **streaming**, which is why it renders at
+    // 64x64 at all — the picture is not the subject and the frame's own cost is
+    // meant to be negligible beside the upload. §6 M35's occlusion breaks that
+    // assumption under one profile: it is two fullscreen passes of dependent
+    // texture reads, and GPU-AV instruments every one of them, which took this
+    // leg from 352 ms to 990 ms against a 500 ms budget while changing nothing
+    // about how fast a pack arrives. Held off here rather than budgeted around,
+    // because a load-time gate that moves when a *shading* term is added is
+    // measuring the wrong thing. The instrumented coverage of those shaders is
+    // not lost: the two `bench` legs above this one in `xtask gpuav` render the
+    // same pass list with them on.
+    gg_render::cvars::AO.set_bool(false);
     let mut renderer = gg_render::OffscreenRenderer::new((64, 64))?;
     tracing::info!(device = %renderer.device().chosen, "offscreen device");
     renderer.open_pack(&path)?;

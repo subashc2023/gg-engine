@@ -160,7 +160,15 @@ pub(crate) struct GpuFrame {
     /// naming them that way is what stops the *next* scalar from being the one
     /// that moves every offset in the file.
     split_sum: u64,
-    reserved: [u32; 2],
+    /// §6 M35's occlusion target in the global sampled-image array, or zero.
+    ///
+    /// One of the two words M34 set aside for the next milestone, which is why
+    /// this block did not grow and every offset below is unchanged. Zero is the
+    /// whole of "this frame has no AO" — `SHADING_AO` is what the shader tests,
+    /// and the graph is what makes the two agree: with `r.ao` off neither pass
+    /// is declared, so there is no target to have a slot.
+    ao_texture: u32,
+    reserved: u32,
     /// This frame's environments, innermost first (§6 M28).
     ///
     /// A fixed array in the block rather than a second buffer, `cascades`'
@@ -277,6 +285,8 @@ pub(crate) struct Radiance {
 pub(crate) struct Maps<'a> {
     pub(crate) cascades: &'a [gg_rhi::TextureIndex],
     pub(crate) lamps: Option<gg_rhi::TextureIndex>,
+    /// The occlusion target the AO pass wrote (§6 M35), if this frame ran one.
+    pub(crate) occlusion: Option<gg_rhi::TextureIndex>,
 }
 
 /// One cascade as the shader reads it, mirroring `include/pbr.slang`'s
@@ -306,6 +316,8 @@ const SHADING_MULTISCATTER: u32 = 1;
 const SHADING_LOBE: u32 = 2;
 /// The split-sum's second integral comes from the table — `r.lut` (§6 M34).
 const SHADING_LUT: u32 = 4;
+/// The ambient terms are occluded by the depth buffer — `r.ao` (§6 M35).
+const SHADING_AO: u32 = 8;
 
 /// [`GpuFrame::shading`], read off the CVars once a frame.
 ///
@@ -323,6 +335,14 @@ fn shading_flags() -> u32 {
         flags |= SHADING_LUT;
     }
     flags
+}
+
+/// [`shading_flags`] with the occlusion bit set to what this *frame* actually
+/// got. Separate because `r.ao` is a request and a slot is a fact: a frame that
+/// asked for AO and whose target never reached the bindless array must not tell
+/// the shader to sample slot zero.
+fn shading_flags_with(ao: Option<gg_rhi::TextureIndex>) -> u32 {
+    shading_flags() | if ao.is_some() { SHADING_AO } else { 0 }
 }
 
 const _: () = {
@@ -823,6 +843,7 @@ impl Lighting {
         let Maps {
             cascades: shadow,
             lamps: atlas,
+            ..
         } = maps;
         // Truncated first, so the froxel lists index the array the shader will
         // actually read. Extract's own caps make this a no-op in every frame it
@@ -912,9 +933,10 @@ impl Lighting {
             lamp_normal_bias: cvars::LAMP_NORMAL_BIAS.float().max(0.0) as f32,
             lamp_depth_bias: cvars::LAMP_DEPTH_BIAS.float().max(0.0) as f32,
             lamp_taps: cvars::LAMP_TAPS.int().clamp(4, 32) as u32,
-            shading: shading_flags(),
+            shading: shading_flags_with(maps.occlusion),
             split_sum: self.lut_address,
-            reserved: [0; 2],
+            ao_texture: maps.occlusion.map_or(0, gg_rhi::TextureIndex::get),
+            reserved: 0,
             environments: self.blocks,
             cascades,
             lamps: gpu_lamps,

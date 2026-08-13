@@ -125,6 +125,7 @@ fn record(
                     clear: Some(DEPTH_CLEAR),
                     store: false,
                     read_only: false,
+                    resolve: None,
                 }),
                 viewport: None,
                 draws,

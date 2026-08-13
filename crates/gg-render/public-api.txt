@@ -1,6 +1,22 @@
 pub mod gg_render
 pub use gg_render::Samples
 pub use gg_render::Viewport
+pub mod gg_render::ao
+pub struct gg_render::ao::Hit
+pub gg_render::ao::Hit::distance: f32
+pub gg_render::ao::Hit::normal: gg_math::sim::Vec3
+pub struct gg_render::ao::Occluder
+pub gg_render::ao::Occluder::center: gg_math::sim::Vec3
+pub gg_render::ao::Occluder::half_extent: gg_math::sim::Vec3
+pub gg_render::ao::Occluder::rotation: gg_math::sim::Quat
+pub gg_render::ao::Occluder::sphere: bool
+pub struct gg_render::ao::Params
+pub gg_render::ao::Params::radius: f32
+pub gg_render::ao::Params::samples: u32
+impl core::default::Default for gg_render::ao::Params
+pub fn gg_render::ao::Params::default() -> gg_render::ao::Params
+pub fn gg_render::ao::occlusion(gg_math::sim::Vec3, gg_math::sim::Vec3, &[gg_render::ao::Occluder], gg_render::ao::Params) -> f32
+pub fn gg_render::ao::trace(gg_math::sim::Vec3, gg_math::sim::Vec3, &[gg_render::ao::Occluder], f32, f32) -> core::option::Option<gg_render::ao::Hit>
 pub mod gg_render::content
 pub enum gg_render::content::ContentError
 pub gg_render::content::ContentError::Asset(gg_assets::load::AssetError)
@@ -38,6 +54,14 @@ pub fn gg_render::content::DrawMaterial::default() -> Self
 pub mod gg_render::cvars
 pub static gg_render::cvars::AA: gg_core::cvar::CVar
 pub static gg_render::cvars::AMBIENT: gg_core::cvar::CVar
+pub static gg_render::cvars::AO: gg_core::cvar::CVar
+pub static gg_render::cvars::AO_BIAS: gg_core::cvar::CVar
+pub static gg_render::cvars::AO_BLUR: gg_core::cvar::CVar
+pub static gg_render::cvars::AO_FALLOFF: gg_core::cvar::CVar
+pub static gg_render::cvars::AO_INTENSITY: gg_core::cvar::CVar
+pub static gg_render::cvars::AO_RADIUS: gg_core::cvar::CVar
+pub static gg_render::cvars::AO_SLICES: gg_core::cvar::CVar
+pub static gg_render::cvars::AO_STEPS: gg_core::cvar::CVar
 pub static gg_render::cvars::CLUSTERS: gg_core::cvar::CVar
 pub static gg_render::cvars::DITHER: gg_core::cvar::CVar
 pub static gg_render::cvars::EXPOSURE: gg_core::cvar::CVar
@@ -77,6 +101,7 @@ pub enum gg_render::graph::Body<'a>
 pub gg_render::graph::Body::Draw
 pub gg_render::graph::Body::Draw::color: core::option::Option<(gg_render::graph::ResourceId, gg_render::graph::Load)>
 pub gg_render::graph::Body::Draw::depth: core::option::Option<(gg_render::graph::ResourceId, gg_render::graph::DepthUse)>
+pub gg_render::graph::Body::Draw::depth_resolve: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::graph::Body::Draw::draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::graph::Body::Draw::resolve: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::graph::Body::Draw::samples: &'a [gg_render::graph::ResourceId]
@@ -108,6 +133,7 @@ pub fn gg_render::graph::Frame<'p>::color_at(&mut self, &'static str, (u32, u32)
 pub fn gg_render::graph::Frame<'p>::compile<'a>(self, &'a [gg_render::graph::Declared<'a>]) -> core::result::Result<gg_render::graph::Compiled<'a>, gg_rhi::RhiError>
 pub fn gg_render::graph::Frame<'p>::depth(&mut self, &'static str) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
 pub fn gg_render::graph::Frame<'p>::depth_at(&mut self, &'static str, (u32, u32), gg_rhi::resource::Samples) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
+pub fn gg_render::graph::Frame<'p>::depth_sampled(&mut self, &'static str, (u32, u32)) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
 pub fn gg_render::graph::Frame<'p>::readback_buffer(&mut self, &'static str, gg_rhi::resource::BufferHandle) -> gg_render::graph::ResourceId
 pub fn gg_render::graph::Frame<'p>::shadow(&mut self, &'static str, (u32, u32)) -> core::result::Result<gg_render::graph::ResourceId, gg_rhi::RhiError>
 pub fn gg_render::graph::Frame<'p>::texture(&self, gg_render::graph::ResourceId) -> core::option::Option<gg_rhi::bindless::TextureIndex>
@@ -193,9 +219,17 @@ pub fn gg_render::Renderer::shadow_cull(&self) -> gg_render::ShadowCull
 pub fn gg_render::Renderer::shutdown(self) -> gg_rhi::ShutdownReport
 pub fn gg_render::Renderer::view_extent(&self) -> (u32, u32)
 pub struct gg_render::SceneFrame<'a>
+pub gg_render::SceneFrame::ao: core::option::Option<gg_render::graph::ResourceId>
+pub gg_render::SceneFrame::ao_blur_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::ao_blur_samples: &'a [gg_render::graph::ResourceId]
+pub gg_render::SceneFrame::ao_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::ao_raw: core::option::Option<gg_render::graph::ResourceId>
+pub gg_render::SceneFrame::ao_samples: &'a [gg_render::graph::ResourceId]
+pub gg_render::SceneFrame::ao_source: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::SceneFrame::backbuffer: gg_render::graph::ResourceId
 pub gg_render::SceneFrame::clear: [f32; 4]
 pub gg_render::SceneFrame::depth: gg_render::graph::ResourceId
+pub gg_render::SceneFrame::depth_resolve: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::SceneFrame::forward_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::forward_samples: &'a [gg_render::graph::ResourceId]
 pub gg_render::SceneFrame::lamp_draws: &'a [gg_rhi::DrawSpec<'a>]

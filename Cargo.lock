@@ -1166,6 +1166,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "demo-05-many",
+ "demo-12-shooter",
  "gg-core",
  "gg-ecs",
  "gg-extract",

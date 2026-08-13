@@ -83,6 +83,14 @@ pub enum ImageFormat {
     /// down, so an 8-bit target would clip every highlight before the curve that
     /// exists to shape them ever ran.
     Rgba16F,
+    /// One 8-bit linear channel — the ambient-occlusion target (§6 M35).
+    ///
+    /// A whole format for one channel because the alternative is four times the
+    /// bandwidth on a full-screen target the forward pass reads once per
+    /// fragment. Eight bits is enough by what it feeds: occlusion multiplies an
+    /// ambient term, so a code value is a 0.4 % change in a fraction of the
+    /// picture's dimmest light.
+    R8Unorm,
     /// 32-bit float depth. The only depth format we ask for: reverse-Z's
     /// precision argument *is* a float-depth argument (§2, Math row).
     Depth32,
@@ -97,6 +105,7 @@ impl ImageFormat {
             ImageFormat::Bc5Unorm => vk::Format::BC5_UNORM_BLOCK,
             ImageFormat::Bc4Unorm => vk::Format::BC4_UNORM_BLOCK,
             ImageFormat::Bc6hUfloat => vk::Format::BC6H_UFLOAT_BLOCK,
+            ImageFormat::R8Unorm => vk::Format::R8_UNORM,
             ImageFormat::Rgba16F => vk::Format::R16G16B16A16_SFLOAT,
             ImageFormat::Depth32 => vk::Format::D32_SFLOAT,
         }
@@ -126,6 +135,7 @@ impl ImageFormat {
             | ImageFormat::Bc6hUfloat => 4,
             ImageFormat::Rgba8Srgb
             | ImageFormat::Rgba8Unorm
+            | ImageFormat::R8Unorm
             | ImageFormat::Rgba16F
             | ImageFormat::Depth32 => 1,
         }
@@ -141,6 +151,7 @@ impl ImageFormat {
                 w.div_ceil(4) * h.div_ceil(4) * 16
             }
             ImageFormat::Bc4Unorm => w.div_ceil(4) * h.div_ceil(4) * 8,
+            ImageFormat::R8Unorm => w * h,
             ImageFormat::Rgba8Srgb | ImageFormat::Rgba8Unorm | ImageFormat::Depth32 => w * h * 4,
             ImageFormat::Rgba16F => w * h * 8,
         }

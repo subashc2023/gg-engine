@@ -4,6 +4,7 @@ pub gg_rhi::Access::ColorWrite
 pub gg_rhi::Access::CopyDst
 pub gg_rhi::Access::CopySrc
 pub gg_rhi::Access::DepthRead
+pub gg_rhi::Access::DepthResolve
 pub gg_rhi::Access::DepthWrite
 pub gg_rhi::Access::HostRead
 pub gg_rhi::Access::None
@@ -41,6 +42,7 @@ pub gg_rhi::ImageFormat::Bc5Unorm
 pub gg_rhi::ImageFormat::Bc6hUfloat
 pub gg_rhi::ImageFormat::Bc7Srgb
 pub gg_rhi::ImageFormat::Depth32
+pub gg_rhi::ImageFormat::R8Unorm
 pub gg_rhi::ImageFormat::Rgba16F
 pub gg_rhi::ImageFormat::Rgba8Srgb
 pub gg_rhi::ImageFormat::Rgba8Unorm
@@ -116,6 +118,7 @@ pub gg_rhi::ColorAttachment::target: gg_rhi::Target
 pub struct gg_rhi::DepthAttachment
 pub gg_rhi::DepthAttachment::clear: core::option::Option<f32>
 pub gg_rhi::DepthAttachment::read_only: bool
+pub gg_rhi::DepthAttachment::resolve: core::option::Option<gg_rhi::Target>
 pub gg_rhi::DepthAttachment::store: bool
 pub gg_rhi::DepthAttachment::target: gg_rhi::Target
 pub struct gg_rhi::DepthBias

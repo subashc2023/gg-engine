@@ -67,6 +67,13 @@ pub enum Body<'a> {
         resolve: Option<ResourceId>,
         /// Tested against, if any.
         depth: Option<(ResourceId, DepthUse)>,
+        /// Where a multisampled `depth` is reduced to one sample (§6 M35).
+        /// [`resolve`](Body::Draw::resolve)'s twin, and required for the same
+        /// reason: a later pass cannot sample a multisample depth attachment,
+        /// because the global set declares no `2DMS` descriptor. Ignored when
+        /// `depth` is already single-sample — there is nothing to reduce, and
+        /// the pass's own target is what the AO pass reads.
+        depth_resolve: Option<ResourceId>,
         /// Where in the attachments the draws land; `None` is all of them. A
         /// [`Load::Clear`] still covers the whole attachment — that pairing is
         /// what fills the area a composited pass does not draw into.
@@ -106,6 +113,7 @@ pub fn single_pass<'a>(
             color: Some((backbuffer, load)),
             resolve: None,
             depth: None,
+            depth_resolve: None,
             viewport: None,
             samples: &[],
             draws,
@@ -343,6 +351,39 @@ impl<'p> Frame<'p> {
         Ok(self.push(name, Target::Image(entry.image), None))
     }
 
+    /// A pooled depth attachment with a bindless slot — the AO pass's source
+    /// (§6 M35).
+    ///
+    /// [`Self::depth_at`]'s note is the whole reason this is a second method
+    /// rather than a flag: `SAMPLED` costs some drivers the compressed depth
+    /// layout, so a prepass target nothing reads must not ask for it. A frame
+    /// with `r.ao` off therefore allocates through the other one and pays
+    /// nothing for a feature it is not running.
+    ///
+    /// Single-sample only, and that is a Vulkan fact rather than a choice: the
+    /// global set declares no `2DMS` descriptor, so a multisampled depth
+    /// attachment is reached by resolving it (see
+    /// [`Body::Draw::depth_resolve`]) and never by sampling it.
+    ///
+    /// # Errors
+    ///
+    /// Allocation, or a full bindless array.
+    pub fn depth_sampled(
+        &mut self,
+        name: &'static str,
+        extent: (u32, u32),
+    ) -> Result<ResourceId, RhiError> {
+        let entry = self.pool.acquire(
+            self.ctx,
+            name,
+            extent,
+            ImageFormat::Depth32,
+            ImageUse::DepthSampled,
+            Samples::X1,
+        )?;
+        Ok(self.push(name, Target::Image(entry.image), entry.texture))
+    }
+
     /// A pooled color attachment at **its own** extent, with a bindless slot —
     /// the luminance resample's small target (§6 M11).
     ///
@@ -455,6 +496,7 @@ impl<'p> Frame<'p> {
                     color,
                     resolve,
                     depth,
+                    depth_resolve,
                     viewport,
                     samples,
                     draws,
@@ -488,8 +530,15 @@ impl<'p> Frame<'p> {
                                 _ => Access::DepthWrite,
                             };
                             let target = self.transition(&mut edges, id, access)?;
+                            // Written by fixed function as the render ends, so
+                            // it is an output of this pass exactly as the color
+                            // resolve above is.
+                            let into = depth_resolve
+                                .map(|id| self.transition(&mut edges, id, Access::DepthResolve))
+                                .transpose()?;
                             Ok::<_, RhiError>(DepthAttachment {
                                 target,
+                                resolve: into,
                                 // Reverse-Z clears to the far plane; a pass that
                                 // tests against a stored buffer loads it.
                                 clear: (use_ != DepthUse::Test).then_some(gg_rhi::DEPTH_CLEAR),
@@ -622,6 +671,7 @@ struct Slot {
     slot: u64,
     extent: (u32, u32),
     format: ImageFormat,
+    usage: ImageUse,
     samples: Samples,
     entry: Entry,
     last_used: u64,
@@ -713,11 +763,20 @@ impl Transients {
         // The sample count is part of the key for the same reason the extent
         // is: a mode switch mid-session must not hand back the old count's
         // image, and the one it stops asking for retires by going idle.
+        //
+        // **So is the usage** (§6 M35), and that one was found rather than
+        // reasoned: `scene.depth` is `Depth` with `r.ao` off and `DepthSampled`
+        // with it on, and a pool that ignored the difference handed the second
+        // request an image created without `SAMPLED` — no bindless slot, and a
+        // pass that would have sampled an image whose usage flags did not allow
+        // it. Toggling the CVar in one process is what makes that reachable,
+        // which is exactly what the A/B in `gg-tools ao` does.
         if let Some(existing) = self.slots.iter_mut().find(|s| {
             s.name == name
                 && s.slot == slot
                 && s.extent == extent
                 && s.format == format
+                && s.usage == usage
                 && s.samples == samples
         }) {
             existing.last_used = frame;
@@ -750,6 +809,7 @@ impl Transients {
             slot,
             extent,
             format,
+            usage,
             samples,
             entry,
             last_used: frame,
@@ -823,6 +883,7 @@ mod tests {
                 color: None,
                 resolve: None,
                 depth: Some((id, DepthUse::Write)),
+                depth_resolve: None,
                 viewport: None,
                 samples: &[],
                 draws: &[],

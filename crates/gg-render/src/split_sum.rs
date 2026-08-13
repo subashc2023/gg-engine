@@ -216,7 +216,7 @@ fn visibility(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
 /// Van der Corput radical inverse, base 2 — the second Hammersley coordinate.
 ///
 /// Integer bit reversal, so it is exact on every host and needs no `sim`.
-fn radical_inverse(bits: u32) -> f32 {
+pub(crate) fn radical_inverse(bits: u32) -> f32 {
     let mut b = bits.rotate_left(16);
     b = ((b & 0x5555_5555) << 1) | ((b & 0xaaaa_aaaa) >> 1);
     b = ((b & 0x3333_3333) << 2) | ((b & 0xcccc_cccc) >> 2);

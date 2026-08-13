@@ -58,6 +58,20 @@ pub enum Access {
     StorageReadWrite,
     /// Handed to the presentation engine. Terminal: nothing follows it.
     Present,
+    /// Written by a multisample **depth** resolve as a render pass ends (§6
+    /// M35) — [`DepthAttachment::resolve`]'s target and nothing else.
+    ///
+    /// Its own variant rather than [`Access::DepthWrite`] because of what
+    /// synchronization validation requires, which is not what the attachment
+    /// itself would suggest: the layers model the depth resolve's write in
+    /// `COLOR_ATTACHMENT_OUTPUT` with `COLOR_ATTACHMENT_WRITE`, so a barrier
+    /// scoped to the fragment-test stages leaves the resolve unordered against
+    /// its own layout transition and reports a WAW hazard both entering and
+    /// leaving the pass. Found by measurement rather than from the spec text —
+    /// `EARLY`/`LATE_FRAGMENT_TESTS`, `RESOLVE` and `ALL_COMMANDS` were each
+    /// tried and each still reported it. Kept to one variant so an ordinary
+    /// depth attachment does not pay a wider barrier for a case it never hits.
+    DepthResolve,
 }
 
 impl Access {
@@ -73,6 +87,10 @@ impl Access {
             Access::DepthWrite | Access::DepthRead => {
                 vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
                     | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS
+            }
+            Access::DepthResolve => {
+                vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT
             }
             Access::SampledRead => vk::PipelineStageFlags2::FRAGMENT_SHADER,
             Access::StorageReadWrite => vk::PipelineStageFlags2::ALL_COMMANDS,
@@ -96,6 +114,10 @@ impl Access {
                     | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
             }
             Access::DepthRead => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+            Access::DepthResolve => {
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
+                    | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+            }
             Access::SampledRead => vk::AccessFlags2::SHADER_SAMPLED_READ,
             Access::StorageReadWrite => {
                 vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE
@@ -110,7 +132,7 @@ impl Access {
         match self {
             Access::None => vk::ImageLayout::UNDEFINED,
             Access::ColorWrite => vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            Access::DepthWrite => vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+            Access::DepthWrite | Access::DepthResolve => vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
             Access::DepthRead => vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL,
             Access::SampledRead => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             Access::StorageReadWrite => vk::ImageLayout::GENERAL,
@@ -236,6 +258,17 @@ pub struct DepthAttachment {
     pub store: bool,
     /// Tested but not written — pair with `Access::DepthRead`.
     pub read_only: bool,
+    /// Where a multisampled `target` is reduced to one sample at the end of the
+    /// pass (§6 M35). Present only when `target` has more than one sample, and
+    /// only when something downstream samples the depth — which is the AO pass
+    /// and nothing else.
+    ///
+    /// `SAMPLE_ZERO` and not an average, which is the one resolve mode the spec
+    /// *requires* every implementation to support and also the only one that
+    /// means anything here: depth is not a linear quantity across an edge, so
+    /// the mean of four samples straddling a silhouette is a surface that is not
+    /// there. Sample zero is a real fragment that really was in front.
+    pub resolve: Option<Target>,
 }
 
 /// What a pass records once its transitions are in.
@@ -333,8 +366,18 @@ enum ResolvedTransition {
 /// together everywhere and the recorder takes them all at once.
 struct Attachments {
     color: Option<(Ref, Option<[f32; 4]>, Option<Ref>)>,
-    depth: Option<(Ref, Option<f32>, bool, bool)>,
+    depth: Option<ResolvedDepth>,
     viewport: Option<Viewport>,
+}
+
+/// A [`DepthAttachment`] with its images looked up — the same four flags, plus
+/// the resolve target (§6 M35).
+struct ResolvedDepth {
+    target: Ref,
+    clear: Option<f32>,
+    store: bool,
+    read_only: bool,
+    resolve: Option<Ref>,
 }
 
 enum ResolvedKind<'a> {
@@ -403,12 +446,16 @@ pub(crate) fn resolve<'a>(
                                 .transpose()?,
                             depth: depth
                                 .map(|d| {
-                                    Ok::<_, RhiError>((
-                                        resolve_image(gpu, d.target)?,
-                                        d.clear,
-                                        d.store,
-                                        d.read_only,
-                                    ))
+                                    Ok::<_, RhiError>(ResolvedDepth {
+                                        target: resolve_image(gpu, d.target)?,
+                                        clear: d.clear,
+                                        store: d.store,
+                                        read_only: d.read_only,
+                                        resolve: d
+                                            .resolve
+                                            .map(|r| resolve_image(gpu, r))
+                                            .transpose()?,
+                                    })
                                 })
                                 .transpose()?,
                             viewport: *viewport,
@@ -656,9 +703,15 @@ unsafe fn render(
     let color = into
         .color
         .map(|(r, clear, resolve)| (r.get(backbuffer), clear, resolve.map(|r| r.get(backbuffer))));
-    let depth = into
-        .depth
-        .map(|(r, clear, store, read_only)| (r.get(backbuffer), clear, store, read_only));
+    let depth = into.depth.as_ref().map(|d| {
+        (
+            d.target.get(backbuffer),
+            d.clear,
+            d.store,
+            d.read_only,
+            d.resolve.map(|r| r.get(backbuffer)),
+        )
+    });
     // The render area is the color attachment's, or the depth one's when a
     // prepass has no color. resolve() refused the pass that has neither.
     let extent = color
@@ -697,7 +750,7 @@ unsafe fn render(
         })
         .collect();
 
-    let depth_attachment = depth.map(|(bound, clear, store, read_only)| {
+    let depth_attachment = depth.map(|(bound, clear, store, read_only, resolve)| {
         let layout = if read_only {
             vk::ImageLayout::DEPTH_READ_ONLY_OPTIMAL
         } else {
@@ -706,11 +759,21 @@ unsafe fn render(
         let info = vk::RenderingAttachmentInfo::default()
             .image_view(bound.view)
             .image_layout(layout)
+            // Unlike a resolved *color* attachment, a resolved depth one is
+            // still stored: the forward pass tests against these samples after
+            // the AO pass has read their reduction, so both images are output.
             .store_op(if store {
                 vk::AttachmentStoreOp::STORE
             } else {
                 vk::AttachmentStoreOp::DONT_CARE
             });
+        let info = match resolve {
+            Some(into) => info
+                .resolve_mode(vk::ResolveModeFlags::SAMPLE_ZERO)
+                .resolve_image_view(into.view)
+                .resolve_image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL),
+            None => info,
+        };
         match clear {
             Some(d) => info
                 .load_op(vk::AttachmentLoadOp::CLEAR)

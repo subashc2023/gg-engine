@@ -179,8 +179,9 @@ struct Frame
     float lamp_normal_bias;    // *face* texels of normal offset, angle-scaled like the sun's
     float lamp_depth_bias;     // the angle-free part, also in face texels
     uint lamp_taps;            // taps in the lamp filter; its own knob because it is paid per lamp
-    uint shading;              // SHADING_* bits (§6 M33, M34)
+    uint shading;              // SHADING_* bits (§6 M33, M34, M35)
     uint64_t split_sum;        // §6 M34's table: EXTENT^2 float pairs, n·v fastest and squared
+    uint ao_texture;           // §6 M35's occlusion target, or 0; guarded by SHADING_AO
 }
 
 // What `Frame::shading` carries. Mirrored in `lighting.rs`, which is where the
@@ -188,6 +189,7 @@ struct Frame
 static const uint SHADING_MULTISCATTER = 1u;
 static const uint SHADING_LOBE = 2u;
 static const uint SHADING_LUT = 4u;
+static const uint SHADING_AO = 8u;
 
 // The split-sum table's edge (§6 M34). Must equal `split_sum::EXTENT`; the read
 // below indexes by it and a mismatch is a wrong number rather than a crash.
@@ -267,6 +269,9 @@ Frame load_frame(uint64_t address)
     frame.shading = u[51];
     // 208 bytes in, which is where M33's last padding word left off.
     frame.split_sum = ((uint64_t*)address)[26];
+    // 216, the first of the two words M34 set aside for the next milestone —
+    // which is why this block did not grow and every offset below is unchanged.
+    frame.ao_texture = u[54];
     return frame;
 }
 
@@ -855,6 +860,23 @@ float3 f_schlick_ambient(float3 f0, float n_dot_v, float roughness)
 // cannot be summed before evaluation: an environment with a prefiltered chain
 // contributes a *sample*, and one without contributes a three-band convolution.
 // Both are linear in what they are given, so the chainless ones are accumulated
+// What §6 M35's occlusion pass decided about this pixel, or 1 when it did not
+// run.
+//
+// A `Load` and not a `Sample`: the target is the same extent as the attachment
+// being shaded, so a fragment's occlusion is exactly one texel and any filtering
+// would be a blur across a neighbour's surface. The guard is the flag rather
+// than the index, because slot 0 is a legitimate texture — `lamp_texture`'s
+// argument at §6 M31.
+float screen_occlusion(Frame frame, float2 pixel, Texture2D<float4> textures[])
+{
+    if ((frame.shading & SHADING_AO) == 0)
+    {
+        return 1.0;
+    }
+    return textures[frame.ao_texture].Load(int3(int2(pixel), 0)).r;
+}
+
 // as coefficients and evaluated once at the end — which is why blending N
 // environments still costs one `sh_irradiance` and one `sh_radiance`.
 float3 ambient_light(uint64_t frame_address, Frame frame, Surface s, float3 world, float3 to_eye,
@@ -1489,6 +1511,13 @@ float3 shade_all(uint64_t frame_address, Frame frame, Surface s, float3 world, f
     // which is `[0, 0, 0, near]` by construction rather than by rounding.
     float3 axis = frame.view_projection[2].xyz;
     float3 to_eye = dot(axis, axis) > 1e-12 ? normalize(axis) : normalize(-world);
+    // §6 M35, folded into the map the material already carried rather than added
+    // as a second term: `Surface::occlusion` is applied to the ambient and
+    // indirect lobes and to nothing direct, which is exactly where a
+    // screen-space estimate belongs. A material with a baked map and a
+    // screen-space estimate gets both, which is the right composition — one is
+    // the surface's own crevices, the other is the scene it is standing in.
+    s.occlusion *= screen_occlusion(frame, pixel, textures);
     // The environment, before any light with a direction — image-based since
     // §6 M24, and the flat placeholder in a frame that declared no sky.
     float3 total = ambient_light(frame_address, frame, s, world, to_eye, textures, samplers);

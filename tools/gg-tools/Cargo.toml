@@ -44,6 +44,11 @@ gg-input = { path = "../../crates/gg-input" }
 # demo renders; `default-features = false` keeps the game ABI's exports out of
 # this binary, the way `gg-golden` takes it.
 demo-05-many = { path = "../../demos/05-many", default-features = false }
+# `ao`'s first question is whether a scene has any occlusion worth a pass, and
+# that is a property of content rather than of the renderer. Demo 12's room is a
+# table of axis-aligned boxes — shipped geometry that `gg_render::ao` represents
+# exactly, so the reference casts against the level rather than against a guess.
+demo-12-shooter = { path = "../../demos/12-shooter", default-features = false }
 # `Node` parenting is the scene graph's to resolve, and `cull`'s field is
 # parented — extract reads world transforms, it does not compute them.
 gg-scene = { path = "../../crates/gg-scene" }

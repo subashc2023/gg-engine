@@ -149,6 +149,9 @@ pub fn declare<'a>(
             color: Some((backbuffer, gg_render::graph::Load::Clear(CLEAR))),
             resolve: None,
             depth: Some((depth, gg_render::graph::DepthUse::Write)),
+            // One sample, and nothing samples this depth: a demo's own graph is
+            // where §6 M35's resolve is least needed.
+            depth_resolve: None,
             viewport: None,
             samples: &[],
             draws,
