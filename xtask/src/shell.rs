@@ -1282,6 +1282,13 @@ const DEMO_12: &Kind = &Kind {
     features: &["game"],
 };
 
+const DEMO_13: &Kind = &Kind {
+    dir: "demos/13-orbit",
+    lib: "demo_13_orbit",
+    beside: &["session.rs"],
+    features: &["game"],
+};
+
 /// A demo's `lib.rs`, which every variant below is an edit of.
 fn game_source(kind: &Kind) -> anyhow::Result<String> {
     Ok(std::fs::read_to_string(
@@ -1481,6 +1488,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--orbit") {
         orbit()?;
     }
+    if only("--epoch") {
+        epoch()?;
+    }
     if only("--rules") {
         rules()?;
     }
@@ -1489,6 +1499,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     }
     if only("--retune") {
         retune()?;
+    }
+    if only("--burn") {
+        burn()?;
     }
     if only("--best") {
         best()?;
@@ -3063,6 +3076,248 @@ fn orbit() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// §6 M38's exit row, second gate: **the sim epoch crosses a save, which is the
+/// whole reason it is not a clock.**
+///
+/// `--best` asks whether a *number* survives a close and reopen. This asks
+/// whether a **time** does, and the difference is the milestone's own thesis
+/// (§6 M38 item 10): warp is an `Epoch` in sim state precisely because a
+/// `TickClock` is host state that no save can see. A mission saved mid-cruise
+/// and reopened has to come back at the sim tick it left on — a world that
+/// returned at epoch 0 with its conics intact would be three bodies teleported
+/// back half a year, and would never reach the target.
+///
+/// So the claim is sharper than either neighbour's, and it is the one shape
+/// neither `--best` (a log line) nor demo 08's gate (play against stop, inside
+/// one process) makes: the resumed run's **whole hash sequence** is compared
+/// against the same mission never saved at all, tick for tick, and the *first*
+/// tick after the load already has to match. Every tick that matches is a tick
+/// the entire world — three conics, the ship's regime, the flight log and the
+/// epoch — crossed a file untouched.
+///
+/// Then M14's policy over the same file, demo 10's three builds exactly:
+///
+/// - **the same build** resumes, reports no migration, and is the sequence above.
+/// - **a build whose `Epoch` gained a field** resumes, reports the migration by
+///   `orbit.epoch`, and still flies the mission to the same two milestones on
+///   the same two ticks. Its hashes differ and are not compared: a widened
+///   schema is a different schema, which is the point of naming it.
+/// - **a build that renamed it** is refused, by that name, before the world is
+///   touched. The one that would take the mission's clock away.
+fn epoch() -> anyhow::Result<()> {
+    let replay = orbit_path();
+    anyhow::ensure!(
+        replay.is_file(),
+        "no orbit stream at {} — `cargo xtask replay --bless` authors it",
+        replay.display()
+    );
+    let replay = replay.display().to_string();
+
+    let entry = orbit_entry()?;
+    let frames = demo_13_orbit::session::frames(&entry).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let progress =
+        demo_13_orbit::session::progress(&entry, &frames).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let at = |find: &dyn Fn(&demo_13_orbit::session::Progress) -> bool| {
+        progress.iter().position(find).map(|i| i as u64)
+    };
+    let (escaped_at, intercept_at, captured_at) = match (
+        at(&|p| p.primary == 0),
+        at(&|p| p.primary == demo_13_orbit::OCHRE.index),
+        at(&|p| p.outcome == demo_13_orbit::CAPTURED),
+    ) {
+        (Some(escaped), Some(intercept), Some(captured)) => (escaped, intercept, captured),
+        (escaped, intercept, captured) => anyhow::bail!(
+            "the in-process mission escaped at {escaped:?}, was taken by the target at \
+             {intercept:?} and captured at {captured:?} — there is no cruise to save inside"
+        ),
+    };
+    // A quarter of the way from the departure planet's grip to the target's:
+    // past the escape and well before the intercept, so the reopened half has
+    // both of the mission's remaining milestones still to fly.
+    let closed_at = usize::try_from(escaped_at + (captured_at - escaped_at) / 4)?;
+    // The world the file will hold, which is the state *after* `closed_at` ticks.
+    let held = progress[closed_at - 1].epoch;
+    anyhow::ensure!(
+        held > closed_at as u64 * 1_000,
+        "the save lands on host tick {closed_at} with the world on sim tick {held} — a mission \
+         this flat is not under warp, and a file that only has to carry a host tick count proves \
+         nothing this gate exists for"
+    );
+
+    let dir = workspace_root().join("target/epoch");
+    std::fs::create_dir_all(&dir)?;
+    let source = game_source(DEMO_13)?;
+    // One variant name rewritten three times, so two of the three are
+    // incremental rather than a demo 13 from cold each (`best`'s arrangement).
+    let lay = |source: &str, name: &str| -> anyhow::Result<PathBuf> {
+        write_variant(DEMO_13, "epoch", source)?;
+        let kept = dir.join(name);
+        std::fs::copy(build_variant(DEMO_13, "epoch")?, &kept)?;
+        Ok(kept)
+    };
+    let same = lay(&source, "same.bin")?;
+    let wider = lay(&with_a_wider_epoch(&source)?, "wider.bin")?;
+    let renamed = lay(&with_the_epoch_renamed(&source)?, "renamed.bin")?;
+
+    exec(
+        cargo().args(["build", "-p", "gg-runtime"]),
+        "build the shell [dev]",
+    )?;
+    let host = exe("debug", "gg-runtime");
+    let save = dir.join("cruise.ggsv");
+    let save_arg = save.display().to_string();
+    let closed = closed_at.to_string();
+    let tail = (frames.len() - closed_at).to_string();
+
+    // The control: the same mission, never saved, hashed the whole way.
+    let whole = sequence(&play(&host, &same, &["--replay", &replay], true)?)?;
+    let want: Vec<(u64, String)> = whole
+        .iter()
+        .filter(|(tick, _)| *tick >= closed_at as u64)
+        .cloned()
+        .collect();
+    anyhow::ensure!(
+        !want.is_empty(),
+        "the unsaved mission emitted no hash at or after tick {closed_at}"
+    );
+
+    let wrote = play(
+        &host,
+        &same,
+        &[
+            "--replay", &replay, "--frames", &closed, "--save", &save_arg,
+        ],
+        false,
+    )?;
+    anyhow::ensure!(
+        wrote.contains("save written") && save.is_file(),
+        "the cruise wrote no save:\n{wrote}"
+    );
+    anyhow::ensure!(
+        !wrote.contains("orbit: captured"),
+        "the mission was already over when the file was written — this gate reopens a flight, and \
+         a saved outcome has nothing left to fly:\n{wrote}"
+    );
+
+    let mut resumed: Vec<(u64, String)> = Vec::new();
+    for (what, game, migrates) in [
+        ("the same build", &same, false),
+        ("a wider epoch", &wider, true),
+    ] {
+        let log = play(
+            &host,
+            game,
+            &["--load", &save_arg, "--replay", &replay, "--frames", &tail],
+            true,
+        )?;
+        anyhow::ensure!(
+            log.contains("save loaded"),
+            "[{what}] the shell did not load {save_arg}:\n{log}"
+        );
+        let named = log.contains("migrated") && log.contains("orbit.epoch");
+        anyhow::ensure!(
+            named == migrates,
+            "[{what}] the load {} a migration of `orbit.epoch`, and this build {} one:\n{log}",
+            if named { "reported" } else { "reported no" },
+            if migrates { "makes" } else { "makes no" },
+        );
+        for (needle, tick) in [
+            (demo_13_orbit::session::LOG[2], intercept_at),
+            (demo_13_orbit::session::LOG[3], captured_at),
+        ] {
+            let got = logged_at(&log, needle);
+            anyhow::ensure!(
+                got == Some(tick),
+                "[{what}] the reopened mission put `{needle}` on tick {got:?} where the run that \
+                 was never saved puts it at {tick} — the world came back off the file on a \
+                 different trajectory, or at a different epoch, which look the same from here \
+                 and are the same defect:\n{log}"
+            );
+        }
+        if !migrates {
+            resumed = sequence(&log)?;
+        }
+    }
+
+    let crossed = want.len();
+    if let Some(found) = divergence(&("the mission unsaved", want), &("reopened", resumed)) {
+        anyhow::bail!(
+            "§6 M38: {found} — the save is supposed to be a seam the whole world crosses without \
+             moving, and a first-tick difference is the epoch itself"
+        );
+    }
+
+    let out = Command::new(&host)
+        .arg("--game")
+        .arg(&renamed)
+        .args(["--load", &save_arg, "--replay", &replay, "--frames", &tail])
+        .env("GG_HEADLESS", "1")
+        .env("RUST_LOG", "info")
+        .output()?;
+    let log = format!("{}{}", plain(&out.stdout), plain(&out.stderr));
+    anyhow::ensure!(
+        !out.status.success(),
+        "a build that stopped declaring `orbit.epoch` loaded the save anyway — §4.5's `a save may \
+         gain, never lose` is not being enforced by the shell:\n{log}"
+    );
+    anyhow::ensure!(
+        log.contains("orbit.epoch"),
+        "the refusal did not name the component that would have been lost:\n{log}"
+    );
+
+    println!(
+        "xtask reload: demo 13's mission closed on host tick {closed_at} at sim tick {held} and \
+         reopened — the remaining {crossed} ticks hash identically to the run that was never saved, a \
+         build whose `Epoch` gained a field flies the same two milestones after migrating by \
+         name, and one that stopped declaring it is refused (§6 M38)"
+    );
+    Ok(())
+}
+
+/// The schema edit: `Epoch` gains a field.
+///
+/// `u64` rather than a second small one because `bytemuck::Pod` refuses padding
+/// and `Epoch` is 24 bytes at align 8 — a `u32` here would need a companion and
+/// say nothing extra.
+fn with_a_wider_epoch(source: &str) -> anyhow::Result<String> {
+    let edits = [
+        (
+            "    /// one singleton, not because a camera is a clock.\n    pub zoom: f32,\n}",
+            "    /// one singleton, not because a camera is a clock.\n    pub zoom: f32,\n    \
+             /// Added by the save gate: a field the saved mission never had, so\n    /// loading \
+             it is a migration rather than a copy (§4.5).\n    pub warped: u64,\n}",
+        ),
+        (
+            "        zoom: ZOOM_NEAR as f32,\n    });",
+            "        zoom: ZOOM_NEAR as f32,\n        warped: 0,\n    });",
+        ),
+    ];
+    let mut out = source.to_owned();
+    for (anchor, replacement) in edits {
+        anyhow::ensure!(
+            out.contains(anchor),
+            "demo 13's `Epoch` no longer contains `{}` — the save gate's migration is a text edit, \
+             so a rename here is a gate to re-point rather than one that quietly stops migrating \
+             anything",
+            anchor.trim()
+        );
+        out = out.replace(anchor, replacement);
+    }
+    Ok(out)
+}
+
+/// The losing edit: the mission's clock under a different name, which is what a
+/// build that stopped declaring it looks like to a save.
+fn with_the_epoch_renamed(source: &str) -> anyhow::Result<String> {
+    let anchor = "#[component(id = \"orbit.epoch\")]";
+    anyhow::ensure!(
+        source.contains(anchor),
+        "demo 13's epoch no longer carries `{anchor}` — this is the gate's *losing* build and a \
+         missed anchor would make it an ordinary one"
+    );
+    Ok(source.replace(anchor, "#[component(id = \"orbit.clock\")]"))
+}
+
 /// Ticks of the endless stream the rule change is measured over. The swap is
 /// aimed at a tick ([`RULES_SWAPS`]) and lands it plus however far the replay
 /// raced while the sighting crossed a pipe, so the margin is bought in ticks: a
@@ -3811,6 +4066,207 @@ fn retune_once() -> anyhow::Result<u128> {
         at_swap.shots,
         at_swap.hits,
         shot - swap - 1,
+    );
+    Ok(total)
+}
+
+/// Ticks of the coasting stream the engine retune is measured over.
+///
+/// Longer than its three neighbours because this one's event is a *single*
+/// light at `session::LIGHT_AT` rather than a cadence: what the stream owes the
+/// gate is a coast the aim cannot miss and a burn far enough past it that the
+/// window is a claim rather than a margin. It buys about four thousand of them.
+const BURN_TICKS: usize = 8_000;
+
+/// Ticks to aim the swap at — [`RULES_SWAPS`]'s values, and for its reason: the
+/// rewrite lands when the shell's own hash line for that tick is seen, so no
+/// wall time is priced. Three because the aim is the machine's to overshoot,
+/// not because a coasting tick is ever the wrong one to land on.
+const BURN_SWAPS: [u64; 3] = [1_200, 2_000, 2_800];
+
+/// The engine edit: how hard the torch pushes (§6 M38's exit row).
+///
+/// The criterion `--rules`, `--feel` and `--retune` all use, at the subject this
+/// game has: [`THRUST`](demo_13_orbit::THRUST) is read on exactly the ticks the
+/// engine is lit and on no others (`crate::burn`'s `throttle != 0` arm), so a
+/// coasting world keeps matching the unswapped run from the swap until the
+/// light, and then always differs. Every other constant in demo 13 is read
+/// either every tick (the conic's own µ) or once at bootstrap (the parking
+/// radius) — the first parts the runs at the swap tick and proves nothing, the
+/// second changes nothing about a mission in progress.
+///
+/// Doubled and dyadic, so the edit is one value and not a rounding besides.
+fn with_a_hotter_engine(source: &str) -> anyhow::Result<String> {
+    let anchor = "pub const THRUST: f64 = 250.0;";
+    anyhow::ensure!(
+        source.contains(anchor),
+        "demo 13's engine is not where this gate expected it — the retune is a text edit, so a \
+         rename here is a gate to re-point rather than one that quietly stops retuning anything"
+    );
+    Ok(source.replace(anchor, "pub const THRUST: f64 = 500.0;"))
+}
+
+/// §6 M38's exit row, last gate: **an engine retuned under a flight in progress
+/// reloads with the trajectory intact, inside §9's two seconds, and the runs
+/// part at the next light.**
+///
+/// [`retune`]'s claim at this game's subject, and the reason it is worth having
+/// a fourth of these is the middle one. The other three cross a rebuild with a
+/// world that is *ticking*; this one crosses it with a world whose **sim clock
+/// is running at 100x** — the stream taps warp twice before it coasts, so every
+/// tick that agrees across the swap is a tick where three conics were each
+/// propagated a hundred sim ticks and landed on the same bits. A session that
+/// had been rebuilt rather than reloaded would part at the swap.
+///
+/// The three claims:
+///
+/// - **the engine changed.** The runs part at exactly the first lit tick after
+///   the swap, which the in-process script names independently off
+///   `Progress::lit`.
+/// - **with the flight intact.** They are identical through the swap and across
+///   every coasting tick between it and the light — thousands of them, each one
+///   a full propagation of a warped world.
+/// - **and it was a swap, not a migration.** Nothing in demo 13's schema moved.
+///
+/// Budget and retry semantics are [`rules`]'s verbatim.
+fn burn() -> anyhow::Result<()> {
+    let total = best_under(
+        "the engine edit's save-to-new-thrust",
+        BUDGET_MS,
+        WALL_CLOCK_TRIES,
+        burn_once,
+    )?;
+    anyhow::ensure!(
+        total <= BUDGET_MS,
+        "the retune reached the flying game in {total} ms at its best over {WALL_CLOCK_TRIES} \
+         attempts against §9's {BUDGET_MS} ms — the per-attempt rebuild/swap breakdown is in the \
+         lines above"
+    );
+    Ok(())
+}
+
+/// One full run of the engine gate: every correctness assertion, then the
+/// measured save-to-new-thrust total in milliseconds — the verdict is
+/// [`burn`]'s.
+fn burn_once() -> anyhow::Result<u128> {
+    let source = game_source(DEMO_13)?;
+    let edited = with_a_hotter_engine(&source)?;
+
+    let entry = orbit_entry()?;
+    let frames = demo_13_orbit::session::endless(BURN_TICKS);
+    let progress =
+        demo_13_orbit::session::progress(&entry, &frames).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // The stream's own light, as the world saw it: a burn the ship had no fuel
+    // for would leave this gate comparing a coast with a coast.
+    let lit_at = progress
+        .iter()
+        .position(|p| p.lit)
+        .ok_or_else(|| anyhow::anyhow!("the coasting stream never lit the engine"))?;
+
+    let dir = workspace_root().join("target/burn");
+    std::fs::create_dir_all(&dir)?;
+    let stream = dir.join("coast.ggrp");
+    std::fs::write(&stream, orbit_stream(&frames).encode())?;
+    let stream = stream.display().to_string();
+
+    write_variant(DEMO_13, "burn", &source)?;
+    let before = dir.join("before.bin");
+    std::fs::copy(build_variant(DEMO_13, "burn")?, &before)?;
+
+    write_variant(DEMO_13, "burn", &edited)?;
+    let started = std::time::Instant::now();
+    let built = build_variant(DEMO_13, "burn")?;
+    let rebuild_ms = started.elapsed().as_millis();
+    let after = dir.join("after.bin");
+    std::fs::copy(&built, &after)?;
+
+    exec(
+        cargo().args(["build", "-p", "gg-runtime"]),
+        "build the shell [dev]",
+    )?;
+    let host = exe("debug", "gg-runtime");
+    let game = dir.join(dylib_name(DEMO_13));
+
+    std::fs::copy(&before, &game)?;
+    let untouched = sequence(&play(&host, &game, &["--replay", &stream], true)?)?;
+
+    let mut taken = None;
+    for aim in BURN_SWAPS {
+        std::fs::copy(&before, &game)?;
+        let marker = format!("tick={aim} hash=");
+        let log = reload_after(&game, &after, &["--replay", &stream], &marker, 0)?;
+        let swapped = sequence(&log)?;
+        let reloaded = log
+            .lines()
+            .find(|l| l.contains("game reloaded"))
+            .unwrap_or_default();
+        let swap = usize::try_from(crate::util::field_u64(reloaded, "tick")?).unwrap_or(usize::MAX);
+        let swap_ms = u128::from(crate::util::field_u64(reloaded, "save_to_swap_ms")?);
+
+        anyhow::ensure!(
+            log.matches("migrated").count() == 0,
+            "the reload migrated a component — an engine constant is code, and nothing in demo \
+             13's schema moved:\n{log}"
+        );
+        anyhow::ensure!(
+            untouched.len() == swapped.len() && untouched.len() == BURN_TICKS,
+            "the two runs are {} and {} ticks of a {BURN_TICKS}-tick stream",
+            untouched.len(),
+            swapped.len()
+        );
+
+        // A coasting tick before the light: the configuration the claim is
+        // about. The stream holds one burn, thousands of ticks past the last
+        // aim, so this is a guard rather than a swing the gate expects to take.
+        if !demo_13_orbit::session::coasting(swap) || swap >= lit_at {
+            println!(
+                "xtask: the swap landed at tick {swap}, which is not a coasting tick before the \
+                 light at {lit_at} — swinging again"
+            );
+            continue;
+        }
+        taken = Some((swap, swap_ms, swapped));
+        break;
+    }
+    let (swap, swap_ms, swapped) = taken.ok_or_else(|| {
+        anyhow::anyhow!(
+            "every one of {} attempts put the swap outside the coast, which is a coincidence \
+             worth looking at rather than retrying further",
+            BURN_SWAPS.len()
+        )
+    })?;
+
+    let parted = untouched
+        .iter()
+        .zip(&swapped)
+        .find(|(a, b)| a.1 != b.1)
+        .map(|(a, _)| usize::try_from(a.0).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the two runs never parted — a thrust the reload did not pick up makes this gate a \
+                 comparison of a sequence with itself"
+            )
+        })?;
+    anyhow::ensure!(
+        parted == lit_at,
+        "the runs parted at tick {parted}; the engine lights at {lit_at}. Earlier means the swap \
+         itself moved the world — the flight did not cross intact. Later means the retuned thrust \
+         never ran."
+    );
+
+    let warped = progress
+        .get(swap)
+        .map_or(0, |p| p.epoch)
+        .saturating_sub(progress.get(swap.saturating_sub(1)).map_or(0, |p| p.epoch));
+    let total = rebuild_ms + swap_ms;
+    println!(
+        "xtask reload: demo 13's engine was retuned under a flight in progress — a new build \
+         swapped in at tick {swap} with the ship coasting and its sim clock running at {warped}x, \
+         hashing identically to the unswapped run through that tick and the {} after it (every one \
+         of them propagating three conics {warped} sim ticks), and differently from the light at \
+         {lit_at} on: {total} ms save to new thrust (rebuild {rebuild_ms} + swap {swap_ms}, budget \
+         {BUDGET_MS}) (§6 M38)",
+        lit_at - swap - 1,
     );
     Ok(total)
 }

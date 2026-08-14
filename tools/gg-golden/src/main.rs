@@ -2169,10 +2169,10 @@ fn render_platformer() -> Render {
 /// The `orbit` reference's own extent, four times every other scene's.
 ///
 /// Not a preference: demo 13's map symbols are sized in **map metres** and the
-/// eye never moves, so the view is 18.6 m tall at every zoom and a `TRACE_DOT`
-/// is 0.3 % of it — three pixels in the 1080p window the game is played in, and
-/// *half* a pixel at `BOXES_EXTENT`. A reference where the conics are sub-pixel
-/// noise gates nothing about the conics.
+/// eye never moves, so the view is 18.6 m tall at every zoom and a trajectory
+/// ribbon is 0.2 % of it — two pixels in the 1080p window the game is played in,
+/// and a third of one at `BOXES_EXTENT`. A reference where the conics are
+/// sub-pixel noise gates nothing about the conics.
 const ORBIT_EXTENT: (u32, u32) = (1280, 720);
 
 /// The zoom the `orbit` reference is framed at — the demo's **own** far end,

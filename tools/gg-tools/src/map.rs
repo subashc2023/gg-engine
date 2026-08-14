@@ -2,9 +2,9 @@
 //! fail in opposite directions (§6 M38).
 //!
 //! The map is a **schematic** drawn with the renderer's only vocabulary: lit
-//! geometry. Every symbol on it — the star, two planet discs, 128 ring dots and
-//! 64 trace dots — is a diffuse ball shaded by one point light, and the whole
-//! point of the picture is that its content spans 2.3e11 metres. Those two facts
+//! geometry. Every symbol on it — the star, two planet discs and three conics of
+//! [`orbit::TRACE`] segments each — is matte and shaded by one point light, and
+//! the whole point of the picture is that its content spans 2.3e11 metres. Those
 //! do not sit together: an inverse-square light placed at the star delivers 16x
 //! more to a ring at 1 AU than to one at 2.3, so a lux that floors the outer
 //! ring blows the inner one to white and a symbol blown to white has lost the
@@ -12,9 +12,10 @@
 //!
 //! So the failures are **blown** — all three channels at the ceiling, a green
 //! trace that reads white — and **crushed** — the peak channel under the noise
-//! floor, a symbol that is not there. `STAR_LUX` was read off a rendered picture
-//! by eye and graded a plateau; the first table below is what that reading
-//! should have been, and it says there is no plateau to find.
+//! floor, a symbol that is not there. The star lamp's own lux was read off a
+//! rendered picture by eye and graded a plateau (§6 M38 item 15); the second
+//! table below is what that reading should have been, and it says there is no
+//! plateau to find, which is why the lamp is at the eye now.
 //!
 //! Where a symbol landed is asked of the matrix the frame was drawn with, never
 //! rebuilt beside it (`shadow-sweep`'s rule, §6 M22).
@@ -27,8 +28,9 @@ use gg_extract::Extracted;
 use gg_math::{render, sim};
 use gg_render::{OffscreenRenderer, View};
 
-/// The golden's extent, for the golden's reason: a `TRACE_DOT` is 0.3 % of the
-/// view height, so a smaller frame measures aliasing rather than shading.
+/// The golden's extent, for the golden's reason: a ribbon is
+/// [`orbit::TRACE_WIDTH`] against an 18.6 m view, so a smaller frame measures
+/// aliasing rather than shading.
 const EXTENT: (u32, u32) = (1280, 720);
 
 /// Both ends of the zoom key and three stations between them, in decades.
@@ -231,9 +233,9 @@ enum Lamp {
 }
 
 impl Lamp {
-    /// The light, in map space. The star arm restates `star_light` because the
-    /// lux is the swept knob — the shipped function pins it to `STAR_LUX`, which
-    /// is the constant this instrument exists to grade.
+    /// The light, in map space. Both arms are written out because the lux is the
+    /// swept knob and [`orbit::map_light`] pins it to [`orbit::MAP_LUX`] — the
+    /// constant this instrument exists to grade.
     fn light(self, star: sim::DVec3) -> Light {
         match self {
             Self::Star(lux) => {

@@ -218,6 +218,59 @@ pub fn frames(entry: &Entry) -> Result<Vec<InputFrame>, SessionError> {
     Ok(flight.frames)
 }
 
+/// Host tick [`endless`] lights the engine on, and how long it holds it.
+///
+/// One burn and one only, late: a reload gate's swap is aimed at a tick in the
+/// low thousands and lands hundreds late by an amount that is the machine's, so
+/// what this stream owes it is a coast long enough that the aim cannot miss and
+/// an event far enough past it to be worth calling a window.
+pub const LIGHT_AT: usize = 6_000;
+/// Ticks the engine is held for — 120 at [`crate::THRUST`] is 500 m/s, well
+/// inside a [`crate::TANK`] and enough to reshape the parking conic outright.
+pub const LIGHT_FOR: usize = 120;
+
+/// The parking orbit coasted for as long as the caller asks, warped, then one
+/// burn.
+///
+/// [`frames`] ends — a mission is a thing that finishes, which is what left §6
+/// M38's exit row a `--retune`-shaped case short. This is the run still in
+/// progress when a rebuilt dylib lands under it, and the shape is demo 11's
+/// verbatim for demo 11's reason: the ship is **coasting** at the swap, so an
+/// engine constant is latent when it arrives and bites exactly at the next
+/// light.
+///
+/// Two warp taps first, which is this game's own contribution to the shape. A
+/// world that crosses a rebuild while its *sim clock* is running at 100x is a
+/// stronger statement than one that crosses it at 1x, and it costs a stream two
+/// frames. Lighting the engine drops warp back to 1 by itself ([`crate::control`]),
+/// so the burn needs no undoing.
+///
+/// Open-loop on purpose: nothing here needs the world, so the stream is a pure
+/// function of `ticks`.
+#[must_use]
+pub fn endless(ticks: usize) -> Vec<InputFrame> {
+    let mut out = Vec::with_capacity(ticks);
+    while out.len() < ticks {
+        let at = out.len();
+        out.push(match at {
+            // Each tap is an *edge*, so a released tick has to sit between them.
+            30 | 32 => press(WARP_UP),
+            _ if (LIGHT_AT..LIGHT_AT + LIGHT_FOR).contains(&at) => press(BURN),
+            _ => idle(),
+        });
+    }
+    out.truncate(ticks);
+    out
+}
+
+/// Whether [`endless`] has the ship coasting at this offset — no engine, which
+/// is what makes a thrust constant latent. For a caller choosing where a mid-run
+/// swap should land.
+#[must_use]
+pub fn coasting(at: usize) -> bool {
+    !(LIGHT_AT..LIGHT_AT + LIGHT_FOR).contains(&at)
+}
+
 /// What one [`Plan`] does, measured — the stream it produces and the four
 /// numbers a search over plans reads.
 #[derive(Clone, Debug)]

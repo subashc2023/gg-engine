@@ -230,3 +230,45 @@ fn a_late_departure_never_arrives() {
     );
     assert!(flight.periapsis.is_none(), "nothing took it");
 }
+
+/// The gate's premise, held here rather than in `xtask`: `session::endless` has
+/// to coast where it says it coasts and light exactly once, or `reload --burn`
+/// is measuring a swap against nothing.
+///
+/// Guarded in the crate because a stream that stopped lighting the engine would
+/// otherwise turn the reload gate green by making both runs a coast.
+#[test]
+fn the_coasting_stream_lights_once_and_late() {
+    let frames = session::endless(8_000);
+    let progress = session::progress(&entry(), &frames).expect("driven");
+    let lit: Vec<usize> = progress
+        .iter()
+        .enumerate()
+        .filter_map(|(at, p)| p.lit.then_some(at))
+        .collect();
+    let first = *lit.first().expect("the stream lit the engine");
+    assert_eq!(
+        first,
+        session::LIGHT_AT,
+        "the engine lit at {first}, not at the offset the stream declares"
+    );
+    assert!(
+        lit.windows(2).all(|w| w[1] == w[0] + 1),
+        "one burn, unbroken — a second light would give the gate two events to part on"
+    );
+    // The claim `coasting` makes to a caller choosing a swap tick, checked
+    // against the world rather than against the function's own arithmetic.
+    assert!(
+        lit.iter().all(|&at| !session::coasting(at)),
+        "`coasting` called a lit tick a coasting one"
+    );
+    // And the warp taps: a coast at 1x would still pass everything above, and
+    // the whole of what this stream adds to its three neighbours is the 100x.
+    let warped = progress[session::LIGHT_AT - 1].epoch - progress[session::LIGHT_AT - 2].epoch;
+    assert_eq!(warped, 100, "the coast is supposed to run at 100x");
+    assert_eq!(
+        progress[session::LIGHT_AT].epoch - progress[session::LIGHT_AT - 1].epoch,
+        1,
+        "lighting the engine is supposed to drop warp to 1x by itself"
+    );
+}

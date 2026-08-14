@@ -536,21 +536,8 @@ pub fn eye_position() -> sim::DVec3 {
     forward * -EYE_RANGE
 }
 
-/// The map's one light, for a star drawn at `star_map`.
-///
-/// A star's illuminance is a property of how far away it *really* is, and the
-/// map's scale must not change it — but the falloff reads the **mapped**
-/// distance, so a light stood at the star's drawn position with a fixed
-/// intensity goes out the moment the view zooms in. That is not a hypothetical:
-/// at [`ZOOM_NEAR`] the star is 474 km away in map metres, and demo 13 drew an
-/// unlit black disc there until the `orbit` golden was framed (§6 M38 item 15).
-///
-/// So the intensity is the one that delivers [`STAR_LUX`] at the map's centre
-/// and the reach is set past it. Both then move with the zoom, which is what
-/// keeps the picture still while the scale sweeps six decades.
-///
-/// Public because the golden scene lights its reference with this and not with
-/// The map's one light, at the **eye**.
+/// The map's one light, at the **eye**. Public because the golden scene lights
+/// its reference with this and not with a second copy of it (§4.10).
 ///
 /// Not at the star, which is where it was until §6 M38 item 16. A map is a
 /// schematic and its symbols carry colour, not shading — and a lamp anywhere
