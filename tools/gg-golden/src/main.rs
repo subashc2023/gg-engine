@@ -2202,6 +2202,25 @@ const ORBIT_EPOCH: u64 = 4_925_342;
 /// (§1.4), then drawn under reverse-Z where half-extents span four orders of
 /// magnitude in one frame. A membrane that leaked an absolute `f32` anywhere
 /// would not be subtly wrong here; the ring would be a scatter.
+/// One conic's ribbon: [`TRACE`](demo_13_orbit::TRACE) segments drawn by the
+/// demo's own `trace_segment`, closing on itself. Every conic this reference
+/// frames is closed — the transfer and both planets — so there is no open arm
+/// to leave off.
+fn ring(
+    world: &mut gg_ecs::World,
+    points: &[gg_math::sim::DVec3],
+    color: u32,
+) -> anyhow::Result<()> {
+    for slot in 0..points.len() {
+        let segment = world.spawn();
+        world.insert(
+            segment,
+            demo_13_orbit::trace_segment(points[slot], points[(slot + 1) % points.len()], color),
+        )?;
+    }
+    Ok(())
+}
+
 fn render_orbit() -> Render {
     use demo_13_orbit as orbit;
     use gg_ecs::World;
@@ -2236,7 +2255,8 @@ fn render_orbit() -> Render {
             map(sim::DVec3::ZERO),
             ((orbit::STAR_RADIUS * scale) as f32).max(orbit::MIN_DOT),
             orbit::STAR_GLOW,
-        ),
+        )
+        .surfaced(0.0, 0.0),
     )?;
     for (planet, position) in &stations {
         let body = world.spawn();
@@ -2246,15 +2266,14 @@ fn render_orbit() -> Render {
                 map(*position),
                 ((planet.radius * scale) as f32).max(orbit::MIN_DOT),
                 planet.color,
-            ),
+            )
+            .surfaced(0.0, 0.0),
         )?;
-        for point in orbit::sample(planet.orbit(), sim::DVec3::ZERO, &map) {
-            let dot = world.spawn();
-            world.insert(
-                dot,
-                Renderable::ball(point, orbit::TRACE_DOT, orbit::dim(planet.color)),
-            )?;
-        }
+        ring(
+            &mut world,
+            &orbit::sample(planet.orbit(), sim::DVec3::ZERO, &map),
+            orbit::dim(planet.color),
+        )?;
     }
     // The ship is on the transfer the flown plan bought, stated about the star
     // at the epoch it was handed over on. Its elements are the reference's one
@@ -2275,21 +2294,19 @@ fn render_orbit() -> Render {
             map(transfer.state_at(0.0).0),
             orbit::SHIP_DOT,
             orbit::SHIP_INK,
-        ),
+        )
+        .surfaced(0.0, 0.0),
     )?;
-    for point in orbit::sample(transfer, sim::DVec3::ZERO, &map) {
-        let dot = world.spawn();
-        world.insert(
-            dot,
-            Renderable::ball(point, orbit::TRACE_DOT, orbit::SHIP_TRACE_INK),
-        )?;
-    }
-    // The demo's own light, computed by the demo's own `star_light` — the
-    // intensity is a function of the mapped distance (§6 M38 item 15), so a
-    // reference that lit itself with a constant would be gating a light the
-    // game does not have.
+    ring(
+        &mut world,
+        &orbit::sample(transfer, sim::DVec3::ZERO, &map),
+        orbit::SHIP_TRACE_INK,
+    )?;
+    // The demo's own light, from the demo's own `map_light` — at the eye, so a
+    // reference lit by a lamp the game does not have is not a thing this file
+    // can accidentally produce (§6 M38 item 16).
     let lamp = world.spawn();
-    world.insert(lamp, orbit::star_light(map(sim::DVec3::ZERO)))?;
+    world.insert(lamp, orbit::map_light())?;
 
     let view = gg_render::View {
         pitch: orbit::EYE_PITCH,

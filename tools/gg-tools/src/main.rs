@@ -61,6 +61,7 @@ mod furnace;
 mod hash_scale;
 mod lamps;
 mod lights;
+mod map;
 mod mcp;
 mod orbit;
 mod pace;
@@ -108,6 +109,7 @@ fn main() -> anyhow::Result<()> {
         "pace" => pace::run(rest),
         "hash-scale" => hash_scale::run(rest),
         "orbit" => orbit::run(rest),
+        "map" => map::run(rest),
         "panorama" => panorama::run(rest),
         "transfer" => transfer::run(rest),
         "fp-isa" => fp_isa::run(rest),
@@ -116,8 +118,8 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
                  shadow-flat, shadow-sweep, shadow-edge, lights, lamps, cull, furnace, \
-                 split-sum, ao, bounce, banding, pace, hash-scale, orbit, panorama, fp-isa, \
-                 mcp. A new instrument is a new subcommand here, not a new crate"
+                 split-sum, ao, bounce, banding, pace, hash-scale, orbit, map, panorama, \
+                 fp-isa, mcp. A new instrument is a new subcommand here, not a new crate"
             )
         }
     }

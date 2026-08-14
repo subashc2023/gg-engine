@@ -200,9 +200,16 @@ pub const EVENT_OUTCOME: u32 = 3;
 pub const MIN_DOT: f32 = 0.045;
 /// The ship's dot. Never scaled: it is a symbol, not a hull.
 pub const SHIP_DOT: f32 = 0.055;
-/// A trajectory sample. Small enough that 64 of them read as a line.
-pub const TRACE_DOT: f32 = 0.028;
-/// Samples per conic.
+/// Half-width of a trajectory ribbon, in map metres.
+///
+/// A ribbon and not a dot since §6 M38 item 16, because 64 dots do not read as
+/// a line and no count of them would: a dot's size is a constant in map metres
+/// while its *spacing* is the conic's circumference over [`TRACE`], which the
+/// zoom moves by five decades. Parked, the ring's samples sit 39 dot-widths
+/// apart; at the far zoom, 7. What the eye was being shown was the sampling.
+pub const TRACE_WIDTH: f32 = 0.022;
+/// Samples per conic — 64 segments, which is a polygon no one can pick out of
+/// an ellipse at any zoom this map reaches.
 pub const TRACE: u32 = 64;
 /// How far along a hyperbola the trace runs, in mean anomaly either side of the
 /// body. An escape is a shape, and a shape needs both arms.
@@ -237,16 +244,13 @@ pub const EYE_RANGE: f64 = 17.0;
 pub const STAR_GLOW: u32 = 0x00ff_e9b0;
 /// The map's one light, sitting where the star is drawn.
 pub const STAR_INK: u32 = 0x00ff_f0d0;
-/// What the star delivers at the map's centre, in the renderer's own units.
+/// What the map's lamp delivers at the eye, in the renderer's own units.
 ///
-/// Read off the `orbit` golden (§6 M38 item 15), and it is a plateau between
-/// two failures rather than a taste: the map's symbols are lit geometry — the
-/// boundary has no emissive channel and a `Sky` bright enough to floor them
-/// would paint the background it lit them with — so an inverse-square light at
-/// the star spans 16:1 across a ring at 1 AU and a ring at 2.3. Below ~20 the
-/// **outer** ring goes to nothing; far above 60 the inner one saturates to
-/// white and the conics stop being colours. 60 keeps both readable.
-pub const STAR_LUX: f64 = 60.0;
+/// Read off `gg-tools map` (§6 M38 item 16), and it is a plateau: below it
+/// symbols fall under the background, above it their channels clip and they
+/// return the *lamp's* colour instead of their own. 8 is where both counts are
+/// at their lowest together.
+pub const MAP_LUX: f64 = 8.0;
 /// The ship's dot.
 pub const SHIP_INK: u32 = 0x00ff_ffff;
 /// Its trace's.
@@ -431,7 +435,10 @@ pub fn bootstrap(world: &mut GameWorld) {
         index: 0,
         reserved: 0,
     });
-    world.put(star, Renderable::ball(sim::DVec3::ZERO, MIN_DOT, STAR_GLOW));
+    world.put(
+        star,
+        Renderable::ball(sim::DVec3::ZERO, MIN_DOT, STAR_GLOW).surfaced(0.0, 0.0),
+    );
 
     for planet in [&VERGE, &OCHRE] {
         let body = world.spawn_with(Body {
@@ -450,7 +457,7 @@ pub fn bootstrap(world: &mut GameWorld) {
         );
         world.put(
             body,
-            Renderable::ball(sim::DVec3::ZERO, MIN_DOT, planet.color),
+            Renderable::ball(sim::DVec3::ZERO, MIN_DOT, planet.color).surfaced(0.0, 0.0),
         );
         for slot in 0..TRACE {
             let dot = world.spawn_with(Marker {
@@ -459,7 +466,7 @@ pub fn bootstrap(world: &mut GameWorld) {
             });
             world.put(
                 dot,
-                Renderable::ball(sim::DVec3::ZERO, TRACE_DOT, dim(planet.color)),
+                trace_segment(sim::DVec3::ZERO, sim::DVec3::ZERO, dim(planet.color)),
             );
         }
     }
@@ -489,7 +496,10 @@ pub fn bootstrap(world: &mut GameWorld) {
             since: 0,
         },
     );
-    world.put(ship, Renderable::ball(sim::DVec3::ZERO, SHIP_DOT, SHIP_INK));
+    world.put(
+        ship,
+        Renderable::ball(sim::DVec3::ZERO, SHIP_DOT, SHIP_INK).surfaced(0.0, 0.0),
+    );
     for slot in 0..TRACE {
         let dot = world.spawn_with(Marker {
             of: Marker::SHIP,
@@ -497,7 +507,7 @@ pub fn bootstrap(world: &mut GameWorld) {
         });
         world.put(
             dot,
-            Renderable::ball(sim::DVec3::ZERO, TRACE_DOT, SHIP_TRACE_INK),
+            trace_segment(sim::DVec3::ZERO, sim::DVec3::ZERO, SHIP_TRACE_INK),
         );
     }
 
@@ -514,8 +524,7 @@ pub fn bootstrap(world: &mut GameWorld) {
     });
     // A point light where the star is, moved with it every tick: the map is
     // recentred on the ship, so nothing in render space stays put — and its
-    // intensity moves with the zoom for the reason `star_light` gives.
-    world.spawn_with(star_light(sim::DVec3::ZERO));
+    world.spawn_with(map_light());
     world.spawn_with(Eye::at(eye_position(), 0.0, EYE_PITCH));
     world.log(log_level::INFO, "orbit: ready");
 }
@@ -541,16 +550,65 @@ pub fn eye_position() -> sim::DVec3 {
 /// keeps the picture still while the scale sweeps six decades.
 ///
 /// Public because the golden scene lights its reference with this and not with
-/// a copy of it.
+/// The map's one light, at the **eye**.
+///
+/// Not at the star, which is where it was until §6 M38 item 16. A map is a
+/// schematic and its symbols carry colour, not shading — and a lamp anywhere
+/// else in the scene leaves half of every ring unlit and prices the rest by an
+/// inverse square the zoom sweeps over five decades, so the same symbol was
+/// white at one end of the key and gone at the other. At the eye, every symbol
+/// is [`EYE_RANGE`] away whatever the zoom and faces the light it is lit by.
 #[must_use]
-pub fn star_light(star_map: sim::DVec3) -> Light {
-    let far = star_map.length().max(1.0);
+pub fn map_light() -> Light {
+    let far = EYE_RANGE;
     Light::point(
-        star_map,
+        eye_position(),
         STAR_INK,
-        (STAR_LUX * far * far) as f32,
-        (far * 2.0) as f32,
+        (MAP_LUX * far * far) as f32,
+        (far * 4.0) as f32,
     )
+}
+
+/// One segment of a trajectory, `from` to `to`: the "long thin box" the render
+/// boundary names in as many words, which is the whole of what a line is here.
+///
+/// Matte and dielectric on purpose. Every symbol on this map is a *symbol* — it
+/// carries a colour and nothing else — and a surface with any smoothness at all
+/// answers a light with a white specular lobe that Fresnel drives to 1 at
+/// grazing angles. On a two-pixel ribbon almost every pixel is grazing, so the
+/// authored colour arrives at the screen mixed with the lamp's (§6 M38 item 16,
+/// `gg-tools map`).
+#[must_use]
+pub fn trace_segment(from: sim::DVec3, to: sim::DVec3, color: u32) -> Renderable {
+    let delta = to - from;
+    let length = delta.length();
+    let mut out = Renderable::boxed(
+        (from + to) * 0.5,
+        sim::Vec3::new(TRACE_WIDTH, TRACE_WIDTH, (length * 0.5) as f32),
+        color,
+    )
+    .surfaced(0.0, 0.0);
+    if length > 1e-12 {
+        out.rotation = aim(delta / length);
+    }
+    out
+}
+
+/// The shortest rotation taking `+Z` onto `direction`, which must be unit.
+/// Built here because `sim` carries axis-angle only, and the two degenerate
+/// cases are the ones a cross product cannot normalise.
+fn aim(direction: sim::DVec3) -> sim::DQuat {
+    let along = sim::DVec3::Z.dot(direction).clamp(-1.0, 1.0);
+    if along > 1.0 - 1e-12 {
+        return sim::DQuat::IDENTITY;
+    }
+    if along < -1.0 + 1e-12 {
+        return sim::DQuat::from_axis_angle(sim::DVec3::X, core::f64::consts::PI);
+    }
+    match sim::DVec3::Z.cross(direction).try_normalize() {
+        Some(axis) => sim::DQuat::from_axis_angle(axis, sim::acos(along)),
+        None => sim::DQuat::IDENTITY,
+    }
 }
 
 /// A dimmer shade of a trace's body colour, so a ring reads as a ring and not
@@ -620,11 +678,6 @@ fn bodies(world: &mut GameWorld, elapsed: u64, hz: u32) -> Vec<Station> {
 /// The station of `entity`, if it is one of the bodies.
 fn station(bodies: &[Station], entity: Entity) -> Option<Station> {
     bodies.iter().copied().find(|held| held.entity == entity)
-}
-
-/// The station of body `index`.
-fn station_of(bodies: &[Station], index: u32) -> Option<Station> {
-    bodies.iter().copied().find(|held| held.body.index == index)
 }
 
 /// Seconds between two epochs. The one place ticks become a float, and it is a
@@ -1042,24 +1095,25 @@ pub fn present(world: &mut GameWorld) {
         shape.position = sim::DVec3::ZERO;
         shape.half_extent = sim::Vec3::splat(SHIP_DOT);
     }
-    // The star lights the map from where the star is drawn, so a planet's lit
-    // face still points at it however far the view is scaled — and it is the
-    // whole light that is recomputed, not only its place (`star_light`).
-    if let Some(star) = station_of(&bodies, 0) {
-        let lit = star_light(map(star.position));
-        world.visit::<&mut Light>(|_, light| *light = lit);
-    }
+    // Rewritten every tick rather than only at bootstrap, so an edit to
+    // `MAP_LUX` lands on a running session like every other tunable.
+    let lit = map_light();
+    world.visit::<&mut Light>(|_, light| *light = lit);
 
     // One trace table per conic, sampled before anything is written: the visit
     // below holds column borrows and cannot ask the world for an orbit.
-    let mut traces: Vec<(u32, Vec<sim::DVec3>)> = Vec::new();
+    let mut traces: Vec<(u32, Vec<sim::DVec3>, bool)> = Vec::new();
     for held in &bodies {
         if held.body.index == 0 {
             continue;
         }
         if let Some(rails) = world.get::<Rails>(held.entity).copied() {
             let origin = station(&bodies, rails.primary).map_or(sim::DVec3::ZERO, |at| at.position);
-            traces.push((held.body.index, sample(rails.orbit, origin, &map)));
+            traces.push((
+                held.body.index,
+                sample(rails.orbit, origin, &map),
+                rails.orbit.eccentricity < 1.0,
+            ));
         }
     }
     let anchor = station(&bodies, primary);
@@ -1074,17 +1128,32 @@ pub fn present(world: &mut GameWorld) {
     };
     if let Some(orbit) = ship_orbit {
         let origin = anchor.map_or(sim::DVec3::ZERO, |at| at.position);
-        traces.push((Marker::SHIP, sample(orbit, origin, &map)));
+        traces.push((
+            Marker::SHIP,
+            sample(orbit, origin, &map),
+            orbit.eccentricity < 1.0,
+        ));
     }
 
     world.visit::<(&Marker, &mut Renderable)>(|_, (marker, shape)| {
-        let Some((_, points)) = traces.iter().find(|(of, _)| *of == marker.of) else {
+        let Some((_, points, closed)) = traces.iter().find(|(of, _, _)| *of == marker.of) else {
             return;
         };
-        let Some(point) = points.get(marker.slot as usize) else {
+        let slot = marker.slot as usize;
+        let Some(from) = points.get(slot) else {
             return;
         };
-        shape.position = *point;
+        // An escape trajectory has two ends and its last sample begins no
+        // segment; a closed one wraps, which is what shuts the ring.
+        let to = match points.get(slot + 1) {
+            Some(next) => Some(next),
+            None if *closed => points.first(),
+            None => None,
+        };
+        match to {
+            Some(to) => *shape = trace_segment(*from, *to, shape.color),
+            None => shape.half_extent = sim::Vec3::ZERO,
+        }
     });
 
     hud(world, epoch, ship, ship_orbit, primary, &bodies);
