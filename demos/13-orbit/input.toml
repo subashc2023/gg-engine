@@ -19,5 +19,9 @@ warp_down = ["Comma"]
 zoom_in = ["E"]
 zoom_out = ["Q"]
 restart = ["R"]
+# Schedule the burn instead of flying it, which is the loop the queue exists
+# for (§6 M39): press once to put a node an hour of sim time ahead, warp, and
+# the clock stops on it rather than near it. Pressing again cancels.
+plan = ["N"]
 
 [game.axes]

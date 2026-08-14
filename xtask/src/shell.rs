@@ -661,9 +661,12 @@ pub fn check_shooter() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Demo 13's verbs, in the id order `gg_game!` declares them (§4.7). All seven,
+/// Demo 13's verbs, in the id order `gg_game!` declares them (§4.7). All eight,
 /// though the mission presses four: the ids are positions in this list, so a
 /// stream declaring only what it holds down would aim `restart` at `zoom_in`.
+/// `plan` is M39's and joined the end, which is the one edit `check_verbs`
+/// forgives — the mission's own recording never presses it and did not have to
+/// be re-scripted for it.
 const ORBIT_ACTIONS: &[&str] = &[
     "burn",
     "retro",
@@ -672,6 +675,7 @@ const ORBIT_ACTIONS: &[&str] = &[
     "zoom_in",
     "zoom_out",
     "restart",
+    "plan",
 ];
 /// The empty axis list is this game's own shape, not an economy: a map view
 /// steers with *when* the engine is lit, and demo 13 declares no axes at all.
@@ -1490,6 +1494,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     }
     if only("--epoch") {
         epoch()?;
+    }
+    if only("--node") {
+        node()?;
     }
     if only("--rules") {
         rules()?;
@@ -4269,6 +4276,282 @@ fn burn_once() -> anyhow::Result<u128> {
         lit_at - swap - 1,
     );
     Ok(total)
+}
+
+/// The warp step `--node` schedules under.
+///
+/// 10,000x is the slowest rate at which `NODE_LEAD` is **not** a multiple of the
+/// stride, which is what makes the reopened half a real question: a resumed
+/// world has to clamp from whatever epoch the file left it on to hit the node,
+/// rather than divide evenly into it the way every rate below this one does.
+const NODE_STEP: u32 = 4;
+
+/// §6 M39's gate: **a burn that has not happened yet crosses a save.**
+///
+/// The queue's log half was proven at M38 — rows that say what happened, hashed
+/// and reloaded like any other column. This is the other half, and it fails in a
+/// way a log row cannot: a `Pending` the file dropped leaves a world that loads
+/// clean, flies on, hashes plausibly and simply *never burns*. Nothing errors,
+/// because nothing reads a row that is not there.
+///
+/// So the claim is the resumed run's whole hash sequence against the same
+/// stream never saved, and the falsification is the run without `--load`, which
+/// reaches the approach and coasts through the node's tick untouched.
+///
+/// The third leg is §4.5's policy over a component the *game spawns at runtime*
+/// rather than one it bootstraps: a build whose `Pending` gained a field
+/// migrates by name and still lights the engine on the node's own tick, and one
+/// that renamed it is refused by that name before the world is touched.
+fn node() -> anyhow::Result<()> {
+    let entry = orbit_entry()?;
+    let frames = demo_13_orbit::session::scheduled(
+        NODE_STEP,
+        demo_13_orbit::session::scheduled_ticks(NODE_STEP),
+    );
+    let progress =
+        demo_13_orbit::session::progress(&entry, &frames).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let plan_at = demo_13_orbit::session::PLAN_AT as u64;
+    let fire_at =
+        progress.iter().position(|p| p.lit).ok_or_else(|| {
+            anyhow::anyhow!("the scheduled stream never lit the engine in-process")
+        })? as u64;
+    anyhow::ensure!(
+        fire_at > plan_at + 2,
+        "the node fired {} tick(s) after it was planned — this gate saves *between* the two, and \
+         a window that narrow is not one",
+        fire_at - plan_at
+    );
+    // The node's own tick, taken from the world rather than from `NODE_LEAD`:
+    // an edit to the lead moves the gate with it.
+    let due = progress[fire_at as usize].epoch;
+
+    let dir = workspace_root().join("target/node");
+    std::fs::create_dir_all(&dir)?;
+    let stream = dir.join("plan.ggrp");
+    std::fs::write(&stream, orbit_stream(&frames).encode())?;
+    let stream = stream.display().to_string();
+
+    // Three tiers first: the node is scheduled, waited out and fired by the real
+    // shell, and the three agree tick for tick.
+    let mut runs: Vec<(&str, Vec<(u64, String)>)> = Vec::new();
+    for tier in HASHED_TIERS {
+        let (host, game) = stage_game(tier, "demo-13-orbit", "demo_13_orbit")?;
+        let log = play(&host, &game, &["--replay", &stream], true)?;
+        for (needle, want) in [("orbit: planned", plan_at), ("orbit: lit", fire_at)] {
+            let count = log.lines().filter(|l| l.contains(needle)).count();
+            anyhow::ensure!(
+                count == 1,
+                "[{}] `{needle}` appears {count} times — one node, planned once and fired \
+                 once:\n{log}",
+                tier.name
+            );
+            let got = logged_at(&log, needle);
+            anyhow::ensure!(
+                got == Some(want),
+                "[{}] `{needle}` landed on host tick {got:?} where the in-process run puts it at \
+                 {want}",
+                tier.name
+            );
+        }
+        runs.push((tier.name, sequence(&log)?));
+    }
+    for pair in runs.windows(2) {
+        if let Some(found) = divergence(&pair[0], &pair[1]) {
+            anyhow::bail!("§6 M39: {found}");
+        }
+    }
+
+    // Halfway down the approach: the node is pending, the epoch is mid-stride,
+    // and the burn is still ahead of the file.
+    let closed_at = usize::try_from(plan_at + (fire_at - plan_at) / 2)?;
+    let closed = closed_at.to_string();
+    let tail = (frames.len() - closed_at).to_string();
+
+    let source = game_source(DEMO_13)?;
+    let lay = |source: &str, name: &str| -> anyhow::Result<PathBuf> {
+        write_variant(DEMO_13, "node", source)?;
+        let kept = dir.join(name);
+        std::fs::copy(build_variant(DEMO_13, "node")?, &kept)?;
+        Ok(kept)
+    };
+    let same = lay(&source, "same.bin")?;
+    let wider = lay(&with_a_wider_node(&source)?, "wider.bin")?;
+    let renamed = lay(&with_the_node_renamed(&source)?, "renamed.bin")?;
+
+    exec(
+        cargo().args(["build", "-p", "gg-runtime"]),
+        "build the shell [dev]",
+    )?;
+    let host = exe("debug", "gg-runtime");
+    let save = dir.join("approach.ggsv");
+    let save_arg = save.display().to_string();
+
+    // The control: never saved, hashed the whole way.
+    let whole = sequence(&play(&host, &same, &["--replay", &stream], true)?)?;
+    let want: Vec<(u64, String)> = whole
+        .iter()
+        .filter(|(tick, _)| *tick >= closed_at as u64)
+        .cloned()
+        .collect();
+    let crossed = want.len();
+    anyhow::ensure!(
+        crossed > 0,
+        "the unsaved run emitted no hash at or after tick {closed_at}"
+    );
+
+    let wrote = play(
+        &host,
+        &same,
+        &[
+            "--replay", &stream, "--frames", &closed, "--save", &save_arg,
+        ],
+        false,
+    )?;
+    anyhow::ensure!(
+        wrote.contains("save written") && save.is_file(),
+        "the approach wrote no save:\n{wrote}"
+    );
+    anyhow::ensure!(
+        wrote.contains("orbit: planned") && !wrote.contains("orbit: lit"),
+        "the file was written outside the window this gate is about — it has to hold a node that \
+         is scheduled and has not fired:\n{wrote}"
+    );
+
+    for (what, game, migrates) in [
+        ("the same build", &same, false),
+        ("a wider node", &wider, true),
+    ] {
+        let log = play(
+            &host,
+            game,
+            &["--load", &save_arg, "--replay", &stream, "--frames", &tail],
+            true,
+        )?;
+        anyhow::ensure!(
+            log.contains("save loaded"),
+            "[{what}] the shell did not load {save_arg}:\n{log}"
+        );
+        let named = log.contains("migrated") && log.contains("orbit.pending");
+        anyhow::ensure!(
+            named == migrates,
+            "[{what}] the load {} a migration of `orbit.pending`, and this build {} one:\n{log}",
+            if named { "reported" } else { "reported no" },
+            if migrates { "makes" } else { "makes no" },
+        );
+        // The whole point: the reopened world still burns, and on the node's own
+        // sim tick rather than the next one a stride happened to land on.
+        anyhow::ensure!(
+            logged_at(&log, "orbit: lit") == Some(fire_at),
+            "[{what}] the reopened run lit the engine on host tick {:?} where the unsaved one \
+             lights at {fire_at} — a node that survived the file fires where it was aimed:\n{log}",
+            logged_at(&log, "orbit: lit"),
+        );
+        if !migrates {
+            // A widened schema is a different schema, so only the same build's
+            // hashes are comparable — `--epoch`'s reasoning, one component along.
+            if let Some(found) = divergence(&("resumed", sequence(&log)?), &("unsaved", want)) {
+                anyhow::bail!("§6 M39: the reopened approach is not the flight it left: {found}");
+            }
+            break;
+        }
+    }
+
+    // The falsification, and it is the shape that makes this gate worth having:
+    // the same build, the same *remaining* frames, no file. Written as its own
+    // stream because the press that schedules the node is at tick 50 and the
+    // file is closed after it — replaying the whole recording again would
+    // schedule a second node and prove nothing about the first.
+    let orphan = dir.join("tail.ggrp");
+    std::fs::write(&orphan, orbit_stream(&frames[closed_at..]).encode())?;
+    let orphan = orphan.display().to_string();
+    let without = play(&host, &same, &["--replay", &orphan], false)?;
+    anyhow::ensure!(
+        !without.contains("orbit: lit"),
+        "the same build reached the burn with no save loaded at all, so the file is not what \
+         carried the node:\n{without}"
+    );
+
+    // Run directly rather than through `play`: a refusal is a nonzero exit, and
+    // that is the outcome this leg is asserting rather than an error to report.
+    let out = Command::new(&host)
+        .arg("--game")
+        .arg(&renamed)
+        .args(["--load", &save_arg, "--replay", &stream, "--frames", &tail])
+        .env("GG_HEADLESS", "1")
+        .env("RUST_LOG", "info")
+        .output()?;
+    let refused = format!("{}{}", plain(&out.stdout), plain(&out.stderr));
+    anyhow::ensure!(
+        !out.status.success(),
+        "a build that stopped declaring `orbit.pending` loaded the save anyway — §4.5's `a save \
+         may gain, never lose` is not being enforced by the shell:\n{refused}"
+    );
+    anyhow::ensure!(
+        refused.contains("orbit.pending"),
+        "the refusal did not name the component that would have been lost:\n{refused}"
+    );
+
+    println!(
+        "xtask reload: demo 13 scheduled a burn at sim tick {due} and warped to it at {}x — \
+         planned on host tick {plan_at}, fired on {fire_at}, identical under \
+         dev, instrumented and dist-verify. Closed mid-approach on tick {closed_at} with the node \
+         still pending and reopened: the remaining {crossed} ticks hash identically to the run \
+         that was never saved and the engine still lights on {fire_at}, a build whose `Pending` \
+         gained a field lights there too after migrating by name, one that renamed it is refused, \
+         and the same build with no `--load` coasts straight through and never burns (§6 M39)",
+        demo_13_orbit::WARPS[NODE_STEP as usize],
+    );
+    Ok(())
+}
+
+/// `Pending` with a field added — §4.5's gaining half, on a component the game
+/// spawns at runtime rather than one bootstrap plants.
+fn with_a_wider_node(source: &str) -> anyhow::Result<String> {
+    let anchor = "    /// +1 prograde, -1 retrograde.\n    pub throttle: i32,\n}";
+    anyhow::ensure!(
+        source.contains(anchor),
+        "demo 13's `Pending` no longer ends where this edit expects it"
+    );
+    // `u64` rather than a second `i32`: a widening that introduced padding would
+    // fail `bytemuck::Pod` at compile time and read as this gate breaking.
+    let widened = source.replace(
+        anchor,
+        "    /// +1 prograde, -1 retrograde.\n    pub throttle: i32,\n    /// Added by \
+         `xtask reload --node`.\n    pub aimed: u64,\n}",
+    );
+    // Both spawn sites, since a struct literal short of a field does not compile
+    // — and a gate whose "wider" build failed to build would read as a refusal.
+    let sites = [
+        (
+            "throttle: 1,\n            });",
+            "throttle: 1,\n                aimed: 0,\n            });",
+        ),
+        (
+            "throttle: 0,\n                });",
+            "throttle: 0,\n                    aimed: 0,\n                });",
+        ),
+    ];
+    let mut out = widened;
+    for (site, with) in sites {
+        anyhow::ensure!(
+            out.contains(site),
+            "demo 13 spawns a `Pending` somewhere this edit cannot reach"
+        );
+        out = out.replace(site, with);
+    }
+    Ok(out)
+}
+
+/// The same component under another id — what a build that stopped declaring it
+/// looks like from the file's side.
+fn with_the_node_renamed(source: &str) -> anyhow::Result<String> {
+    let anchor = "#[component(id = \"orbit.pending\")]";
+    anyhow::ensure!(
+        source.contains(anchor),
+        "demo 13 no longer declares `orbit.pending`"
+    );
+    Ok(source.replace(anchor, "#[component(id = \"orbit.node\")]"))
 }
 
 /// Ticks appended to the recorded session for the save gate: idle, one press of

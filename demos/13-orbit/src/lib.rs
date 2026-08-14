@@ -40,13 +40,20 @@
 //! because a burn is the one thing that must run at 1x and nobody should sit
 //! through a real one.
 //!
-//! # The flight log is entities, not a side table (§6 M38 item 12)
+//! # The queue is entities, not a side table (§6 M38 item 12, M39)
 //!
 //! Every regime change, handover and outcome is an [`Event`] row. §2 asked for a
 //! `(tick, entity_id)` total order and that is the canonical walk's own order,
 //! so the queue needs no new concept — and unlike a side table it migrates,
 //! saves under M14's rules and survives a reload, which is the finding item 12
 //! recorded.
+//!
+//! [`Pending`] is the same rows pointed the other way: a burn that has not
+//! happened. It exists because warp makes a queue a correctness problem rather
+//! than a sorted list — at [`WARPS`]`[6]` one host tick spans 4.6 hours of sim,
+//! so [`advance`] clamps its stride to the soonest [`Pending::due`] and the
+//! epoch lands *on* the node. Warp-to-node is that clamp read from the player's
+//! side rather than a second feature.
 //!
 //! # What you are looking at
 //!
@@ -192,6 +199,9 @@ pub const EVENT_CUT: u32 = 1;
 pub const EVENT_HANDOVER: u32 = 2;
 /// The mission ended, one way or the other. [`Event::value`] carries which.
 pub const EVENT_OUTCOME: u32 = 3;
+/// A burn was scheduled. [`Event::value`] carries the epoch it is due at, which
+/// is the one row of the log that names a tick that has not happened yet.
+pub const EVENT_PLANNED: u32 = 4;
 
 // ---- the map view -------------------------------------------------------
 
@@ -255,6 +265,12 @@ pub const MAP_LUX: f64 = 8.0;
 pub const SHIP_INK: u32 = 0x00ff_ffff;
 /// Its trace's.
 pub const SHIP_TRACE_INK: u32 = 0x0060_ffc0;
+/// The scheduled burn's dot — amber against the trace's green, because what it
+/// has to be distinguishable from is the line it sits on.
+pub const NODE_INK: u32 = 0x00ff_b020;
+/// Its size, a shade over [`SHIP_DOT`]: the node is the one symbol a player is
+/// looking *for* rather than at.
+pub const NODE_DOT: f32 = 0.07;
 
 // ---- verbs --------------------------------------------------------------
 
@@ -272,6 +288,27 @@ pub const ZOOM_IN: ActionId = ActionId::new(4);
 pub const ZOOM_OUT: ActionId = ActionId::new(5);
 /// Start the mission over.
 pub const RESTART: ActionId = ActionId::new(6);
+/// Schedule a burn [`NODE_LEAD`] ticks ahead, or cancel the one pending.
+/// Appended last on purpose: `Replay::check_verbs` forgives an append and
+/// refuses every other edit (§4.7), so M38's recorded session still replays.
+pub const PLAN: ActionId = ActionId::new(7);
+
+/// How far ahead [`PLAN`] schedules, in sim ticks — one sim hour at 60 Hz.
+///
+/// A lead you have to *warp* to reach, which is the point: at 1x it is an hour
+/// of sitting still and at [`WARPS`]`[5]` it is two host ticks. It is also a
+/// multiple of none of the top three warp steps, so reaching it is a clamped
+/// stride rather than an exact division on every run that uses one.
+pub const NODE_LEAD: u64 = 3_600 * 60;
+/// How long a planned burn holds the engine, in sim ticks. Two seconds at
+/// 60 Hz, the same length the recorded session's departure burn holds for.
+pub const NODE_HOLD: u64 = 120;
+
+/// [`Pending::kind`]: light the engine.
+pub const NODE_LIGHT: u32 = 0;
+/// [`Pending::kind`]: cut it. Spawned by a light rather than by the player,
+/// which is what makes the burn's *end* a queue entry and not a countdown.
+pub const NODE_CUT: u32 = 1;
 
 /// The warp ladder. Powers of ten, and the top of it is what makes a
 /// nine-month transfer a thirty-second one — §6 M38 item 10 measured the
@@ -387,6 +424,31 @@ pub struct Event {
     pub value: f64,
 }
 
+/// The queue's *future* half (§6 M39): a burn that has not happened yet.
+///
+/// [`Event`] rows say what happened; these say what is going to, and the
+/// difference has exactly one reader that matters — [`advance`] clamps the warp
+/// stride against [`Pending::due`] so the epoch lands **on** the tick rather
+/// than near it. A stride that overshoots does not make an event late, it makes
+/// it never happen, since nothing reads a row whose tick no stride landed on.
+///
+/// Being a component rather than a flag is what makes "is anything due" an
+/// archetype question instead of a scan over the flight log, the same shape
+/// [`Bubble`] gave "may I warp" (§6 M38 item 6).
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "orbit.pending")]
+#[repr(C)]
+pub struct Pending {
+    /// Sim epoch it is due at.
+    pub due: u64,
+    /// Ticks to hold the engine once it fires; 0 on a [`NODE_CUT`].
+    pub hold: u64,
+    /// [`NODE_LIGHT`] or [`NODE_CUT`].
+    pub kind: u32,
+    /// +1 prograde, -1 retrograde.
+    pub throttle: i32,
+}
+
 /// A sampled point of somebody's conic. `of` is a [`Body::index`], or
 /// [`Marker::SHIP`] for the ship's own trajectory.
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Component)]
@@ -402,6 +464,9 @@ pub struct Marker {
 impl Marker {
     /// [`Marker::of`] for the ship's trajectory.
     pub const SHIP: u32 = u32::MAX;
+    /// [`Marker::of`] for the scheduled burn's own dot — no conic behind it, so
+    /// it is the one marker `present` positions outside the trace tables.
+    pub const NODE: u32 = u32::MAX - 1;
 }
 
 /// A HUD line. `slot` is the row from the top.
@@ -510,6 +575,17 @@ pub fn bootstrap(world: &mut GameWorld) {
             trace_segment(sim::DVec3::ZERO, sim::DVec3::ZERO, SHIP_TRACE_INK),
         );
     }
+    // One dot for the node, spawned whether or not there is ever a plan: a
+    // marker the world grows and sheds would be an archetype churning under the
+    // hash for a thing the player can see is absent by its size (§6 M39).
+    let dot = world.spawn_with(Marker {
+        of: Marker::NODE,
+        slot: 0,
+    });
+    world.put(
+        dot,
+        Renderable::ball(sim::DVec3::ZERO, 0.0, NODE_INK).surfaced(0.0, 0.0),
+    );
 
     for slot in 0..READOUTS {
         let row = world.spawn_with(Readout { slot, reserved: 0 });
@@ -732,19 +808,24 @@ pub fn control(world: &mut GameWorld) {
     };
 
     let lit = world.get::<Bubble>(ship_entity).is_some();
+    // A burn the queue started is ended by the queue. Without this the throttle
+    // law below — written when a held key was the only way into the bubble —
+    // reads a node-lit engine as one whose key was released and cuts it on the
+    // very next tick, which is the node's whole burn (§6 M39 item 3).
+    let queued = queued(world, NODE_CUT);
     match (lit, throttle) {
         (false, -1 | 1) => {
             light(world, ship_entity, epoch.elapsed, hz, throttle);
             epoch.step = 0;
             epoch.warp = WARPS[0];
         }
-        (true, 0) => cut(world, ship_entity, epoch.elapsed, hz),
-        (true, _) => {
+        (true, 0) if !queued => cut(world, ship_entity, epoch.elapsed, hz),
+        (true, _) if !queued => {
             if let Some(bubble) = world.get_mut::<Bubble>(ship_entity) {
                 bubble.throttle = throttle;
             }
         }
-        (false, _) => {}
+        _ => {}
     }
 
     // Warp is refused while the bubble has rows, which is an archetype question
@@ -760,7 +841,49 @@ pub fn control(world: &mut GameWorld) {
         epoch.step = 0;
         epoch.warp = WARPS[0];
     }
+
+    // One key, two verbs, decided by whether the queue is empty — a plan you
+    // cannot take back is a plan nobody makes.
+    if world.just_pressed(PLAN) && flying {
+        if pending(world).is_empty() {
+            world.spawn_with(Pending {
+                due: epoch.elapsed.saturating_add(NODE_LEAD),
+                hold: NODE_HOLD,
+                kind: NODE_LIGHT,
+                throttle: 1,
+            });
+            record(
+                world,
+                EVENT_PLANNED,
+                epoch.elapsed,
+                u32::MAX,
+                epoch.elapsed.saturating_add(NODE_LEAD) as f64,
+            );
+            world.log(log_level::INFO, "orbit: planned");
+        } else {
+            for entity in pending(world) {
+                world.despawn(entity);
+            }
+            world.log(log_level::INFO, "orbit: unplanned");
+        }
+    }
     world.put(epoch_entity, epoch);
+}
+
+/// Every scheduled node, in the walk's order. Collected because cancelling
+/// despawns and a visit may not.
+fn pending(world: &mut GameWorld) -> Vec<Entity> {
+    let mut rows = Vec::new();
+    world.visit::<&Pending>(|entity, _| rows.push(entity));
+    rows
+}
+
+/// Whether a node of this kind is scheduled — an archetype question, which is
+/// what makes it cheap enough to ask every tick.
+fn queued(world: &mut GameWorld, kind: u32) -> bool {
+    let mut found = false;
+    world.visit::<&Pending>(|_, node| found |= node.kind == kind);
+    found
 }
 
 /// The one entity carrying `T`, if there is exactly one worth having.
@@ -858,14 +981,93 @@ fn record(world: &mut GameWorld, kind: u32, epoch: u64, about: u32, value: f64) 
 
 // ---- the tick -----------------------------------------------------------
 
-/// Advance the epoch by the warp factor. Its own system, and it runs *after*
-/// control, so the tick a burn starts on is already back at 1x.
+/// Advance the epoch, by the warp factor or by whatever the queue leaves —
+/// whichever is less. Its own system, and it runs *after* control, so the tick
+/// a burn starts on is already back at 1x.
+///
+/// The clamp is M39's whole subject. Warp-to-node is not a feature bolted on
+/// beside it; it is this `min` read from the other side.
 pub fn advance(world: &mut GameWorld) {
     let Some((entity, mut epoch)) = singleton::<Epoch>(world) else {
         return;
     };
-    epoch.elapsed = epoch.elapsed.saturating_add(epoch.warp);
+    let stride = match next_due(world) {
+        Some(due) => epoch.warp.min(due.saturating_sub(epoch.elapsed)),
+        None => epoch.warp,
+    };
+    // Never zero. `fire` has already drained everything the epoch reached, so a
+    // remaining `due` is strictly ahead and the `min` is at least 1 — the
+    // `max` is what says a queue can never stall the sim rather than pause it.
+    epoch.elapsed = epoch.elapsed.saturating_add(stride.max(1));
     world.put(entity, epoch);
+}
+
+/// The soonest [`Pending::due`] there is. A min over an archetype, and the only
+/// question the clock ever asks the queue.
+fn next_due(world: &mut GameWorld) -> Option<u64> {
+    let mut soonest: Option<u64> = None;
+    world.visit::<&Pending>(|_, node| {
+        soonest = Some(soonest.map_or(node.due, |held| u64::min(held, node.due)));
+    });
+    soonest
+}
+
+/// Fire every node the epoch has reached, in `(due, entity)` order.
+///
+/// That order is §2's `(tick, entity_id)` and it is sorted explicitly rather
+/// than taken from the walk: `visit` is archetype order, so two nodes due on
+/// the same tick would otherwise fire in whichever order storage happened to
+/// hold them — a hash that depends on archetype layout is the failure §4.2.1
+/// exists to refuse. `Entity`'s own `Ord` is index-then-generation, which is
+/// the canonical walk's order and therefore the tiebreak §2 named.
+pub fn fire(world: &mut GameWorld) {
+    let hz = world.tick_hz();
+    let Some((_, epoch)) = singleton::<Epoch>(world) else {
+        return;
+    };
+    let Some((ship_entity, ship)) = singleton::<Ship>(world) else {
+        return;
+    };
+
+    let mut due: Vec<(u64, Entity, Pending)> = Vec::new();
+    world.visit::<&Pending>(|entity, node| {
+        if node.due <= epoch.elapsed {
+            due.push((node.due, entity, *node));
+        }
+    });
+    due.sort_unstable_by_key(|&(at, entity, _)| (at, entity));
+
+    for (_, entity, node) in due {
+        world.despawn(entity);
+        // A node outlives the flight it was planned in — restart clears the
+        // world, but an outcome does not, and lighting a dead ship's engine is
+        // a regime change nothing would ever cut.
+        if ship.outcome != FLYING {
+            continue;
+        }
+        match node.kind {
+            NODE_LIGHT if world.get::<Bubble>(ship_entity).is_none() && ship.fuel > 0.0 => {
+                light(
+                    world,
+                    ship_entity,
+                    epoch.elapsed,
+                    hz,
+                    i64::from(node.throttle),
+                );
+                // The cut is the queue's own entry, not a countdown on the
+                // ship: it survives a save, a reload and a schema change for
+                // the same reason every other row does.
+                world.spawn_with(Pending {
+                    due: epoch.elapsed.saturating_add(node.hold),
+                    hold: 0,
+                    kind: NODE_CUT,
+                    throttle: 0,
+                });
+            }
+            NODE_CUT => cut(world, ship_entity, epoch.elapsed, hz),
+            _ => {}
+        }
+    }
 }
 
 /// Gravity of one primary at a point in its frame.
@@ -1143,6 +1345,26 @@ pub fn present(world: &mut GameWorld) {
         }
     });
 
+    // Where a scheduled burn will happen, on the ship's own conic — a node a
+    // player cannot see is a plan they cannot aim, and cancelling is the only
+    // aim this verb has (§6 M39). The closed form is asked for one point here
+    // rather than sixty-four, which is the same question `sample` asks.
+    let node = next_due(world).and_then(|due| {
+        let rails = world.get::<Rails>(ship_entity).copied()?;
+        let origin = station(&bodies, rails.primary).map_or(sim::DVec3::ZERO, |at| at.position);
+        Some(map(
+            origin + rails.orbit.state_at(seconds(due, rails.since, hz)).0
+        ))
+    });
+    world.visit::<(&Marker, &mut Renderable)>(|_, (marker, shape)| {
+        if marker.of != Marker::NODE {
+            return;
+        }
+        // Absent is drawn as zero extent, which is how anything hides here.
+        shape.position = node.unwrap_or(sim::DVec3::ZERO);
+        shape.half_extent = node.map_or(sim::Vec3::ZERO, |_| sim::Vec3::splat(NODE_DOT));
+    });
+
     hud(world, epoch, ship, ship_orbit, primary, &bodies);
 }
 
@@ -1222,10 +1444,20 @@ fn hud(
         ),
         None => "no conic".to_owned(),
     };
+    // The node shares the warp row because they are one fact: the clock runs at
+    // this rate *until* that tick, which is what the clamp does (§6 M39).
+    let clock = match next_due(world) {
+        Some(due) => format!(
+            "warp x{}   node in {:.0} s",
+            epoch.warp,
+            seconds(due, epoch.elapsed, world.tick_hz())
+        ),
+        None => format!("warp x{}", epoch.warp),
+    };
     let lines = [
         format!("about {}", name_of(index)),
         conic,
-        format!("warp x{}", epoch.warp),
+        clock,
         format!("fuel {:.0} m/s   spent {:.0} m/s", ship.fuel, ship.spent),
         match ship.outcome {
             CAPTURED => "CAPTURED — press R".to_owned(),
@@ -1254,8 +1486,8 @@ fn hud(
 // id space a replay records (§4.7). Neither is alphabetical, neither may drift.
 #[cfg(feature = "game")]
 gg_ecs::gg_game! {
-    components: [Body, Rails, Bubble, Ship, Epoch, Event, Marker, Readout, Renderable, Light, Eye, Widget],
-    actions: ["burn", "retro", "warp_up", "warp_down", "zoom_in", "zoom_out", "restart"],
+    components: [Body, Rails, Bubble, Ship, Epoch, Event, Pending, Marker, Readout, Renderable, Light, Eye, Widget],
+    actions: ["burn", "retro", "warp_up", "warp_down", "zoom_in", "zoom_out", "restart", "plan"],
     axes: [],
-    systems: [bootstrap, control, advance, flight, present],
+    systems: [bootstrap, control, advance, fire, flight, present],
 }

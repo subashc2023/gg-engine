@@ -11,7 +11,8 @@
 
 use demo_13_orbit::session::{self, Entry, Plan};
 use demo_13_orbit::{
-    CAPTURED, EVENT_CUT, EVENT_HANDOVER, EVENT_LIT, EVENT_OUTCOME, FLYING, OCHRE, TANK, VERGE,
+    CAPTURED, EVENT_CUT, EVENT_HANDOVER, EVENT_LIT, EVENT_OUTCOME, FLYING, NODE_HOLD, NODE_LEAD,
+    OCHRE, TANK, VERGE, WARPS,
 };
 use gg_ecs::boundary::{AbiInfo, ComponentsTable, HostApiV1, SystemsTable};
 
@@ -270,5 +271,91 @@ fn the_coasting_stream_lights_once_and_late() {
         progress[session::LIGHT_AT].epoch - progress[session::LIGHT_AT - 1].epoch,
         1,
         "lighting the engine is supposed to drop warp to 1x by itself"
+    );
+}
+
+/// M39's whole claim, swept: a scheduled burn starts on **its own tick**, not
+/// on the first tick a stride happens to land past it.
+///
+/// The sweep starts at 100x because that is where the question exists. Below
+/// it, [`NODE_LEAD`] divides the stride and the epoch lands on the node whether
+/// anything clamps or not; the mission's own tests fly those rates. From
+/// `WARPS[4]` up the lead is not a multiple of the stride, and an unclamped
+/// clock steps over the node and never fires it at all — silently, since a row
+/// nothing reads raises nothing.
+#[test]
+fn a_scheduled_burn_starts_on_its_own_tick_at_every_warp() {
+    let mut clamped = 0;
+    for step in 2..WARPS.len() as u32 {
+        let warp = WARPS[step as usize];
+        let frames = session::scheduled(step, session::scheduled_ticks(step));
+        let run = session::progress(&entry(), &frames).expect("driven");
+
+        // Computed from the stream, not read back from the world: `control`
+        // schedules before `advance` steps, so the node is due `NODE_LEAD`
+        // past the epoch the *previous* tick ended on. Asking the world
+        // instead would grade the queue against its own bookkeeping — and at
+        // 1e6 the light has already fired by the end of the plan tick, so what
+        // is pending there is the cut.
+        // (At 1e6 the light is already gone by the end of the plan tick, which
+        // is why nothing here reads the queue for it — a stride that covers the
+        // whole lead in one step never leaves the row observable.)
+        let due = run[session::PLAN_AT - 1].epoch + NODE_LEAD;
+
+        let edges = |want: bool| -> Vec<usize> {
+            (1..run.len())
+                .filter(|&at| run[at].lit == want && run[at - 1].lit != want)
+                .collect()
+        };
+        let lights = edges(true);
+        assert_eq!(
+            lights.len(),
+            1,
+            "{warp}x: the node fired {} times, not once — 0 is a stride that stepped over it",
+            lights.len()
+        );
+
+        let at = lights[0];
+        assert_eq!(
+            run[at].epoch,
+            due,
+            "{warp}x: the burn started at sim tick {} against a node due at {due} — {} ticks late",
+            run[at].epoch,
+            run[at].epoch.saturating_sub(due)
+        );
+
+        // The clamp, seen doing its work: the stride *into* the fire tick is
+        // short. Without it that tick would have been `warp` long and landed
+        // past the node.
+        let stride = run[at].epoch - run[at - 1].epoch;
+        assert!(
+            stride <= warp,
+            "{warp}x: a stride of {stride} exceeded the warp"
+        );
+        clamped += usize::from(stride < warp);
+
+        // The burn's *end* is a queue entry too, so it lands the same way.
+        let cuts = edges(false);
+        assert_eq!(
+            cuts.len(),
+            1,
+            "{warp}x: the burn ended {} times",
+            cuts.len()
+        );
+        assert_eq!(
+            run[cuts[0]].epoch,
+            due + NODE_HOLD,
+            "{warp}x: the cut missed its own tick"
+        );
+        assert_eq!(
+            run[run.len() - 1].due,
+            0,
+            "{warp}x: a fired node stayed in the queue"
+        );
+    }
+    assert!(
+        clamped >= 3,
+        "only {clamped} of the swept rates had their stride clamped — a sweep where the \
+         lead divides every stride would pass with no clamp in the source at all"
     );
 }

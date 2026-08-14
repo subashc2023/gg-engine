@@ -271,6 +271,41 @@ pub fn coasting(at: usize) -> bool {
     !(LIGHT_AT..LIGHT_AT + LIGHT_FOR).contains(&at)
 }
 
+/// Host tick [`scheduled`] presses [`crate::PLAN`] on, after the warp ramp.
+pub const PLAN_AT: usize = 50;
+
+/// Warp to `step`, schedule one burn, then hold the key down on nothing: the
+/// stream M39's queue is graded by.
+///
+/// Open-loop like [`endless`], and for a sharper reason — the whole claim is
+/// that the *clock* stops on the node, so a stream that steered toward it would
+/// be grading itself. Nothing after [`PLAN_AT`] is a keystroke; every tick of
+/// the approach, the light and the cut is the queue's doing.
+#[must_use]
+pub fn scheduled(step: u32, ticks: usize) -> Vec<InputFrame> {
+    let last_tap = 30 + 2 * (step as usize).saturating_sub(1);
+    (0..ticks)
+        .map(|at| match at {
+            // One tap per step, edges, exactly as `endless` spaces them.
+            _ if step > 0 && (30..=last_tap).contains(&at) && at % 2 == 0 => press(WARP_UP),
+            _ if at == PLAN_AT => press(crate::PLAN),
+            _ => idle(),
+        })
+        .collect()
+}
+
+/// Host ticks [`scheduled`] needs at `step` for the node to fire and its burn
+/// to end: the warp ramp, the approach at that stride, the hold, and slack.
+///
+/// The approach is the honest half — [`crate::NODE_LEAD`] sim ticks at
+/// `WARPS[step]` per host tick — and it is why the sweep starts at 100x rather
+/// than 1x, where the same lead is 216,000 host ticks of test.
+#[must_use]
+pub fn scheduled_ticks(step: u32) -> usize {
+    let stride = WARPS[step as usize] as usize;
+    PLAN_AT + crate::NODE_LEAD as usize / stride + crate::NODE_HOLD as usize + 60
+}
+
 /// What one [`Plan`] does, measured — the stream it produces and the four
 /// numbers a search over plans reads.
 #[derive(Clone, Debug)]
@@ -480,6 +515,11 @@ pub struct Progress {
     /// that put it in `TickClock` instead would replay a different number of
     /// ticks rather than the same ones over a different span.
     pub epoch: u64,
+    /// The soonest [`crate::Pending::due`] there is, or 0 for an empty queue —
+    /// the number [`crate::advance`] clamps the stride against, read out where a
+    /// gate can compare it against the tick the burn actually started on
+    /// (§6 M39).
+    pub due: u64,
 }
 
 /// [`Progress`] after each of `frames`, through the same table
@@ -497,6 +537,7 @@ pub fn progress(entry: &Entry, frames: &[InputFrame]) -> Result<Vec<Progress>, S
     let bubble_q = Query::<(&Ship, &Bubble)>::new().map_err(SessionError::Alias)?;
     let body_q = Query::<&Body>::new().map_err(SessionError::Alias)?;
     let epoch_q = Query::<&Epoch>::new().map_err(SessionError::Alias)?;
+    let pending_q = Query::<&crate::Pending>::new().map_err(SessionError::Alias)?;
     drive(entry, frames, |world| {
         let mut out = Progress {
             primary: u32::MAX,
@@ -504,7 +545,15 @@ pub fn progress(entry: &Entry, frames: &[InputFrame]) -> Result<Vec<Progress>, S
             events: 0,
             lit: false,
             epoch: 0,
+            due: 0,
         };
+        world.each_ref(&pending_q, |_, node: &crate::Pending| {
+            out.due = if out.due == 0 {
+                node.due
+            } else {
+                out.due.min(node.due)
+            };
+        });
         world.each_ref(&ship_q, |_, ship: &Ship| out.outcome = ship.outcome);
         world.each_ref(&epoch_q, |_, epoch: &Epoch| out.epoch = epoch.elapsed);
         world.each_ref(&event_q, |_, _: &crate::Event| out.events += 1);

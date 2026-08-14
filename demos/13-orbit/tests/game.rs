@@ -9,11 +9,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use demo_13_orbit::{
-    BURN, Body, Bubble, Epoch, Event, MU_STAR, OCHRE, PARKING_RADIUS, RESTART, Rails, Ship, THRUST,
-    TRACE, VERGE, WARP_UP, WARPS,
+    BURN, Body, Bubble, Epoch, Event, MU_STAR, Marker, OCHRE, PARKING_RADIUS, PLAN, RESTART, Rails,
+    Ship, THRUST, TRACE, VERGE, WARP_UP, WARPS,
 };
 use gg_ecs::boundary::{
-    self, AbiInfo, ActionId, ComponentsTable, HostApiV1, InputFrame, SystemsTable, TickCtx,
+    self, AbiInfo, ActionId, ComponentsTable, HostApiV1, InputFrame, Renderable, SystemsTable,
+    TickCtx,
 };
 use gg_ecs::{Query, World};
 use gg_math::sim;
@@ -163,10 +164,12 @@ fn the_world_opens_with_a_star_two_planets_and_a_parked_ship() {
         "nothing is integrated at rest"
     );
     assert_eq!(game.ship().fuel, demo_13_orbit::TANK);
-    // Three conics, and the ship's is the third.
+    // Three conics, and the ship's is the third — plus the node's one dot,
+    // which is spawned whether or not a burn is ever planned so that planning
+    // one does not churn an archetype under the hash (§6 M39).
     assert_eq!(
         game.all::<demo_13_orbit::Marker>().len(),
-        3 * TRACE as usize
+        3 * TRACE as usize + 1
     );
 }
 
@@ -442,4 +445,61 @@ fn escaping_the_planet_hands_the_conic_to_the_star() {
         .filter(|e| e.kind == demo_13_orbit::EVENT_HANDOVER)
         .count();
     assert_eq!(handovers, 1, "one crossing, not a chatter of them");
+}
+
+/// The node has to be *visible*, which is the half no hash can see: a planned
+/// burn nothing draws is a plan a player cannot aim, and M38 item 16's finding
+/// was that a map graded by eye passes (§6 M39).
+#[test]
+fn a_planned_burn_puts_a_dot_on_the_conic_and_takes_it_away_again() {
+    let dot = |game: &Game| -> Option<sim::DVec3> {
+        let query = Query::<(&Marker, &Renderable)>::new().unwrap();
+        let mut found = None;
+        self::each_node(&game.world, &query, &mut found);
+        found
+    };
+
+    let mut game = Game::load();
+    game.step();
+    assert_eq!(
+        dot(&game),
+        None,
+        "nothing is planned, so the node's dot has to be drawn at zero extent"
+    );
+
+    game.tap(PLAN);
+    game.step();
+    let planned = dot(&game).expect("a planned burn is drawn");
+
+    // On the conic, not beside it: the dot is the ship's own orbit evaluated at
+    // the node's epoch, so its distance from the primary is a radius that conic
+    // actually reaches. Compared in map units, which is what `present` writes.
+    let rails = game.ship_rails().expect("still parked");
+    let scale = sim::powf(10.0, -f64::from(game.one::<Epoch>().zoom));
+    let (near, far) = (
+        rails.orbit.semi_major * (1.0 - rails.orbit.eccentricity) * scale,
+        rails.orbit.semi_major * (1.0 + rails.orbit.eccentricity) * scale,
+    );
+    // The map is centred on the ship and the planet is off at its own offset,
+    // so what is bounded here is the *separation* the conic can produce.
+    let reach = planned.length();
+    assert!(
+        reach <= far * 2.0 + f64::from(f32::EPSILON),
+        "the node landed {reach} map units out, past anything a conic spanning {near}..{far} \
+         reaches — it is not being evaluated on the ship's orbit"
+    );
+
+    game.tap(PLAN);
+    game.step();
+    assert_eq!(dot(&game), None, "cancelling takes the dot away again");
+}
+
+/// The node marker's drawn position, or `None` when it is hidden. Split out
+/// because a closure holding a `Query` and a `&World` cannot also borrow `game`.
+fn each_node(world: &World, query: &Query<(&Marker, &Renderable)>, found: &mut Option<sim::DVec3>) {
+    world.each_ref(query, |_, (marker, shape): (&Marker, &Renderable)| {
+        if marker.of == Marker::NODE && shape.half_extent != sim::Vec3::ZERO {
+            *found = Some(shape.position);
+        }
+    });
 }
