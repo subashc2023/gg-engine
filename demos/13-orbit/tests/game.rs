@@ -427,6 +427,15 @@ fn escaping_the_planet_hands_the_conic_to_the_star() {
         "and the heliocentric conic is closed: e = {}",
         rails.orbit.eccentricity
     );
+    // The claim the eccentricity cannot make: a handover is a change of *frame*,
+    // and a ship that has just left a planet keeps that planet's 29.8 km/s.
+    // Dropping it leaves a conic that is closed, plausible, and a third of the
+    // right size — which every assertion above this one forgives.
+    let speed = rails.orbit.state_at(0.0).1.length();
+    assert!(
+        speed > 20_000.0,
+        "the departure planet's own motion is part of the state that crossed: {speed} m/s"
+    );
     let handovers = game
         .all::<Event>()
         .into_iter()

@@ -55,6 +55,15 @@ demo-05-many = { path = "../../demos/05-many", default-features = false }
 # table of axis-aligned boxes — shipped geometry that `gg_render::ao` represents
 # exactly, so the reference casts against the level rather than against a guess.
 demo-12-shooter = { path = "../../demos/12-shooter", default-features = false }
+# `transfer` measures demo 13's own mission, so it drives demo 13's own pilot —
+# `session::fly` through the declared systems table. Taken as a crate for the
+# reason `cull` takes demo 05: a number about a mission has to come from the
+# mission, not from a model of it.
+# ...and with the game feature *on*, unlike the two above: `transfer` drives the
+# declared systems table through `session::fly`, which needs the four `gg_game!`
+# exports. Only one demo in this binary may have them, which is what keeps the
+# other two at `default-features = false`.
+demo-13-orbit = { path = "../../demos/13-orbit" }
 # `Node` parenting is the scene graph's to resolve, and `cull`'s field is
 # parented — extract reads world transforms, it does not compute them.
 gg-scene = { path = "../../crates/gg-scene" }

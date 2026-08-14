@@ -72,6 +72,7 @@ mod shadow_flat;
 mod shadow_image;
 mod shadow_sweep;
 mod split_sum;
+mod transfer;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -108,6 +109,7 @@ fn main() -> anyhow::Result<()> {
         "hash-scale" => hash_scale::run(rest),
         "orbit" => orbit::run(rest),
         "panorama" => panorama::run(rest),
+        "transfer" => transfer::run(rest),
         "fp-isa" => fp_isa::run(rest),
         "mcp" => mcp::run(rest),
         other => {

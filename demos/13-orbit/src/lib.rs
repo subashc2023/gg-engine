@@ -64,6 +64,8 @@ use gg_ecs::boundary::{ActionId, Eye, GameWorld, Light, Renderable, Widget, log_
 use gg_ecs::{Component, Entity};
 use gg_math::sim;
 
+pub mod session;
+
 // ---- the system ---------------------------------------------------------
 
 /// `GM` of the star, m³/s². The Sun's, because every number item 7 and item 8
@@ -93,19 +95,30 @@ pub const VERGE: Planet = Planet {
     color: 0x0038_6ea8,
 };
 
-/// The target's — Mars', rounded, with the one phase angle that is not
-/// astronomy: [`Planet::mean_anomaly`] is set so a Hohmann departure near tick
-/// zero arrives near the target rather than at the empty place it used to be.
+/// The target's — Mars', rounded, and two of them are not astronomy.
+///
+/// [`Planet::inclination`] is **zero** where Mars' is 0.032 rad, because the
+/// ship's only thrust is along its velocity: a target out of the departure
+/// plane is then reachable at its nodes and nowhere else, and a mission whose
+/// win condition needs a verb the game does not have is a decoration rather
+/// than a mission. The tilt goes back the day there is a normal burn to spend
+/// on it.
+///
+/// [`Planet::mean_anomaly`] is where the target has to *be* for the crossing
+/// the departure buys to have something at the end of it — solved by
+/// `gg-tools transfer` against the transfer the flown plan produces, and not
+/// guessed. Nothing perturbs anything here, so the departure and the phase are
+/// independent: the plan chooses the conic, this number chooses the meeting.
 pub const OCHRE: Planet = Planet {
     index: 2,
     mu: 4.282_837e13,
     radius: 3.3895e6,
     semi_major: 2.279_39e11,
     eccentricity: 0.0934,
-    inclination: 0.0322,
+    inclination: 0.0,
     ascending_node: 0.865,
     argument_of_periapsis: 5.000,
-    mean_anomaly: 0.780,
+    mean_anomaly: 2.982_013,
     color: 0x00b0_5a34,
 };
 
@@ -507,12 +520,26 @@ fn find_body(world: &mut GameWorld, index: u32) -> Option<Entity> {
     found
 }
 
-/// Every body, as `(entity, Body, absolute position)` at `elapsed`.
+/// A body's identity and its **absolute** state at an epoch.
+///
+/// Velocity is carried beside position because a handover is a change of frame,
+/// and a frame change that moves only the origin drops the old primary's own
+/// motion — 29.8 km/s at the departure planet against a 3 km/s escape, so a
+/// conic built without it is not slightly wrong but a different orbit.
+#[derive(Clone, Copy)]
+struct Station {
+    entity: Entity,
+    body: Body,
+    position: sim::DVec3,
+    velocity: sim::DVec3,
+}
+
+/// Every body's [`Station`] at `elapsed`.
 ///
 /// Absolute rather than relative because the handover test compares
 /// accelerations from *every* body at once, and a chain of parent lookups
 /// inside that loop would read the same conic five times.
-fn bodies(world: &mut GameWorld, elapsed: u64, hz: u32) -> Vec<(Entity, Body, sim::DVec3)> {
+fn bodies(world: &mut GameWorld, elapsed: u64, hz: u32) -> Vec<Station> {
     let mut rows: Vec<(Entity, Body, Option<Rails>)> = Vec::new();
     world.visit::<&Body>(|entity, body| rows.push((entity, *body, None)));
     for row in &mut rows {
@@ -520,16 +547,31 @@ fn bodies(world: &mut GameWorld, elapsed: u64, hz: u32) -> Vec<(Entity, Body, si
     }
     rows.iter()
         .map(|(entity, body, rails)| {
-            let position = match rails {
+            let (position, velocity) = match rails {
                 // One level deep by construction: a planet's primary is the
                 // star, and the star has no `Rails`. A moon would make this a
                 // walk, and would need the cycle refusal `Node` already has.
-                Some(rails) => rails.orbit.state_at(seconds(elapsed, rails.since, hz)).0,
-                None => sim::DVec3::ZERO,
+                Some(rails) => rails.orbit.state_at(seconds(elapsed, rails.since, hz)),
+                None => (sim::DVec3::ZERO, sim::DVec3::ZERO),
             };
-            (*entity, *body, position)
+            Station {
+                entity: *entity,
+                body: *body,
+                position,
+                velocity,
+            }
         })
         .collect()
+}
+
+/// The station of `entity`, if it is one of the bodies.
+fn station(bodies: &[Station], entity: Entity) -> Option<Station> {
+    bodies.iter().copied().find(|held| held.entity == entity)
+}
+
+/// The station of body `index`.
+fn station_of(bodies: &[Station], index: u32) -> Option<Station> {
+    bodies.iter().copied().find(|held| held.body.index == index)
 }
 
 /// Seconds between two epochs. The one place ticks become a float, and it is a
@@ -538,28 +580,30 @@ fn seconds(elapsed: u64, since: u64, hz: u32) -> f64 {
     (elapsed.saturating_sub(since) as f64) * seconds_per_tick(hz)
 }
 
-/// The ship's absolute state, whichever regime it is in.
+/// The ship's absolute position, its velocity **relative to its primary**, and
+/// which body that is. The two are in different frames on purpose: every reader
+/// but the handover wants the position against the whole system and the
+/// velocity against the conic it belongs to, and the one that wants both in one
+/// frame converts explicitly.
 fn ship_state(
     world: &mut GameWorld,
     ship: Entity,
     elapsed: u64,
     hz: u32,
-    bodies: &[(Entity, Body, sim::DVec3)],
+    bodies: &[Station],
 ) -> Option<(sim::DVec3, sim::DVec3, Entity)> {
-    let primary_at = |primary: Entity| {
-        bodies
-            .iter()
-            .find(|(entity, _, _)| *entity == primary)
-            .map(|(_, _, position)| *position)
-    };
     if let Some(bubble) = world.get::<Bubble>(ship).copied() {
-        let origin = primary_at(bubble.primary)?;
-        return Some((origin + bubble.position, bubble.velocity, bubble.primary));
+        let origin = station(bodies, bubble.primary)?;
+        return Some((
+            origin.position + bubble.position,
+            bubble.velocity,
+            bubble.primary,
+        ));
     }
     let rails = world.get::<Rails>(ship).copied()?;
-    let origin = primary_at(rails.primary)?;
+    let origin = station(bodies, rails.primary)?;
     let (position, velocity) = rails.orbit.state_at(seconds(elapsed, rails.since, hz));
-    Some((origin + position, velocity, rails.primary))
+    Some((origin.position + position, velocity, rails.primary))
 }
 
 // ---- control ------------------------------------------------------------
@@ -801,48 +845,47 @@ pub fn flight(world: &mut GameWorld) {
 /// by what keeps the *decision* stable rather than by what a crossing costs.
 const HANDOVER_RATIO: f64 = 2.0;
 
-fn handover(
-    world: &mut GameWorld,
-    ship: Entity,
-    elapsed: u64,
-    hz: u32,
-    bodies: &[(Entity, Body, sim::DVec3)],
-) {
+fn handover(world: &mut GameWorld, ship: Entity, elapsed: u64, hz: u32, bodies: &[Station]) {
     let Some((position, velocity, current)) = ship_state(world, ship, elapsed, hz, bodies) else {
         return;
     };
-    let pull = |body: &(Entity, Body, sim::DVec3)| {
-        let offset = position - body.2;
-        let radius = offset.length();
+    let pull = |held: &Station| {
+        let radius = (position - held.position).length();
         if radius <= 0.0 {
             f64::INFINITY
         } else {
-            body.1.mu / (radius * radius)
+            held.body.mu / (radius * radius)
         }
     };
-    let Some(held) = bodies.iter().find(|(entity, _, _)| *entity == current) else {
+    let Some(held) = station(bodies, current) else {
         return;
     };
     let mut best = held;
-    let mut best_pull = pull(held);
+    let mut best_pull = pull(&held);
     for candidate in bodies {
         let strength = pull(candidate);
         if strength > best_pull * HANDOVER_RATIO {
-            best = candidate;
+            best = *candidate;
             best_pull = strength;
         }
     }
-    if best.0 == current {
+    if best.entity == current {
         return;
     }
-    let Some(orbit) = sim::Orbit::from_state(position - best.2, velocity, best.1.mu) else {
+    // The frame change, spelled out: the ship's velocity is against the old
+    // primary, and the new conic wants it against the new one. Leaving this out
+    // costs the departure planet's whole orbital velocity and produces a conic
+    // that is closed, plausible, and a third of the right size.
+    let relative = velocity + held.velocity - best.velocity;
+    let Some(orbit) = sim::Orbit::from_state(position - best.position, relative, best.body.mu)
+    else {
         return;
     };
     world.put(
         ship,
         Rails {
             orbit,
-            primary: best.0,
+            primary: best.entity,
             since: elapsed,
         },
     );
@@ -850,12 +893,12 @@ fn handover(
         world,
         EVENT_HANDOVER,
         elapsed,
-        best.1.index,
+        best.body.index,
         orbit.eccentricity,
     );
     world.log(
         log_level::INFO,
-        if best.1.index == 0 {
+        if best.body.index == 0 {
             "orbit: escaped"
         } else {
             "orbit: intercept"
@@ -865,13 +908,7 @@ fn handover(
 
 /// Impact, capture, and the empty tank — every one of them read off the state
 /// the tick produced rather than off a flag some system set.
-fn outcome(
-    world: &mut GameWorld,
-    ship_entity: Entity,
-    elapsed: u64,
-    hz: u32,
-    bodies: &[(Entity, Body, sim::DVec3)],
-) {
+fn outcome(world: &mut GameWorld, ship_entity: Entity, elapsed: u64, hz: u32, bodies: &[Station]) {
     let Some((position, _, _)) = ship_state(world, ship_entity, elapsed, hz, bodies) else {
         return;
     };
@@ -884,7 +921,7 @@ fn outcome(
 
     let hit = bodies
         .iter()
-        .any(|(_, body, at)| (position - *at).length() < body.radius);
+        .any(|held| (position - held.position).length() < held.body.radius);
     let captured = world
         .get::<Body>(rails.primary)
         .is_some_and(|body| body.index == OCHRE.index)
@@ -941,10 +978,10 @@ pub fn present(world: &mut GameWorld) {
     let scale = sim::powf(10.0, -f64::from(epoch.zoom));
     let map = |absolute: sim::DVec3| (absolute - ship_position) * scale;
 
-    for (entity, body, at) in &bodies {
-        let radius = (body.radius * scale) as f32;
-        if let Some(shape) = world.get_mut::<Renderable>(*entity) {
-            shape.position = map(*at);
+    for held in &bodies {
+        let radius = (held.body.radius * scale) as f32;
+        if let Some(shape) = world.get_mut::<Renderable>(held.entity) {
+            shape.position = map(held.position);
             shape.half_extent = sim::Vec3::splat(radius.max(MIN_DOT));
         }
     }
@@ -954,46 +991,35 @@ pub fn present(world: &mut GameWorld) {
     }
     // The star lights the map from where the star is drawn, so a planet's lit
     // face still points at it however far the view is scaled.
-    if let Some((_, _, star_at)) = bodies.iter().find(|(_, body, _)| body.index == 0) {
-        let star_map = map(*star_at);
+    if let Some(star) = station_of(&bodies, 0) {
+        let star_map = map(star.position);
         world.visit::<&mut Light>(|_, light| light.position = star_map);
     }
 
     // One trace table per conic, sampled before anything is written: the visit
     // below holds column borrows and cannot ask the world for an orbit.
     let mut traces: Vec<(u32, Vec<sim::DVec3>)> = Vec::new();
-    for (_, body, _) in &bodies {
-        if body.index == 0 {
+    for held in &bodies {
+        if held.body.index == 0 {
             continue;
         }
-        if let Some((entity, _, _)) = bodies.iter().find(|(_, b, _)| b.index == body.index)
-            && let Some(rails) = world.get::<Rails>(*entity).copied()
-        {
-            let origin = bodies
-                .iter()
-                .find(|(e, _, _)| *e == rails.primary)
-                .map_or(sim::DVec3::ZERO, |(_, _, at)| *at);
-            traces.push((body.index, sample(rails.orbit, origin, &map)));
+        if let Some(rails) = world.get::<Rails>(held.entity).copied() {
+            let origin = station(&bodies, rails.primary).map_or(sim::DVec3::ZERO, |at| at.position);
+            traces.push((held.body.index, sample(rails.orbit, origin, &map)));
         }
     }
+    let anchor = station(&bodies, primary);
     let ship_orbit = match world.get::<Rails>(ship_entity).copied() {
         Some(rails) => Some(rails.orbit),
         // Lit: the trace is the *osculating* conic, which is what the shape
         // would be if the engine cut this instant — the one readout a burn is
         // steered by.
-        None => world.get::<Body>(primary).copied().and_then(|body| {
-            let origin = bodies
-                .iter()
-                .find(|(e, _, _)| *e == primary)
-                .map_or(sim::DVec3::ZERO, |(_, _, at)| *at);
-            sim::Orbit::from_state(ship_position - origin, ship_velocity, body.mu)
+        None => anchor.and_then(|at| {
+            sim::Orbit::from_state(ship_position - at.position, ship_velocity, at.body.mu)
         }),
     };
     if let Some(orbit) = ship_orbit {
-        let origin = bodies
-            .iter()
-            .find(|(e, _, _)| *e == primary)
-            .map_or(sim::DVec3::ZERO, |(_, _, at)| *at);
+        let origin = anchor.map_or(sim::DVec3::ZERO, |at| at.position);
         traces.push((Marker::SHIP, sample(orbit, origin, &map)));
     }
 
@@ -1059,16 +1085,11 @@ fn hud(
     ship: Ship,
     orbit: Option<sim::Orbit>,
     primary: Entity,
-    bodies: &[(Entity, Body, sim::DVec3)],
+    bodies: &[Station],
 ) {
-    let index = bodies
-        .iter()
-        .find(|(entity, _, _)| *entity == primary)
-        .map_or(0, |(_, body, _)| body.index);
-    let radius = bodies
-        .iter()
-        .find(|(entity, _, _)| *entity == primary)
-        .map_or(1.0, |(_, body, _)| body.radius);
+    let held = station(bodies, primary);
+    let index = held.map_or(0, |at| at.body.index);
+    let radius = held.map_or(1.0, |at| at.body.radius);
     let conic = match orbit {
         Some(orbit) if orbit.eccentricity < 1.0 => {
             let peri = orbit.semi_major * (1.0 - orbit.eccentricity) - radius;
