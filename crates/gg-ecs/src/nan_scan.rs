@@ -290,6 +290,9 @@ fn classify_squeezed(t: &str, size: Option<usize>) -> Option<Class> {
         "DVec4" | "DQuat" => scalars(4, true),
         "DMat3" => scalars(9, true),
         "DMat4" => scalars(16, true),
+        // Seven elements, all `f64`: a NaN in one is a body that has left the
+        // universe, and it must be caught where every other float is (§6 M38).
+        "Orbit" => scalars(7, true),
         "u8" | "i8" | "bool" => opaque(1),
         "u16" | "i16" => opaque(2),
         "u32" | "i32" => opaque(4),

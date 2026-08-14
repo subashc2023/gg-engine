@@ -359,6 +359,9 @@ impl World {
     /// Install a hashed side table — sim state above the columns, free of the
     /// `Pod` rule and hashed in the canonical pass alongside them.
     ///
+    /// The caller must be the host: a table declared in a game dylib does not
+    /// survive a migrating reload in either direction (see the module docs).
+    ///
     /// # Errors
     ///
     /// If a table with this id is already installed, or two types claim one id.

@@ -16,6 +16,24 @@
 //! recorded now so nobody later mistakes the component `Pod` rule for the
 //! gameplay data model.
 //!
+//! # The host declares them, never a game (§6 M38 item 12)
+//!
+//! "Host-owned" above is a rule about the *declaring crate*, not a description
+//! of where the box lives. A migrating reload is snapshot → fresh `World` →
+//! adopt the rebuilt dylib → [`restore`](crate::World::restore), and nothing in
+//! that sequence re-installs a table: a game-declared one is either absent from
+//! the fresh world (the restore refuses, so the reload dies) or re-installed
+//! empty (the restore is green and the contents are gone, which is a hash
+//! divergence at the swap). Which of the two happens turns on whether some
+//! unrelated component's schema moved in the same edit, and neither is
+//! recoverable by migration — a table has no schema for one to read. Both
+//! shapes are pinned in `tests/side_tables.rs`.
+//!
+//! A game's growable, totally-ordered state goes in entities instead: an event
+//! is a row, `(tick, entity_id)` is the canonical walk's own order, and the
+//! `Pod` column then migrates, saves and reloads like everything else. That is
+//! what demo 13's event queue does.
+//!
 //! # Order
 //!
 //! Registration order is irrelevant: tables are walked ascending by

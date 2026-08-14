@@ -232,6 +232,82 @@ fn a_component_and_a_side_table_sharing_a_name_do_not_share_an_id() {
     );
 }
 
+// ---- the reload boundary, which is what decides who may declare one ------
+//
+// `App::swap`'s migrating path is snapshot → `World::new()` → adopt the rebuilt
+// dylib's schemas → restore, and nothing between those steps installs a side
+// table. The two tests below are that shape with the game's table in it, and
+// together they are why §6 M38 item 12 put demo 13's event queue in components
+// instead: a table the *game* declares either kills the reload or survives it
+// empty, and which of the two happens depends on whether some unrelated
+// component's schema moved in the same edit.
+
+#[test]
+fn the_migrating_reload_refuses_a_table_the_fresh_world_does_not_have() {
+    let mut live = World::new();
+    live.register::<Position>().unwrap();
+    let e = live.spawn();
+    live.insert(
+        e,
+        Position {
+            p: sim::DVec3::new(1.0, 0.0, 0.0),
+        },
+    )
+    .unwrap();
+    live.insert_side_table(ProductionQueue {
+        orders: vec![order(e, 7, 12.5)],
+        label: "shipyard".into(),
+    })
+    .unwrap();
+
+    let mut fresh = World::new();
+    fresh.register::<Position>().unwrap();
+    let msg = fresh.restore(&live.snapshot()).unwrap_err().to_string();
+    assert!(msg.contains("production-queue"), "{msg}");
+    assert!(msg.contains("host-owned"), "{msg}");
+}
+
+#[test]
+fn re_installing_it_restores_green_with_the_contents_gone() {
+    // The worse half: the id check is by *name*, so a fresh table under the same
+    // id passes it and the restore reports a clean migration while the queue's
+    // rows are gone. The hash is where that shows, and a hash is exactly what
+    // §5.6c's reload legs compare either side of a swap.
+    let mut live = World::new();
+    live.register::<Position>().unwrap();
+    let e = live.spawn();
+    live.insert(
+        e,
+        Position {
+            p: sim::DVec3::new(1.0, 0.0, 0.0),
+        },
+    )
+    .unwrap();
+    live.insert_side_table(ProductionQueue {
+        orders: vec![order(e, 7, 12.5)],
+        label: "shipyard".into(),
+    })
+    .unwrap();
+
+    let mut fresh = World::new();
+    fresh.register::<Position>().unwrap();
+    fresh.insert_side_table(ProductionQueue::default()).unwrap();
+    let report = fresh.restore(&live.snapshot()).unwrap();
+    assert_eq!(report.entities, 1, "the columns migrate perfectly");
+    assert!(
+        fresh
+            .side_table::<ProductionQueue>()
+            .unwrap()
+            .orders
+            .is_empty()
+    );
+    assert_ne!(
+        live.canonical_hash(),
+        fresh.canonical_hash(),
+        "a reload that loses table contents is a divergence, not a migration"
+    );
+}
+
 // ---- §1.13 hazard 6 over non-`Pod` state --------------------------------
 //
 // A side table's floats live behind a `Vec`, so the column scan's layout walk

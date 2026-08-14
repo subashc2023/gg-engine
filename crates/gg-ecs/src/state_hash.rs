@@ -170,6 +170,19 @@ impl_sim! {
     sim::DQuat { x, y, z, w }
     sim::DMat3 { x_axis, y_axis, z_axis }
     sim::DMat4 { x_axis, y_axis, z_axis, w_axis }
+    // The analytic regime's whole state (§6 M38 item 7). Element order is the
+    // declaration's, so an `Orbit` hashes as the seven doubles it is — and it
+    // is here because a body on rails carries its conic as a component, which
+    // demo 13 is the first to do.
+    sim::Orbit {
+        semi_major,
+        eccentricity,
+        inclination,
+        ascending_node,
+        argument_of_periapsis,
+        mean_anomaly,
+        mu,
+    }
 }
 
 /// The generator's stream position, which is the whole of its state (§6 M18).

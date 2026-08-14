@@ -1,0 +1,23 @@
+# Demo 13's bindings (§4.7). By *physical* key position, so this file means the
+# same thing on AZERTY as on QWERTY.
+#
+# Seven actions and no axes, which is the shape a map view wants: everything
+# here is a discrete decision the flight log can name — light the engine, cut
+# it, step the warp, step the zoom, start over. The one continuous quantity a
+# space game seems to need is throttle, and this one has none on purpose: the
+# engine is a torch and a burn is seconds long, so what a player steers with is
+# *when* it is lit and for how long, which a held key already says exactly.
+#
+# Warp and zoom are the same two keys' worth of idiom every map in the genre
+# uses: comma/period step the clock, Q/E step the scale.
+
+[game.actions]
+burn = ["Space"]
+retro = ["ShiftLeft"]
+warp_up = ["Period"]
+warp_down = ["Comma"]
+zoom_in = ["E"]
+zoom_out = ["Q"]
+restart = ["R"]
+
+[game.axes]

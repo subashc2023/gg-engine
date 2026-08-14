@@ -664,6 +664,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "demo-13-orbit"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "gg-ecs",
+ "gg-math",
+]
+
+[[package]]
 name = "demo-99-template"
 version = "0.1.0"
 dependencies = [

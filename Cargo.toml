@@ -38,6 +38,7 @@ members = [
     "demos/10-tetris",
     "demos/11-platformer",
     "demos/12-shooter",
+    "demos/13-orbit",
     "demos/99-template",
     "tools/gg-golden",
     "tools/gg-static-link",
