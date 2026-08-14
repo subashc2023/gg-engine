@@ -41,6 +41,9 @@
 //!   gg-tools hash-scale             what the per-tick full-world passes cost at
 //!                                   the scale §6 M38 brings — the contract's
 //!                                   sorted walk against a storage-order floor
+//!   gg-tools orbit                  whether §2's two regimes agree about the
+//!                                   same body — the orbit's shape against its
+//!                                   phase, which fail in opposite directions
 //!   gg-tools panorama [--out P]   write the synthetic equirectangular `.hdr`
 //!                                   demo 06's environment is compiled from
 //!   gg-tools fp-isa [--target T]    which floating-point instructions the
@@ -59,6 +62,7 @@ mod hash_scale;
 mod lamps;
 mod lights;
 mod mcp;
+mod orbit;
 mod pace;
 mod panorama;
 mod shadow_bias;
@@ -102,6 +106,7 @@ fn main() -> anyhow::Result<()> {
         "banding" => banding::run(rest),
         "pace" => pace::run(rest),
         "hash-scale" => hash_scale::run(rest),
+        "orbit" => orbit::run(rest),
         "panorama" => panorama::run(rest),
         "fp-isa" => fp_isa::run(rest),
         "mcp" => mcp::run(rest),
@@ -109,8 +114,8 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
                  shadow-flat, shadow-sweep, shadow-edge, lights, lamps, cull, furnace, \
-                 split-sum, ao, bounce, banding, pace, hash-scale, panorama, fp-isa, mcp. A new \
-                 instrument is a new subcommand here, not a new crate"
+                 split-sum, ao, bounce, banding, pace, hash-scale, orbit, panorama, fp-isa, \
+                 mcp. A new instrument is a new subcommand here, not a new crate"
             )
         }
     }

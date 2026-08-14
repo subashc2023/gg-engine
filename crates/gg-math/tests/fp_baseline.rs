@@ -126,12 +126,54 @@ macro_rules! width_report {
     }};
 }
 
+/// `Orbit`'s lines, outside the per-width macro because it has no `f32` twin.
+///
+/// Worth its own section rather than left to the chain above: a Kepler solve is
+/// a *composition* of libm transcendentals wrapped in a data-dependent
+/// iteration, which is both hazards 1 and 2 in one expression, and §6 M38's
+/// whole on-rails regime is the claim that it lands the same bits on aarch64.
+/// The eccentricities are chosen so the iteration actually iterates — `e = 0`
+/// converges in one step and would pin nothing.
+fn orbit_report(out: &mut Report) {
+    let bb = black_box::<f64>;
+    let mut push = |label: &str, v: f64| {
+        out.push((format!("f64/{label}"), format!("0x{:016X}", v.to_bits())));
+    };
+    push(
+        "kepler.elliptic",
+        kepler_anomaly(bb(0.82), bb(1.37), KEPLER_STEPS),
+    );
+    push(
+        "kepler.hyperbolic",
+        kepler_anomaly(bb(1.6), bb(-4.2), KEPLER_STEPS),
+    );
+    // Elements at real magnitudes, and every angle nonzero so the perifocal
+    // basis is a genuine three-quaternion composition rather than an identity.
+    let path = Orbit {
+        semi_major: bb(1.495_978_707e11),
+        eccentricity: bb(0.41),
+        inclination: bb(0.37),
+        ascending_node: bb(2.11),
+        argument_of_periapsis: bb(-0.83),
+        mean_anomaly: bb(0.29),
+        mu: bb(1.327_124_400_18e20),
+    };
+    let (position, velocity) = path.state_at(bb(9.87e6));
+    push("orbit.position.x", position.x);
+    push("orbit.position.y", position.y);
+    push("orbit.position.z", position.z);
+    push("orbit.velocity.x", velocity.x);
+    push("orbit.velocity.z", velocity.z);
+    push("orbit.mean_motion", path.mean_motion());
+}
+
 fn build_report() -> Report {
     let mut out = Report::new();
     width_report!(&mut out, "f32", "8", f32, Vec3, Vec4, Quat, Mat3, Mat4);
     width_report!(
         &mut out, "f64", "16", f64, DVec3, DVec4, DQuat, DMat3, DMat4
     );
+    orbit_report(&mut out);
     out
 }
 

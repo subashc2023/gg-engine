@@ -896,6 +896,200 @@ pub fn fly_basis(yaw: f32, pitch: f32) -> (DVec3, DVec3) {
     (forward, right)
 }
 
+/// Halley steps both Kepler solves take, fixed rather than convergent.
+///
+/// An on-rails body's whole claim is that it costs the same on every tick (§2),
+/// and a loop that stops on a residual costs most exactly where a solar system
+/// is most interesting — at periapsis, at high eccentricity, on the tick the
+/// player is watching. Read off `gg-tools orbit`, which sweeps the residual over
+/// eccentricity and step count on both branches: five reaches the double's own
+/// floor (~2e-16) everywhere outside `0.99 < e < 1.01`, and a sixth step buys
+/// nothing anywhere except inside that band.
+pub const KEPLER_STEPS: u32 = 5;
+
+/// The eccentric anomaly `E` solving `M = E - e sin E` (`e < 1`), or the
+/// hyperbolic anomaly `H` solving `M = e sinh H - H` (`e >= 1`), by Halley from
+/// a closed-form starter.
+///
+/// Halley rather than Newton because the budget is *steps*, not evaluations:
+/// both need the same `sin`/`cos` pair, the second derivative of Kepler's
+/// equation is a term already in hand, and the extra two flops buy cubic
+/// convergence instead of quadratic. Newton from the same starter still owed
+/// 2.5e-10 at `e = 0.9` after five steps; Halley is at the floor after four.
+///
+/// `steps` is public only because [`KEPLER_STEPS`] is a *measured* constant, and
+/// a constant nothing can re-measure is a constant that rots. Callers with an
+/// orbit want [`Orbit::state_at`], which spends [`KEPLER_STEPS`] of them.
+///
+/// The elliptic branch answers for `M` wrapped into `(-π, π]` and so returns an
+/// `E` near that interval: `M` and `M + 2πk` are the same point on the ellipse,
+/// and the wrap is what keeps Newton starting beside its root rather than `k`
+/// revolutions away. A residual taken against an unwrapped `M` therefore has to
+/// be wrapped too.
+///
+/// `e` approaching 1 from either side is where the starter is worst and the
+/// measured band `0.99 < e < 1.01` is where [`KEPLER_STEPS`] stops reaching the
+/// floor: at `e = 0.999` five steps still owe 6.8e-11, which near periapsis is
+/// amplified by `1/(1 - e)` and is a real distance rather than a rounding one. A
+/// near-parabolic body is a body for the *bubble*, and that is a regime decision
+/// rather than a reason to make this loop cost more for everything else. `e`
+/// exactly 1 is parabolic, has no `a`, and takes the hyperbolic branch's division
+/// by `e cosh H - 1` to zero at `H = 0`.
+#[must_use]
+pub fn kepler_anomaly(eccentricity: f64, mean_anomaly: f64, steps: u32) -> f64 {
+    if eccentricity < 1.0 {
+        // Wrapped before the starter, not after: `M + e sin M` is only near the
+        // root within one revolution of it, and a body a thousand orbits old
+        // arrives with a thousand turns of `M` that Newton would have to walk
+        // back one period at a time.
+        let m =
+            mean_anomaly - core::f64::consts::TAU * (mean_anomaly / core::f64::consts::TAU).round();
+        let mut anomaly = m + eccentricity * sin(m);
+        for _ in 0..steps {
+            let (s, c) = sin_cos(anomaly);
+            // f, f', f''. The 2ff'/(2f'² - ff'') form of Halley's step rather
+            // than f/(f' - ff''/2f'): one division instead of two, and it does
+            // not divide by f' twice where a near-parabolic orbit at periapsis
+            // has driven f' toward 1 - e.
+            let f = anomaly - eccentricity * s - m;
+            let d1 = 1.0 - eccentricity * c;
+            let d2 = eccentricity * s;
+            anomaly -= 2.0 * f * d1 / (2.0 * d1 * d1 - f * d2);
+        }
+        anomaly
+    } else {
+        // No wrap: a hyperbolic pass happens once, so `M` is a one-way clock and
+        // there is no revolution to fold it into.
+        let scaled = mean_anomaly / eccentricity;
+        // asinh, written out — `ln(x + sqrt(x² + 1))` is exact in sign and
+        // smooth through zero, which the `ln(2|M|/e + 1.8)` starter in the
+        // literature is neither of near periapsis.
+        let mut anomaly = ln(scaled + sqrt(scaled * scaled + 1.0));
+        for _ in 0..steps {
+            let (s, c) = (sinh(anomaly), cosh(anomaly));
+            let f = eccentricity * s - anomaly - mean_anomaly;
+            let d1 = eccentricity * c - 1.0;
+            let d2 = eccentricity * s;
+            anomaly -= 2.0 * f * d1 / (2.0 * d1 * d1 - f * d2);
+        }
+        anomaly
+    }
+}
+
+/// A two-body trajectory as classical elements — the whole state of an *on-rails*
+/// body (§2), for which position is a function of time and not of last tick's
+/// position. Nothing here integrates, so nothing here drifts.
+///
+/// # Frame
+///
+/// Y-up, like every other angle in this engine, and transcribed into it rather
+/// than beside it — the textbook formulas below are all written Z-up.
+/// `inclination` tilts the orbit's angular momentum away from `+Y` about the
+/// ascending-node line, `ascending_node` turns that line about `+Y` from `+X`,
+/// and `argument_of_periapsis` turns periapsis about the orbit normal from the
+/// node. With all three zero, periapsis is `+X`, motion heads toward `-Z`, and
+/// angular momentum is `+Y`.
+///
+/// # Width
+///
+/// `f64` only, with no `f32` twin like [`Ray`] has. At one AU an `f32` metre is
+/// 8 km, so a narrow orbit is not a cheaper orbit but a wrong one — the same
+/// reason `Renderable::position` is [`DVec3`] and narrows only at the camera
+/// (§1.4).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct Orbit {
+    /// Semi-major axis, metres. **Negative** on a hyperbolic trajectory, which
+    /// is the sign convention that keeps `p = a(1 - e²)` positive on both
+    /// branches and lets one expression serve both.
+    pub semi_major: f64,
+    /// Eccentricity. Below 1 is an ellipse, above is a hyperbola; exactly 1 is a
+    /// parabola, which has no semi-major axis and is not representable here.
+    pub eccentricity: f64,
+    /// Radians from the reference plane.
+    pub inclination: f64,
+    /// Radians about `+Y`, from `+X` to the ascending node.
+    pub ascending_node: f64,
+    /// Radians about the orbit normal, from the node to periapsis.
+    pub argument_of_periapsis: f64,
+    /// Mean anomaly at epoch, radians. Time enters the trajectory here and
+    /// through [`Orbit::mean_motion`] and nowhere else.
+    pub mean_anomaly: f64,
+    /// `GM` of the primary, m³/s². Carried per body rather than looked up: a
+    /// body reached through a typed query has to answer without its parent being
+    /// in that query, and an element set that needs a second lookup to mean
+    /// anything is not a self-describing component (§4.2).
+    pub mu: f64,
+}
+
+impl Orbit {
+    /// Radians of mean anomaly per second. Uses `|a|`, so it is the hyperbolic
+    /// branch's clock rate too, where it is a rate and not a frequency.
+    #[must_use]
+    pub fn mean_motion(self) -> f64 {
+        let a = self.semi_major.abs();
+        sqrt(self.mu / (a * a * a))
+    }
+
+    /// Seconds per revolution, or `None` for a trajectory that has none.
+    #[must_use]
+    pub fn period(self) -> Option<f64> {
+        (self.eccentricity < 1.0).then(|| core::f64::consts::TAU / self.mean_motion())
+    }
+
+    /// Position and velocity `seconds` after epoch, in metres and metres per
+    /// second, relative to the primary.
+    ///
+    /// Cost is one Kepler solve ([`KEPLER_STEPS`] Newton steps) and a fixed tail
+    /// whatever `seconds` is — evaluating a body a century out costs what
+    /// evaluating it next tick costs, which is the property the whole regime
+    /// exists for.
+    #[must_use]
+    pub fn state_at(self, seconds: f64) -> (DVec3, DVec3) {
+        let (e, a) = (self.eccentricity, self.semi_major);
+        let anomaly = kepler_anomaly(
+            e,
+            self.mean_anomaly + self.mean_motion() * seconds,
+            KEPLER_STEPS,
+        );
+        // Perifocal state straight from the anomaly rather than through the true
+        // anomaly: `r = p/(1 + e cos ν)` loses its leading digits near apoapsis of
+        // an eccentric orbit, where `1 + e cos ν` is a difference of two nearly
+        // equal numbers, and the half-angle tangent that reaches ν costs a `tan`
+        // and an `atan` to get there.
+        let g = sqrt((1.0 - e * e).abs()); // √(1-e²) elliptic, √(e²-1) hyperbolic
+        let (x, y, radius, sweep) = if e < 1.0 {
+            let (s, c) = sin_cos(anomaly);
+            let radius = a * (1.0 - e * c);
+            (a * (c - e), a * g * s, radius, (s, c))
+        } else {
+            let (s, c) = (sinh(anomaly), cosh(anomaly));
+            let radius = a * (1.0 - e * c);
+            (a * (c - e), -a * g * s, radius, (s, c))
+        };
+        // √(μ|a|)/r: the same scale on both branches once `a`'s sign is taken out.
+        let scale = sqrt(self.mu * a.abs()) / radius;
+        let (basis_p, basis_q) = self.perifocal_basis();
+        (
+            basis_p * x + basis_q * y,
+            basis_p * (-scale * sweep.0) + basis_q * (scale * g * sweep.1),
+        )
+    }
+
+    /// `(P, Q)` — the unit vector toward periapsis and the one a quarter turn
+    /// ahead of it in the direction of motion. `P × Q` is the orbit normal.
+    #[must_use]
+    pub fn perifocal_basis(self) -> (DVec3, DVec3) {
+        let node = DQuat::from_axis_angle(DVec3::Y, self.ascending_node);
+        let tilt = DQuat::from_axis_angle(DVec3::X, self.inclination);
+        let peri = DQuat::from_axis_angle(DVec3::Y, self.argument_of_periapsis);
+        // Intrinsic, innermost first: periapsis turns in a plane that has not been
+        // tilted yet, so `ω` is about `+Y` here and about the orbit normal after.
+        let frame = node.mul(tilt).mul(peri);
+        (frame.rotate(DVec3::X), frame.rotate(-DVec3::Z))
+    }
+}
+
 /// A deterministic random source, sized and shaped to live *in* the world
 /// (§6 M18).
 ///
@@ -1386,5 +1580,128 @@ mod tests {
             a.transform_point3(b.transform_point3(v))
         ));
         assert_eq!(a.transpose().transpose(), a);
+    }
+
+    /// Sun, and one AU. Real magnitudes rather than unit ones: an orbit whose
+    /// numbers are all near 1 is the one case where a lost exponent does not
+    /// show, and §6 M38's whole premise is that these numbers are enormous.
+    const MU_SUN: f64 = 1.327_124_400_18e20;
+    const AU: f64 = 1.495_978_707e11;
+
+    fn orbit(eccentricity: f64) -> Orbit {
+        Orbit {
+            semi_major: if eccentricity < 1.0 { AU } else { -AU },
+            eccentricity,
+            inclination: 0.0,
+            ascending_node: 0.0,
+            argument_of_periapsis: 0.0,
+            mean_anomaly: 0.0,
+            mu: MU_SUN,
+        }
+    }
+
+    /// Specific orbital energy and the angular-momentum magnitude — the two
+    /// quantities a two-body trajectory conserves exactly, which is what makes
+    /// them a gate needing no reference implementation to argue with.
+    fn invariants(position: DVec3, velocity: DVec3) -> (f64, f64) {
+        (
+            velocity.length_squared() * 0.5 - MU_SUN / position.length(),
+            position.cross(velocity).length(),
+        )
+    }
+
+    #[test]
+    fn orbit_is_pod_and_the_frame_is_y_up() {
+        assert_pod::<Orbit>();
+        // Zero angles, zero anomaly: periapsis on +X, motion toward -Z, angular
+        // momentum +Y. The Z-up transcription is the one thing here no invariant
+        // would catch — a consistently wrong frame conserves energy perfectly.
+        let (position, velocity) = orbit(0.3).state_at(0.0);
+        assert!((position.x - AU * 0.7).abs() < AU * 1e-12);
+        assert!(position.y.abs() < AU * 1e-12 && position.z.abs() < AU * 1e-12);
+        assert!(velocity.z < 0.0 && velocity.x.abs() < velocity.length() * 1e-12);
+        let normal = position.cross(velocity);
+        assert!(normal.y > 0.0 && normal.x.abs() + normal.z.abs() < normal.y * 1e-12);
+    }
+
+    #[test]
+    fn a_circular_orbit_closes_on_its_own_period() {
+        let circle = orbit(0.0);
+        let period = circle.period().expect("an ellipse has a period");
+        let speed = sqrt(MU_SUN / AU);
+        for step in 0..16 {
+            let (position, velocity) = circle.state_at(period * f64::from(step) / 16.0);
+            assert!((position.length() - AU).abs() < AU * 1e-12);
+            assert!((velocity.length() - speed).abs() < speed * 1e-12);
+        }
+        // The closure itself: a propagator that drifts by a metre per revolution
+        // is one that has an integrator hiding in it.
+        let (start, _) = circle.state_at(0.0);
+        let (after, _) = circle.state_at(period);
+        assert!((after - start).length() < AU * 1e-12);
+        assert!(orbit(1.4).period().is_none());
+    }
+
+    #[test]
+    fn both_branches_conserve_energy_and_angular_momentum() {
+        for eccentricity in [0.0, 0.2, 0.6, 0.9, 0.97, 1.2, 2.5] {
+            let path = orbit(eccentricity);
+            // -μ/2a: positive on the hyperbolic branch, where `a` is negative,
+            // which is the sign convention paying for itself.
+            let expected_energy = -MU_SUN / (2.0 * path.semi_major);
+            let expected_momentum =
+                sqrt(MU_SUN * path.semi_major * (1.0 - eccentricity * eccentricity));
+            // A period where there is one, and a wide hyperbolic pass where there
+            // is not — the tail of a hyperbola is where a bad starter shows.
+            let span = path.period().unwrap_or(3.0e7);
+            for step in -8..=8 {
+                let (position, velocity) = path.state_at(span * f64::from(step) / 8.0);
+                let (energy, momentum) = invariants(position, velocity);
+                assert!(
+                    (energy - expected_energy).abs() < expected_energy.abs() * 1e-9,
+                    "energy drifted at e={eccentricity} step={step}: {energy} vs {expected_energy}"
+                );
+                assert!(
+                    (momentum - expected_momentum).abs() < expected_momentum * 1e-9,
+                    "momentum drifted at e={eccentricity} step={step}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_shipped_step_count_solves_kepler_on_both_branches() {
+        // The residual is the equation itself, so this grades the solve against
+        // its definition rather than against a table of answers. The bound is
+        // loose next to what `gg-tools orbit` measures — this test exists to
+        // catch a broken starter, not to pin the plateau.
+        for eccentricity in [0.0, 0.3, 0.7, 0.9, 0.95] {
+            for step in 0..32 {
+                let mean = core::f64::consts::TAU * f64::from(step) / 32.0 - core::f64::consts::PI;
+                let anomaly = kepler_anomaly(eccentricity, mean, KEPLER_STEPS);
+                let raw = anomaly - eccentricity * sin(anomaly) - mean;
+                // Wrapped: the solve answers for `M` folded into one revolution,
+                // so a residual of exactly 2π at `M = -π` is the fold, not an error.
+                let residual =
+                    raw - core::f64::consts::TAU * (raw / core::f64::consts::TAU).round();
+                assert!(
+                    residual.abs() < 1e-12,
+                    "elliptic e={eccentricity} M={mean}: {residual}"
+                );
+            }
+        }
+        for eccentricity in [1.1, 1.5, 3.0, 10.0] {
+            for step in -16..=16 {
+                let mean = f64::from(step) * 4.0;
+                let anomaly = kepler_anomaly(eccentricity, mean, KEPLER_STEPS);
+                let residual = eccentricity * sinh(anomaly) - anomaly - mean;
+                // Relative: `e sinh H` reaches 1e5 out here, so an absolute bound
+                // would be asking for more digits than an f64 holds.
+                assert!(
+                    residual.abs() < 1e-12 * (mean.abs() + 1.0),
+                    "hyperbolic e={eccentricity} M={mean}: {residual}"
+                );
+            }
+        }
     }
 }

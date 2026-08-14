@@ -111,3 +111,17 @@ f64/chain.mat.p.z = 0x401636870AF1E705
 f64/chain.mat.det = 0x3FF0000000000000
 f64/nan_div@x86_64 = 0xFFF8000000000000
 f64/nan_div@aarch64 = 0x7FF8000000000000
+
+# Added for §6 M38: `sim::Orbit` and its Kepler solve. Not a bless — these
+# are new lines, and no line above them moved when they arrived. A Kepler
+# solve composes libm transcendentals inside a data-dependent iteration, so
+# it is the one place hazards 1 and 2 meet, and the on-rails regime is the
+# claim that it lands these bits on aarch64 too.
+f64/kepler.elliptic = 0x4000AC90631411F2
+f64/kepler.hyperbolic = 0xC0009B064D553848
+f64/orbit.position.x = 0xC23BC0126E56497C
+f64/orbit.position.y = 0x422FCB2711A87B2A
+f64/orbit.position.z = 0x4240B8FC553B4976
+f64/orbit.velocity.x = 0x40C704CA33BF31F1
+f64/orbit.velocity.z = 0x40D12C88211868A4
+f64/orbit.mean_motion = 0x3E8AB8F7C2BFBCE2
