@@ -174,15 +174,22 @@ fn push() -> anyhow::Result<()> {
     // Gate 3 (§5): entry points compile + reflection codegen diff-clean. Check
     // mode: CI verifies the checked-in artifacts, it never rewrites the tree.
     crate::shaders::build_all(true)?;
-    // Gate 5, *after* gate 3 deliberately: codegen drift and a stale `.spv` are
-    // both things the suite would report as pixels, and a gate that can name the
-    // cause should get to speak first.
-    golden_suite()?;
     // §4.6's byte-reproducibility, which §6 M9's exit row asks to be CI-tested:
     // every demo's asset tree compiled twice *cleanly* and compared. Here and
     // not in the nightly tier, because the incremental cache rests on it — a
     // pack that differs run to run makes every warm build's reuse a guess.
+    //
+    // **Before the suite, not after**: `--check` leaves each pack in place and
+    // golden scenes *load* them, so on a tree with no `target/assets/` the suite
+    // fails on a missing pack instead of a picture. Only a pristine clone can
+    // see that, and it did — the goldens moved down into this tier at §6 M20
+    // item 11, where they had been running after this leg in the nightly, and
+    // `xtask fresh --clone` was red on an older cause until §6 M37 closed it.
     crate::assets::run(&["--check"])?;
+    // Gate 5, *after* gate 3 deliberately: codegen drift and a stale `.spv` are
+    // both things the suite would report as pixels, and a gate that can name the
+    // cause should get to speak first.
+    golden_suite()?;
     rejuvenation()?;
     static_link()?;
     for (pkg, feats) in [
