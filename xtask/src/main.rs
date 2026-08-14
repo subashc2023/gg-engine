@@ -20,6 +20,7 @@ mod replay;
 mod run;
 mod shaders;
 mod shell;
+mod ship;
 mod timers;
 mod util;
 
@@ -35,6 +36,7 @@ fn main() {
         Some("probe") => probe::run(rest.contains(&"--system")),
         Some("shaders") => shaders::build_all(rest.contains(&"--check")),
         Some("dist") => dist::gate(),
+        Some("ship") => ship::run_cmd(&rest),
         Some("public-api") => public_api::run(&rest),
         Some("replay") => replay::run(&rest),
         Some("reload") => shell::gates(&rest),
@@ -70,6 +72,7 @@ fn usage() -> anyhow::Result<()> {
          probe [--system]                                 capability table vs pinned lavapipe (spike 2)\n\
          shaders [--check]                                offline shader build + codegen (in-process Slang)\n\
          dist                                             dist gate: build+run tier-dist, symbol absence, crash symbolization (§5.8)\n\
+         ship <demo>                                      manual: assemble the folder a player unzips, from the demo's game.ggproj (§6 M41)\n\
          reload [--cross-tier|--segments|--chaos|--latency|--ui|--save|--editor|--launcher|--knob|--tetris|--platformer|--shooter|--orbit|--epoch|--node|--rules|--feel|--retune|--burn|--best|--agent]  the gates that need the shell over a game dylib; no flag runs the set\n\
          fresh [--clone|--canary]                         the weekly repository gates on demand: pristine-clone rebuild, cargo update canary (§5, §9)\n\
          replay [--bless]                                 §5.6 determinism material: the curated replay's hashes vs its baseline; --bless re-authors both\n\

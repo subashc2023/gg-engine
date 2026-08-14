@@ -17,9 +17,10 @@
 //! just the argv in front of it — and §3's line budget counts a launcher's own
 //! lines as the application's, not the shell's.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
+use gg_core::config::project::Project;
 use gg_core::{DEFAULT_TICK_HZ, FrameLoop};
 use gg_input::Replay;
 use tracing::{info, info_span, warn};
@@ -89,6 +90,20 @@ pub struct Args {
     /// The pack a game draws out of (§4.6). Which file, and nothing else: what
     /// to draw from it is the game's to say, through `Model`.
     pub pack: Option<PathBuf>,
+    /// What the window says (§6 M41). `None` is the dev tree's answer — the
+    /// dylib's file stem — which is a developer's name for a game and not a
+    /// player's.
+    pub title: Option<String>,
+    /// The window to open, for a project that asked for one.
+    pub window: Option<(u32, u32)>,
+    /// The folder a manifest was found in, and therefore where this run's
+    /// `gg.cfg` and its own files are. `None` is every run driven from a command
+    /// line, where the working directory is the answer it has always been.
+    pub dir: Option<PathBuf>,
+    /// Where this game's own bytes belong (§6 M41 item 4, §6 M42): the log, and
+    /// the saves and settings M42 puts beside it. Only a project has one — a dev
+    /// run writes under `target/` like everything else.
+    pub data: Option<PathBuf>,
 }
 
 /// Where a project keeps its opening scene: `scene.ggsave` beside the action
@@ -147,7 +162,7 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
     // Dist has no guard to hold, so the binding is a unit there and the lint is
     // right about that one tier and wrong about the shape.
     #[cfg_attr(not(feature = "debug-tools"), allow(clippy::let_unit_value))]
-    let _observability = init_observability()?;
+    let _observability = init_observability(args.data.as_deref())?;
     // Hazard 5's startup call site (§4.2.1): before any dependency's initializer
     // has had a chance to vandalize MXCSR/FPCR unnoticed. Demos 00–02 do the
     // same; the shell is what every demo from 03 on actually runs under.
@@ -161,6 +176,7 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
             tier = active_tier(),
             headless = gg_platform::headless(),
             game = %args.game.display(),
+            title = args.title.as_deref().unwrap_or("<no project>"),
             "golden runtime online"
         );
         // Game output has nowhere to go until this is set, and two loggers would
@@ -185,7 +201,12 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
         // until §6 M40 went looking for a knob to move.
         #[cfg(feature = "editor")]
         gg_editor::register()?;
-        gg_core::config::boot(std::path::Path::new(CONFIG), argv)?;
+        // Beside the manifest for a shipped folder, and in the working directory
+        // for every other run there has ever been (§6 M41): a game launched from
+        // a shortcut must not lose its knobs to whatever directory the shortcut
+        // happened to name.
+        let config = args.dir.as_deref().unwrap_or(Path::new(".")).join(CONFIG);
+        gg_core::config::boot(&config, argv)?;
     }
 
     while let Some(next) = session(&args)? {
@@ -247,8 +268,8 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
             .resuming_at(app.next_tick())
             .run(&mut app, target)?
     } else {
-        let title = app.title();
-        play::play(&mut app, &title, target)?
+        let title = args.title.clone().unwrap_or_else(|| app.title());
+        play::play(&mut app, &title, target, args.window)?
     };
 
     // The window is down and the GPU is accounted for (§4.3), which is the only
@@ -311,6 +332,7 @@ pub fn parse_extent(text: &str) -> anyhow::Result<(u32, u32)> {
 /// The command line, as [`Args`].
 pub fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
     let mut args = Args::default();
+    let mut project = None;
     let mut argv = argv.iter().cloned();
     while let Some(flag) = argv.next() {
         let mut value = || argv.next().with_context(|| format!("{flag} needs a value"));
@@ -337,8 +359,28 @@ pub fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
             "--editor-extent" => args.editor_extent = Some(parse_extent(&value()?)?),
             "--leak-budget" => args.leak_budget = Some(value()?.parse()?),
             "--pack" => args.pack = Some(PathBuf::from(value()?)),
+            "--project" => project = Some(PathBuf::from(value()?)),
             other => anyhow::bail!("unknown argument `{other}`"),
         }
+    }
+    // A shipped folder has no command line (§6 M41): the manifest beside the
+    // executable is what a double-click passes. Argv wins field by field, which
+    // is what keeps every dev-tree invocation and every gate byte-unchanged.
+    // The probe happens *only* when no `--game` was given, so a run with a
+    // command line never stats a file it did not name.
+    let asked = project.is_some() || args.game.as_os_str().is_empty();
+    if let Some(found) = if asked {
+        Project::found(project.as_deref())?
+    } else {
+        None
+    } {
+        args.data = found.data_dir();
+        args.dir = Some(found.dir);
+        args.title = Some(found.title);
+        args.window = found.window;
+        args.input = args.input.take().or(found.input);
+        args.pack = args.pack.take().or(found.pack);
+        args.game = found.game;
     }
     anyhow::ensure!(
         args.record.is_none() || args.replay.is_none(),
@@ -390,12 +432,16 @@ pub fn active_tier() -> &'static str {
 /// only by the gate that compares two runs, which asks for it by `RUST_LOG`.
 const LOG_FILTER: &str = "debug,gg::hash=off";
 
+/// Where a shipped run's log goes, in the game's own directory (§6 M41 item 4).
+#[cfg(not(feature = "debug-tools"))]
+const LOG_FILE: &str = "log.txt";
+
 /// The instruments (§4.8): Tracy, the log tail a crash report attaches, the
 /// console. `gg-debug` is absent from every dist graph by §3, so this is two
 /// bodies rather than one with a flag in it — dist keeps the terminal and loses
 /// the rest, which is the whole difference.
 #[cfg(feature = "debug-tools")]
-fn init_observability() -> anyhow::Result<gg_debug::Guard> {
+fn init_observability(_data: Option<&Path>) -> anyhow::Result<gg_debug::Guard> {
     let guard = gg_debug::init(LOG_FILTER)?;
     // After the tail exists, never before: a report from a process whose logging
     // had not come up yet would attach nothing (§4.8).
@@ -408,13 +454,37 @@ fn init_observability() -> anyhow::Result<gg_debug::Guard> {
 }
 
 #[cfg(not(feature = "debug-tools"))]
-fn init_observability() -> anyhow::Result<()> {
+fn init_observability(data: Option<&Path>) -> anyhow::Result<()> {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(LOG_FILTER));
+    // A shipped folder is linked without a console (§6 M41 item 4), so stdout is
+    // a handle nothing is behind: the log is a file in the game's own directory
+    // or it is nothing, and nothing is what an itch bug report otherwise holds.
+    // Truncated per run rather than rolled — the interesting session is the one
+    // that just went wrong, and a rolling appender is a dependency.
+    let sink = data
+        .map(|dir| -> std::io::Result<_> {
+            std::fs::create_dir_all(dir)?;
+            Ok(BoxMakeWriter::new(std::sync::Arc::new(
+                std::fs::File::create(dir.join(LOG_FILE))?,
+            )))
+        })
+        .transpose()?
+        .unwrap_or_else(|| BoxMakeWriter::new(std::io::stdout));
     tracing_subscriber::fmt()
         .with_target(true)
         .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(sink)
         .try_init()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // §3 keeps `gg-debug` and its crash reporter out of the dist graph, so a
+    // panic's last words are this hook's or a player watches a window vanish.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(tier = active_tier(), "{info}");
+        previous(info);
+    }));
     Ok(())
 }

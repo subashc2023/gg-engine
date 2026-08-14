@@ -15,7 +15,12 @@ use crate::app::App;
 
 /// Play until the window closes, the game asks to stop, or `target` frames have
 /// run. Returns the frames presented.
-pub fn play(app: &mut App, title: &str, target: Option<u64>) -> anyhow::Result<u64> {
+pub fn play(
+    app: &mut App,
+    title: &str,
+    target: Option<u64>,
+    window: Option<(u32, u32)>,
+) -> anyhow::Result<u64> {
     // Realtime, not locked: a windowed run is paced by the wall clock and the
     // catch-up guard is the clock's (§4.1).
     // Resuming at zero, or where a predecessor stopped: a rejuvenated session
@@ -40,7 +45,8 @@ pub fn play(app: &mut App, title: &str, target: Option<u64>) -> anyhow::Result<u
     // item 5) — and only the editor: a demo has no bar to replace one with, and
     // an undecorated window with nothing drawing a close button is a window
     // nobody can close.
-    let desc = WindowDesc::visible_unless_headless(title, (1920, 1080));
+    // A project says what it wants (§6 M41); everything else gets 1080p.
+    let desc = WindowDesc::visible_unless_headless(title, window.unwrap_or((1920, 1080)));
     gg_platform::run(desc.decorations(!app.editing()), |window, event| {
         let verdict = match event {
             // The monitor's scale factor at both edges that can change it: a

@@ -1,0 +1,13 @@
+# What `cargo xtask ship 10-tetris` assembles a folder from (§6 M41). Every name
+# here is the name the file has *in the folder*, so shipping is a copy — except
+# `game`, which is absent on purpose: a dylib is `.dll` on one host and `lib….so`
+# on another, so the folder's own manifest names it and this one cannot.
+#
+# The title is the operator's, not the tree's: this is a demo of a falling-block
+# game and stays one in `demos/`, but the mark on the obvious name is enforced by
+# the company that holds it, so what ships says something else.
+input  = input.toml
+title  = Falling Blocks
+# Twice the 640x360 canvas the game lays its board out in, so every widget lands
+# on a whole pixel.
+window = 1280x720

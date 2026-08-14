@@ -91,9 +91,27 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   recorded once at tick 0, and `gg_editor::register` moved up beside every
 ///   other crate's, which is the ordering bug this milestone found.
 ///
+/// - **A folder instead of a command line** (1385 → 1435, §6 M41): the largest
+///   raise since M16's, and the only one whose subject is what the shell *is*
+///   rather than what it wires together.
+///
+///   Every line of it answers "where did this run's arguments come from", which
+///   is the one question no engine crate may answer: `gg-core` parses the
+///   manifest and finds it (`Project::found`, so the probe policy sits beside the
+///   format), but `Args` is the shell's own type and mapping one onto the other
+///   is the shell's whole job — a session is what it was told to run. The four
+///   fields are title, window, the project's directory and the player's; the merge
+///   is six lines of "argv wins"; and the rest is the log a shipped run has
+///   nowhere else to write, since §3 keeps `gg-debug` and its crash reporter out
+///   of the dist graph and the linker takes the console away (§6 M41 item 4).
+///
+///   Note what did *not* land here: the format, the probe, the extent parse and
+///   the slug all went to `gg-core` where they are tested without a shell, and
+///   the assembly went to `xtask ship`. What is left is the conjunction, once.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio) — each argued the same way as above.
-const SHELL_BUDGET: usize = 1385;
+const SHELL_BUDGET: usize = 1435;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

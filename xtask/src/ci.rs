@@ -341,8 +341,35 @@ pub fn interactive() -> anyhow::Result<()> {
     shell_run()?;
     replay_run()?;
     crate::dist::demo_runs()?;
+    ship_run()?;
     println!("xtask interactive: green (manual windowed suite — not part of any automated tier)");
     Ok(())
+}
+
+/// The artifact, launched the way a player launches it (§6 M41 item 5).
+///
+/// The only leg in the tree whose subject is the *folder* rather than the build:
+/// no `--game`, no `--input`, no working directory that means anything — the
+/// manifest beside the executable is the whole command line. Deliberately not on
+/// lavapipe, because a player has whatever driver they have; and deliberately
+/// last, since it is the only one that needs `xtask ship` to have run.
+fn ship_run() -> anyhow::Result<()> {
+    crate::ship::run_cmd(&["10-tetris"])?;
+    let folder = crate::util::workspace_root().join("target/ship/falling-blocks");
+    let exe = folder.join(if cfg!(windows) {
+        "falling-blocks.exe"
+    } else {
+        "falling-blocks"
+    });
+    let mut cmd = std::process::Command::new(&exe);
+    // From a directory that is not the folder: cwd decides nothing any more
+    // (§6 M41 pull 3), and a run started from a shortcut is the ordinary case.
+    cmd.current_dir(crate::util::workspace_root())
+        .args(["--frames", "300"]);
+    exec(
+        &mut cmd,
+        "the shipped folder, 300 windowed frames, no arguments a player would not have",
+    )
 }
 
 /// The legs that open a sound card (§1.5's audio analogue, §6 M18 item 2).
