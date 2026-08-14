@@ -864,6 +864,7 @@ impl Editor {
                     Some(gg_assets::AssetKind::Material) => "mat",
                     Some(gg_assets::AssetKind::Scene) => "scn",
                     Some(gg_assets::AssetKind::Environment) => "env",
+                    Some(gg_assets::AssetKind::Clip) => "pcm",
                     None => "?",
                 };
                 format!(

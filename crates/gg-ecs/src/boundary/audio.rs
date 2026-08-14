@@ -38,6 +38,8 @@
 //! zeroes a retyped field (§4.2.2): [`wave::SILENT`] is 0, and a `seq` of 0
 //! never differs from the 0 the host saw last. A migration cannot cause a noise.
 
+use gg_abi::asset_id;
+
 use crate::Component;
 
 /// How a [`Sound`] is synthesized. Constants rather than an `enum` field, for
@@ -57,11 +59,23 @@ pub mod wave {
     /// `gg_math::sim::Rng` from the trigger, so the same tick makes the same
     /// hiss and a recorded session sounds like itself on replay.
     pub const NOISE: u32 = 4;
+    /// Baked PCM from the pack, named by [`Sound::clip`] — the samples arrive
+    /// as an asset rather than as arithmetic (§6 M43). Plays once.
+    pub const CLIP: u32 = 5;
+    /// The same samples, repeated until something else takes the voice. What
+    /// music is: a game stops it by setting [`SILENT`] and bumping the sequence,
+    /// because a trigger replaces whatever held the slot and a silent one holds
+    /// nothing.
+    pub const CLIP_LOOP: u32 = 6;
 }
 
-/// The longest a single trigger may sound, milliseconds. A voice that outlived
-/// the run holds a slot in the host's fixed bank forever; clamped rather than
-/// refused, because the game asking for it is not an error worth halting a sim.
+/// The longest a single *synthesized* trigger may sound, milliseconds. A voice
+/// that outlived the run holds a slot in the host's fixed bank forever; clamped
+/// rather than refused, because the game asking for it is not an error worth
+/// halting a sim.
+///
+/// A [`wave::CLIP`] is not clamped by it: what bounds a clip is the clip, and a
+/// [`wave::CLIP_LOOP`] outlives this cap on purpose (§6 M43).
 pub const MAX_MS: u32 = 4_000;
 
 /// One voice the game can trigger.
@@ -87,7 +101,9 @@ pub struct Sound {
     pub seq: u32,
     /// One of [`wave`]'s constants. An unknown one is silent.
     pub wave: u32,
-    /// Frequency at the start of the note, Hz. Unread for [`wave::NOISE`].
+    /// Frequency at the start of the note, Hz. Unread for [`wave::NOISE`] and
+    /// for both clip waves — a sample plays at the rate it was authored at, and
+    /// pitching one is a knob no milestone has asked for.
     pub hz: f32,
     /// Frequency at the end, Hz — the note sweeps linearly between the two.
     /// Equal to [`hz`](Sound::hz) for a steady tone, which is the common case.
@@ -96,13 +112,33 @@ pub struct Sound {
     /// its own business and a game cannot make it clip by asking loudly.
     pub gain: f32,
     /// How long the note lasts, milliseconds. Clamped to [`MAX_MS`].
+    ///
+    /// For [`wave::CLIP`], `0` is the clip's own length — which is the whole
+    /// point of naming a clip — and anything else truncates it. Unread for
+    /// [`wave::CLIP_LOOP`], which ends when something else takes the voice.
     pub ms: u32,
     /// Fade in, milliseconds. Zero is a click on every trigger — a square wave
     /// starting at full amplitude is a step, and a step is a broadband snap.
     pub attack_ms: u32,
     /// Fade out, milliseconds, ending at silence. Overlapping attack and release
     /// in a note shorter than their sum is resolved by the host, not refused.
+    /// Unread for [`wave::CLIP_LOOP`]: a note with no end has nothing to fade
+    /// into, and a release applied per repeat would pump the loop.
     pub release_ms: u32,
+    /// Which baked clip to play, as [`gg_abi::asset_id`] of its pack name — or
+    /// 0 for none. Read only by the clip waves.
+    ///
+    /// A `u64` rather than `gg_assets::AssetId` for [`Model::asset`](super::Model)'s
+    /// reason: a game crate may not link the crate that defines that type (§3).
+    /// And an id the loaded pack does not hold is **silence**, never an error —
+    /// a pack is rebuilt while the game runs (§4.6 watch mode), and a cue that
+    /// panicked because an artist hit save would be the worst possible answer.
+    ///
+    /// Last rather than beside [`wave`](Sound::wave), so the widening reads as
+    /// the addition it is — `gg_assets::Vertex`'s tangent went on the end for
+    /// the same reason. Eight bytes at offset 32 is also the only place it fits
+    /// without padding, which `Pod` would refuse.
+    pub clip: u64,
 }
 
 impl Sound {
@@ -120,6 +156,41 @@ impl Sound {
             ms,
             attack_ms: 2,
             release_ms: ms / 4,
+            clip: 0,
+        }
+    }
+
+    /// A baked clip, played once at its own length (§6 M43).
+    ///
+    /// The envelope is one millisecond at each end and no more: a `.wav` was
+    /// authored with its own attack and decay, and a host envelope large enough
+    /// to shape it would be the engine overruling the file. One millisecond is
+    /// there only to keep a source that starts mid-waveform from clicking.
+    #[must_use]
+    pub fn clip(name: &str, gain: f32) -> Self {
+        Sound {
+            seq: 0,
+            wave: wave::CLIP,
+            hz: 0.0,
+            hz_to: 0.0,
+            gain,
+            ms: 0,
+            attack_ms: 1,
+            release_ms: 1,
+            clip: asset_id(name),
+        }
+    }
+
+    /// The same clip, repeated until something else takes the voice — music.
+    ///
+    /// Stopped by [`wave::SILENT`] and a [`play`](Sound::play), which is the
+    /// protocol it already had: a trigger replaces the slot's voice, and a
+    /// silent trigger leaves nothing behind.
+    #[must_use]
+    pub fn music(name: &str, gain: f32) -> Self {
+        Sound {
+            wave: wave::CLIP_LOOP,
+            ..Sound::clip(name, gain)
         }
     }
 
@@ -146,9 +217,34 @@ mod tests {
     #[test]
     fn the_protocol_type_is_flat_and_padding_free() {
         // `Pod` already refuses padding; this pins the number so a field added
-        // is a visible edit rather than a silent layout move.
-        assert_eq!(size_of::<Sound>(), 32);
-        assert_eq!(align_of::<Sound>(), 4);
+        // is a visible edit rather than a silent layout move. 32 until §6 M43
+        // put a clip id on the end, which took the alignment with it.
+        assert_eq!(size_of::<Sound>(), 40);
+        assert_eq!(align_of::<Sound>(), 8);
+    }
+
+    /// The forward-compatibility rule the clip waves rest on, from the other
+    /// side: a zeroed `Sound` names no clip either, so a migration that widened
+    /// this component cannot make a world play one.
+    #[test]
+    fn a_zeroed_sound_names_no_clip() {
+        let zeroed: Sound = bytemuck::Zeroable::zeroed();
+        assert_eq!(zeroed.clip, 0);
+        assert_eq!(Sound::tone(wave::SQUARE, 440.0, 60, 0.5).clip, 0);
+    }
+
+    #[test]
+    fn a_clip_is_named_the_way_every_other_pack_asset_is() {
+        let cue = Sound::clip("tetris/lock", 0.4);
+        assert_eq!(cue.clip, asset_id("tetris/lock"));
+        assert_eq!(cue.wave, wave::CLIP);
+        assert_eq!(cue.ms, 0, "0 is the clip's own length");
+        // Music is the same clip with one word changed, so a game cannot get a
+        // loop and a one-shot out of step by writing the fields twice.
+        let theme = Sound::music("tetris/theme", 0.3);
+        assert_eq!(theme.wave, wave::CLIP_LOOP);
+        assert_eq!(theme.clip, asset_id("tetris/theme"));
+        assert_eq!(theme.gain, 0.3);
     }
 
     /// The property `World::restore` needs: a component zeroed by a migration

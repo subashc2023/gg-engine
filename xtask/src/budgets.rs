@@ -128,9 +128,29 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   systems have run once — which is a fact about the frame the shell composes
 ///   and about nothing either crate can see.
 ///
+/// - **The clips a game plays** (1485 → 1515, §6 M43): open the pack, walk the
+///   entries of one kind, hand the bank over. Thirty lines, and the same shape
+///   of argument a third time — with the novelty that here *two* crates are
+///   each a step away from doing it, and for different reasons.
+///
+///   `gg-audio` is the obvious home and is the one place it must not be. Its
+///   §3 budget exists to keep a decoder out (its manifest says so in as many
+///   words), and a pack reader is the first step of one; it also has five of
+///   six slots spent, so the file that opened a pack would be the file that
+///   closed the budget. `gg-render` already opens this very file and is the
+///   other near miss — but it opens it for the GPU, and under `GG_HEADLESS=1`
+///   there is no renderer at all, while a headless run still fires cues and a
+///   gate still has to ask whether one resolved.
+///
+///   So the shell is once more the only place both halves are in scope, and
+///   what it says is thirty lines long: a pack that will not open is silence
+///   and a log line, a blob that will not read is one clip skipped, and the
+///   bank goes to `gg-audio` as a slice — which is exactly the interface that
+///   let `gg-audio` spend none of its slots.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio) — each argued the same way as above.
-const SHELL_BUDGET: usize = 1485;
+const SHELL_BUDGET: usize = 1515;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

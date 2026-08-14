@@ -48,6 +48,13 @@ gg-ui = { path = "../gg-ui" }
 # a silent run out of `GG_HEADLESS`, not out of a missing dependency, so the code
 # that opens a device is the code the dist gate builds.
 gg-audio = { path = "../gg-audio" }
+# The pack reader, for the clips alone (§6 M43). `gg-audio` may not have it —
+# a decoder or a format is what would make `cpal` stop being a rental, and its
+# budget is spent — and the renderer, which opens the same file, does not exist
+# at all under `GG_HEADLESS=1`. So the shell is the one place the pack and the
+# speakers are both in scope, which is the same sentence §6 M42 wrote about the
+# player's settings.
+gg-assets = { path = "../gg-assets" }
 # The editor (§6 M15). Lab equipment like `gg-debug`: optional here, banned from
 # the dist graph in `deny.toml`, and absent from `tier-dist` and
 # `tier-dist-verify` — the latter deliberately, because dist-verify exists to be

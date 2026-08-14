@@ -44,6 +44,8 @@ pub mod asset {
     pub struct Scene;
     /// A [`crate::Environment`]: an SH projection and its radiance chain's id.
     pub struct Environment;
+    /// A [`crate::Clip`]: mono 16-bit PCM, read in place.
+    pub struct Clip;
 }
 
 /// What a handle's type parameter promises about the entry behind it. The
@@ -68,6 +70,9 @@ impl Asset for asset::Scene {
 }
 impl Asset for asset::Environment {
     const KIND: AssetKind = AssetKind::Environment;
+}
+impl Asset for asset::Clip {
+    const KIND: AssetKind = AssetKind::Clip;
 }
 
 /// Where an asset stands (§4.6). Read off a [`Handle`] with no registry in
@@ -536,6 +541,15 @@ impl Assets {
         handle: &Handle<asset::Environment>,
     ) -> Result<crate::Environment, crate::environment::EnvironmentError> {
         crate::Environment::read(self.blob(handle.id()))
+    }
+
+    /// A clip, read in place — never through a worker, because PCM is the one
+    /// payload there is nothing to produce from (`crate::clip`).
+    ///
+    /// # Errors
+    /// A blob whose samples do not lie inside it.
+    pub fn clip(&self, handle: &Handle<asset::Clip>) -> Result<crate::Clip<'_>, crate::ClipError> {
+        crate::Clip::read(self.blob(handle.id()))
     }
 
     /// A scene, read in place.

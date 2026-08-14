@@ -33,6 +33,15 @@ gg-extract = { path = "../../crates/gg-extract" }
 # components in a World, read through the same typed query the shell uses.
 gg-ecs = { path = "../../crates/gg-ecs" }
 gg-math = { path = "../../crates/gg-math" }
+# §6 M43's grading. `gg-audio` because the reach column has to be what the
+# *shipped* mixer can produce — a model of it here would answer the question
+# about this file instead; `gg-assets` because the loss column goes through the
+# blob a pack actually holds. (`ggc` is already below, for M34's integral, and
+# is what keeps the loss column measuring the real bake rather than a second
+# decoder that happens to agree with it.)
+gg-audio = { path = "../../crates/gg-audio" }
+gg-assets = { path = "../../crates/gg-assets" }
+
 # `hash-scale` declares its own components rather than borrowing the boundary's:
 # its spread axis needs *zero-sized* markers, so archetype count moves without
 # the byte count moving with it, and a component must be `Pod` to exist at all

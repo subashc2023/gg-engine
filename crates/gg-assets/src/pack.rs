@@ -120,6 +120,8 @@ pub enum AssetKind {
     /// An environment blob: an order-2 SH projection and the id of the
     /// prefiltered radiance chain it shares a source with (§6 M27).
     Environment = 5,
+    /// A clip blob: one clip header, then mono 16-bit PCM (§6 M43).
+    Clip = 6,
 }
 
 impl AssetKind {
@@ -130,6 +132,7 @@ impl AssetKind {
             3 => Some(Self::Material),
             4 => Some(Self::Scene),
             5 => Some(Self::Environment),
+            6 => Some(Self::Clip),
             _ => None,
         }
     }

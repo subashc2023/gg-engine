@@ -26,7 +26,8 @@ use crate::import;
 /// 2 since M11: meshes carry a tangent, generated where the document has none.
 /// 3 since M27: `.hdr` sources compile, and every prefilter constant beside them
 /// is part of what a blob means.
-pub const IMPORT_VERSION: u32 = 3;
+/// 4 since M43: `.wav` sources compile to clips.
+pub const IMPORT_VERSION: u32 = 4;
 
 /// What a build did, for the log and for the tests.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -41,6 +42,8 @@ pub struct Stats {
     pub triangles: usize,
     /// (image, role) pairs block-compressed this run.
     pub textures: usize,
+    /// Clips compiled this run.
+    pub clips: usize,
 }
 
 /// Compile every source under `source` into a pack at `out`.
@@ -79,11 +82,13 @@ pub fn build(source: &Path, out: &Path) -> Result<Stats> {
             meshes = import.meshes,
             triangles = import.triangles,
             textures = import.textures,
+            clips = import.clips,
             "compiled"
         );
         stats.compiled += 1;
         stats.triangles += import.triangles;
         stats.textures += import.textures;
+        stats.clips += import.clips;
         for asset in import.assets {
             writer.add(&asset.name, asset.kind, hash, asset.blob)?;
             stats.assets += 1;
@@ -123,7 +128,7 @@ fn reuse(previous: &Pack, stem: &str, hash: u64, writer: &mut PackWriter) -> Res
     Ok(Some(owned.len()))
 }
 
-/// Every glTF document under `root`, sorted by path.
+/// Every source under `root`, sorted by path.
 ///
 /// Sorted because the walk order is the filesystem's and differs between
 /// machines; the pack's own sort by id would hide that, but the *build log*
@@ -140,7 +145,7 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>> {
                 stack.push(path);
             } else if matches!(
                 path.extension().and_then(|e| e.to_str()),
-                Some("gltf" | "glb" | "hdr")
+                Some("gltf" | "glb" | "hdr" | "wav")
             ) {
                 found.push(path);
             }
@@ -207,11 +212,14 @@ pub fn source_hash_at(path: &Path, import_version: u32) -> Result<u64> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     core::hash::Hasher::write(&mut hasher, &bytes);
 
-    // An `.hdr` is a single self-contained file: its bytes above are the whole
-    // source, and there is no document to walk for references. Checked here
-    // rather than by trying glTF first, because "it did not parse as glTF" is
-    // also what a corrupt glTF looks like.
-    if path.extension().and_then(|e| e.to_str()) == Some("hdr") {
+    // An `.hdr` and a `.wav` are single self-contained files: their bytes above
+    // are the whole source, and there is no document to walk for references.
+    // Checked here rather than by trying glTF first, because "it did not parse
+    // as glTF" is also what a corrupt glTF looks like.
+    if matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("hdr" | "wav")
+    ) {
         return Ok(core::hash::Hasher::finish(&hasher));
     }
 
@@ -305,6 +313,7 @@ pub fn list(path: &Path) -> Result<()> {
             Some(AssetKind::Material) => "material",
             Some(AssetKind::Scene) => "scene",
             Some(AssetKind::Environment) => "environment",
+            Some(AssetKind::Clip) => "clip",
             None => "?",
         };
         println!(

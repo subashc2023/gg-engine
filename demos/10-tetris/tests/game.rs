@@ -12,9 +12,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use demo_10_tetris::{
-    Banner, Bay, Best, COLORS, CUE_CLEAR, CUE_HOLD, CUE_LEVEL, CUE_LOCK, CUE_MOVE, CUE_OVER,
-    CUE_ROTATE, CUES, Cell, Cue, HARD_DROP, HEIGHT, HIDDEN, HOLD, HOLD_BAY, HudLine, LEFT,
-    M_CURSOR, M_DONE, M_GHOST, M_QUIT, M_RESUME, M_THEME, M_TITLE_SETTINGS, M_VOLUME, MENU,
+    Banner, Bay, Best, COLORS, CUE_CLEAR, CUE_HOLD, CUE_LEVEL, CUE_LOCK, CUE_MOVE, CUE_MUSIC,
+    CUE_OVER, CUE_ROTATE, CUES, Cell, Cue, HARD_DROP, HEIGHT, HIDDEN, HOLD, HOLD_BAY, HudLine,
+    LEFT, M_CURSOR, M_DONE, M_GHOST, M_QUIT, M_RESUME, M_THEME, M_TITLE_SETTINGS, M_VOLUME, MENU,
     MIN_GRAVITY_TICKS, NEXT_BAY, NO_PIECE, Options, PAUSE, PRESETS, Piece, Play, RESTART,
     ROTATE_CW, Rules, SCREEN_PAUSED, SCREEN_PLAYING, SCREEN_SETTINGS, SCREEN_TITLE, SEED, SHAPES,
     Screen, THEMES, WIDTH, Well, cells_of, clear_rows, collides, color_of, draw, gravity_for,
@@ -23,7 +23,7 @@ use demo_10_tetris::{
 };
 use gg_ecs::boundary::{
     self, AbiInfo, ActionId, ComponentsTable, HostApiV1, InputFrame, Sound, SystemsTable, TickCtx,
-    Widget, wave,
+    Widget, asset_id, wave,
 };
 use gg_ecs::{Query, World};
 use gg_math::sim;
@@ -659,19 +659,96 @@ fn a_new_game_declares_a_cue_bank_that_has_not_played() {
     assert_eq!(game.cues(), [0; CUES], "a fresh board played something");
     // And every one of them is a voice that would make a sound if triggered —
     // a cue wired to `wave::SILENT` is a cue that is quietly not there.
+    //
+    // Every one but the music, which is silent on purpose: the component is the
+    // theme's own state (§6 M43), so a cue bank spawned already looping would
+    // start it over the title screen. That is asserted below rather than
+    // excused here.
     for kind in 0..CUES as u8 {
         let voice = game.cue(kind);
-        assert_ne!(voice.wave, wave::SILENT, "cue {kind} is silent");
-        assert!(
-            voice.gain > 0.0 && voice.ms > 0,
-            "cue {kind} cannot be heard"
-        );
         assert_eq!(
             voice,
             voice_of(kind),
             "cue {kind} is not the voice it declares"
         );
+        if kind == CUE_MUSIC {
+            assert_eq!(voice.wave, wave::SILENT, "the theme starts on the title");
+            continue;
+        }
+        assert_ne!(voice.wave, wave::SILENT, "cue {kind} is silent");
+        // A clip carries no length of its own here: `ms` 0 *is* the clip's own
+        // length (§6 M43), so the audibility test is length-or-a-clip.
+        assert!(
+            voice.gain > 0.0 && (voice.ms > 0 || voice.clip != 0),
+            "cue {kind} cannot be heard"
+        );
     }
+    // Three of them are baked clips and the rest are tones, which is the shape
+    // §6 M43 landed on rather than a replacement: the cue that is *retuned per
+    // event* stays synthesized, because a sample cannot be pitched.
+    for kind in [CUE_LOCK, CUE_LEVEL, CUE_OVER] {
+        assert_eq!(game.cue(kind).wave, wave::CLIP);
+        assert_ne!(game.cue(kind).clip, 0, "cue {kind} names no clip");
+    }
+    assert_eq!(game.cue(CUE_CLEAR).wave, wave::SQUARE);
+    assert_eq!(game.cue(CUE_CLEAR).clip, 0, "a tone named a clip");
+}
+
+/// The theme, on the four edges that move it (§6 M43).
+///
+/// A loop is a level rather than an event, so what is under test is that the
+/// component *is* the state: a `CLIP_LOOP` means playing, silence means not,
+/// and nothing anywhere has a second flag that could disagree with it.
+#[test]
+fn the_theme_follows_the_screen_and_stops_when_the_run_does() {
+    let mut game = Game::load();
+    game.step();
+    assert_eq!(game.cue(CUE_MUSIC).wave, wave::SILENT, "on the title");
+
+    game.start();
+    let playing = game.cue(CUE_MUSIC);
+    assert_eq!(playing.wave, wave::CLIP_LOOP, "starting a game was quiet");
+    assert_eq!(playing.clip, asset_id("theme"));
+    assert_ne!(playing.seq, 0, "the theme was set but never triggered");
+
+    // A tick that changes nothing leaves it alone — the whole point of the
+    // component being the state is that there is no edge to re-fire.
+    let steady = game.cue(CUE_MUSIC).seq;
+    game.steps(30);
+    assert_eq!(game.cue(CUE_MUSIC).seq, steady, "the theme retriggered");
+
+    game.hold(PAUSE);
+    game.step();
+    assert_eq!(game.cue(CUE_MUSIC).wave, wave::SILENT);
+    // A tick with the key up between the two presses: the transition wants a
+    // fresh edge, and holding PAUSE down for two ticks is one press.
+    game.step();
+    game.hold(PAUSE);
+    game.step();
+    assert_eq!(game.screen(), SCREEN_PLAYING);
+    assert_eq!(
+        game.cue(CUE_MUSIC).wave,
+        wave::CLIP_LOOP,
+        "resume was quiet"
+    );
+
+    // And the run ending, which changes no screen at all — the game-over
+    // overlay is drawn on the playing screen, so this edge is `step`'s.
+    for tick in 0..2_000 {
+        if tick % 2 == 0 {
+            game.hold(HARD_DROP);
+        }
+        game.step();
+        if game.one::<Play>().over != 0 {
+            break;
+        }
+    }
+    assert_ne!(game.one::<Play>().over, 0, "the well never filled");
+    assert_eq!(
+        game.cue(CUE_MUSIC).wave,
+        wave::SILENT,
+        "the theme played on over a finished game"
+    );
 }
 
 /// The ordinary moves, each on the tick it happened and not before.
@@ -1142,7 +1219,21 @@ fn pause_freezes_the_game_and_resume_continues_it() {
     }
     assert_eq!(game.one::<Piece>().col, frozen.col, "a paused piece moved");
     assert_eq!(game.one::<Piece>().row, frozen.row, "a paused piece fell");
-    assert_eq!(played(quiet, game.cues()), Vec::<u8>::new());
+    // The theme is the one voice a pause *does* touch, and it stops (§6 M43) —
+    // which is a `seq` bump like any other, so the gameplay cues are what the
+    // silence is asserted over.
+    assert_eq!(
+        played(quiet, game.cues())
+            .into_iter()
+            .filter(|kind| *kind != CUE_MUSIC)
+            .collect::<Vec<_>>(),
+        Vec::<u8>::new()
+    );
+    assert_eq!(
+        game.cue(CUE_MUSIC).wave,
+        wave::SILENT,
+        "the theme played on over a paused game"
+    );
 
     game.hold(PAUSE);
     game.step();

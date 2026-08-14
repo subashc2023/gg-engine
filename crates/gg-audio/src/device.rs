@@ -9,7 +9,22 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use tracing::{debug, warn};
 
+use crate::bank::Bank;
 use crate::synth::{Mixer, Trigger};
+
+/// What the sim thread leaves for the callback to pick up.
+///
+/// One structure behind one lock rather than three channels: the callback takes
+/// the lock once per buffer and everything it might need is behind it, so
+/// adding the bank and the volume cost no second chance to lose the race.
+#[derive(Default)]
+struct Pending {
+    triggers: Vec<Trigger>,
+    /// Set when the shell installs a pack (§6 M43); taken by the callback.
+    bank: Option<Arc<Bank>>,
+    /// The player's master volume, read off the world every tick.
+    master: f32,
+}
 
 /// Triggers the queue holds between one tick and the callback that drains it.
 ///
@@ -43,7 +58,7 @@ pub enum DeviceError {
 /// lifetime of the sound — there is nothing to shut down explicitly and no way
 /// to leak a running device past the shell that owns it.
 pub struct Device {
-    queue: Arc<Mutex<Vec<Trigger>>>,
+    queue: Arc<Mutex<Pending>>,
     rate: u32,
     channels: u16,
     /// Held for its `Drop`. Never read, and `cpal::Stream` is not `Send`, which
@@ -65,7 +80,11 @@ impl Device {
         let config: cpal::StreamConfig = supported.into();
         let rate = config.sample_rate.0;
         let channels = config.channels;
-        let queue = Arc::new(Mutex::new(Vec::with_capacity(QUEUE)));
+        let queue = Arc::new(Mutex::new(Pending {
+            triggers: Vec::with_capacity(QUEUE),
+            bank: None,
+            master: 1.0,
+        }));
 
         // Every format `cpal` names as a device default in practice. An
         // unhandled one is an error rather than a silent cast: writing f32
@@ -93,18 +112,23 @@ impl Device {
         })
     }
 
-    /// Hand `triggers` to the audio thread. Returns how many were taken.
+    /// Hand `triggers` and the current master volume to the audio thread.
+    /// Returns how many triggers were taken.
+    ///
+    /// Called every tick, triggers or not, because the volume is a level rather
+    /// than an event — a slider moved on a quiet frame still has to arrive.
     ///
     /// Blocks on the queue's lock, which the callback holds only for the length
     /// of a `Vec` drain — the *callback* is the side that must never wait, and
     /// it does not.
-    pub(crate) fn send(&self, triggers: &[Trigger]) -> usize {
+    pub(crate) fn send(&self, triggers: &[Trigger], master: f32) -> usize {
         let Ok(mut queue) = self.queue.lock() else {
             // A poisoned lock means the audio callback panicked. The stream is
             // already dead; saying so every tick would be sixty lines a second.
             return 0;
         };
-        let room = QUEUE.saturating_sub(queue.len());
+        queue.master = master;
+        let room = QUEUE.saturating_sub(queue.triggers.len());
         let taken = triggers.len().min(room);
         if taken < triggers.len() {
             warn!(
@@ -112,8 +136,16 @@ impl Device {
                 "audio trigger queue full — the device is not draining"
             );
         }
-        queue.extend_from_slice(&triggers[..taken]);
+        queue.triggers.extend_from_slice(&triggers[..taken]);
         taken
+    }
+
+    /// Hand the clips over (§6 M43). Replaces whatever the callback holds, and
+    /// cuts every sounding voice — see [`Mixer::set_bank`](crate::Mixer::set_bank).
+    pub(crate) fn install(&self, bank: Arc<Bank>) {
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.bank = Some(bank);
+        }
     }
 
     /// Samples per second the device actually runs at.
@@ -134,7 +166,7 @@ impl Device {
 fn build<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    queue: &Arc<Mutex<Vec<Trigger>>>,
+    queue: &Arc<Mutex<Pending>>,
     rate: u32,
     channels: u16,
 ) -> Result<cpal::Stream, DeviceError>
@@ -155,7 +187,14 @@ where
             // 10 ms, below what anyone hears as late — where blocking costs an
             // audible dropout.
             if let Ok(mut pending) = queue.try_lock() {
-                for trigger in pending.drain(..) {
+                // The bank first: a trigger arriving in the same batch as the
+                // pack it names must resolve against the new clips, not miss by
+                // one buffer and fall silent.
+                if let Some(bank) = pending.bank.take() {
+                    mixer.set_bank(bank);
+                }
+                mixer.set_master(pending.master);
+                for trigger in pending.triggers.drain(..) {
                     mixer.fire(&trigger);
                 }
             }

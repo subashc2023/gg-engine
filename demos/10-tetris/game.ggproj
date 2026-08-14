@@ -7,6 +7,10 @@
 # game and stays one in `demos/`, but the mark on the obvious name is enforced by
 # the company that holds it, so what ships says something else.
 input  = input.toml
+# The clips (§6 M43). Named here because M41's gate refuses a demo that has an
+# `assets/` tree and a manifest that does not — a game shipping without its pack
+# is one that opens silent, three layers from anything that says so.
+pack   = clips.ggpack
 title  = Falling Blocks
 # Twice the 640x360 canvas the game lays its board out in, so every widget lands
 # on a whole pixel.

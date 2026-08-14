@@ -57,6 +57,8 @@ pub const gg_ecs::boundary::state::FOCUSED: u32
 pub const gg_ecs::boundary::state::HELD: u32
 pub const gg_ecs::boundary::state::HOVERED: u32
 pub mod gg_ecs::boundary::wave
+pub const gg_ecs::boundary::wave::CLIP: u32
+pub const gg_ecs::boundary::wave::CLIP_LOOP: u32
 pub const gg_ecs::boundary::wave::NOISE: u32
 pub const gg_ecs::boundary::wave::SILENT: u32
 pub const gg_ecs::boundary::wave::SINE: u32
@@ -242,6 +244,7 @@ impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Sky
 pub fn gg_ecs::boundary::Sky::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 #[repr(C)] pub struct gg_ecs::boundary::Sound
 pub gg_ecs::boundary::Sound::attack_ms: u32
+pub gg_ecs::boundary::Sound::clip: u64
 pub gg_ecs::boundary::Sound::gain: f32
 pub gg_ecs::boundary::Sound::hz: f32
 pub gg_ecs::boundary::Sound::hz_to: f32
@@ -250,6 +253,8 @@ pub gg_ecs::boundary::Sound::release_ms: u32
 pub gg_ecs::boundary::Sound::seq: u32
 pub gg_ecs::boundary::Sound::wave: u32
 impl gg_ecs::boundary::Sound
+pub fn gg_ecs::boundary::Sound::clip(&str, f32) -> Self
+pub fn gg_ecs::boundary::Sound::music(&str, f32) -> Self
 pub fn gg_ecs::boundary::Sound::play(&mut self)
 pub fn gg_ecs::boundary::Sound::sweep(u32, f32, f32, u32, f32) -> Self
 pub fn gg_ecs::boundary::Sound::tone(u32, f32, u32, f32) -> Self

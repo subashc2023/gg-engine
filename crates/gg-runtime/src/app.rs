@@ -246,7 +246,13 @@ impl App {
             extracted: Extracted::default(),
             view: View::default(),
             ui: gg_ui::Ui::new()?,
-            audio: gg_audio::Audio::device_unless_headless()?,
+            audio: {
+                let mut audio = gg_audio::Audio::device_unless_headless()?;
+                if let Some(pack) = &args.pack {
+                    audio.install(clips(pack));
+                }
+                audio
+            },
             cursor: Cursor::new(args.editor || ui_binding.is_some()),
             looks: input_looks,
             ui_binding,
@@ -1029,6 +1035,37 @@ fn journal(args: &crate::Args, game: &str) -> gg_agent::Journal {
 #[cfg(feature = "editor")]
 fn hands_back(held: bool, running: Option<bool>) -> bool {
     held && running.is_some_and(|running| !running)
+}
+
+/// The clips in `path`, as a bank `gg-audio` can be handed (§6 M43).
+///
+/// Read here rather than in `gg-audio`, which links no pack and parses no
+/// format (§3), and not through the renderer, which opens the same file for the
+/// GPU's sake and does not exist at all under `GG_HEADLESS=1` — a headless run
+/// still fires cues, and a gate has to be able to ask whether one resolved.
+///
+/// A pack that will not open is silence and a line in the log, never a refusal:
+/// the renderer is the half that needs one to draw, and a game whose audio
+/// failed to load should still be playable enough to say so.
+fn clips(path: &Path) -> gg_audio::Bank {
+    let mut bank = gg_audio::Bank::new();
+    let pack = match gg_assets::Pack::open(path) {
+        Ok(pack) => pack,
+        Err(error) => {
+            warn!(pack = %path.display(), %error, "audio: no clips — the pack did not open");
+            return bank;
+        }
+    };
+    for entry in pack.entries() {
+        if entry.kind() != Some(gg_assets::AssetKind::Clip) {
+            continue;
+        }
+        match gg_assets::Clip::read(pack.blob(entry)) {
+            Ok(clip) => bank.add(entry.id.0, clip.rate(), clip.samples()),
+            Err(error) => warn!(name = pack.name(entry), %error, "audio: clip skipped"),
+        }
+    }
+    bank
 }
 
 /// The OS cursor, and which of the two things a mouse does is happening (§6

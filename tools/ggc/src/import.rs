@@ -45,6 +45,8 @@ pub struct Import {
     pub triangles: usize,
     /// Compiled (image, role) pairs.
     pub textures: usize,
+    /// Compiled clips.
+    pub clips: usize,
 }
 
 /// Compile one source. `stem` is its pack-relative path with the extension
@@ -54,10 +56,31 @@ pub struct Import {
 /// walked for. An `.hdr` is not a document with meshes in it and shares nothing
 /// with the glTF path below but this function's signature.
 pub fn document(path: &std::path::Path, stem: &str) -> Result<Import> {
-    if path.extension().and_then(|e| e.to_str()) == Some("hdr") {
-        return panorama(path, stem);
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("hdr") => panorama(path, stem),
+        Some("wav") => clip(path, stem),
+        _ => gltf_document(path, stem),
     }
-    gltf_document(path, stem)
+}
+
+/// Compile one `.wav` into a clip (§6 M43) — one source, one asset, named by the
+/// stem alone, so a game writes `Sound::clip("sfx/pickup")` for the path it put
+/// the file at. [`crate::clip`] is where the refusals live.
+fn clip(path: &std::path::Path, stem: &str) -> Result<Import> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let (rate, samples) =
+        crate::clip::parse(&bytes).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(Import {
+        assets: vec![Compiled {
+            name: stem.to_owned(),
+            kind: AssetKind::Clip,
+            blob: gg_assets::clip::encode(rate, &samples),
+        }],
+        meshes: 0,
+        triangles: 0,
+        textures: 0,
+        clips: 1,
+    })
 }
 
 /// Compile one equirectangular `.hdr` into an environment and its prefiltered
@@ -99,6 +122,7 @@ fn panorama(path: &std::path::Path, stem: &str) -> Result<Import> {
         meshes: 0,
         triangles: 0,
         textures: 1,
+        clips: 0,
     })
 }
 
@@ -190,6 +214,7 @@ fn gltf_document(path: &std::path::Path, stem: &str) -> Result<Import> {
         meshes,
         triangles,
         textures,
+        clips: 0,
     })
 }
 
@@ -206,9 +231,16 @@ fn texture_name(stem: &str, image: usize, role: Role) -> String {
 /// `props/chair.gltf` share that prefix, so a stem would claim its namesake
 /// directory's assets — refusing reuse forever while the hashes differ, and
 /// failing a warm build with `DuplicateId` the day the two files are identical.
+///
+/// An empty remainder is the *exact* name and therefore owned: an `.hdr`'s
+/// environment and a `.wav`'s clip are both named by the stem alone. Missing it
+/// meant every `.hdr` recompiled on every warm build, silently — the pack was
+/// still correct, so nothing failed except the cache.
 pub fn owns(stem: &str, name: &str) -> bool {
     name.strip_prefix(stem).is_some_and(|rest| {
-        rest == "/scene"
+        rest.is_empty()
+            || rest == "/scene"
+            || rest == "/radiance"
             || ["/mesh/", "/material/", "/texture/"]
                 .iter()
                 .any(|kind| rest.starts_with(kind))
@@ -662,6 +694,21 @@ mod tests {
         // A stem that merely *starts* like another claims nothing of its
         // namesake either direction.
         assert!(!owns("prop", "props/scene"));
+        // The same hazard one character in, which is what the empty remainder
+        // below must not weaken: `a` owns `a`, never anything of `ab`.
+        assert!(!owns("a", "ab"));
+    }
+
+    /// The bare-`{stem}` regression: an `.hdr` names its environment by the stem
+    /// alone, so an ownership test that required a `/` suffix found none of a
+    /// panorama's assets and recompiled every one of them on every warm build.
+    #[test]
+    fn a_source_whose_asset_carries_the_bare_stem_is_still_owned() {
+        assert!(owns("sky/dusk", "sky/dusk"), "the environment");
+        assert!(owns("sky/dusk", "sky/dusk/radiance"), "its chain");
+        // And a clip, which is the whole of a `.wav`'s output.
+        assert!(owns("sfx/pickup", "sfx/pickup"));
+        assert!(!owns("sfx/pick", "sfx/pickup"));
     }
 
     /// A grid of quads, emitted in scanline order — the order that maximizes

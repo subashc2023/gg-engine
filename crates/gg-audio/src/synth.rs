@@ -6,8 +6,12 @@
 //! talks to an OS, and it is a buffer's worth of arithmetic away from anything
 //! testable. Everything with an opinion is here.
 
+use std::sync::Arc;
+
 use gg_ecs::boundary::{MAX_MS, Sound, wave};
 use gg_math::sim;
+
+use crate::bank::Bank;
 
 /// Voices that can sound at once. A fixed bank rather than a growing list: the
 /// mixer runs in an audio callback, where allocating is the classic way to miss
@@ -58,19 +62,81 @@ struct Voice {
     /// same session sounds the same twice — a run whose hiss differed would make
     /// "record it and listen to it again" useless as a way to hear a bug.
     rng: sim::Rng,
+    /// Where in the bank this voice reads, for the clip waves (§6 M43). `None`
+    /// for everything the synthesizer produces itself.
+    clip: Option<Playback>,
+}
+
+/// A clip voice's read head.
+///
+/// The cursor is **32.32 fixed point** rather than an `f32`, and that is not
+/// tidiness: an `f32` accumulator loses its last bit of resolution at 16.7
+/// million samples, which a six-minute track passes — a music voice would drift
+/// off pitch on its way through, silently and only on long clips.
+#[derive(Clone, Copy, Debug)]
+struct Playback {
+    /// First sample of this clip in the bank's block.
+    start: u32,
+    frames: u32,
+    /// Read position within the clip, 32.32 fixed point.
+    cursor: u64,
+    /// Samples of source per sample of output, 32.32 — the whole of the
+    /// resampling this engine does, and the only place a clip's authored rate
+    /// meets the rate the device turned out to run at.
+    step: u64,
+    /// Repeat rather than finish ([`wave::CLIP_LOOP`]).
+    looping: bool,
 }
 
 impl Voice {
     /// `None` for a note that would make no sound: an unknown or silent wave, a
     /// zero length, or a gain of nothing. Cheaper to refuse here than to mix
     /// silence for 4000 ms while holding a slot.
-    fn new(sound: &Sound, rate: u32, seed: u64) -> Option<Voice> {
-        if sound.wave == wave::SILENT || sound.wave > wave::NOISE {
+    ///
+    /// A clip wave naming an id `bank` does not hold is refused the same way —
+    /// silence, never an error (`Sound::clip`'s contract). That is the case a
+    /// pack rebuilt under a running game produces, and it must not be louder
+    /// than the case where a game asked for nothing.
+    fn new(sound: &Sound, rate: u32, seed: u64, bank: Option<&Bank>) -> Option<Voice> {
+        if sound.wave == wave::SILENT || sound.wave > wave::CLIP_LOOP {
             return None;
         }
         let gain = sound.gain.clamp(0.0, 1.0);
-        let len = samples(sound.ms.min(MAX_MS), rate);
-        if gain <= 0.0 || len == 0 {
+        if gain <= 0.0 {
+            return None;
+        }
+        let looping = sound.wave == wave::CLIP_LOOP;
+        let (clip, len) = if sound.wave >= wave::CLIP {
+            let entry = bank?.locate(sound.clip)?;
+            // Source samples per output sample, 32.32. A clip authored at
+            // 22.05 kHz on a 48 kHz device steps by less than one, which is the
+            // interpolating direction and the common one.
+            let step = (u64::from(entry.rate) << 32) / u64::from(rate.max(1));
+            // The note's length at the *device* rate, so the envelope, `at` and
+            // `finished` are the same arithmetic they are for a tone.
+            let whole = ((u64::from(entry.frames) << 32) / step.max(1)) as u32;
+            let len = match (looping, sound.ms) {
+                // A loop ends when something else takes the slot. `u32::MAX` is
+                // 24.8 hours at 48 kHz — longer than a session, and finite so
+                // there is no branch in `finished` that never fires.
+                (true, _) => u32::MAX,
+                // 0 is the clip's own length, which is why a game names a clip
+                // at all; anything else truncates it.
+                (false, 0) => whole,
+                (false, ms) => whole.min(samples(ms, rate)),
+            };
+            let playback = Playback {
+                start: entry.start,
+                frames: entry.frames,
+                cursor: 0,
+                step,
+                looping,
+            };
+            (Some(playback), len)
+        } else {
+            (None, samples(sound.ms.min(MAX_MS), rate))
+        };
+        if len == 0 {
             return None;
         }
         let (attack, release) = envelope(sound, rate, len);
@@ -83,15 +149,29 @@ impl Voice {
             at: 0,
             len,
             attack,
-            release,
+            // A loop has no end to fade into, and a release applied per repeat
+            // would pump it (`Sound::release_ms`'s contract).
+            release: if looping { 0 } else { release },
             rng: sim::Rng::from_seed(seed),
+            clip,
         })
     }
 
-    /// The next sample, or `None` once the note has finished.
-    fn sample(&mut self, rate: f32) -> Option<f32> {
+    /// The next sample, or `None` once the note has finished. `block` is the
+    /// bank's sample block, already validated by [`Bank::locate`].
+    fn sample(&mut self, rate: f32, block: &[i16]) -> Option<f32> {
         if self.at >= self.len {
             return None;
+        }
+        if let Some(mut play) = self.clip {
+            let value = play.read(block);
+            self.clip = Some(play);
+            // Envelope before the advance, for the reason the oscillator branch
+            // gives below — the first sample of a note must be the attack's own
+            // zero and not one step above it.
+            let amplitude = self.envelope_at();
+            self.at = self.at.saturating_add(1);
+            return Some(value * self.gain * amplitude);
         }
         // Sweep on the note's own progress, so a 20 ms chirp and a 2 s slide are
         // the same two lines.
@@ -150,6 +230,57 @@ impl Voice {
     }
 }
 
+impl Playback {
+    /// The next sample of the clip, `-1.0..1.0`, advancing the cursor.
+    ///
+    /// Linear interpolation between neighbours rather than nearest: at a step
+    /// near 1.0 the two are the same, and at 22.05 kHz against a 48 kHz device
+    /// nearest-neighbour is audible aliasing on exactly the short bright cues a
+    /// game reaches for. Anything better than linear is a filter, and a filter
+    /// is a pinned kernel and a determinism surface — the argument
+    /// `gg_assets::clip` makes for not resampling at bake time.
+    fn read(&mut self, block: &[i16]) -> f32 {
+        if self.frames == 0 {
+            return 0.0;
+        }
+        let index = (self.cursor >> 32) as u32;
+        if index >= self.frames {
+            // Past the end of a one-shot. Silence rather than a wrap, and the
+            // note's own `len` is what retires it — the two agree to within the
+            // rounding of one fixed-point division, and this is that rounding.
+            return 0.0;
+        }
+        let at = (self.start + index) as usize;
+        let next = if index + 1 < self.frames {
+            at + 1
+        } else if self.looping {
+            // The seam. Interpolating into sample 0 is what makes a loop whose
+            // ends match join without a click.
+            self.start as usize
+        } else {
+            at
+        };
+        // `get` rather than an index: `locate` proved the span fits, and the
+        // audio callback is the one place in this tree where being wrong about
+        // that would be a panic on a thread nobody can catch it on.
+        let a = f32::from(block.get(at).copied().unwrap_or(0));
+        let b = f32::from(block.get(next).copied().unwrap_or(0));
+        // The fraction's top 24 bits, which is every bit an `f32` can hold
+        // exactly — so the interpolation is the same arithmetic on every host.
+        let frac = ((self.cursor & 0xffff_ffff) >> 8) as f32 / 16_777_216.0;
+        self.cursor = self.cursor.wrapping_add(self.step);
+        if self.looping {
+            let span = u64::from(self.frames) << 32;
+            // `%` and not a subtract: a clip shorter than one output sample
+            // steps past its whole span in one read.
+            self.cursor %= span;
+        }
+        // 32768 and not 32767: the negative full scale is what divides exactly,
+        // and the asymmetry is half a bit at the top of an i16.
+        (a + (b - a) * frac) / 32_768.0
+    }
+}
+
 /// Milliseconds to samples, rounded down but never to zero for a nonzero ask —
 /// a 1 ms attack at 48 kHz is 48 samples, and the rounding only bites at rates
 /// nothing uses.
@@ -178,7 +309,7 @@ fn envelope(sound: &Sound, rate: u32, len: u32) -> (u32, u32) {
     (attack, (len - attack).max(1))
 }
 
-/// The bank. Owned by the audio callback and reached from nowhere else.
+/// The voice bank. Owned by the audio callback and reached from nowhere else.
 pub struct Mixer {
     voices: [Option<Voice>; VOICES],
     rate: u32,
@@ -186,6 +317,17 @@ pub struct Mixer {
     /// note rather than with time, which is what makes a replayed session's
     /// noise identical to the original's.
     fired: u64,
+    /// The clips (§6 M43). `None` until the shell hands one over, which is what
+    /// a game with no pack stays at.
+    clips: Option<Arc<Bank>>,
+    /// The player's master volume, applied **to looping voices only**.
+    ///
+    /// A one-shot carries its volume in the trigger's own gain, set when it
+    /// fired (§6 M19) — it is over before a slider finishes moving, and that is
+    /// what makes `Audio::fired` report what will sound. A loop is not over, so
+    /// music that ignored the slider until the next track would be a settings
+    /// menu that appears not to work.
+    master: f32,
 }
 
 impl Mixer {
@@ -196,7 +338,26 @@ impl Mixer {
             voices: [None; VOICES],
             rate: rate.max(1),
             fired: 0,
+            clips: None,
+            master: 1.0,
         }
+    }
+
+    /// Install the clips a trigger's [`Sound::clip`] resolves against.
+    ///
+    /// **Cuts every voice.** A voice holds offsets into the block it was
+    /// started against ([`Bank::locate`]'s contract), so the alternative is
+    /// reading the wrong samples; and a pack rebuilt under a running game
+    /// changed the very bytes a sounding note is reading, so continuing it
+    /// would be continuing something that no longer exists.
+    pub fn set_bank(&mut self, bank: Arc<Bank>) {
+        self.silence();
+        self.clips = Some(bank);
+    }
+
+    /// The player's master volume, `0.0..=1.0`.
+    pub fn set_master(&mut self, master: f32) {
+        self.master = master.clamp(0.0, 1.0);
     }
 
     /// Start `trigger`, replacing whatever was in its slot.
@@ -207,7 +368,8 @@ impl Mixer {
     pub fn fire(&mut self, trigger: &Trigger) {
         let slot = trigger.slot % VOICES;
         self.fired = self.fired.wrapping_add(1);
-        self.voices[slot] = Voice::new(&trigger.sound, self.rate, self.fired);
+        let bank = self.clips.as_deref();
+        self.voices[slot] = Voice::new(&trigger.sound, self.rate, self.fired, bank);
     }
 
     /// Fill `out` with the sum of every sounding voice, one channel. Overwrites
@@ -215,12 +377,22 @@ impl Mixer {
     /// there, which is the previous block of audio if it is anything at all.
     pub fn mix(&mut self, out: &mut [f32]) {
         let rate = self.rate as f32;
+        // Borrowed once outside the loop, not per sample: the `Arc` deref is
+        // free but the branch on `None` in an inner loop is not, and this loop
+        // runs a few hundred thousand times a second.
+        let block = self.clips.as_deref().map_or(&[][..], Bank::block);
+        let master = self.master;
         for sample in out.iter_mut() {
             let mut sum = 0.0;
             for voice in &mut self.voices {
                 let Some(playing) = voice else { continue };
-                match playing.sample(rate) {
-                    Some(value) => sum += value,
+                let live = if playing.wave == wave::CLIP_LOOP {
+                    master
+                } else {
+                    1.0
+                };
+                match playing.sample(rate, block) {
+                    Some(value) => sum += value * live,
                     None => *voice = None,
                 }
             }
@@ -481,6 +653,179 @@ mod tests {
             crossings(early),
             crossings(late)
         );
+    }
+
+    // --------------------------------------------------------- §6 M43's clips
+
+    /// A clip whose envelope is one sample at each end, so an assertion about a
+    /// sample is an assertion about the *clip* rather than about the ramp.
+    fn cue(name: &str, gain: f32) -> Sound {
+        Sound {
+            attack_ms: 0,
+            release_ms: 0,
+            ..Sound::clip(name, gain)
+        }
+    }
+
+    fn banked(rate: u32, samples: &[i16]) -> Arc<Bank> {
+        let mut bank = Bank::new();
+        bank.add(gg_ecs::boundary::asset_id("cue"), rate, samples);
+        Arc::new(bank)
+    }
+
+    /// The claim the whole milestone rests on: what comes out is what `ggc`
+    /// put in. At the device's own rate the resampler steps by exactly one, so
+    /// the samples pass through untouched but for gain and the two-sample ramp.
+    #[test]
+    fn a_clip_plays_the_samples_it_was_handed() {
+        let mut mixer = Mixer::new(RATE);
+        mixer.set_bank(banked(RATE, &[0, 8_192, 16_384, -8_192, 0]));
+        fire(&mut mixer, cue("cue", 1.0));
+
+        let mut out = [0.0; 5];
+        mixer.mix(&mut out);
+        assert_eq!(out[1], 0.25);
+        assert_eq!(out[2], 0.5);
+        assert_eq!(out[3], -0.25);
+        assert_eq!(out[0], 0.0, "the attack's own zero");
+        assert_eq!(out[4], 0.0, "and the release's");
+        assert_eq!(mixer.sounding(), 0, "a one-shot outlived its samples");
+    }
+
+    /// The resampler, in the direction every real clip takes: authored at half
+    /// the device's rate, so one source sample becomes two output ones and the
+    /// note lasts twice as long. Nothing about this is knowable at bake time —
+    /// which is why `gg_assets::clip` stores the source's rate and stops.
+    #[test]
+    fn a_clip_authored_at_another_rate_is_stretched_rather_than_pitched() {
+        let mut mixer = Mixer::new(RATE);
+        mixer.set_bank(banked(RATE / 2, &[16_384; 8]));
+        fire(&mut mixer, cue("cue", 1.0));
+
+        let mut short = [0.0; 15];
+        mixer.mix(&mut short);
+        assert_eq!(mixer.sounding(), 1, "8 frames at half rate is 16 samples");
+        let mut last = [0.0; 1];
+        mixer.mix(&mut last);
+        assert_eq!(mixer.sounding(), 0);
+        // And the interpolation did not invent amplitude: a constant clip is
+        // constant however it was stepped through.
+        assert!(short[1..].iter().all(|s| (*s - 0.5).abs() < 1e-6));
+    }
+
+    /// Music: it repeats, and it does not end on its own. What ends it is the
+    /// protocol `Sound` already had — a silent trigger on the same slot.
+    #[test]
+    fn a_loop_repeats_until_something_takes_the_voice() {
+        let mut mixer = Mixer::new(RATE);
+        mixer.set_bank(banked(RATE, &[16_384, -16_384]));
+        fire(&mut mixer, Sound::music("cue", 1.0));
+
+        let mut out = [0.0; 4_096];
+        for _ in 0..8 {
+            mixer.mix(&mut out);
+            assert_eq!(mixer.sounding(), 1, "the loop ended by itself");
+        }
+        assert!(peak(&out) > 0.4, "the loop went quiet on a later pass");
+
+        fire(&mut mixer, Sound::tone(wave::SILENT, 0.0, 100, 1.0));
+        assert_eq!(mixer.sounding(), 0, "a silent trigger did not stop it");
+    }
+
+    /// A pack rebuilt while the game runs, and a game shipped without its pack:
+    /// both land here, and both must be silent rather than loud or fatal.
+    #[test]
+    fn a_clip_no_bank_holds_is_silence_and_takes_no_slot() {
+        let mut mixer = Mixer::new(RATE);
+        // No bank at all — a run with no `--pack`.
+        fire(&mut mixer, cue("cue", 1.0));
+        assert_eq!(mixer.sounding(), 0);
+
+        mixer.set_bank(banked(RATE, &[16_384; 64]));
+        fire(&mut mixer, cue("a name nothing baked", 1.0));
+        assert_eq!(mixer.sounding(), 0);
+        // A clip id of 0 is the zeroed component `World::restore` writes.
+        let mut nothing = cue("cue", 1.0);
+        nothing.clip = 0;
+        fire(&mut mixer, nothing);
+        assert_eq!(mixer.sounding(), 0);
+        // And the one that does resolve still plays, so the three above are
+        // refusals rather than a mixer that stopped working.
+        fire(&mut mixer, cue("cue", 1.0));
+        assert_eq!(mixer.sounding(), 1);
+    }
+
+    #[test]
+    fn a_length_on_a_clip_truncates_it() {
+        let mut mixer = Mixer::new(1_000); // 1 sample per ms
+        mixer.set_bank(banked(1_000, &[16_384; 500]));
+        let mut clipped = cue("cue", 1.0);
+        clipped.ms = 100;
+        fire(&mut mixer, clipped);
+
+        let mut out = [0.0; 99];
+        mixer.mix(&mut out);
+        assert_eq!(mixer.sounding(), 1);
+        mixer.mix(&mut [0.0; 1]);
+        assert_eq!(mixer.sounding(), 0, "ms did not truncate the clip");
+
+        // And a length past the clip's own is the clip's own, not silence
+        // padded out to it — `ms` truncates and never extends.
+        let mut long = cue("cue", 1.0);
+        long.ms = 10_000;
+        fire(&mut mixer, long);
+        mixer.mix(&mut [0.0; 500]);
+        assert_eq!(mixer.sounding(), 0);
+    }
+
+    /// The asymmetry §6 M43 introduces, in both directions: a slider moved
+    /// while music plays is heard now, and a one-shot already carries the
+    /// volume it fired at (§6 M19) so applying it twice would square it.
+    #[test]
+    fn the_master_volume_reaches_a_loop_and_leaves_a_one_shot_alone() {
+        let mut mixer = Mixer::new(RATE);
+        mixer.set_bank(banked(RATE, &[16_384; 512]));
+
+        fire(&mut mixer, Sound::music("cue", 1.0));
+        let mut out = [0.0; 256];
+        mixer.mix(&mut out);
+        assert!((peak(&out) - 0.5).abs() < 1e-6);
+
+        mixer.set_master(0.5);
+        mixer.mix(&mut out);
+        assert!(
+            (peak(&out) - 0.25).abs() < 1e-6,
+            "the slider did not reach the music: {}",
+            peak(&out)
+        );
+
+        // The one-shot's gain is the trigger's, already scaled by `Audio::tick`.
+        let mut alone = Mixer::new(RATE);
+        alone.set_bank(banked(RATE, &[16_384; 512]));
+        alone.set_master(0.5);
+        alone.fire(&Trigger {
+            slot: 0,
+            sound: cue("cue", 1.0),
+        });
+        alone.mix(&mut out);
+        assert!(
+            (peak(&out) - 0.5).abs() < 1e-6,
+            "the master was applied to a one-shot twice: {}",
+            peak(&out)
+        );
+    }
+
+    /// Swapping the bank cuts every voice, and it has to: a voice holds offsets
+    /// into the block it started against, so the alternative is reading the
+    /// wrong samples out of the right array.
+    #[test]
+    fn installing_a_bank_cuts_what_was_playing_out_of_the_old_one() {
+        let mut mixer = Mixer::new(RATE);
+        mixer.set_bank(banked(RATE, &[16_384; 4_096]));
+        fire(&mut mixer, cue("cue", 1.0));
+        assert_eq!(mixer.sounding(), 1);
+        mixer.set_bank(banked(RATE, &[8_192; 8]));
+        assert_eq!(mixer.sounding(), 0);
     }
 
     #[test]

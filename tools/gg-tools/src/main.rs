@@ -45,6 +45,7 @@
 //!                                   same body — the orbit's shape against its
 //!                                   phase, which fail in opposite directions
 //!   gg-tools panorama [--out P]   write the synthetic equirectangular `.hdr`
+//!   gg-tools timbre [--out D]     write demo 10's clips, and grade what a tone cannot reach
 //!                                   demo 06's environment is compiled from
 //!   gg-tools fp-isa [--target T]    which floating-point instructions the
 //!                                   determinism path contains, by how much
@@ -73,6 +74,7 @@ mod shadow_flat;
 mod shadow_image;
 mod shadow_sweep;
 mod split_sum;
+mod timbre;
 mod transfer;
 
 fn main() -> anyhow::Result<()> {
@@ -111,6 +113,7 @@ fn main() -> anyhow::Result<()> {
         "orbit" => orbit::run(rest),
         "map" => map::run(rest),
         "panorama" => panorama::run(rest),
+        "timbre" => timbre::run(rest),
         "transfer" => transfer::run(rest),
         "fp-isa" => fp_isa::run(rest),
         "mcp" => mcp::run(rest),

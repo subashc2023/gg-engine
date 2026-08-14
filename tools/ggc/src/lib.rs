@@ -6,6 +6,7 @@
 //! than a rule someone has to remember.
 
 pub mod build;
+pub mod clip;
 pub mod environment;
 pub mod import;
 pub mod texture;

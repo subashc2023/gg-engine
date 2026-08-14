@@ -186,7 +186,10 @@ impl Content {
             // both are reached *through* a mesh, and a texture with no mesh
             // behind it has no draw to be sampled by.
             AssetKind::Environment => self.request_environment(id),
-            AssetKind::Material | AssetKind::Texture => {}
+            // A clip is the one kind the renderer will never want: it is
+            // reached by `gg-audio`, through the shell, and asking for it here
+            // would put PCM in the residency budget.
+            AssetKind::Material | AssetKind::Texture | AssetKind::Clip => {}
         }
     }
 

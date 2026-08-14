@@ -52,6 +52,9 @@ demo-08-save = { path = "../demos/08-save", default-features = false }
 # own test and `gg-runtime` take, so one file stands behind the qemu leg and the
 # three tier legs. That makes it the only `gg_game!` in this binary's graph, and
 # a second one linked the same way would collide on its fixed extern names.
+# Reading a pack back, for the one thing §6 M43 can otherwise only check by
+# hand: that every clip a cue names is in the file that was just built.
+gg-assets = { path = "../crates/gg-assets" }
 demo-10-tetris = { path = "../demos/10-tetris" }
 # M20 (§6): the recorded platformer session — demo 10's arrangement, resolved
 # around the collision its comment names: the `game` feature stays *off*, so no

@@ -153,6 +153,7 @@ fn report(result: Result<build::Stats>, out: &Path) {
             compiled = stats.compiled,
             reused = stats.reused,
             textures = stats.textures,
+            clips = stats.clips,
             pack = %out.display(),
             "ggc: built"
         ),

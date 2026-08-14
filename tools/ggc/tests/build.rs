@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gg_assets::{AssetId, AssetKind, Material, Mesh, Pack, Scene, Texture, TextureFormat};
+use gg_assets::{AssetId, AssetKind, Clip, Material, Mesh, Pack, Scene, Texture, TextureFormat};
 use image::ImageEncoder;
 
 /// Three positions and three `u16` indices, base64. Positions are (0,0,0),
@@ -324,6 +324,126 @@ fn a_warm_build_reuses_what_did_not_change_and_recompiles_what_did() {
     let partial = ggc::build::build(&dir.join("src"), &out).unwrap();
     assert_eq!((partial.compiled, partial.reused), (1, 1));
     assert_ne!(std::fs::read(&out).unwrap(), warm_bytes);
+}
+
+/// A 16-bit stereo `.wav`, written byte for byte beside its glTF neighbours —
+/// same reason the glTF above is a string literal and not a fixture.
+fn write_wav(dir: &Path, relative: &str, rate: u32, interleaved: &[i16]) {
+    let data: Vec<u8> = interleaved.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    fmt.extend_from_slice(&2u16.to_le_bytes()); // stereo
+    fmt.extend_from_slice(&rate.to_le_bytes());
+    fmt.extend_from_slice(&(rate * 4).to_le_bytes());
+    fmt.extend_from_slice(&4u16.to_le_bytes());
+    fmt.extend_from_slice(&16u16.to_le_bytes());
+
+    let mut body = b"WAVE".to_vec();
+    for (id, payload) in [(b"fmt ", &fmt), (b"data", &data)] {
+        body.extend_from_slice(id);
+        body.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        body.extend_from_slice(payload);
+    }
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+
+    let path = dir.join("src").join(relative);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, out).unwrap();
+}
+
+#[test]
+fn a_wav_compiles_to_one_clip_named_by_its_stem() {
+    let dir = scratch("clip");
+    write_wav(&dir, "sfx/pickup.wav", 22_050, &[100, 300, -1000, 0, 7, 8]);
+    let out = dir.join("assets.ggpack");
+
+    let stats = ggc::build::build(&dir.join("src"), &out).unwrap();
+    assert_eq!((stats.compiled, stats.assets, stats.clips), (1, 1, 1));
+
+    let pack = Pack::open(&out).unwrap();
+    // The stem alone, with no suffix: a game names the path it put the file at.
+    let entry = pack.find_by_name("sfx/pickup").unwrap();
+    assert_eq!(entry.kind(), Some(AssetKind::Clip));
+    let clip = Clip::read(pack.blob(entry)).unwrap();
+    // Unresampled, and the stereo pairs averaged as integers — (7+8)/2 truncates.
+    assert_eq!(clip.rate(), 22_050);
+    assert_eq!(clip.samples(), [200, -500, 7]);
+}
+
+#[test]
+fn a_pack_with_a_clip_is_bit_identical_across_two_clean_runs() {
+    // §4.6 through the audio path: the downmix and the depth conversion are the
+    // two places a host could have disagreed, and neither is allowed to.
+    let dir = scratch("clip-reproducible");
+    let samples: Vec<i16> = (0..2_000).map(|i| (i * 37 - 20_000) as i16).collect();
+    write_wav(&dir, "sfx/hum.wav", 44_100, &samples);
+    write_wav(&dir, "music/theme.wav", 48_000, &samples[..100]);
+
+    let first = dir.join("first.ggpack");
+    let second = dir.join("second.ggpack");
+    ggc::build::build(&dir.join("src"), &first).unwrap();
+    ggc::build::build(&dir.join("src"), &second).unwrap();
+    assert_eq!(
+        std::fs::read(&first).unwrap(),
+        std::fs::read(&second).unwrap()
+    );
+}
+
+#[test]
+fn a_warm_build_reuses_a_clip_rather_than_recompiling_it() {
+    // What `import::owns` recognising a bare `{stem}` buys. Before it, a source
+    // whose only asset carries the stem itself was owned by nobody, so the cache
+    // found nothing to copy and rebuilt it on every run.
+    let dir = scratch("clip-incremental");
+    write_wav(&dir, "sfx/pickup.wav", 22_050, &[1, 2, 3, 4]);
+    let out = dir.join("assets.ggpack");
+
+    let cold = ggc::build::build(&dir.join("src"), &out).unwrap();
+    assert_eq!((cold.compiled, cold.reused), (1, 0));
+    let cold_bytes = std::fs::read(&out).unwrap();
+
+    let warm = ggc::build::build(&dir.join("src"), &out).unwrap();
+    assert_eq!((warm.compiled, warm.reused), (0, 1));
+    assert_eq!(std::fs::read(&out).unwrap(), cold_bytes);
+
+    write_wav(&dir, "sfx/pickup.wav", 22_050, &[9, 9, 9, 9]);
+    let after = ggc::build::build(&dir.join("src"), &out).unwrap();
+    assert_eq!((after.compiled, after.reused), (1, 0));
+    assert_ne!(std::fs::read(&out).unwrap(), cold_bytes);
+}
+
+#[test]
+fn a_wav_that_is_not_pcm_fails_the_build_by_name() {
+    // A compressed source must not become a clip full of noise: the pack is cast
+    // in place, so bake is the last place this can be refused.
+    let dir = scratch("clip-refused");
+    let path = dir.join("src").join("bad.wav");
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&0x0011u16.to_le_bytes()); // IMA ADPCM
+    fmt.extend_from_slice(&1u16.to_le_bytes());
+    fmt.extend_from_slice(&22_050u32.to_le_bytes());
+    fmt.extend_from_slice(&11_025u32.to_le_bytes());
+    fmt.extend_from_slice(&256u16.to_le_bytes());
+    fmt.extend_from_slice(&4u16.to_le_bytes());
+    let mut body = b"WAVE".to_vec();
+    body.extend_from_slice(b"fmt ");
+    body.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    body.extend_from_slice(&fmt);
+    body.extend_from_slice(b"data\x08\0\0\0");
+    body.extend_from_slice(&[0; 8]);
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    std::fs::write(&path, out).unwrap();
+
+    let err = ggc::build::build(&dir.join("src"), &dir.join("assets.ggpack")).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(message.contains("bad.wav"), "{message}");
+    assert!(message.contains("17"), "{message}");
 }
 
 #[test]

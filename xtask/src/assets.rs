@@ -61,7 +61,47 @@ pub fn run(args: &[&str]) -> Result<()> {
             std::fs::remove_file(&twin).ok();
             println!("xtask assets: {demo} — bit-identical across two clean runs (§4.6)");
         }
+        if demo == "10-tetris" {
+            clips_resolve(&out)?;
+        }
     }
+    Ok(())
+}
+
+/// Every clip demo 10's cue table names is in the pack that was just built
+/// (§6 M43).
+///
+/// The one failure nothing else in the tree can see. `Sound::clip("lock", …)`
+/// hashes a string literal at compile time and a pack names assets after
+/// filenames, so a renamed `.wav`, a typo or a deleted source produces a cue
+/// that is *silent* — not a build error, not a panic, not a failed test, because
+/// a clip the bank does not hold is silence by contract (`Sound::clip`), which
+/// is the right answer for a pack mid-rebuild and the wrong one for a cue that
+/// will never resolve again.
+///
+/// Demo 10 by name rather than every demo, because there is no way to enumerate
+/// a game's `Sound`s without loading its dylib, and a gate that guessed would be
+/// a gate that stops catching things when a second game gets clips.
+fn clips_resolve(pack: &Path) -> Result<()> {
+    let pack = gg_assets::Pack::open(pack)
+        .with_context(|| format!("opening {} to check its clips", pack.display()))?;
+    let voices = (0..demo_10_tetris::CUES as u8)
+        .map(demo_10_tetris::voice_of)
+        .chain(std::iter::once(demo_10_tetris::music_voice()));
+    let mut found = 0;
+    for voice in voices {
+        if voice.clip == 0 {
+            continue;
+        }
+        ensure!(
+            pack.find(gg_assets::AssetId(voice.clip)).is_some(),
+            "demo 10 names a clip its pack does not hold ({:#018x}) — a cue whose asset went away \
+             is silent rather than broken, so nothing but this notices",
+            voice.clip
+        );
+        found += 1;
+    }
+    println!("xtask assets: 10-tetris — {found} cue(s) resolve against the pack (§6 M43)");
     Ok(())
 }
 

@@ -32,13 +32,17 @@
 //! away" is an ordinary assertion on a silent machine. What it does not do is
 //! open a device.
 
+mod bank;
 mod device;
 pub mod synth;
 
-use gg_ecs::boundary::{Prefs, Sound};
-use gg_ecs::{AliasError, Entity, Query, World};
-use tracing::{debug, warn};
+use std::sync::Arc;
 
+use gg_ecs::boundary::{Prefs, Sound, wave};
+use gg_ecs::{AliasError, Entity, Query, World};
+use tracing::{debug, info, warn};
+
+pub use bank::Bank;
 pub use device::DeviceError;
 pub use synth::{Mixer, Trigger, VOICES};
 
@@ -88,6 +92,16 @@ pub struct Audio {
     /// This tick's triggers. Kept after sending so a test can read what a tick
     /// decided to play without a device in the picture.
     fired: Vec<Trigger>,
+    /// The clips (§6 M43), kept here as well as sent, so `Bank::holds` is
+    /// answerable on a silent machine — which is where the gates run.
+    bank: Option<Arc<Bank>>,
+    /// The bank before this one, held one swap longer than it is needed.
+    ///
+    /// Not a leak and not caution: without it the audio thread would be the
+    /// last owner of a replaced bank and would run the deallocator *inside the
+    /// callback*, which is the textbook way to miss a deadline. One extra
+    /// reference moves that free onto this thread, one pack rebuild later.
+    retired: Option<Arc<Bank>>,
     out: Option<device::Device>,
 }
 
@@ -105,6 +119,8 @@ impl Audio {
             seen: Vec::new(),
             next: Vec::new(),
             fired: Vec::new(),
+            bank: None,
+            retired: None,
             out: None,
         })
     }
@@ -179,6 +195,7 @@ impl Audio {
             next,
             fired,
             out,
+            ..
         } = self;
         // The first `Prefs` walked, `Prefs`' documented rule; a world that
         // declares none plays at full volume, which is the zeroed default.
@@ -207,8 +224,15 @@ impl Audio {
                 // Master volume lands in the trigger's own gain (§6 M19): what
                 // `fired` reports is what will sound, so a demo's "the cue is
                 // half as loud at half volume" is an ordinary assertion.
+                //
+                // Except for a loop, which outlives the slider (§6 M43). Music
+                // pre-multiplied here would keep the volume it started at until
+                // the track changed, so the mixer applies the live value to
+                // those voices and this must not apply it twice.
                 let mut sound = *sound;
-                sound.gain *= volume;
+                if sound.wave != wave::CLIP_LOOP {
+                    sound.gain *= volume;
+                }
                 fired.push(Trigger {
                     // The entity's slot index, so one entity is one voice for as
                     // long as it lives. Two entities colliding modulo the bank
@@ -222,11 +246,39 @@ impl Audio {
         // `each_ref` walks archetypes in creation order, so this is not sorted.
         next.sort_unstable_by_key(|(entity, _)| *entity);
         std::mem::swap(seen, next);
-        if let Some(device) = out
-            && !fired.is_empty()
-        {
-            device.send(fired);
+        // Sent every tick and not only on a trigger: the volume is a level, and
+        // a slider moved on a quiet frame still has to reach a playing loop.
+        if let Some(device) = out {
+            device.send(fired, volume);
         }
+    }
+
+    /// Install the clips this session can play (§6 M43).
+    ///
+    /// Handed the bank whole rather than a pack: this crate parses no audio
+    /// format and links no pack, which is what keeps `cpal` a rental and leaves
+    /// its sixth dependency slot unspent (§3).
+    ///
+    /// Replacing one cuts every sounding voice — a pack rebuilt under a running
+    /// game changed the samples a note is reading.
+    pub fn install(&mut self, bank: Bank) {
+        info!(
+            clips = bank.clips(),
+            frames = bank.frames(),
+            "audio: clips installed"
+        );
+        let bank = Arc::new(bank);
+        if let Some(device) = &self.out {
+            device.install(Arc::clone(&bank));
+        }
+        self.retired = self.bank.replace(bank);
+    }
+
+    /// The installed clips, for the one question a silent machine can answer
+    /// about them: whether a cue's id resolves.
+    #[must_use]
+    pub fn bank(&self) -> Option<&Bank> {
+        self.bank.as_deref()
     }
 
     /// What the last [`tick`](Audio::tick) decided to play.
