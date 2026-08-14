@@ -4,7 +4,7 @@
 use crate::archetype::{Archetype, ArchetypeId, Location};
 use crate::component::Component;
 use crate::entity::{Entities, Entity};
-use crate::hash::{CanonicalHash, ComponentId, StateHasher};
+use crate::hash::{Block, CanonicalHash, ComponentId, StateHasher};
 use crate::query::{Query, QueryData, ReadOnly};
 use crate::registry::{Registry, RegistryError};
 use crate::side_table::{SideTable, SideTableError, SideTables};
@@ -437,19 +437,23 @@ impl World {
     #[must_use]
     pub fn entity_hashes(&self) -> Vec<(Entity, CanonicalHash)> {
         let mut out = Vec::with_capacity(self.entities.len() as usize);
+        // One buffer across every entity's digest, not one per hasher: the
+        // absorbs are per-entity but the allocation need not be (§6 M38 item 9).
+        let mut block = Block::new();
         for entity in self.entities.iter() {
             let mut h = StateHasher::canonical();
-            h.u64(entity.to_bits());
+            block.u64(&mut h, entity.to_bits());
             if let Some(loc) = self.location(entity) {
                 let archetype = &self.archetypes[loc.archetype.index() as usize];
-                h.u64(archetype.ids().len() as u64);
+                block.u64(&mut h, archetype.ids().len() as u64);
                 for (at, id) in archetype.ids().iter().enumerate() {
-                    h.u64(id.get());
-                    h.bytes(archetype.column(at).row(loc.row as usize));
+                    block.u64(&mut h, id.get());
+                    block.bytes(&mut h, archetype.column(at).row(loc.row as usize));
                 }
             } else {
-                h.u64(u64::MAX);
+                block.u64(&mut h, u64::MAX);
             }
+            block.flush(&mut h);
             out.push((entity, h.finish_canonical()));
         }
         out
@@ -481,37 +485,51 @@ impl World {
         self.entities.hash_into(&mut h);
         self.registry.hash_into(&mut h);
 
-        h.u64(u64::from(self.entities.len()));
+        // Staged for the fast path, passthrough for the protocol one — so the
+        // two walks differ in staging as well as in encoding and §4.2.1's proof
+        // covers both (§6 M38 item 9).
+        let mut block = match encoding {
+            Encoding::RawFastPath => Block::new(),
+            Encoding::Protocol => Block::unstaged(),
+        };
+        block.u64(&mut h, u64::from(self.entities.len()));
         // Ascending entity id (§4.2.1) — never storage order, which is what
         // keeps archetype layout out of the contract.
         for entity in self.entities.iter() {
-            h.u64(entity.to_bits());
+            block.u64(&mut h, entity.to_bits());
             let Some(loc) = self.location(entity) else {
                 // Allocated but unplaced cannot happen; hash a discriminant
                 // rather than panic, so a bug surfaces as a CI divergence
                 // instead of as a crash in a player's build.
-                h.u64(u64::MAX);
+                block.u64(&mut h, u64::MAX);
                 continue;
             };
             let archetype = &self.archetypes[loc.archetype.index() as usize];
             // The component *set*, never the archetype index — archetype
             // numbering is creation order, which is storage layout.
-            h.u64(archetype.ids().len() as u64);
+            block.u64(&mut h, archetype.ids().len() as u64);
             for (at, id) in archetype.ids().iter().enumerate() {
-                h.u64(id.get());
+                block.u64(&mut h, id.get());
                 let bytes = archetype.column(at).row(loc.row as usize);
                 match encoding {
-                    Encoding::RawFastPath => h.bytes(bytes),
+                    Encoding::RawFastPath => block.bytes(&mut h, bytes),
                     Encoding::Protocol => match self.registry.get(*id) {
-                        Some(info) => (info.protocol_hash)(bytes, &mut h),
+                        // Writes through the hasher directly, so nothing may be
+                        // staged behind it. `unstaged` guarantees that here;
+                        // the flush is what would make it true if it were not.
+                        Some(info) => {
+                            block.flush(&mut h);
+                            (info.protocol_hash)(bytes, &mut h);
+                        }
                         // Unregistered is impossible — a column exists only
                         // because registration created it — but the walk stays
                         // total rather than panicking mid-hash.
-                        None => h.bytes(bytes),
+                        None => block.bytes(&mut h, bytes),
                     },
                 }
             }
         }
+        block.flush(&mut h);
 
         // Side tables last, ascending by id (§4.2.1). They are protocol-encoded
         // in both walks — being non-`Pod` is the point — so they cannot make the

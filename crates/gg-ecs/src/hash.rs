@@ -379,6 +379,94 @@ impl StateHasher {
     }
 }
 
+/// The block the full-world walks stage their absorbs into, the low end of the
+/// plateau `gg-tools hash-scale`'s block sweep prints (§6 M38 item 9): 2.74x at
+/// 256 KiB against 2.75x at 1 MiB, and 2.24x at 4 MiB where the buffer is read
+/// back from further away than it was written. Below the plateau the cost is not
+/// per-`update` overhead as item 5 assumed — 64 B blocks fold five updates into
+/// one and buy 1.17x — it is that blake3 hashes a large input as a *subtree* and
+/// a small one a chunk at a time, so the win needs a big buffer or none.
+pub(crate) const HASH_BLOCK: usize = 256 * 1024;
+
+/// A staging buffer in front of a [`StateHasher`], for the passes that absorb a
+/// few dozen bytes at a time.
+///
+/// blake3 is a stream hash, so blocking changes **nothing about the byte
+/// stream** and the digest is bit-identical — which is why this is an
+/// optimization rather than a Determinism Contract event, and why the proof is
+/// the existing fast-path-equals-protocol test (the protocol walk is
+/// deliberately left unstaged) plus every checked-in hash baseline in the tree.
+/// At 100k entities that granularity — five `update` calls an entity, 48 bytes
+/// at a time — was 71 % of the canonical pass and neither the bytes nor the
+/// sorted order (§6 M38 item 5).
+///
+/// The hasher is passed per call rather than borrowed for the buffer's life:
+/// [`World::entity_hashes`](crate::World::entity_hashes) finishes a digest per
+/// entity and reuses one buffer across all of them, so one allocation covers a
+/// walk of either shape.
+pub(crate) struct Block {
+    buf: Vec<u8>,
+    /// Staging threshold. `0` is the passthrough — see [`Block::unstaged`].
+    block: usize,
+}
+
+impl Block {
+    pub(crate) fn new() -> Self {
+        Self {
+            // Grown lazily, never reserved: a world smaller than the block
+            // allocates only what it uses, so a 200-entity demo hashing every
+            // tick under §5.6c does not pay for a buffer sized for a solar
+            // system. The doublings are once per walk against a pass measured
+            // in milliseconds.
+            buf: Vec::new(),
+            block: HASH_BLOCK,
+        }
+    }
+
+    /// A passthrough: every absorb reaches the digest immediately, and the
+    /// buffer never allocates. What the *protocol* walk uses, so that §4.2.1's
+    /// fast-path-equals-protocol proof compares a staged walk against an
+    /// unstaged one rather than two copies of the same buffer.
+    pub(crate) fn unstaged() -> Self {
+        Self {
+            buf: Vec::new(),
+            block: 0,
+        }
+    }
+
+    /// Eight bytes, little-endian — the same commitment [`StateHasher::u64`]
+    /// makes, staged.
+    pub(crate) fn u64(&mut self, h: &mut StateHasher, v: u64) {
+        self.bytes(h, &v.to_le_bytes());
+    }
+
+    /// Raw bytes, no length prefix, as [`StateHasher::bytes`].
+    pub(crate) fn bytes(&mut self, h: &mut StateHasher, bytes: &[u8]) {
+        // A run already past the block would only be copied to be re-emitted;
+        // flushing first is what keeps the stream order identical. This is also
+        // what makes `block == 0` a passthrough without a second branch.
+        if bytes.len() >= self.block {
+            self.flush(h);
+            h.bytes(bytes);
+            return;
+        }
+        self.buf.extend_from_slice(bytes);
+        if self.buf.len() >= self.block {
+            self.flush(h);
+        }
+    }
+
+    /// Emit whatever is staged. Mandatory before the hasher is finished and
+    /// before anything absorbs into it directly — an unflushed buffer is state
+    /// missing from the digest, not merely late.
+    pub(crate) fn flush(&mut self, h: &mut StateHasher) {
+        if !self.buf.is_empty() {
+            h.bytes(&self.buf);
+            self.buf.clear();
+        }
+    }
+}
+
 /// blake3 emits 32 bytes; we keep the first 16. Truncating a blake3 digest is
 /// explicitly sanctioned by the spec (its XOF output is uniform), unlike
 /// truncating a Merkle–Damgård hash.
@@ -431,6 +519,38 @@ mod tests {
         let mut b = StateHasher::canonical();
         b.raw_column(4, 4, &bytes);
         assert_ne!(a.finish_canonical(), b.finish_canonical());
+    }
+
+    #[test]
+    fn staging_is_invisible_to_the_digest_across_a_block_boundary() {
+        // The fill path. Every walk flushes at `HASH_BLOCK` and every world
+        // small enough to be a test fits inside one block, so the boundary is
+        // crossed here or nowhere — sized off the constant so it cannot quietly
+        // stop crossing when the constant moves. The oversized run at the end
+        // covers the other branch: a slice past the block flushes what is
+        // staged and passes through, which is the only place the two could get
+        // out of order.
+        let rows: Vec<[u8; 48]> = (0..(HASH_BLOCK / 48 * 3) as u32)
+            .map(|i| {
+                let mut row = [0u8; 48];
+                row[..4].copy_from_slice(&i.to_le_bytes());
+                row
+            })
+            .collect();
+        let big = vec![0xA5u8; HASH_BLOCK + 17];
+
+        let run = |mut block: Block| {
+            let mut h = StateHasher::canonical();
+            for (i, row) in rows.iter().enumerate() {
+                block.u64(&mut h, i as u64);
+                block.bytes(&mut h, row);
+            }
+            block.u64(&mut h, 0xDEAD_BEEF);
+            block.bytes(&mut h, &big);
+            block.flush(&mut h);
+            h.finish_canonical()
+        };
+        assert_eq!(run(Block::new()), run(Block::unstaged()));
     }
 
     #[test]

@@ -44,6 +44,18 @@ Readings:
   `src/chunked.rs`) — and equally the reason not to build it yet: 11ms/tick is
   invisible in a dev loop until entity counts climb well past 100k, which is
   demo 05-many's job to prove (§6, M9).
+- **That 184x is a pre-staging reading and the walk no longer costs it** (§6 M38
+  items 5 and 9). `gg-tools hash-scale` took this line apart at the scale M38
+  brings and found 71 % of it in blake3 update *granularity* rather than in the
+  sorted walk; the absorbs are now staged into 256 KiB blocks, which is the
+  identical byte stream, so every checked-in hash sequence in the tree still
+  matches. Derived from same-run numbers on that instrument: 6.84 ms staged
+  against 13.22 unstaged at the same 100k, 1.93x. The line above stays as
+  recorded — this file's rule is that a moved number is the finding, and reading
+  it against a later session's numbers is exactly what the instrument's own
+  report refuses to do, an untouched pass in it having moved 2x between sessions.
+  What the reading changes is the bullet above it: the accelerator's remaining
+  justification is bisection, not the tier's wall clock.
 
 Open finding — **typed each() moved 0.97x → 1.19x between the first recording
 (2026-07-31) and M5's close**, and this file's own rule says a moved number is

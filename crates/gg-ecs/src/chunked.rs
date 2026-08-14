@@ -8,6 +8,13 @@
 //! need (§6, M9). What lands at M3 is the contract, so the implementation is
 //! later a feature rather than a redesign.
 //!
+//! Half of that cost argument has since been answered without this module, and
+//! by something nobody had designed: 71 % of the walk at 100k entities was
+//! blake3 update *granularity*, recovered by staging absorbs into blocks for a
+//! bit-identical digest (§6 M38 items 5 and 9). What remains is the sorted order
+//! — which is the contract itself — and the bytes. So the case for building this
+//! is the bisection job below, and no longer the tier's wall clock.
+//!
 //! # What it is not
 //!
 //! Not the canonical hash, and not comparable to it. Chunk membership is
