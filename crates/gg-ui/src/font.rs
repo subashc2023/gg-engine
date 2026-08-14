@@ -16,7 +16,13 @@
 
 /// Glyph cell in texels, including the one-texel gap that keeps a nearest
 /// sample off its neighbour.
-pub const CELL: (u32, u32) = (6, 8);
+///
+/// Defined on the *game's* side of §3's pin and read back here (§6 M44): a
+/// game sizes the rect its own label is clipped to and may not link this
+/// crate to measure it, so one of the two had to own the number and only one
+/// of them is reachable from both. The cell is texels here and canvas units
+/// there because widget text is drawn 1:1.
+pub const CELL: (u32, u32) = gg_ecs::boundary::CELL;
 /// Inked area of a cell.
 pub const GLYPH: (u32, u32) = (5, 7);
 /// Cells across the band.

@@ -76,9 +76,11 @@ struct Scene {
     render: fn() -> Render,
 }
 
-/// The roster. Nineteen scenes — seven demos, the engine's own v1 pass list, two
-/// replay-driven captures, the UI layer, and three the harness builds itself to
-/// put a lighting feature on its own against nothing else (§6 M26-M28) — each
+/// The roster. Twenty-eight scenes — seven demos (demo 10 at five, one per
+/// screen, since a menu is a picture nothing else can gate), the engine's own v1
+/// pass list, two replay-driven captures, the UI layer, and three the harness
+/// builds itself to put a lighting feature on its own against nothing else
+/// (§6 M26-M28) — each
 /// with its own policy, because "how strictly" is a property of what the frame
 /// contains and not of the harness (§4.10 per-test config).
 const SCENES: &[Scene] = &[
@@ -446,6 +448,72 @@ const SCENES: &[Scene] = &[
             max_bias: 0.25,
         },
         render: render_tetris,
+    },
+    Scene {
+        name: "tetris-title",
+        // The first thing a player sees, and until M44 the only screen in this
+        // game with no picture gating it. What it catches: a heading that
+        // stopped being centred, a plate that grew a button and did not grow,
+        // and the five ranked rows — the table M44 made survive an exit.
+        // The playing scene's policy, and for its reason: flat fills and the
+        // bitmap font at an exact x1 fit.
+        policy: Policy {
+            tolerance: 1,
+            max_diff_pixels: 16,
+            benign_delta: 2,
+            max_dssim: 0.02,
+            max_bias: 0.25,
+        },
+        render: || render_tetris_screen(demo_10_tetris::SCREEN_TITLE, false),
+    },
+    Scene {
+        name: "tetris-pause",
+        // The menu over a board it must not hide: the shroud is alpha, so a
+        // plate drawn opaque is a change this reference sees and the rect
+        // tests cannot.
+        // The playing scene's policy, and for its reason: flat fills and the
+        // bitmap font at an exact x1 fit.
+        policy: Policy {
+            tolerance: 1,
+            max_diff_pixels: 16,
+            benign_delta: 2,
+            max_dssim: 0.02,
+            max_bias: 0.25,
+        },
+        render: || render_tetris_screen(demo_10_tetris::SCREEN_PAUSED, false),
+    },
+    Scene {
+        name: "tetris-settings",
+        // Five rows whose text is a label and a value in one string, at their
+        // shipped defaults — the widest of them (CURSOR SYSTEM) is what a
+        // narrowed row would clip, and clipping reads as a typo.
+        // The playing scene's policy, and for its reason: flat fills and the
+        // bitmap font at an exact x1 fit.
+        policy: Policy {
+            tolerance: 1,
+            max_diff_pixels: 16,
+            benign_delta: 2,
+            max_dssim: 0.02,
+            max_bias: 0.25,
+        },
+        render: || render_tetris_screen(demo_10_tetris::SCREEN_SETTINGS, false),
+    },
+    Scene {
+        name: "tetris-over",
+        // GAME OVER belongs to the playing screen, so no menu scene can reach
+        // it. Its two lines are the tree's only LABEL_CENTRE over a rect the
+        // game did not size to the text (§6 M44) — centred wrong is centred
+        // wrong by a whole word here.
+        // The playing scene's policy, and for its reason: flat fills and the
+        // bitmap font at an exact x1 fit.
+        policy: Policy {
+            tolerance: 1,
+            max_diff_pixels: 16,
+            benign_delta: 2,
+            max_dssim: 0.02,
+            max_bias: 0.25,
+        },
+        render: || render_tetris_screen(demo_10_tetris::SCREEN_PLAYING, true),
     },
     Scene {
         name: "platformer",
@@ -2851,8 +2919,6 @@ fn render_ui_text() -> Render {
 /// gates the layout rather than a resampler.
 fn render_tetris() -> Render {
     use demo_10_tetris as tetris;
-    use gg_ecs::World;
-    use gg_ecs::boundary::{CANVAS, Widget};
 
     // A board with something to read: a stack with a hole under an overhang,
     // one row nearly closed, a piece falling with its ghost below it, and a
@@ -2894,19 +2960,101 @@ fn render_tetris() -> Render {
         pad: [0; 2],
     };
 
-    let grid = tetris::compose_well(&well, &play, &piece);
-    let bays = tetris::compose_bays(&play);
+    tetris_frame(&well, &play, &best, &piece, tetris::SCREEN_PLAYING)
+}
+
+/// The same board on a screen the playing one covers up (§6 M44). M19 shipped
+/// the title, pause and settings screens with no picture gating them — their
+/// layout was pinned by the demo's rect tests and their behaviour by the session
+/// replays, and neither can see a heading that stopped being centred.
+///
+/// `over` deals the fourth: GAME OVER belongs to the *playing* screen, so a
+/// menu scene cannot reach it and it needs a scene of its own.
+fn render_tetris_screen(at: u32, over: bool) -> Render {
+    use demo_10_tetris as tetris;
+
+    let mut well = tetris::Well {
+        cells: [[0; tetris::WIDTH]; tetris::HEIGHT],
+    };
+    // A shallow stack, so the menu plate reads over something rather than over
+    // an empty well — a shroud that forgave the board would look identical.
+    for (row, filled) in [
+        (tetris::HEIGHT - 1, 0b11_0111_1111u16),
+        (tetris::HEIGHT - 2, 0b10_0011_0011),
+    ] {
+        for col in 0..tetris::WIDTH {
+            if filled & (1 << col) != 0 {
+                well.cells[row][col] = (row + col) as u8 % 7 + 1;
+            }
+        }
+    }
+    let mut play = tetris::new_play(0x5445_5452_4953_0002);
+    play.score = 61_200;
+    play.lines = 12;
+    play.level = 2;
+    play.over = u8::from(over);
+    // A filled table, so the title screen renders five ranked rows rather than
+    // the blanks a fresh install shows — the case with something to read.
+    let best = tetris::Best {
+        score: 204_900,
+        top: [204_900, 128_400, 61_200, 15_000, 900],
+    };
+    let piece = tetris::Piece {
+        col: 4,
+        row: 6,
+        kind: 5,
+        rot: 1,
+        pad: [0; 2],
+    };
+    tetris_frame(&well, &play, &best, &piece, at)
+}
+
+/// Demo 10's widgets, dressed by the demo's own `declare`/`dress_menu`/`hud`
+/// arithmetic and run through the real `gg_ui::boundary::Ui`. Nothing about the
+/// layout is decided here (§4.10 — the golden guards the demo, not a lookalike).
+fn tetris_frame(
+    well: &demo_10_tetris::Well,
+    play: &demo_10_tetris::Play,
+    best: &demo_10_tetris::Best,
+    piece: &demo_10_tetris::Piece,
+    at: u32,
+) -> Render {
+    use demo_10_tetris as tetris;
+    use gg_ecs::World;
+    use gg_ecs::boundary::{CANVAS, Prefs, Widget};
+
+    let grid = tetris::compose_well(well, play, piece);
+    let bays = tetris::compose_bays(play);
+    let screen = tetris::Screen { at, from: at };
+    // Defaults, which is what makes the settings scene the shipped one: ghost
+    // on, full volume, drawn cursor, NORMAL, CLASSIC.
+    let (opts, prefs) = (
+        tetris::Options {
+            ghost_off: 0,
+            theme: 0,
+            preset: 0,
+        },
+        Prefs::default(),
+    );
     let mut declared = Vec::new();
     tetris::declare(|part, mut widget| {
         match part {
-            // The banner belongs to a dead board and this one is alive — and
-            // the menu layer to a screen this picture is not on (§6 M19); both
-            // are declared at zero rects, which draw nothing.
-            tetris::Part::Chrome | tetris::Part::Banner(_) | tetris::Part::Menu(_) => {}
+            tetris::Part::Chrome => {}
             tetris::Part::Cell(cell) => widget.color = tetris::cell_color(&grid, &cell),
             tetris::Part::Bay(bay) => widget.color = tetris::bay_color(&bays, &bay),
             tetris::Part::Value(line) => {
-                widget.set_text(&tetris::value_of(&play, &best, &line).to_string());
+                widget.set_text(&tetris::value_of(play, best, &line).to_string());
+            }
+            // `hud`'s two rules, called rather than restated: the banner shows
+            // on a dead board and only on the playing screen, and a menu row
+            // shows on the screens its own table names.
+            tetris::Part::Banner(banner) => {
+                if play.over != 0 && at == tetris::SCREEN_PLAYING {
+                    widget.rect = banner.rect;
+                }
+            }
+            tetris::Part::Menu(item) => {
+                tetris::dress_menu(&item, &screen, &opts, &prefs, best, &mut widget);
             }
         }
         declared.push(widget);

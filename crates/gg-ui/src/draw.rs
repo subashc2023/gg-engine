@@ -246,8 +246,12 @@ impl DrawList {
     }
 
     /// Width of `text` in this font, unscaled.
+    ///
+    /// The game's own measurement (§6 M44), not a second one that agrees with
+    /// it today — a label is clipped to a rect the game sized, so the two
+    /// answers have to be one answer.
     pub fn width(text: &str) -> f32 {
-        text.chars().count() as f32 * font::CELL.0 as f32
+        gg_ecs::boundary::text_width(text)
     }
 
     /// Height of one line, unscaled.

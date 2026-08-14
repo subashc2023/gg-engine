@@ -67,6 +67,8 @@ pub const gg_ecs::boundary::wave::TRIANGLE: u32
 pub mod gg_ecs::boundary::widget
 pub const gg_ecs::boundary::widget::BUTTON: u32
 pub const gg_ecs::boundary::widget::LABEL: u32
+pub const gg_ecs::boundary::widget::LABEL_CENTRE: u32
+pub const gg_ecs::boundary::widget::LABEL_RIGHT: u32
 pub const gg_ecs::boundary::widget::PANEL: u32
 pub struct gg_ecs::boundary::Access
 impl gg_ecs::boundary::Access
@@ -301,6 +303,8 @@ pub fn gg_ecs::boundary::Widget::focused(&self) -> bool
 pub fn gg_ecs::boundary::Widget::held(&self) -> bool
 pub fn gg_ecs::boundary::Widget::hovered(&self) -> bool
 pub fn gg_ecs::boundary::Widget::label([f32; 4], u32, &str) -> Self
+pub fn gg_ecs::boundary::Widget::label_centred([f32; 4], u32, &str) -> Self
+pub fn gg_ecs::boundary::Widget::label_right([f32; 4], u32, &str) -> Self
 pub fn gg_ecs::boundary::Widget::panel([f32; 4], u32) -> Self
 pub fn gg_ecs::boundary::Widget::set_text(&mut self, &str)
 pub fn gg_ecs::boundary::Widget::text(&self) -> &str
@@ -314,6 +318,7 @@ pub const gg_ecs::boundary::Widget::TYPE_NAME: &'static str
 impl gg_ecs::state_hash::StateHash for gg_ecs::boundary::Widget
 pub fn gg_ecs::boundary::Widget::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 pub const gg_ecs::boundary::CANVAS: (u32, u32)
+pub const gg_ecs::boundary::CELL: (u32, u32)
 pub const gg_ecs::boundary::DEFAULT_SMOOTHNESS: f32
 pub const gg_ecs::boundary::MAX_MS: u32
 pub const gg_ecs::boundary::QUIET_MAX: u32
@@ -397,6 +402,7 @@ pub unsafe fn gg_ecs::boundary::same_schemas(&gg_abi::layout::ComponentsTable, &
 pub fn gg_ecs::boundary::set_logger(fn(u32, &str)) -> core::result::Result<(), fn(u32, &str)>
 pub fn gg_ecs::boundary::set_system_zone(gg_ecs::boundary::SystemZone) -> core::result::Result<(), gg_ecs::boundary::SystemZone>
 pub fn gg_ecs::boundary::system_id(&str) -> u64
+pub const fn gg_ecs::boundary::text_width(&str) -> f32
 pub fn gg_ecs::boundary::verbs(&'static gg_ecs::boundary::Table<gg_abi::verb::VerbName>, &'static gg_ecs::boundary::Table<gg_abi::verb::VerbName>, &[&'static str], &[&'static str]) -> gg_abi::verb::VerbsTable
 pub const fn gg_ecs::boundary::widget_id(&str) -> u64
 pub type gg_ecs::boundary::SystemZone = fn(&str, &mut dyn core::ops::function::FnMut())

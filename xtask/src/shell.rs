@@ -242,6 +242,18 @@ pub fn bless(commit: &str) -> anyhow::Result<()> {
         tetris.change_count(),
         sequence.len(),
     );
+    // The menu tour has no baseline beside it: a click is a `Widget::state` bit
+    // the host writes, so an in-process run of these frames registers none of
+    // them (§6 M44). It is graded across tiers, demo 07's way.
+    let mut tour = tetris_menu_replay();
+    tour.set_engine_commit(commit);
+    std::fs::write(tetris_menu_path(), tour.encode())?;
+    println!(
+        "xtask replay: blessed {} ({} ticks, {} change records) at {commit}",
+        demo_10_tetris::session::MENU_NAME,
+        tour.ticks(),
+        tour.change_count(),
+    );
     let entry = platformer_entry()?;
     let frames = demo_11_platformer::session::frames(&entry)?;
     let opening = demo_11_platformer::session::opening_tick()?;
@@ -327,7 +339,26 @@ const TETRIS_ACTIONS: &[&str] = &[
     "pause",
     "ui_click",
     "ui_focus",
+    "back",
 ];
+/// And its axes. Declared for every demo 10 stream, not only the one that moves
+/// a pointer: the list is the game's, and a keyboard session that declared none
+/// was a stream describing a different game from the one replaying it.
+const TETRIS_AXES: &[&str] = &["ui_x", "ui_y"];
+
+/// Demo 10's *menu* tour as a replay file (§6 M44). Same verb space as the game
+/// stream, because it is the same game — what differs is that every verb in it
+/// but four is a pointer glide, and that the session ends itself.
+pub fn tetris_menu_replay() -> Replay {
+    tetris_stream(&demo_10_tetris::session::menu_frames())
+}
+
+/// Where the menu tour lives.
+pub fn tetris_menu_path() -> PathBuf {
+    workspace_root()
+        .join("tests/replays")
+        .join(format!("{}.ggrp", demo_10_tetris::session::MENU_NAME))
+}
 
 /// The recorded full game as a replay file — `demo_10_tetris::session`'s frames,
 /// so this file, the demo's own tests and the baseline are one script.
@@ -343,7 +374,7 @@ fn tetris_stream(frames: &[InputFrame]) -> Replay {
         "curated",
         gg_core::DEFAULT_TICK_HZ,
         TETRIS_ACTIONS,
-        &[],
+        TETRIS_AXES,
     );
     meta.engine_commit = "generated".to_owned();
     let mut recorder = Recorder::new(meta);
@@ -401,6 +432,36 @@ pub fn check_tetris() -> anyhow::Result<()> {
     println!(
         "xtask replay: {} matches its script ({} ticks, blessed at {})",
         demo_10_tetris::session::NAME,
+        decoded.ticks(),
+        decoded.meta().engine_commit,
+    );
+    Ok(())
+}
+
+/// The same staleness check for the menu tour (§6 M44). Its own function rather
+/// than a loop over the two, because the error text names the script.
+pub fn check_tetris_menu() -> anyhow::Result<()> {
+    let path = tetris_menu_path();
+    let on_disk = std::fs::read(&path)
+        .map_err(|e| anyhow::anyhow!("no Tetris menu tour at {} ({e})", path.display()))?;
+    let decoded = Replay::decode(&on_disk)?;
+    let mut fresh = tetris_menu_replay();
+    fresh.set_engine_commit(&decoded.meta().engine_commit);
+    anyhow::ensure!(
+        fresh.encode() != decoded.encode() || fresh.encode() == on_disk,
+        "{} is the stream `demo_10_tetris::session::menu_frames()` still produces, written in an older encoding — `cargo xtask replay --bless` re-authors it",
+        path.display(),
+    );
+    anyhow::ensure!(
+        fresh.encode() == on_disk,
+        "{} is not what `demo_10_tetris::session::menu_frames()` produces today ({} ticks on disk, {} from the script) — a menu row that moved is exactly what this looks like, and `cargo xtask replay --bless` is the reviewed act that re-joins them",
+        path.display(),
+        decoded.ticks(),
+        fresh.ticks(),
+    );
+    println!(
+        "xtask replay: {} matches its script ({} ticks, blessed at {})",
+        demo_10_tetris::session::MENU_NAME,
         decoded.ticks(),
         decoded.meta().engine_commit,
     );
@@ -1504,6 +1565,12 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     }
     if only("--tetris") {
         tetris()?;
+    }
+    if only("--menu") {
+        tetris_menu()?;
+    }
+    if only("--progress") {
+        progress()?;
     }
     if only("--platformer") {
         platformer()?;
@@ -2685,6 +2752,65 @@ pub fn cross_tier() -> anyhow::Result<()> {
     println!(
         "xtask: §5.6c green — dev, instrumented and dist-verify agree tick for tick over {} ticks",
         first.len()
+    );
+    Ok(())
+}
+
+/// M19's other residual, closed (§6 M44): a recorded session that goes *through*
+/// the settings menu rather than planting clicks in-process.
+///
+/// Three claims the game stream cannot make. Every row of the settings screen is
+/// reached by a pointer that had to survive the canvas fit, fixed-point
+/// integration and one frame of lag — a click that landed a row off changes the
+/// log, not just the picture. The same screen is opened from the title *and*
+/// from pause, which is the only way `Screen::from` is proven to be a field
+/// rather than a hardcoded return. And the session **ends itself**: `Prefs::close`
+/// is sim state, so the tick the replay stops on is the game's decision, and a
+/// shell that ignored it would run to the end of the file instead.
+fn tetris_menu() -> anyhow::Result<()> {
+    let replay = tetris_menu_path();
+    anyhow::ensure!(
+        replay.is_file(),
+        "no Tetris menu tour at {} — `cargo xtask replay --bless` authors it",
+        replay.display()
+    );
+    let ticks = Replay::decode(&std::fs::read(&replay)?)?.ticks();
+    let replay = replay.display().to_string();
+    let wanted = demo_10_tetris::session::MENU_LOG;
+
+    let mut runs: Vec<(&str, Vec<(u64, String)>)> = Vec::new();
+    for tier in HASHED_TIERS {
+        let (host, game) = stage_game(tier, "demo-10-tetris", "demo_10_tetris")?;
+        let log = play(&host, &game, &["--replay", &replay], true)?;
+        let at = reaches(&log, wanted);
+        anyhow::ensure!(
+            at == wanted.len(),
+            "[{}] the tour reached {at} of {} milestones — expected {wanted:?} in order, and a click that landed a row off is exactly what this looks like:
+{log}",
+            tier.name,
+            wanted.len(),
+        );
+        let seq = sequence(&log)?;
+        // The session closed itself: `Prefs::close` is monotone hashed state, so
+        // the shell stops on the tick the game wrote it rather than at the end
+        // of the file. A shell that read it as decoration runs every tick.
+        anyhow::ensure!(
+            seq.len() < ticks as usize,
+            "[{}] the tour ran all {ticks} recorded ticks — EXIT set `Prefs::close` and nothing ended the session, which is the shipped game's quit button doing nothing",
+            tier.name,
+        );
+        runs.push((tier.name, seq));
+    }
+
+    for pair in runs.windows(2) {
+        if let Some(found) = divergence(&pair[0], &pair[1]) {
+            anyhow::bail!("§6 M44: {found}");
+        }
+    }
+    println!(
+        "xtask reload: demo 10's menu tour landed the same clicks under dev, instrumented and \n         dist-verify over {} ticks, closing itself {} ticks before the file ran out (§6 M44)",
+        runs[0].1.len(),
+        ticks as usize - runs[0].1.len(),
     );
     Ok(())
 }
@@ -4760,6 +4886,131 @@ fn with_the_node_renamed(source: &str) -> anyhow::Result<String> {
 /// reopened build print the record it inherited.
 const BEST_TAIL: usize = 12;
 
+/// M42's own gap, closed (§6 M44): **a shipped game forgot every score at exit**.
+///
+/// `--best` proves the table crosses a save and a reopen, and nobody types
+/// `--save`. What is new is a file the shell writes without being asked and
+/// reads without being told, on M42's directory — so the gate is M42's shape
+/// with a different number in it: `settings.cfg`'s effect is a `Prefs` field,
+/// and this one's is *the tick the world resumes at*.
+///
+/// Four legs, and the third is the one that would otherwise pass on a shell
+/// writing the file and never opening it.
+fn progress() -> anyhow::Result<()> {
+    let (host, game) = stage_game(&HASHED_TIERS[0], "demo-10-tetris", "demo_10_tetris")?;
+    let dir = workspace_root().join("target/progress");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let manifest = dir.join("game.ggproj");
+    std::fs::write(
+        &manifest,
+        "title = M44 Progress
+",
+    )?;
+    let data = dir.join("data");
+    let file = data.join("m44-progress").join("progress.ggsave");
+    let (manifest, data) = (manifest.display().to_string(), data.display().to_string());
+    let env = [("LOCALAPPDATA", data.as_str()), ("XDG_DATA_HOME", &data)];
+    let run = |args: &[&str]| play_env(&host, &game, args, true, &env);
+    let forget = || {
+        let _ = std::fs::remove_file(&file);
+    };
+
+    // 1. A replayed session writes none. `player_file`'s rule, and the reason
+    //    the whole tetris and menu legs above are unaffected by this milestone.
+    let replay = tetris_path();
+    let replay = replay.display().to_string();
+    let played = dir.join("played.ggsv");
+    let played_arg = played.display().to_string();
+    let log = run(&[
+        "--replay",
+        &replay,
+        "--frames",
+        "400",
+        "--save",
+        &played_arg,
+        "--project",
+        &manifest,
+    ])?;
+    anyhow::ensure!(
+        log.contains("save written") && played.is_file(),
+        "the played session wrote no save:
+{log}"
+    );
+    anyhow::ensure!(
+        !file.exists(),
+        "a replayed session wrote {} — a blessed stream must leave nothing behind for the next run to open, or every gate in this file would be reading the last one's world",
+        file.display()
+    );
+
+    // 2. A live session writes one. `--load` seeds it with a played board, which
+    //    is what gives leg 3 something a fresh boot could never produce.
+    let live = ["--frames", "120", "--project", &manifest];
+    let seeded = run(&[&["--load", &played_arg], &live[..]].concat())?;
+    anyhow::ensure!(
+        file.is_file(),
+        "a live session left no {} — the shipped game still forgets (§6 M42's gap):
+{seeded}",
+        file.display()
+    );
+    let keep = std::fs::read(&file)?;
+
+    // 3. And the next one opens it. The claim needs both directions: without the
+    //    file the run starts at tick 0, with it the run starts where the last one
+    //    stopped — so the two sequences must *not* agree, and a shell that wrote
+    //    the file and never read it fails here rather than passing everywhere.
+    forget();
+    let fresh = sequence(&run(&live)?)?;
+    std::fs::write(&file, &keep)?;
+    let reopened = run(&live)?;
+    anyhow::ensure!(
+        reopened.contains("resuming the player's session"),
+        "the shell did not say it opened {}:
+{reopened}",
+        file.display()
+    );
+    let resumed = sequence(&reopened)?;
+    anyhow::ensure!(
+        divergence(
+            &("without the file", fresh.clone()),
+            &("with it", resumed.clone())
+        )
+        .is_some(),
+        "a session with the player's file and one without it hashed identically — the file reached nothing, and the tick a world resumes at is hashed state precisely so that it cannot"
+    );
+    anyhow::ensure!(
+        resumed.first().is_some_and(|(tick, _)| *tick > 0)
+            && fresh.first().is_some_and(|(tick, _)| *tick == 0),
+        "the reopened session began at {:?} and the fresh one at {:?} — a resumed world carries the tick it stopped on, which is the one number a fresh boot cannot produce",
+        resumed.first().map(|(tick, _)| *tick),
+        fresh.first().map(|(tick, _)| *tick),
+    );
+
+    // 4. A build that cannot read it starts anyway, and does not eat it. This is
+    //    the policy that is neither `--load`'s nor `settings.cfg`'s: refusing to
+    //    launch would brick a patched game, and forgiving the loss would destroy
+    //    the scores at the next exit. Skipped, named, and left alone.
+    let source = std::fs::read_to_string(workspace_root().join(DEMO_10.dir).join("src/lib.rs"))?;
+    write_variant(DEMO_10, "progress", &with_the_record_renamed(&source)?)?;
+    let renamed = build_variant(DEMO_10, "progress")?;
+    std::fs::write(&file, &keep)?;
+    let log = play_env(&host, &renamed, &live, true, &env)?;
+    anyhow::ensure!(
+        log.contains("this build cannot read it") && log.contains("tetris.best"),
+        "a build that renamed a component read the player's file, or refused it without naming what it could not read:
+{log}"
+    );
+    anyhow::ensure!(
+        std::fs::read(&file)? == keep,
+        "the build that could not read {} overwrote it at exit — going back to the build that wrote it is the only recovery there is, and this is what takes it away",
+        file.display()
+    );
+    println!(
+        "xtask reload: the player's session crossed two processes, moved the hash by the tick it resumed at, and survived a build that could not read it (§6 M44)"
+    );
+    Ok(())
+}
+
 /// §6 M18's last save row: **the high score survives a close and reopen across a
 /// component schema change.**
 ///
@@ -4823,8 +5074,18 @@ fn settings() -> anyhow::Result<()> {
         std::fs::write(&file, text)?;
         Ok(())
     };
+    // Both of the player's files, because M44 gave this directory a second one
+    // and a *live* leg here would otherwise resume the previous leg's world
+    // instead of booting — which is this gate's own leg 1 turned on itself.
+    let session = file.with_file_name("progress.ggsave");
+    // The session alone, for the legs that must compare a *boot* against a boot
+    // while keeping the settings file they just wrote.
+    let reboot = || {
+        let _ = std::fs::remove_file(&session);
+    };
     let forget = || {
         let _ = std::fs::remove_file(&file);
+        reboot();
     };
     let replay = tetris_path();
     let replay = replay.display().to_string();
@@ -4879,6 +5140,7 @@ fn settings() -> anyhow::Result<()> {
         file.display()
     );
     quiet("quiet = 512\ncursor = 1\n")?;
+    reboot();
     let set = sequence(&run(&["--frames", "300", "--project", &manifest])?)?;
     anyhow::ensure!(
         divergence(&("at defaults", plain.clone()), &("with settings", set)).is_some(),
@@ -4893,6 +5155,7 @@ fn settings() -> anyhow::Result<()> {
     // 3. A hostile file is a game at defaults, never a game that will not start:
     //    the player's file outlives the build that wrote it.
     quiet("shadowquality=ultra\nquiet = loud\n!\n")?;
+    reboot();
     let log = run(&["--frames", "300", "--project", &manifest])?;
     anyhow::ensure!(
         log.contains("settings: lines this build does not answer to"),

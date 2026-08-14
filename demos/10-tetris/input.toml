@@ -22,6 +22,9 @@ restart = ["R"]
 pause = ["P"]
 ui_click = ["Mouse1"]
 ui_focus = ["Tab"]
+# Claimed from the shell, which quits on an unclaimed Escape without the game
+# ever hearing it (§6 M44) — the one key a game has to take to own its own exit.
+back = ["Escape"]
 
 # The steered pointer (§4.9, §6 M19): the menus are clicked with the arrow the
 # operator sees, so these are `PointerX`/`PointerY` — never raw `MouseX` counts.

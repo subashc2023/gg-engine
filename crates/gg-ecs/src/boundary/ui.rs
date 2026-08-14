@@ -45,6 +45,17 @@ pub mod widget {
     /// A filled rectangle with its text centred, hit-tested and focusable —
     /// the only kind that ever comes back with [`super::state`] bits set.
     pub const BUTTON: u32 = 2;
+    /// [`LABEL`], centred in its rect. A kind rather than an alignment field
+    /// because [`Widget`] is exactly 80 bytes with no padding for `Pod` to
+    /// refuse (`the_protocol_type_is_flat_and_padding_free`), so a `u32` here
+    /// costs 8 bytes and every save and replay baseline in the tree; the host
+    /// has done this arithmetic for [`BUTTON`] since M13 and the only thing
+    /// missing was a way to ask for it.
+    pub const LABEL_CENTRE: u32 = 3;
+    /// [`LABEL`], right-aligned in its rect — what a column of numbers wants,
+    /// a score that gained a digit growing leftward into space the panel
+    /// already reserved rather than rightward into its neighbour.
+    pub const LABEL_RIGHT: u32 = 4;
 }
 
 /// Bits the host writes into [`Widget::state`]. All of them are false for a
@@ -138,6 +149,22 @@ impl Widget {
         widget
     }
 
+    /// Text centred in `rect`. Same truncation as [`label`](Widget::label).
+    #[must_use]
+    pub fn label_centred(rect: [f32; 4], color: u32, text: &str) -> Self {
+        let mut widget = Widget::label(rect, color, text);
+        widget.kind = widget::LABEL_CENTRE;
+        widget
+    }
+
+    /// Text right-aligned in `rect`.
+    #[must_use]
+    pub fn label_right(rect: [f32; 4], color: u32, text: &str) -> Self {
+        let mut widget = Widget::label(rect, color, text);
+        widget.kind = widget::LABEL_RIGHT;
+        widget
+    }
+
     /// A button, hit-tested under `id`.
     #[must_use]
     pub fn button(id: u64, rect: [f32; 4], color: u32, text_color: u32, text: &str) -> Self {
@@ -215,6 +242,37 @@ pub const fn widget_id(path: &str) -> u64 {
     hash
 }
 
+/// The host's fallback face, in [`CANVAS`] units: advance per character, and
+/// height of a line.
+///
+/// Here for [`widget_id`]'s reason, and load-bearing for the same one: a game
+/// sizing the rect it is about to clip its own text to (`gg-ui` clips a
+/// [`widget::LABEL`] to its rectangle) has to know how wide that text comes
+/// out, and cannot ask the crate that decides. `gg-ui` rasterises this cell —
+/// one definition, so the two sides cannot drift.
+///
+/// It is a *contract* rather than an observation: widget text is drawn with
+/// the fallback face at 1:1, so a game's layout arithmetic is exact. A rented
+/// face is `gg-ui`'s to use where a game is not measuring against it (§4.9).
+pub const CELL: (u32, u32) = (6, 8);
+
+/// How wide `text` comes out in [`CANVAS`] units, drawn as a [`Widget`].
+///
+/// `const`, so a rect computed from a label can be a `const` too — which is
+/// what keeps a menu's layout a table rather than a startup pass.
+#[must_use]
+pub const fn text_width(text: &str) -> f32 {
+    let bytes = text.as_bytes();
+    // Characters, not bytes, counted by skipping UTF-8 continuations: `chars`
+    // is not `const`, and for valid UTF-8 the two agree by definition.
+    let (mut chars, mut at) = (0u32, 0);
+    while at < bytes.len() {
+        chars += ((bytes[at] & 0xc0) != 0x80) as u32;
+        at += 1;
+    }
+    (chars * CELL.0) as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +313,40 @@ mod tests {
         assert!(!button.clicked() && !button.hovered());
         button.state = state::HOVERED | state::CLICKED;
         assert!(button.clicked() && button.hovered() && !button.held() && !button.focused());
+    }
+
+    /// The measurement a game lays its menus out with. `gg-ui` draws against
+    /// these same constants, so this is the whole of the agreement — before
+    /// M44 it was a private constant in demo 10 and a test whose only job was
+    /// to notice the day the two came apart.
+    #[test]
+    fn text_is_measured_at_the_faces_cell() {
+        assert_eq!(CELL, (6, 8));
+        assert_eq!(text_width(""), 0.0);
+        assert_eq!(text_width("GAME OVER"), 54.0);
+        // Characters, not bytes: a two-byte code point advances one cell.
+        assert_eq!(text_width("é"), 6.0);
+        // `const`, which is the reason it is written the way it is.
+        const CENTRED: f32 = (CANVAS.0 as f32 - text_width("PAUSED")) / 2.0;
+        assert_eq!(CENTRED, 302.0);
+    }
+
+    #[test]
+    fn an_aligned_label_differs_from_a_plain_one_only_in_kind() {
+        let rect = [10.0, 20.0, 100.0, 9.0];
+        let (left, centre, right) = (
+            Widget::label(rect, 0xffff_ffff, "SCORE"),
+            Widget::label_centred(rect, 0xffff_ffff, "SCORE"),
+            Widget::label_right(rect, 0xffff_ffff, "SCORE"),
+        );
+        assert_eq!(left.kind, widget::LABEL);
+        assert_eq!(centre.kind, widget::LABEL_CENTRE);
+        assert_eq!(right.kind, widget::LABEL_RIGHT);
+        for aligned in [centre, right] {
+            assert_eq!(aligned.rect, left.rect);
+            assert_eq!(aligned.text(), left.text());
+            assert_eq!(aligned.text_color, left.text_color);
+        }
     }
 
     #[test]

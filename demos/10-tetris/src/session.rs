@@ -44,7 +44,7 @@
 //! `xtask ci --push` byte-compares the checked-in file against [`frames`], so a
 //! script edited without a `--bless` fails the push tier by name.
 
-use gg_ecs::boundary::{self, ActionId, InputFrame, MAX_AXES};
+use gg_ecs::boundary::{self, AXIS_SCALE, ActionId, InputFrame, MAX_AXES};
 use gg_ecs::hash::CanonicalHash;
 use gg_ecs::{AliasError, RegistryError};
 // Only what drives a world needs the entry points, and so the feature.
@@ -292,6 +292,161 @@ fn idle() -> InputFrame {
     InputFrame {
         buttons: 0,
         axes: [0; MAX_AXES],
+    }
+}
+
+// ------------------------------------------------------------- the menu tour
+//
+// A second script over the same game, because the first one never touches a
+// menu (§6 M19's residual, closed at M44). It is *pointer* input where the game
+// session is keyboard input, which is the whole point: a click has to survive
+// the canvas fit, the pointer's fixed-point integration and one frame of lag
+// before it lands on the row it was aimed at, and none of that is exercised by
+// a key. It is also the only recorded session in the tree that **ends itself** —
+// EXIT sets `Prefs::close`, so the replay's last tick is the game's decision
+// rather than the harness running out of frames.
+
+/// `ui_click`'s id. Named here and nowhere else in the demo: the *game* never
+/// reads it — the host routes the click and hands the result back as a `state`
+/// bit (§4.9) — but a script has to press the button a player presses.
+const UI_CLICK: ActionId = ActionId::new(9);
+
+/// This session's name in `tests/replays/`.
+pub const MENU_NAME: &str = "demo10-menu";
+
+/// What the shell's log must say, in order, when the tour is replayed.
+///
+/// There is no `.hashes` beside this one, and the absence is the structure
+/// rather than an omission: a click is a `Widget::state` bit the *host* writes,
+/// so an in-process run of these frames registers nothing. The tour is graded
+/// against the other tiers running it, demo 07's way (`xtask reload --ui`).
+///
+/// Every settings row is here because each writes a *different* component —
+/// `Options`, `Rules`, `Prefs` — and a tour that only proved one row worked
+/// would be checking that the click machinery runs, not that the menu does.
+pub const MENU_LOG: &[&str] = &[
+    "tetris: ready",
+    "tetris: ghost off",
+    "tetris: volume changed",
+    "tetris: cursor changed",
+    "tetris: speed changed",
+    "tetris: theme changed",
+    "tetris: paused",
+    "tetris: resumed",
+    "tetris: quit",
+    "tetris: closing",
+];
+
+/// The scripted tour: every settings row from the title, then a game, then the
+/// same screen reached from *pause* — the path that exercises `Screen::from` —
+/// then out through QUIT and EXIT.
+///
+/// Every position is the centre of a row in [`crate::MENU`], so moving a button
+/// moves the click rather than breaking the gate (demo 07's rule).
+#[must_use]
+pub fn menu_frames() -> Vec<InputFrame> {
+    let mut out = Vec::new();
+    let mut at = (0i32, 0i32);
+
+    // From the title: open settings and touch all five rows. VOLUME twice, so
+    // the row that steps through five values is proven to step rather than to
+    // toggle.
+    for (which, clicks) in [
+        (crate::M_TITLE_SETTINGS, 1),
+        (crate::M_GHOST, 1),
+        (crate::M_VOLUME, 2),
+        (crate::M_CURSOR, 1),
+        (crate::M_SPEED, 1),
+        (crate::M_THEME, 1),
+        (crate::M_DONE, 1),
+    ] {
+        click(&mut out, &mut at, which, clicks);
+    }
+
+    // Play a little, with the keyboard, so the pause lands on a live board.
+    tap(&mut out, RESTART);
+    for _ in 0..40 {
+        out.push(idle());
+    }
+
+    // Pause with the key, reach settings from *there*, and leave: `Screen::from`
+    // is the field that says where DONE returns to, and the title path above
+    // cannot tell a working one from a hardcoded `SCREEN_TITLE`.
+    tap(&mut out, crate::PAUSE);
+    for _ in 0..4 {
+        out.push(idle());
+    }
+    click(&mut out, &mut at, crate::M_PAUSE_SETTINGS, 1);
+    click(&mut out, &mut at, crate::M_DONE, 1);
+    // Escape resumes, and escape pauses again — the verb M44 took off the shell.
+    tap(&mut out, crate::BACK);
+    for _ in 0..8 {
+        out.push(idle());
+    }
+    tap(&mut out, crate::BACK);
+    for _ in 0..8 {
+        out.push(idle());
+    }
+    // Abandon the run, then close the session from the title.
+    click(&mut out, &mut at, crate::M_QUIT, 1);
+    click(&mut out, &mut at, crate::M_TITLE_EXIT, 1);
+    // The shell needs a tick to see `Prefs::close`; past that the frames are
+    // spare, and a replay that outlives its own ending is the point.
+    for _ in 0..10 {
+        out.push(idle());
+    }
+    out
+}
+
+/// Glide onto row `which`, settle, and press `ui_click` `clicks` times.
+fn click(out: &mut Vec<InputFrame>, at: &mut (i32, i32), which: u8, clicks: u32) {
+    let rect = crate::MENU[which as usize].rect;
+    glide(
+        out,
+        at,
+        (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0),
+        20,
+    );
+    // Settle: hover resolves against the geometry the *previous* frame declared
+    // (§4.9's lag), and a press that finds no hovered widget captures nothing.
+    for _ in 0..3 {
+        out.push(idle());
+    }
+    for _ in 0..clicks {
+        for _ in 0..2 {
+            out.push(InputFrame {
+                buttons: 1 << UI_CLICK.index(),
+                axes: [0; MAX_AXES],
+            });
+        }
+        // Released, then long enough for `menu` to read the bit and `hud` to
+        // redraw what it changed.
+        for _ in 0..6 {
+            out.push(idle());
+        }
+    }
+}
+
+/// Move the pointer from `at` to `to` over `ticks`, in fixed point.
+///
+/// Divided against the ticks *remaining* rather than by a constant step, so the
+/// last frame carries the remainder and the pointer lands exactly on the target
+/// — a click one unit short of a button is a gate that fails on a rounding
+/// change and names nothing.
+fn glide(out: &mut Vec<InputFrame>, at: &mut (i32, i32), to: (f32, f32), ticks: i32) {
+    let target = (
+        (to.0 * AXIS_SCALE as f32) as i32,
+        (to.1 * AXIS_SCALE as f32) as i32,
+    );
+    for step in 0..ticks {
+        let left = ticks - step;
+        let motion = ((target.0 - at.0) / left, (target.1 - at.1) / left);
+        at.0 += motion.0;
+        at.1 += motion.1;
+        let mut axes = [0; MAX_AXES];
+        axes[0] = motion.0;
+        axes[1] = motion.1;
+        out.push(InputFrame { buttons: 0, axes });
     }
 }
 

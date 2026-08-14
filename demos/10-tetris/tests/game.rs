@@ -12,18 +12,18 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use demo_10_tetris::{
-    Banner, Bay, Best, COLORS, CUE_CLEAR, CUE_HOLD, CUE_LEVEL, CUE_LOCK, CUE_MOVE, CUE_MUSIC,
+    BACK, Banner, Bay, Best, COLORS, CUE_CLEAR, CUE_HOLD, CUE_LEVEL, CUE_LOCK, CUE_MOVE, CUE_MUSIC,
     CUE_OVER, CUE_ROTATE, CUES, Cell, Cue, HARD_DROP, HEIGHT, HIDDEN, HOLD, HOLD_BAY, HudLine,
-    LEFT, M_CURSOR, M_DONE, M_GHOST, M_QUIT, M_RESUME, M_THEME, M_TITLE_SETTINGS, M_VOLUME, MENU,
-    MIN_GRAVITY_TICKS, NEXT_BAY, NO_PIECE, Options, PAUSE, PRESETS, Piece, Play, RESTART,
-    ROTATE_CW, Rules, SCREEN_PAUSED, SCREEN_PLAYING, SCREEN_SETTINGS, SCREEN_TITLE, SEED, SHAPES,
-    Screen, THEMES, WIDTH, Well, cells_of, clear_rows, collides, color_of, draw, gravity_for,
-    landing_row, new_play, record_top, rotate_kicked, session, spawn_piece, themed_color,
-    tspin_at_lock, voice_of,
+    LEFT, M_CURSOR, M_DONE, M_GHOST, M_QUIT, M_RESUME, M_THEME, M_TITLE_EXIT, M_TITLE_SETTINGS,
+    M_VOLUME, MENU, MIN_GRAVITY_TICKS, NEXT_BAY, NO_PIECE, Options, PAUSE, PRESETS, Piece, Play,
+    RESTART, ROTATE_CW, Rules, SCREEN_PAUSED, SCREEN_PLAYING, SCREEN_SETTINGS, SCREEN_TITLE, SEED,
+    SHAPES, Screen, THEMES, WIDTH, Well, cells_of, clear_rows, collides, color_of, draw,
+    gravity_for, landing_row, new_play, record_top, rotate_kicked, session, spawn_piece,
+    themed_color, tspin_at_lock, voice_of,
 };
 use gg_ecs::boundary::{
-    self, AbiInfo, ActionId, ComponentsTable, HostApiV1, InputFrame, Sound, SystemsTable, TickCtx,
-    Widget, asset_id, wave,
+    self, AbiInfo, ActionId, ComponentsTable, HostApiV1, InputFrame, Prefs, Sound, SystemsTable,
+    TickCtx, Widget, asset_id, wave,
 };
 use gg_ecs::{Query, World};
 use gg_math::sim;
@@ -1621,4 +1621,84 @@ fn the_best_score_reaches_the_hud() {
     assert_eq!(shown.len(), 4);
     assert_eq!(shown[3], "204900", "the fourth stats row is the record");
     assert_ne!(shown[0], shown[3], "the score row is not the record row");
+}
+
+/// Escape is the game's, not the shell's (§6 M44). Unclaimed it exits the
+/// process without a tick running, which is how a shipped game loses whatever
+/// the session was about to write; claimed, it is one verb that means "back" on
+/// every screen and "leave" on the one screen with nowhere further back.
+#[test]
+fn escape_backs_out_of_every_screen_and_leaves_from_the_title() {
+    let mut game = Game::load();
+    game.step();
+    assert_eq!(game.screen(), SCREEN_TITLE);
+
+    // Title to settings and back out again.
+    game.click(M_TITLE_SETTINGS);
+    assert_eq!(game.screen(), SCREEN_SETTINGS);
+    game.hold(BACK);
+    game.step();
+    assert_eq!(game.screen(), SCREEN_TITLE, "escape did not leave settings");
+    assert_eq!(
+        game.one::<Prefs>().close,
+        0,
+        "backing out of a screen closed the game"
+    );
+
+    // Playing to paused and back, the pause key's other spelling. A press has
+    // to end before the next begins, which is what the bare step between them is.
+    game.start();
+    game.steps(5);
+    game.hold(BACK);
+    game.step();
+    assert_eq!(game.screen(), SCREEN_PAUSED);
+    game.step();
+    game.hold(BACK);
+    game.step();
+    assert_eq!(game.screen(), SCREEN_PLAYING);
+}
+
+/// The two edges that end a session, and the one that does not. `Prefs::close`
+/// is monotone and hashed, so the tick it is written on is the tick a replay
+/// ends on and the world the shell saves on the way out (§6 M44).
+#[test]
+fn only_the_title_screens_exit_closes_the_game_and_it_leaves_a_clean_board() {
+    let mut game = Game::load();
+    game.start();
+    game.steps(40);
+    game.hold(PAUSE);
+    game.step();
+    assert_eq!(game.screen(), SCREEN_PAUSED);
+
+    // QUIT TO TITLE files the run and deals a fresh board. It does not close.
+    game.click(M_QUIT);
+    assert_eq!(game.screen(), SCREEN_TITLE);
+    assert_eq!(
+        game.one::<Prefs>().close,
+        0,
+        "quitting to the title closed it"
+    );
+    assert_eq!(game.one::<Play>().score, 0, "the board was not dealt again");
+
+    // EXIT does, and the board it leaves behind is the one a resumed session
+    // opens on — which is the whole reason the reset above happens first.
+    game.click(M_TITLE_EXIT);
+    assert_ne!(game.one::<Prefs>().close, 0, "EXIT did not end the session");
+    assert_eq!(game.screen(), SCREEN_TITLE);
+    assert_eq!(
+        game.one::<Play>().over,
+        0,
+        "a half-played board crossed the exit"
+    );
+
+    // And escape from the title is the same edge by another name.
+    let mut second = Game::load();
+    second.step();
+    second.hold(BACK);
+    second.step();
+    assert_ne!(
+        second.one::<Prefs>().close,
+        0,
+        "escape did not end the session"
+    );
 }

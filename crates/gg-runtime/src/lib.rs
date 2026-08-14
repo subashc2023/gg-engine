@@ -157,6 +157,17 @@ pub(crate) fn player_file(args: &Args, name: &str) -> Option<PathBuf> {
 /// the two would make a twice-rejuvenated session accumulate argv.
 const RESTORE_FLAG: &str = "--restore";
 
+/// The player's session, in the data directory beside `settings.cfg` (§6 M44).
+///
+/// A fourth file policy, and the three that exist do not cover it. It is a
+/// [`gg_ecs::world::save::Save`], so it inherits §4.5's *may gain, never lose* —
+/// but nobody typed `--load` to open it, so a build that cannot read one must
+/// not refuse to start the way `--load` does. The answer is the one thing a
+/// forgiving read cannot be: **skipped and left alone**. The scores are lost to
+/// this build and recovered by going back to the one that wrote them, where
+/// decoding it leniently would have destroyed them at the next exit.
+const PROGRESS: &str = "progress.ggsave";
+
 /// The config file, read from the working directory. Not having written one is
 /// the normal case (§4.8), so there is no flag to point elsewhere: a run that
 /// wants one value wants `--set`, and a run that wants a different *file* is
@@ -260,10 +271,35 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     if let Some(path) = &args.load {
         app.load_save(path)?;
     }
+    // The player's own session (§6 M44), ahead of the opening scene and never
+    // beside it: the scene is what a *new* player gets, and this is what the
+    // last one left. A refusal is a warning here rather than an error — see
+    // `PROGRESS` — and it takes the exit write down with it.
+    // `--load` suppresses the *read* and not the write: the flag says where the
+    // session starts, this says where it left off, and every session leaves off
+    // somewhere. The editor is out of both, like `--save`.
+    let progress = player_file(args, PROGRESS).filter(|_| !args.editor);
+    let mut resumed = false;
+    let mut keep_progress = true;
+    if let Some(path) = progress
+        .as_deref()
+        .filter(|path| path.is_file() && args.load.is_none())
+    {
+        match app.load_save(path) {
+            Ok(()) => {
+                info!(progress = %path.display(), "resuming the player's session");
+                resumed = true;
+            }
+            Err(error) => {
+                warn!(%error, "progress: this build cannot read it — starting fresh, file untouched");
+                keep_progress = false;
+            }
+        }
+    }
     // The project's opening scene (§6 M15.2 post-close; §6 M20 pull 2): the
     // world as data — the editor opens Stopped at the save's tick with no game
     // code run, and a plain run opens the level the project checked in.
-    if let Some(scene) = opening_scene(args) {
+    if let Some(scene) = opening_scene(args).filter(|_| !resumed) {
         info!(scene = %scene.display(), "opening scene");
         app.load_save(&scene)?;
     }
@@ -323,6 +359,17 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     // out of is the world, and the world goes with the app (§6 M42).
     if let Some(path) = &settings {
         app.write_settings(path);
+    }
+    // And the session itself (§6 M44). Written however the session ended, which
+    // is what leaves the decision with the game: demo 10's EXIT files the score
+    // and deals a fresh board before setting `Prefs::close`, so a deliberate
+    // quit reopens on the title — and a window closed mid-game reopens on that
+    // game, because the game got no tick in which to decide otherwise. A
+    // failure here is logged, never fatal: the process is already leaving.
+    if let Some(path) = progress.filter(|_| keep_progress)
+        && let Err(error) = app.write_save(&path)
+    {
+        warn!(%error, "progress: not written");
     }
     // Also before `finish`, and the reason is the same one: the pick is the
     // editor's and the editor goes with the app.

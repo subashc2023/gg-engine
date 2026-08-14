@@ -49,7 +49,7 @@ pub use load::{SystemPanic, Verbs, read_verbs, same_schemas};
 pub use prefs::{Prefs, QUIET_MAX, aa, cursor, settings};
 pub use present::{DEFAULT_SMOOTHNESS, Eye, Light, Model, Renderable, Sky, light, shape};
 pub use scene::Node;
-pub use ui::{CANVAS, TEXT, Widget, state, widget, widget_id};
+pub use ui::{CANVAS, CELL, TEXT, Widget, state, text_width, widget, widget_id};
 
 pub use crate::hash::system_id;
 

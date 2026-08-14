@@ -144,9 +144,14 @@ pub struct App {
     /// dist entirely — `gg-debug` is not in that graph (§3).
     #[cfg(feature = "overlay")]
     overlay: gg_debug::Overlay,
-    /// What the player's settings file asked for, until tick 0 spends it (§6
-    /// M42). `None` in every run that may not read one — see `player_file`.
+    /// What the player's settings file asked for, until this session's first
+    /// tick spends it (§6 M42). `None` in every run that may not read one — see
+    /// `player_file`.
     settings: Option<Prefs>,
+    /// Whether a tick of this session has run. What [`settings`](Self::settings)
+    /// is spent on, and a `bool` rather than a tick number because a resumed
+    /// session's first tick is whatever the save carried (§6 M44).
+    opened: bool,
 }
 
 impl App {
@@ -270,10 +275,12 @@ impl App {
             #[cfg(feature = "overlay")]
             overlay: gg_debug::Overlay::default(),
             settings: None,
+            opened: false,
         })
     }
 
-    /// What the player's settings file asked for, spent on tick 0 (§6 M42).
+    /// What the player's settings file asked for, spent on the first tick this
+    /// session runs (§6 M42, corrected at M44).
     pub fn want_settings(&mut self, prefs: Prefs) {
         self.settings = Some(prefs);
     }
@@ -1667,19 +1674,24 @@ impl Stages for App {
             error!(error = %refused, tick, "hierarchy refused — sim halted until the next reload");
             self.halted = true;
         }
-        // The player's own settings (§6 M42), on tick 0 and after the systems,
-        // which is the only moment they can land: a game spawns its `Prefs` in
-        // its bootstrap, so before tick 0 there is no component to write — the
-        // one way this differs from a scene, which arrives as the whole world.
-        // Before the UI tick below, so the stage that caches preferences reads
-        // them on the tick they arrive rather than the one after.
+        // The player's own settings (§6 M42), after the systems of this
+        // session's *first* tick — which is the only moment they can land: a
+        // game spawns its `Prefs` in its bootstrap, so before it there is no
+        // component to write, the one way this differs from a scene, which
+        // arrives as the whole world. Before the UI tick below, so the stage
+        // that caches preferences reads them on the tick they arrive.
+        //
+        // The first tick, not tick 0 (§6 M44): a resumed session opens at the
+        // tick it stopped on, and a condition written `tick == 0` silently
+        // stopped reading the settings file the moment a session could carry a
+        // tick — a player whose saved game ignored the volume slider.
         //
         // The file is the *complete* statement of what the player asked for, so
         // it is assigned rather than merged: a key they deleted is a preference
         // they gave back. `close` alone survives — it is the quit button's edge
         // and belongs to this session, and a file that carried it would end
         // every session that opened one.
-        if tick == 0
+        if !std::mem::replace(&mut self.opened, true)
             && let Some(want) = self.settings.take()
         {
             let mut applied = 0usize;

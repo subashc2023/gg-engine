@@ -49,8 +49,8 @@
 
 use gg_ecs::Component;
 use gg_ecs::boundary::{
-    ActionId, GameWorld, Prefs, QUIET_MAX, Sound, TEXT, Widget, cursor, log_level, state, wave,
-    widget, widget_id,
+    ActionId, GameWorld, Prefs, QUIET_MAX, Sound, TEXT, Widget, cursor, log_level, state,
+    text_width, wave, widget, widget_id,
 };
 use gg_math::sim;
 
@@ -106,6 +106,12 @@ pub const PAUSE: ActionId = ActionId::new(8);
 // Ids 9 and 10 are `ui_click`/`ui_focus`, and axes 0 and 1 are `ui_x`/`ui_y` —
 // §4.9's pointer verbs, routed by the host and never read here by name. They
 // are *appended* so the eight ids above keep the values every recording holds.
+/// Back out of wherever we are: pause, resume, leave the settings screen, or —
+/// on the title — end the session. Bound to Escape, which is what claims it
+/// from the shell (§6 M44): unclaimed, Escape exits the process without the
+/// game hearing about it, which is how a shipped Tetris lost its scores. Id 11
+/// for the reason above — appended, so every recording keeps its ids.
+pub const BACK: ActionId = ActionId::new(11);
 
 // ---------------------------------------------------------------- the layout
 
@@ -255,14 +261,11 @@ const KEYS_AT: (f32, f32) = (460.0, 169.0);
 const KEYS_STEP: f32 = 12.0;
 const KEYS_COLUMN: f32 = 42.0;
 
-/// `gg-ui`'s fallback face advances six canvas units per character and inks
-/// seven of eight vertically (`gg_ui::font::CELL`). Restated rather than
-/// imported: §3's deny pin keeps a game crate off `gg-ui`, so the number a
-/// layout measures with lives here and `text_width`'s own test is what stops it
-/// from drifting.
-const GLYPH_CELL: f32 = 6.0;
 /// Height of a label's rectangle — the face's cell, plus one for a descender.
-const LINE: f32 = 9.0;
+/// [`gg_ecs::boundary::CELL`] and [`text_width`] are the host's own, on the
+/// game's side of §3's pin since M44 — before that this file carried a copy of
+/// each and a test whose whole job was to notice the day they came apart.
+const LINE: f32 = gg_ecs::boundary::CELL.1 as f32 + 1.0;
 /// What the stats column is sized for. Six digits: an ordinary game passes
 /// 100000, and a rect that fitted the score at spawn would clip it later.
 const WIDEST_VALUE: &str = "999999";
@@ -274,9 +277,10 @@ const BANNER: [(&str, u32); 3] = [("", SHROUD), ("GAME OVER", ACCENT), ("PRESS R
 /// Height of the banner's plate, and where its top sits inside the well.
 const BANNER_PLATE: (f32, f32) = (110.0, 56.0);
 
-/// Where [`BANNER`]'s `index`th widget goes when it is shown. The plate spans
-/// the well; the two lines are centred in it, which is arithmetic rather than
-/// three more literals to keep in agreement.
+/// Where [`BANNER`]'s `index`th widget goes when it is shown. Every row spans
+/// the well and the two lines are [`widget::LABEL_CENTRE`], so the centring is
+/// the host's — which is the only way the text and the plate cannot disagree
+/// about where the middle is (§6 M44).
 #[must_use]
 pub fn banner_rect(index: usize) -> [f32; 4] {
     let well = well_rect();
@@ -284,12 +288,10 @@ pub fn banner_rect(index: usize) -> [f32; 4] {
     if index == 0 {
         return [well[0], top, well[2], BANNER_PLATE.1];
     }
-    let body = BANNER[index % BANNER.len()].0;
-    let width = text_width(body);
     [
-        well[0] + (well[2] - width) / 2.0,
+        well[0],
         top + 18.0 + (index - 1) as f32 * 20.0,
-        width,
+        well[2],
         LINE,
     ]
 }
@@ -321,6 +323,10 @@ pub const M_PAUSE_LABEL: u8 = 10;
 pub const M_RESUME: u8 = 11;
 pub const M_PAUSE_SETTINGS: u8 = 12;
 pub const M_QUIT: u8 = 13;
+/// Appended rather than slotted beside [`M_TITLE_SETTINGS`]: `which` doubles as
+/// the index into [`MENU`], so a row inserted in the middle would renumber every
+/// row after it — and those numbers are in `MenuItem`, which is hashed state.
+pub const M_TITLE_EXIT: u8 = 22;
 // The settings screen:
 pub const M_SET_PLATE: u8 = 14;
 pub const M_SET_TITLE: u8 = 15;
@@ -360,29 +366,30 @@ const ON_SETTINGS: u32 = 1 << SCREEN_SETTINGS;
 ///
 /// Unformatted for [`LAYOUT`]-in-demo-07's reason: it is a table.
 #[rustfmt::skip]
-pub const MENU: [MenuDef; 22] = [
-    MenuDef { which: M_TITLE_PLATE,    kind: widget::PANEL,  id: widget_id("tetris.title.plate"),    rect: [247.0,  96.0, 146.0, 140.0], on: ON_TITLE,    text: "" },
+pub const MENU: [MenuDef; 23] = [
+    MenuDef { which: M_TITLE_PLATE,    kind: widget::PANEL,  id: widget_id("tetris.title.plate"),    rect: [247.0,  96.0, 146.0, 164.0], on: ON_TITLE,    text: "" },
     MenuDef { which: M_TITLE_PLAY,     kind: widget::BUTTON, id: widget_id("tetris.title.play"),     rect: [265.0, 110.0, 110.0,  18.0], on: ON_TITLE,    text: "PLAY" },
     MenuDef { which: M_TITLE_SETTINGS, kind: widget::BUTTON, id: widget_id("tetris.title.settings"), rect: [265.0, 134.0, 110.0,  18.0], on: ON_TITLE,    text: "SETTINGS" },
-    MenuDef { which: M_TITLE_BEST,     kind: widget::LABEL,  id: widget_id("tetris.title.best"),     rect: [265.0, 162.0, 110.0,   9.0], on: ON_TITLE,    text: "BEST GAMES" },
-    MenuDef { which: M_TITLE_ROW0,     kind: widget::LABEL,  id: widget_id("tetris.title.row0"),     rect: [265.0, 174.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
-    MenuDef { which: M_TITLE_ROW0 + 1, kind: widget::LABEL,  id: widget_id("tetris.title.row1"),     rect: [265.0, 185.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
-    MenuDef { which: M_TITLE_ROW0 + 2, kind: widget::LABEL,  id: widget_id("tetris.title.row2"),     rect: [265.0, 196.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
-    MenuDef { which: M_TITLE_ROW0 + 3, kind: widget::LABEL,  id: widget_id("tetris.title.row3"),     rect: [265.0, 207.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
-    MenuDef { which: M_TITLE_ROW0 + 4, kind: widget::LABEL,  id: widget_id("tetris.title.row4"),     rect: [265.0, 218.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
+    MenuDef { which: M_TITLE_BEST,     kind: widget::LABEL_CENTRE, id: widget_id("tetris.title.best"),     rect: [265.0, 186.0, 110.0,   9.0], on: ON_TITLE,    text: "BEST GAMES" },
+    MenuDef { which: M_TITLE_ROW0,     kind: widget::LABEL_CENTRE, id: widget_id("tetris.title.row0"),     rect: [265.0, 198.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
+    MenuDef { which: M_TITLE_ROW0 + 1, kind: widget::LABEL_CENTRE, id: widget_id("tetris.title.row1"),     rect: [265.0, 209.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
+    MenuDef { which: M_TITLE_ROW0 + 2, kind: widget::LABEL_CENTRE, id: widget_id("tetris.title.row2"),     rect: [265.0, 220.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
+    MenuDef { which: M_TITLE_ROW0 + 3, kind: widget::LABEL_CENTRE, id: widget_id("tetris.title.row3"),     rect: [265.0, 231.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
+    MenuDef { which: M_TITLE_ROW0 + 4, kind: widget::LABEL_CENTRE, id: widget_id("tetris.title.row4"),     rect: [265.0, 242.0, 110.0,   9.0], on: ON_TITLE,    text: "" },
     MenuDef { which: M_PAUSE_PLATE,    kind: widget::PANEL,  id: widget_id("tetris.pause.plate"),    rect: [247.0,  96.0, 146.0, 120.0], on: ON_PAUSE,    text: "" },
-    MenuDef { which: M_PAUSE_LABEL,    kind: widget::LABEL,  id: widget_id("tetris.pause.label"),    rect: [302.0, 106.0,  36.0,   9.0], on: ON_PAUSE,    text: "PAUSED" },
+    MenuDef { which: M_PAUSE_LABEL,    kind: widget::LABEL_CENTRE, id: widget_id("tetris.pause.label"),    rect: [247.0, 106.0, 146.0,   9.0], on: ON_PAUSE,    text: "PAUSED" },
     MenuDef { which: M_RESUME,         kind: widget::BUTTON, id: widget_id("tetris.pause.resume"),   rect: [265.0, 122.0, 110.0,  18.0], on: ON_PAUSE,    text: "RESUME" },
     MenuDef { which: M_PAUSE_SETTINGS, kind: widget::BUTTON, id: widget_id("tetris.pause.settings"), rect: [265.0, 146.0, 110.0,  18.0], on: ON_PAUSE,    text: "SETTINGS" },
-    MenuDef { which: M_QUIT,           kind: widget::BUTTON, id: widget_id("tetris.pause.quit"),     rect: [265.0, 170.0, 110.0,  18.0], on: ON_PAUSE,    text: "QUIT" },
+    MenuDef { which: M_QUIT,           kind: widget::BUTTON, id: widget_id("tetris.pause.quit"),     rect: [265.0, 170.0, 110.0,  18.0], on: ON_PAUSE,    text: "QUIT TO TITLE" },
     MenuDef { which: M_SET_PLATE,      kind: widget::PANEL,  id: widget_id("tetris.set.plate"),      rect: [230.0,  78.0, 180.0, 182.0], on: ON_SETTINGS, text: "" },
-    MenuDef { which: M_SET_TITLE,      kind: widget::LABEL,  id: widget_id("tetris.set.title"),      rect: [296.0,  88.0,  48.0,   9.0], on: ON_SETTINGS, text: "SETTINGS" },
+    MenuDef { which: M_SET_TITLE,      kind: widget::LABEL_CENTRE, id: widget_id("tetris.set.title"),      rect: [230.0,  88.0, 180.0,   9.0], on: ON_SETTINGS, text: "SETTINGS" },
     MenuDef { which: M_GHOST,          kind: widget::BUTTON, id: widget_id("tetris.set.ghost"),      rect: [242.0, 104.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
     MenuDef { which: M_VOLUME,         kind: widget::BUTTON, id: widget_id("tetris.set.volume"),     rect: [242.0, 128.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
     MenuDef { which: M_CURSOR,         kind: widget::BUTTON, id: widget_id("tetris.set.cursor"),     rect: [242.0, 152.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
     MenuDef { which: M_SPEED,          kind: widget::BUTTON, id: widget_id("tetris.set.speed"),      rect: [242.0, 176.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
     MenuDef { which: M_THEME,          kind: widget::BUTTON, id: widget_id("tetris.set.theme"),      rect: [242.0, 200.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
     MenuDef { which: M_DONE,           kind: widget::BUTTON, id: widget_id("tetris.set.done"),       rect: [242.0, 232.0, 156.0,  18.0], on: ON_SETTINGS, text: "DONE" },
+    MenuDef { which: M_TITLE_EXIT,     kind: widget::BUTTON, id: widget_id("tetris.title.exit"),     rect: [265.0, 158.0, 110.0,  18.0], on: ON_TITLE,    text: "EXIT" },
 ];
 
 /// Top-left of a visible cell.
@@ -1393,7 +1400,11 @@ pub fn declare(mut emit: impl FnMut(Part, Widget)) {
         // starts as: a label is clipped to its own rect, so a rect that fitted
         // the initial text would cut the score at one digit.
         let rect = [*x, *y, text_width(WIDEST_VALUE), LINE];
-        let widget = ordered(Widget::label(rect, INK, "0"), order);
+        // Right-aligned: the rect is the widest number's, so a left-aligned
+        // score walks its own last digit rightward as it grows and the column
+        // reads as three ragged rows. Growing leftward into space already
+        // reserved is what a scoreboard does (§6 M44).
+        let widget = ordered(Widget::label_right(rect, INK, "0"), order);
         order += 1;
         emit(Part::Value(HudLine { which: which as u8 }), widget);
     }
@@ -1404,7 +1415,7 @@ pub fn declare(mut emit: impl FnMut(Part, Widget)) {
     for (index, (body, color)) in BANNER.iter().enumerate() {
         let widget = match body.is_empty() {
             true => Widget::panel([0.0; 4], SHROUD),
-            false => Widget::label([0.0; 4], *color, body),
+            false => Widget::label_centred([0.0; 4], *color, body),
         };
         emit(
             Part::Banner(Banner {
@@ -1421,6 +1432,7 @@ pub fn declare(mut emit: impl FnMut(Part, Widget)) {
         let mut widget = match def.kind {
             widget::PANEL => Widget::panel([0.0; 4], SHROUD),
             widget::LABEL => Widget::label([0.0; 4], INK, def.text),
+            widget::LABEL_CENTRE => Widget::label_centred([0.0; 4], INK, def.text),
             _ => Widget::button(def.id, [0.0; 4], SURROUND, INK, def.text),
         };
         widget.id = def.id;
@@ -1440,18 +1452,6 @@ pub fn declare(mut emit: impl FnMut(Part, Widget)) {
 fn ordered(mut widget: Widget, order: u32) -> Widget {
     widget.order = order;
     widget
-}
-
-/// Canvas width of a run of text in `gg-ui`'s fallback face.
-///
-/// A label is clipped to its own rectangle (§4.9), so a rect narrower than its
-/// text silently cuts it — a layout bug that reads as a typo. [`GLYPH_CELL`] is
-/// that face's advance; a proportional face would make this a host call, which
-/// §3's pin does not allow, so a game either measures like this or over-sizes
-/// every rectangle it authors.
-#[must_use]
-pub fn text_width(text: &str) -> f32 {
-    text.chars().count() as f32 * GLYPH_CELL
 }
 
 /// One tick of the game: input, gravity, lock, clear, spawn.
@@ -1756,6 +1756,7 @@ pub fn step(world: &mut GameWorld) {
 pub fn menu(world: &mut GameWorld) {
     let pause = world.just_pressed(PAUSE);
     let start = world.just_pressed(RESTART);
+    let back = world.just_pressed(BACK);
 
     let mut clicked = 0u64;
     let _ = world.each::<&Widget>(|_, w| {
@@ -1820,9 +1821,19 @@ pub fn menu(world: &mut GameWorld) {
         }
     }
 
+    // EXIT is the only way this game closes its own window. `Prefs::close` is
+    // sim state on purpose, so a replay ends where the recorded session did —
+    // and because it lands on a tick the game's own systems ran, the world the
+    // shell saves on the way out is a world this game chose (§6 M44).
+    if at == SCREEN_TITLE && (is(M_TITLE_EXIT) || back) {
+        let _ = world.each::<&mut Prefs>(|_, p: &mut Prefs| p.close = 1);
+        world.log(log_level::INFO, "tetris: closing");
+    }
+
     // QUIT files the abandoned run and deals a fresh board under the title, so
     // PLAY is always a new game (§6 M19). The score is recorded exactly as a
-    // top-out records it — walking away is finishing.
+    // top-out records it — walking away is finishing. It says TO TITLE since
+    // M44 because the title screen grew an EXIT and one word cannot mean both.
     if at == SCREEN_PAUSED && is(M_QUIT) {
         let _ = world.each::<(&mut Well, &mut Play, &mut Piece, &mut Best)>(
             |_, (well, play, piece, best)| {
@@ -1837,15 +1848,15 @@ pub fn menu(world: &mut GameWorld) {
         Some((SCREEN_PLAYING, from))
     } else if at == SCREEN_TITLE && is(M_TITLE_SETTINGS) {
         Some((SCREEN_SETTINGS, SCREEN_TITLE))
-    } else if at == SCREEN_PLAYING && pause && !over {
+    } else if at == SCREEN_PLAYING && (pause || back) && !over {
         Some((SCREEN_PAUSED, from))
-    } else if at == SCREEN_PAUSED && (pause || is(M_RESUME)) {
+    } else if at == SCREEN_PAUSED && (pause || back || is(M_RESUME)) {
         Some((SCREEN_PLAYING, from))
     } else if at == SCREEN_PAUSED && is(M_PAUSE_SETTINGS) {
         Some((SCREEN_SETTINGS, SCREEN_PAUSED))
     } else if at == SCREEN_PAUSED && is(M_QUIT) {
         Some((SCREEN_TITLE, from))
-    } else if at == SCREEN_SETTINGS && is(M_DONE) {
+    } else if at == SCREEN_SETTINGS && (is(M_DONE) || back) {
         Some((from, from))
     } else {
         None
@@ -2055,48 +2066,65 @@ pub fn hud(world: &mut GameWorld) {
         };
     });
 
-    // Percent for the volume row, computed the host's way round (`Prefs`'
-    // fixed point) so the label and the loudness cannot disagree.
-    let volume = (QUIET_MAX - prefs.quiet.min(QUIET_MAX)) * 100 / QUIET_MAX;
     let _ = world.each::<(&MenuItem, &mut Widget)>(|_, (item, widget)| {
-        let def = &MENU[item.which as usize % MENU.len()];
-        let shown = def.on & (1 << screen.at.min(31)) != 0;
-        widget.rect = match shown {
-            true => def.rect,
-            false => [0.0; 4],
-        };
-        if !shown {
-            return;
-        }
-        match item.which {
-            M_GHOST => widget.set_text(if opts.ghost_off == 0 {
-                "GHOST      ON"
-            } else {
-                "GHOST      OFF"
-            }),
-            M_VOLUME => widget.set_text(Text::labelled(b"VOLUME     ", volume).as_str()),
-            M_CURSOR => widget.set_text(if prefs.hardware_cursor() {
-                "CURSOR     SYSTEM"
-            } else {
-                "CURSOR     DRAWN"
-            }),
-            M_SPEED => {
-                widget.set_text(Text::pair(b"SPEED      ", speed_name(opts.preset)).as_str());
-            }
-            M_THEME => {
-                widget.set_text(Text::pair(b"THEME      ", theme_name(opts.theme)).as_str());
-            }
-            which if (M_TITLE_ROW0..M_TITLE_ROW0 + 5).contains(&which) => {
-                let rank = which - M_TITLE_ROW0;
-                let score = best.top[rank as usize % best.top.len()];
-                match score {
-                    0 => widget.set_text(""),
-                    _ => widget.set_text(Text::ranked(rank, score).as_str()),
-                }
-            }
-            _ => {}
-        }
+        dress_menu(item, &screen, &opts, &prefs, &best, widget);
     });
+}
+
+/// A menu widget's rect and text on the screen the world is on.
+///
+/// Split out of [`hud`] for [`declare`]'s reason (§4.10): `gg-golden` renders
+/// the title, pause and settings screens, and a harness that decided for itself
+/// which rows are visible would be gating a lookalike. Nothing here reads the
+/// world, so both callers hand it the same five values.
+pub fn dress_menu(
+    item: &MenuItem,
+    screen: &Screen,
+    opts: &Options,
+    prefs: &Prefs,
+    best: &Best,
+    widget: &mut Widget,
+) {
+    let def = &MENU[item.which as usize % MENU.len()];
+    let shown = def.on & (1 << screen.at.min(31)) != 0;
+    widget.rect = match shown {
+        true => def.rect,
+        false => [0.0; 4],
+    };
+    if !shown {
+        return;
+    }
+    // Percent for the volume row, computed the host's way round (`Prefs`' fixed
+    // point) so the label and the loudness cannot disagree.
+    let volume = (QUIET_MAX - prefs.quiet.min(QUIET_MAX)) * 100 / QUIET_MAX;
+    match item.which {
+        M_GHOST => widget.set_text(if opts.ghost_off == 0 {
+            "GHOST      ON"
+        } else {
+            "GHOST      OFF"
+        }),
+        M_VOLUME => widget.set_text(Text::labelled(b"VOLUME     ", volume).as_str()),
+        M_CURSOR => widget.set_text(if prefs.hardware_cursor() {
+            "CURSOR     SYSTEM"
+        } else {
+            "CURSOR     DRAWN"
+        }),
+        M_SPEED => {
+            widget.set_text(Text::pair(b"SPEED      ", speed_name(opts.preset)).as_str());
+        }
+        M_THEME => {
+            widget.set_text(Text::pair(b"THEME      ", theme_name(opts.theme)).as_str());
+        }
+        which if (M_TITLE_ROW0..M_TITLE_ROW0 + 5).contains(&which) => {
+            let rank = which - M_TITLE_ROW0;
+            let score = best.top[rank as usize % best.top.len()];
+            match score {
+                0 => widget.set_text(""),
+                _ => widget.set_text(Text::ranked(rank, score).as_str()),
+            }
+        }
+        _ => {}
+    }
 }
 
 /// [`PRESETS`]' label for a preset index, out-of-range reading as NORMAL.
@@ -2130,7 +2158,8 @@ gg_ecs::gg_game! {
         "restart",
         "pause",
         "ui_click",
-        "ui_focus"
+        "ui_focus",
+        "back"
     ],
     axes: ["ui_x", "ui_y"],
     systems: [bootstrap, step, menu, present, hud],
@@ -2347,14 +2376,14 @@ mod tests {
         );
     }
 
-    /// The measurement the whole layout is built on. `gg_ui::font::CELL` is
-    /// `(6, 8)` and a game crate may not link `gg-ui` to read it (§3), so this
-    /// is the seam where the two could drift apart unnoticed — pinned here, and
-    /// checked against the real face by the golden scene.
+    /// Every rect this file computes is [`LINE`] tall, and [`LINE`] is the
+    /// host's cell plus a descender. Pinned because the arithmetic reads as a
+    /// literal everywhere else in the layout — the *measurement* itself moved
+    /// to `gg_ecs::boundary` at M44 and is tested there, where `gg-ui` reads it
+    /// too and the two cannot drift.
     #[test]
-    fn text_is_measured_at_the_faces_cell() {
-        assert_eq!(GLYPH_CELL, 6.0);
-        assert_eq!(text_width(""), 0.0);
+    fn a_row_is_the_faces_cell_and_a_descender() {
+        assert_eq!(LINE, 9.0);
         assert_eq!(text_width("GAME OVER"), 54.0, "spaces advance the pen");
     }
 

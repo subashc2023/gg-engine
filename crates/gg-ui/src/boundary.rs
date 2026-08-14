@@ -244,11 +244,23 @@ impl Ui {
             w.state = 0;
             match w.kind {
                 widget::PANEL => list.rect(rect, w.color),
-                widget::LABEL => {
+                widget::LABEL | widget::LABEL_CENTRE | widget::LABEL_RIGHT => {
+                    let text = w.text();
+                    // Whole canvas units, for the reason the button arm gives.
+                    // Slack goes negative when the text outgrew its rect, which
+                    // moves a centred or right-aligned run left of `rect.x` and
+                    // loses its head rather than its tail — the right end being
+                    // the one the alignment was asked for.
+                    let slack = rect.w - DrawList::width(text);
+                    let x = match w.kind {
+                        widget::LABEL_CENTRE => (rect.x + slack * 0.5).floor(),
+                        widget::LABEL_RIGHT => (rect.x + slack).floor(),
+                        _ => rect.x,
+                    };
                     // Clipped to its own rectangle: a HUD row that outgrew the
                     // space it was given is cut, never drawn over its neighbour.
                     list.push_clip(rect);
-                    list.text(rect.x, rect.y, w.text(), w.text_color);
+                    list.text(x, rect.y, text, w.text_color);
                     list.pop_clip();
                 }
                 widget::BUTTON => {
@@ -484,6 +496,34 @@ mod tests {
             ui.frame(&mut world, &Tick::default(), Fit::new(TARGET))
                 .is_empty()
         );
+    }
+
+    /// The alignment the host has done for a button since M13, now askable for
+    /// a label (§6 M44) — measured off the pen rather than off the kind,
+    /// because the claim is that the game's own `text_width` and the host's
+    /// placement are one arithmetic and not two that agree today.
+    #[test]
+    fn an_aligned_label_lands_where_the_games_own_measurement_says() {
+        const RECT: [f32; 4] = [10.0, 20.0, 100.0, 9.0];
+        const TEXT: &str = "SCORE";
+        // Fit 1:1 so the pen is in canvas units and the arithmetic is visible.
+        let pen = |build: fn([f32; 4], u32, &str) -> Widget| {
+            let mut ui = Ui::new().expect("query");
+            let mut world = World::new();
+            world.register::<Widget>().expect("register");
+            let label = world.spawn();
+            world
+                .insert(label, build(RECT, 0xffff_ffff, TEXT))
+                .expect("insert");
+            ui.frame(&mut world, &Tick::default(), Fit::new(CANVAS))
+                .iter()
+                .map(|v| v.pos[0])
+                .fold(f32::INFINITY, f32::min)
+        };
+        let slack = RECT[2] - gg_ecs::boundary::text_width(TEXT);
+        assert_eq!(pen(Widget::label), RECT[0]);
+        assert_eq!(pen(Widget::label_centred), RECT[0] + slack * 0.5);
+        assert_eq!(pen(Widget::label_right), RECT[0] + slack);
     }
 
     /// A game with no UI at all gets no pointer drawn over its camera.

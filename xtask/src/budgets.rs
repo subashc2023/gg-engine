@@ -148,9 +148,21 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   bank goes to `gg-audio` as a slice — which is exactly the interface that
 ///   let `gg-audio` spend none of its slots.
 ///
+/// - **The session a player left** (1515 → 1545, §6 M44): the file M42's own
+///   directory was missing, and the twenty-odd lines that read it before the
+///   opening scene and write it after the loop. It is the *shell's* by the
+///   argument M42 already made about `settings.cfg` — `player_file`'s live-only
+///   rule is here, the data directory is here, and the world both halves need is
+///   here — but it is also the one player file whose policy could not be written
+///   anywhere else: `--load` refuses a save it cannot read and this **skips**
+///   one, because refusing to launch would brick a patched game and forgiving
+///   the loss would destroy the scores at the next exit. That third answer is
+///   two lines of `match` and a `keep_progress` flag, and there is nowhere below
+///   the shell that knows a launch is at stake.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
-/// (play mode), M18 item 2 (audio) — each argued the same way as above.
-const SHELL_BUDGET: usize = 1515;
+/// (play mode), M18 item 2 (audio), M43 (clips) — each argued the same way.
+const SHELL_BUDGET: usize = 1545;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.
@@ -890,7 +902,11 @@ mod tests {
             std::fs::read_to_string(workspace_root().join(WIDGET_PROTOCOL)).expect("protocol");
         let kinds = widget_kinds(&text);
         let names: Vec<&str> = kinds.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(names, ["PANEL", "LABEL", "BUTTON"], "{kinds:?}");
+        assert_eq!(
+            names,
+            ["PANEL", "LABEL", "BUTTON", "LABEL_CENTRE", "LABEL_RIGHT"],
+            "{kinds:?}"
+        );
         for (kind, ctors) in &kinds {
             assert!(!ctors.is_empty(), "{kind} has no constructor: {kinds:?}");
         }
