@@ -31,11 +31,20 @@
 //!
 //! # CVars are not sim state
 //!
-//! Nothing here is hashed, snapshotted or recorded into a replay. A CVar read
-//! inside a sim tick would make that tick depend on a config file, and the replay
-//! would reproduce only on machines with the same one — so sim code does not read
-//! them. The types stop at `bool`/`i64`/`f64` partly for that reason: a CVar is a
-//! knob, and anything that needs a string wants config or an asset, not a knob.
+//! Nothing here is hashed or snapshotted. A CVar read inside a sim tick would
+//! make that tick depend on a config file, and the replay would reproduce only on
+//! machines with the same one — so sim code does not read them. The types stop at
+//! `bool`/`i64`/`f64` partly for that reason: a CVar is a knob, and anything that
+//! needs a string wants config or an asset, not a knob.
+//!
+//! **What that rule does not cover, and §6 M40 does:** the pipeline turning a
+//! recorded *click* into a world write is parameterized by knobs even though the
+//! sim is not. `r.fov` and `r.near` build the editor's pick ray, `d.editor_scale`
+//! divides a physical click down to a logical one, `d.editor_undo` decides
+//! whether the twentieth undo restores anything. Those four declare themselves
+//! [`CVar::recorded`], which puts them in a replay's own channel — recorded when
+//! they move, applied at the tick they moved on, and [`CVarSource::Replay`] after
+//! that so the listing says who moved it.
 
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -81,6 +90,10 @@ pub enum CVarSource {
     /// other, and calling it anything else would hide the one case where a knob
     /// moved with nobody asking.
     Code = 4,
+    /// Applied out of a replay's knob channel (§6 M40). The one source whose
+    /// value is otherwise inexplicable — nobody on this machine set it — which
+    /// is the case this enum exists for.
+    Replay = 5,
 }
 
 impl CVarSource {
@@ -92,6 +105,7 @@ impl CVarSource {
             CVarSource::Cli => "cli",
             CVarSource::Console => "console",
             CVarSource::Code => "code",
+            CVarSource::Replay => "replay",
         }
     }
 
@@ -103,6 +117,7 @@ impl CVarSource {
             2 => CVarSource::Cli,
             3 => CVarSource::Console,
             4 => CVarSource::Code,
+            5 => CVarSource::Replay,
             _ => CVarSource::Default,
         }
     }
@@ -125,6 +140,10 @@ pub struct CVar {
     /// them in one word would cap values at 56 bits to buy an atomicity nothing
     /// reads them as a pair anyway.
     source: AtomicU8,
+    /// Set by [`CVar::recorded`]. Not atomic and not settable: whether a knob
+    /// reaches a click is a property of the code reading it, so it is decided
+    /// where it is declared and never at runtime.
+    recorded: bool,
 }
 
 impl CVar {
@@ -153,6 +172,55 @@ impl CVar {
             default,
             bits: AtomicU64::new(default),
             source: AtomicU8::new(CVarSource::Default as u8),
+            recorded: false,
+        }
+    }
+
+    /// Declare that this knob reaches a *recorded input* — that moving it moves
+    /// where a click lands or what it hits — so a replay must carry it (§6 M40).
+    ///
+    /// Chained onto the declaration (`CVar::new_float(…).recorded()`), which is
+    /// the only place the question can be answered: the registry cannot see who
+    /// reads a value or what they do with it. The set is small and reviewed —
+    /// `xtask ci` compares it against `crates/gg-core/recorded-cvars.txt`, so
+    /// adding one is a diff rather than a remembered sentence.
+    #[must_use]
+    pub const fn recorded(self) -> Self {
+        // Destructured rather than `..self`: a functional update would move out
+        // of a type holding atomics in const context.
+        let CVar {
+            name,
+            help,
+            kind,
+            default,
+            bits,
+            source,
+            ..
+        } = self;
+        CVar {
+            name,
+            help,
+            kind,
+            default,
+            bits,
+            source,
+            recorded: true,
+        }
+    }
+
+    /// Whether [`CVar::recorded`] declared this one.
+    pub fn is_recorded(&self) -> bool {
+        self.recorded
+    }
+
+    /// The declared default as text, in [`CVar::to_text`]'s spelling — what a
+    /// [`Watch`] starts from, so the opening values fall out of the diff instead
+    /// of being a second mechanism.
+    fn default_text(&self) -> String {
+        match self.kind {
+            CVarKind::Bool => if self.default != 0 { "1" } else { "0" }.to_owned(),
+            CVarKind::Int => (self.default as i64).to_string(),
+            CVarKind::Float => f64::from_bits(self.default).to_string(),
         }
     }
 
@@ -405,6 +473,84 @@ pub fn log_sources() {
 /// order a written config file would take.
 pub fn all() -> Vec<&'static CVar> {
     locked!(read).clone()
+}
+
+/// The [`CVar::recorded`] ones, ascending by name (§6 M40). What the baseline
+/// gate reads, and the set a [`Watch`] follows.
+pub fn recorded() -> Vec<&'static CVar> {
+    locked!(read)
+        .iter()
+        .copied()
+        .filter(|c| c.recorded)
+        .collect()
+}
+
+/// Follows the [`recorded`] set and reports what moved (§6 M40).
+///
+/// A **diff**, deliberately, rather than a hook in each of the four things that
+/// can set a knob: the console bypasses the input path entirely, and a hook per
+/// source would cover the ones that exist today. Polling four values a tick
+/// catches every source, including the ones that do not exist yet.
+///
+/// It starts from the *declared defaults*, so the first [`Watch::moved`] reports
+/// everything a config file or `--set` had already changed — the opening
+/// snapshot is the channel's tick-0 entries and not a second mechanism.
+pub struct Watch {
+    last: Vec<(&'static CVar, String)>,
+}
+
+impl Watch {
+    /// Start following, from the declared defaults. Call after registration:
+    /// the set is fixed at construction, since a CVar registered later has no
+    /// value anything recorded could have read.
+    #[must_use]
+    pub fn new() -> Self {
+        Watch {
+            last: recorded()
+                .into_iter()
+                .map(|c| (c, c.default_text()))
+                .collect(),
+        }
+    }
+
+    /// Whatever moved since the last call, ascending by name — empty on almost
+    /// every tick, which is what makes polling the cheap option.
+    pub fn moved(&mut self) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        for (cvar, last) in &mut self.last {
+            let now = cvar.to_text();
+            if *last != now {
+                out.push((cvar.name(), now.clone()));
+                *last = now;
+            }
+        }
+        out
+    }
+}
+
+impl Default for Watch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Apply a replay's knob records (§6 M40) — the values a recording says were in
+/// force from this tick on.
+///
+/// A name this build does not declare is [`CVarError::Unknown`] and the run
+/// stops: this is `World::load`'s policy and not `World::restore`'s (§4.5),
+/// because a knob that was read while recording and is missing while replaying
+/// is a run reproducing something else under the same file name.
+///
+/// Takes pairs rather than the replay's own record shape: a tick is the
+/// caller's concept, and a registry that had learned what one is would be the
+/// dependency direction §4.8 homed this module here to avoid.
+pub fn apply<'a>(changes: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<(), CVarError> {
+    for (name, value) in changes {
+        set(name, value, CVarSource::Replay)?;
+        tracing::info!(cvar = name, value, "cvar replayed");
+    }
+    Ok(())
 }
 
 /// How many CVars are registered.

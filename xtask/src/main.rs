@@ -70,7 +70,7 @@ fn usage() -> anyhow::Result<()> {
          probe [--system]                                 capability table vs pinned lavapipe (spike 2)\n\
          shaders [--check]                                offline shader build + codegen (in-process Slang)\n\
          dist                                             dist gate: build+run tier-dist, symbol absence, crash symbolization (§5.8)\n\
-         reload [--cross-tier|--segments|--chaos|--latency|--ui|--save|--editor|--launcher|--tetris|--platformer|--shooter|--orbit|--epoch|--node|--rules|--feel|--retune|--burn|--best|--agent]  the gates that need the shell over a game dylib; no flag runs the set\n\
+         reload [--cross-tier|--segments|--chaos|--latency|--ui|--save|--editor|--launcher|--knob|--tetris|--platformer|--shooter|--orbit|--epoch|--node|--rules|--feel|--retune|--burn|--best|--agent]  the gates that need the shell over a game dylib; no flag runs the set\n\
          fresh [--clone|--canary]                         the weekly repository gates on demand: pristine-clone rebuild, cargo update canary (§5, §9)\n\
          replay [--bless]                                 §5.6 determinism material: the curated replay's hashes vs its baseline; --bless re-authors both\n\
          public-api [--bless]                             §5.10 surface gate for the five frozen crates, on the pinned nightly\n\

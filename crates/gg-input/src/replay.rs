@@ -35,7 +35,12 @@ pub const MAGIC: [u8; 4] = *b"GGRP";
 /// 2 adds the text channel (§6 M16). That *is* an encoding change — a record
 /// the reader would otherwise walk straight past into the wrong bytes — so it
 /// is the bump the doubling was not.
-pub const FORMAT: u32 = 2;
+///
+/// 3 adds the knob channel and the recorded surface (§6 M40): the host-side
+/// inputs a session was fed that are not verbs. Appended after the text channel
+/// for the reason that channel was appended last — a v2 file is a byte-prefix
+/// of a v3 one, so nothing in `tests/replays/` is re-blessed to read it.
+pub const FORMAT: u32 = 3;
 
 /// The oldest format this build still reads. A v1 file has no text channel,
 /// which decodes as the empty one rather than as a refusal: every replay in
@@ -65,6 +70,15 @@ pub struct ReplayMeta {
     pub actions: Vec<String>,
     /// Axis names in id order.
     pub axes: Vec<String>,
+    /// The surface the session was laid out for, physical pixels, or `(0, 0)`
+    /// when the file does not say (§6 M40).
+    ///
+    /// Hit-testing divides a physical click by a scale computed from this, so a
+    /// session replayed against another surface clicks somewhere else — §6
+    /// M15.1's named residual, carried by hand as `--editor-extent` until the
+    /// file could carry it. The flag remains, now as the override that authors a
+    /// session for a *different* surface, which is what it was really for.
+    pub surface: (u32, u32),
 }
 
 impl ReplayMeta {
@@ -87,6 +101,7 @@ impl ReplayMeta {
             seed: 0,
             actions: actions.iter().map(|s| (*s).to_owned()).collect(),
             axes: axes.iter().map(|s| (*s).to_owned()).collect(),
+            surface: (0, 0),
         }
     }
 }
@@ -124,6 +139,15 @@ pub struct Replay {
     /// (§4.2.2); text is host-UI input that no game reads, and widening the ABI
     /// to carry it would put a string in the sim's boundary to feed a panel.
     text: Vec<(u64, String)>,
+    /// `(tick, name, value)` for every *recorded* CVar that moved, at the tick
+    /// it moved on, in tick order (§6 M40).
+    ///
+    /// An impulse channel like [`Replay::text`] and for its reason — a knob
+    /// change belongs to the tick it happened in — but unlike text its effect
+    /// *persists*, since applying it sets a value that stays set. Which is why
+    /// this holds only what moved: the opening values are the entries at tick 0,
+    /// so a session that ran wholly at defaults carries no bytes at all.
+    knobs: Vec<(u64, String, String)>,
 }
 
 /// Why a replay could not be read, or could not be trusted once read.
@@ -207,6 +231,14 @@ impl Replay {
         self.meta.engine_commit = commit.to_owned();
     }
 
+    /// Restamp the recorded surface — for a *generated* replay, which is
+    /// authored for an extent rather than recorded against one (§6 M40).
+    /// `(0, 0)` is the pre-v3 spelling of "the file does not say", and writing
+    /// it deliberately is how a gate builds its own negative control.
+    pub fn set_surface(&mut self, surface: (u32, u32)) {
+        self.meta.surface = surface;
+    }
+
     /// The segments, in tick order.
     pub fn segments(&self) -> &[Segment] {
         &self.segments
@@ -248,6 +280,25 @@ impl Replay {
     /// survived a round trip rather than being silently empty.
     pub fn typed_count(&self) -> usize {
         self.text.len()
+    }
+
+    /// The knob records at exactly `tick` (§6 M40) — the contiguous run, so a
+    /// caller applying them allocates nothing.
+    ///
+    /// An exact match rather than "at or before", for [`Replay::text`]'s reason:
+    /// the record is the *change*, and a change held forward would re-apply
+    /// itself over whatever the ticks after it did.
+    pub fn knobs_at(&self, tick: u64) -> &[(u64, String, String)] {
+        let from = self.knobs.partition_point(|&(t, ..)| t < tick);
+        let to = self.knobs.partition_point(|&(t, ..)| t <= tick);
+        &self.knobs[from..to]
+    }
+
+    /// How many knob records the stream carries — zero for every session run at
+    /// defaults, which is what a test asserts to know the channel is not
+    /// silently recording noise.
+    pub fn knob_count(&self) -> usize {
+        self.knobs.len()
     }
 
     /// The game-code hash covering `tick` (§4.2.2).
@@ -315,6 +366,15 @@ impl Replay {
             out.extend_from_slice(&tick.to_le_bytes());
             put_str(&mut out, typed);
         }
+        // v3, and after the v2 channel for the same reason it was written last.
+        out.extend_from_slice(&(self.knobs.len() as u32).to_le_bytes());
+        for (tick, name, value) in &self.knobs {
+            out.extend_from_slice(&tick.to_le_bytes());
+            put_str(&mut out, name);
+            put_str(&mut out, value);
+        }
+        out.extend_from_slice(&self.meta.surface.0.to_le_bytes());
+        out.extend_from_slice(&self.meta.surface.1.to_le_bytes());
         out
     }
 
@@ -373,6 +433,16 @@ impl Replay {
                 text.push((r.u64()?, r.string()?));
             }
         }
+        // Absent in v1 and v2, which is why both counts are read only when the
+        // header's own version says the bytes are there to read.
+        let mut knobs = Vec::new();
+        let mut surface = (0, 0);
+        if format >= 3 {
+            for _ in 0..r.u32()? {
+                knobs.push((r.u64()?, r.string()?, r.string()?));
+            }
+            surface = (r.u32()?, r.u32()?);
+        }
 
         Ok(Replay {
             meta: ReplayMeta {
@@ -383,11 +453,13 @@ impl Replay {
                 seed,
                 actions,
                 axes,
+                surface,
             },
             segments,
             ticks,
             changes,
             text,
+            knobs,
         })
     }
 }
@@ -412,8 +484,15 @@ impl Recorder {
                 ticks: 0,
                 changes: Vec::new(),
                 text: Vec::new(),
+                knobs: Vec::new(),
             },
         }
+    }
+
+    /// Record the surface the session is laid out for (§6 M40) — physical
+    /// pixels, and the host's to know.
+    pub fn record_surface(&mut self, surface: (u32, u32)) {
+        self.replay.meta.surface = surface;
     }
 
     /// Record one tick. Ticks must arrive in order; a frame identical to the
@@ -440,6 +519,24 @@ impl Recorder {
         match self.replay.text.last_mut() {
             Some((t, existing)) if *t == tick => existing.push_str(typed),
             _ => self.replay.text.push((tick, typed.to_owned())),
+        }
+    }
+
+    /// Record the recorded-CVar values that moved at `tick` (§6 M40).
+    ///
+    /// Whether a knob is worth recording is settled before this is called — the
+    /// caller polls the set the registry declares — so this writes what it is
+    /// given. Empty is not a record, which is what makes a defaults-only session
+    /// cost nothing.
+    pub fn record_knobs(&mut self, tick: u64, moved: &[(&str, String)]) {
+        if moved.is_empty() {
+            return;
+        }
+        self.replay.ticks = self.replay.ticks.max(tick + 1);
+        for (name, value) in moved {
+            self.replay
+                .knobs
+                .push((tick, (*name).to_owned(), value.clone()));
         }
     }
 
@@ -574,6 +671,7 @@ mod tests {
             seed: 7,
             actions: vec!["look".into(), "spawn".into()],
             axes: vec!["move_right".into()],
+            surface: (1280, 720),
         }
     }
 
@@ -761,6 +859,64 @@ mod tests {
             matches!(err, ReplayError::Format { found } if found == FORMAT + 1),
             "{err}"
         );
+    }
+
+    /// A knob change is an impulse belonging to one tick, like text — but its
+    /// *effect* persists, since applying it sets a value that stays set. So the
+    /// channel holds only what moved, and the query is an exact match: a record
+    /// held forward would re-apply itself over every tick after it, which for a
+    /// knob the console moved back is a session that will not let go.
+    #[test]
+    fn a_knob_belongs_to_the_tick_it_moved_on_and_the_channel_holds_only_moves() {
+        let mut rec = Recorder::new(meta());
+        rec.record(0, frame(0, 0));
+        // Two knobs moving on one tick is two records, and they stay in the
+        // order the registry walked them (ascending by name).
+        rec.record_knobs(
+            0,
+            &[("d.editor_scale", "2".into()), ("r.fov", "1.4".into())],
+        );
+        rec.record_knobs(40, &[("r.fov", "0.9".into())]);
+        // Nothing moved is not a record, or a defaults-only session would pay
+        // per tick for saying so.
+        rec.record_knobs(41, &[]);
+        let replay = Replay::decode(&rec.finish().encode()).unwrap();
+
+        assert_eq!(replay.knob_count(), 3);
+        let opening = replay.knobs_at(0);
+        assert_eq!(opening.len(), 2);
+        assert_eq!(opening[0].1, "d.editor_scale");
+        assert_eq!(opening[1].2, "1.4");
+        assert_eq!(replay.knobs_at(40).len(), 1);
+        for quiet in [1, 39, 41, 999] {
+            assert!(replay.knobs_at(quiet).is_empty(), "tick {quiet}");
+        }
+        // The surface rides the header and survives with it.
+        assert_eq!(replay.meta().surface, (1280, 720));
+    }
+
+    /// The v2 layout is a byte-prefix of the v3 one, which is what keeps every
+    /// checked-in replay readable — and re-blessing a determinism baseline to
+    /// survive a *reader* change would make the bless a formality (§5.6). A v2
+    /// file therefore decodes with an empty channel and no surface, and `(0, 0)`
+    /// is how "the file does not say" is spelled.
+    #[test]
+    fn a_recording_from_before_the_knob_channel_still_reads() {
+        let mut rec = Recorder::new(meta());
+        rec.record(0, frame(1, 0));
+        let v3 = rec.finish().encode();
+
+        const FORMAT_AT: usize = 4;
+        // v3 appends a knob count and two extents to what v2 wrote.
+        let mut v2 = v3.clone();
+        v2.truncate(v3.len() - 3 * size_of::<u32>());
+        v2[FORMAT_AT..FORMAT_AT + 4].copy_from_slice(&2u32.to_le_bytes());
+
+        let replay = Replay::decode(&v2).unwrap();
+        assert_eq!(replay.knob_count(), 0);
+        assert!(replay.knobs_at(0).is_empty());
+        assert_eq!(replay.meta().surface, (0, 0));
+        assert_eq!(replay.frame(0), frame(1, 0));
     }
 
     #[test]

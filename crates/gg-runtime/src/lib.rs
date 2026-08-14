@@ -180,6 +180,11 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
         gg_render::cvars::register()?;
         #[cfg(feature = "debug-tools")]
         gg_debug::register()?;
+        // The editor's two were registered when an editor was *built*, which is
+        // after this — so `--set d.editor_scale=3` was "no such cvar" from M15
+        // until §6 M40 went looking for a knob to move.
+        #[cfg(feature = "editor")]
+        gg_editor::register()?;
         gg_core::config::boot(std::path::Path::new(CONFIG), argv)?;
     }
 

@@ -1514,10 +1514,14 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
     walk_rs(&root.join("xtask"), &mut files);
 
     let mut violations = Vec::new();
+    let mut recorded = Vec::new();
     for file in &files {
         let rel = file.strip_prefix(root).unwrap_or(file);
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let text = std::fs::read_to_string(file)?;
+        if !rel_str.starts_with("xtask/") {
+            recorded.extend(recorded_cvars(&text));
+        }
         let lines: Vec<&str> = text.lines().collect();
         // `xtask` is outside the containment seam by charter — deny.toml already
         // names it in `ash`'s wrappers for the §6 M0A capability probe — and
@@ -1650,7 +1654,52 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
         }
     }
 
+    recorded.sort();
+    let baseline = root.join(RECORDED_BASELINE);
+    let held: Vec<String> = std::fs::read_to_string(&baseline)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .map(str::to_owned)
+        .collect();
+    if recorded != held {
+        violations.push(format!(
+            "{RECORDED_BASELINE} is {held:?}, the tree declares {recorded:?} (§6 M40) — a knob \
+             that reaches a recorded click belongs in a replay, and one that does not should not \
+             be in it; if the change is right, rewrite the file and let the diff be reviewed"
+        ));
+    }
+
     Ok((violations, files.len()))
+}
+
+/// The reviewed membership of the [`CVar::recorded`] set (§6 M40).
+///
+/// A baseline rather than a proof, and named as one: nothing can decide from
+/// outside a declaration whether the value reaches a click, so what this buys is
+/// that the answer changes in a *diff* instead of in someone's memory. The same
+/// rung §5.10's public-API baseline settled for.
+const RECORDED_BASELINE: &str = "crates/gg-core/recorded-cvars.txt";
+
+/// Every CVar name declared `.recorded()` in one source file (§6 M40).
+///
+/// Walks back from each `.recorded()` to the `CVar::new_` that opened the
+/// declaration, because the chain is on the *last* line of one that may span
+/// five, and takes the first string literal after it — which is the name, the
+/// argument order being what it is. A `.recorded()` with no `CVar::new_` before
+/// it belongs to something else and is skipped rather than guessed at.
+fn recorded_cvars(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices(".recorded()") {
+        let Some(opened) = text[..at].rfind("CVar::new_") else {
+            continue;
+        };
+        let rest = &text[opened..at];
+        if let Some(name) = rest.split_once('"').and_then(|(_, r)| r.split_once('"')) {
+            out.push(name.0.to_owned());
+        }
+    }
+    out
 }
 
 /// A declaration with its visibility removed — `pub`, `pub(crate)`, `pub(in …)`.

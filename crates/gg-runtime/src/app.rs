@@ -71,6 +71,10 @@ pub struct App {
     bindings: String,
     input: Input,
     drive: Drive,
+    /// The recorded-CVar diff (§6 M40). The shell is the only place a replay and
+    /// the registry are both in scope, which is why the two lines that join them
+    /// are here rather than in either.
+    knobs: gg_core::cvar::Watch,
     /// The tick that has not run yet — the sim clock's own resume point, which
     /// is why it survives a rejuvenation (§4.2.2) rather than restarting at zero.
     next_tick: u64,
@@ -211,7 +215,9 @@ impl App {
         // dylib's own name, so a session with no `--save` still has somewhere
         // for the button to write.
         #[cfg(feature = "editor")]
-        let editing = args.editor.then(|| Editing::new(args, &lib));
+        let editing = args
+            .editor
+            .then(|| Editing::new(args, &lib, drive.surface()));
         // Same reason, one line later: the record names the game it is about.
         #[cfg(feature = "agent")]
         let lib_name = lib.name().to_string();
@@ -230,6 +236,7 @@ impl App {
             bindings,
             input,
             drive,
+            knobs: gg_core::cvar::Watch::new(),
             next_tick: 0,
             previous: InputFrame::default(),
             hierarchy: Hierarchy::new(),
@@ -1085,7 +1092,7 @@ struct Editing {
 
 #[cfg(feature = "editor")]
 impl Editing {
-    fn new(args: &crate::Args, lib: &GameLib) -> Editing {
+    fn new(args: &crate::Args, lib: &GameLib, recorded: Option<(u32, u32)>) -> Editing {
         use gg_editor::persist;
         let stem = &lib.name();
         // A live session's save button writes the project's opening scene
@@ -1122,7 +1129,10 @@ impl Editing {
             opened: preloaded,
             step: false,
             save,
-            extent: args.editor_extent,
+            // The flag wins over the file: it is what authors a session for a
+            // surface other than the one it was recorded at (§6 M15.1), and a
+            // header that overrode it would delete that use.
+            extent: args.editor_extent.or(recorded),
             layout,
             maximized: false,
         }
@@ -1473,6 +1483,18 @@ impl Stages for App {
         }
         if self.halted {
             return Ok(());
+        }
+        // Before anything reads a knob this tick — `ui_fit` below is already one
+        // such reader (§6 M40). Live: what moved is written down. Replayed: what
+        // the file says moved is applied, and an unknown name stops the run.
+        let moved = self.knobs.moved();
+        let replayed = self.drive.knobs(tick, &moved);
+        gg_core::cvar::apply(replayed.iter().map(|(_, n, v)| (n.as_str(), v.as_str())))?;
+        // The surface the session opened at, once. `attach` has run by now in a
+        // windowed session and a headless one never resizes, so this is the
+        // extent every click below was scaled by (§6 M40, M15.1).
+        if tick == 0 {
+            self.drive.record_surface(self.surface());
         }
         // The cursor's own accumulator, filled before the latch below for the
         // same reason platform events are: it is this tick's input (§6 M15.1).

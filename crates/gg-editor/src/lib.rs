@@ -461,11 +461,15 @@ pub fn default_layout() -> Node {
 
 /// CVar-overridable UI scale; `0` is auto. Read through [`ui_scale`], which is
 /// where the auto rule lives.
+/// `recorded` (§6 M40): this is the divisor every physical click is turned into
+/// a logical position by, so a session replayed at another value clicks
+/// elsewhere.
 static SCALE: gg_core::cvar::CVar = gg_core::cvar::CVar::new_int(
     "d.editor_scale",
     0,
     "editor UI scale in whole pixels; 0 picks one from the window",
-);
+)
+.recorded();
 
 /// Logical units to physical pixels for a surface `extent` across, on a monitor
 /// reporting `dpi` (1.0 at 96 DPI; a host with no window says 1.0).
@@ -813,6 +817,17 @@ pub struct Editor {
     commands: Commands,
 }
 
+/// Claim the editor's knob names, beside every other crate's and *before*
+/// config is applied (§6 M40).
+///
+/// Called by the shell at startup rather than by [`Editor::new`], for the reason
+/// the shell states where it calls it: a name the config file or `--set` uses is
+/// unknown by an accident of ordering otherwise. Idempotent — [`Editor::new`]
+/// calls it too, so a host that forgets still gets the console's completion.
+pub fn register() -> Result<(), gg_core::cvar::CVarError> {
+    gg_core::cvar::register_all(&[&SCALE, &history::DEPTH])
+}
+
 impl Editor {
     /// Build an editor. `pack` is the asset pack the browser lists; a session
     /// without one gets an empty browser rather than no browser.
@@ -821,8 +836,12 @@ impl Editor {
         // Best effort, and a second editor in one process is the only way it
         // fails: `ui_scale` reads the static directly, so registration buys the
         // console and the config file a name, not the read path.
-        let _ = gg_core::cvar::register(&SCALE);
-        let _ = gg_core::cvar::register(&history::DEPTH);
+        //
+        // Late, and that is why [`register`] exists: this runs when the *editor*
+        // is built, which is long after `gg_core::config::boot` has applied the
+        // config file and `--set`, so a knob named there was "no such cvar"
+        // until the shell started registering these two up front (§6 M40).
+        let _ = register();
         let pack = pack.and_then(|path| match gg_assets::Pack::open(path) {
             Ok(pack) => Some(pack),
             Err(error) => {

@@ -67,6 +67,46 @@ impl Drive {
         }
     }
 
+    /// This tick's knob changes, through the same seam as [`Drive::text`] (§6
+    /// M40): live values that moved are written down, a replay's are handed back
+    /// to be applied.
+    ///
+    /// The two directions are not symmetric here and that is the point. A live
+    /// caller has *already* got the values — it read them to diff them — so
+    /// nothing is returned and nothing is applied; a replayed caller gets what
+    /// the file says and applies it. Returning the live ones would restamp every
+    /// knob's source as a replay's on a run that is not one.
+    pub fn knobs(&mut self, tick: u64, moved: &[(&str, String)]) -> &[(u64, String, String)] {
+        match self {
+            Drive::Live(recorder) => {
+                if let Some(recorder) = recorder {
+                    recorder.record_knobs(tick, moved);
+                }
+                &[]
+            }
+            Drive::Replay(replay) => replay.knobs_at(tick),
+        }
+    }
+
+    /// Record the surface a session is laid out for (§6 M40). A no-op while
+    /// replaying, whose surface is already in the file.
+    pub fn record_surface(&mut self, surface: (u32, u32)) {
+        if let Drive::Live(Some(recorder)) = self {
+            recorder.record_surface(surface);
+        }
+    }
+
+    /// The surface a replay says it was recorded at, if it says (§6 M40) —
+    /// what a host lays a replayed session out for when no flag overrides it.
+    /// `None` for live play and for the v1/v2 files that predate the field.
+    #[must_use]
+    pub fn surface(&self) -> Option<(u32, u32)> {
+        match self.replay()?.meta().surface {
+            (0, 0) => None,
+            extent => Some(extent),
+        }
+    }
+
     /// Open a replay segment at `tick`, naming the game build that produces the
     /// ticks from here on (§4.2.2). A no-op when nothing is being recorded,
     /// which is what lets the host call it at every load and every swap without

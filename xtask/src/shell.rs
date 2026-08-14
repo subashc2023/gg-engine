@@ -960,6 +960,11 @@ pub fn editor_replay_at(extent: (u32, u32)) -> anyhow::Result<Replay> {
         verbs.axes,
     );
     meta.engine_commit = "generated".to_owned();
+    // The session says what it was laid out for (§6 M40). It is authored *for*
+    // an extent rather than recorded against one, so this is the one place that
+    // knows — and it is what lets the windowed session below replay with no
+    // flag at all, which was §6 M15.1's residual.
+    meta.surface = extent;
     let mut recorder = Recorder::new(meta);
     for (tick, frame) in frames.into_iter().enumerate() {
         recorder.record(tick as u64, frame);
@@ -1480,6 +1485,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--launcher") {
         launcher()?;
     }
+    if only("--knob") {
+        knob()?;
+    }
     if only("--tetris") {
         tetris()?;
     }
@@ -1518,6 +1526,182 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     }
     println!("xtask reload: green");
     Ok(())
+}
+
+/// The knob the file never carried (§6 M40) — §8's oldest determinism row.
+///
+/// A CVar is not sim state and no sim code reads one, which is true and is not
+/// the hole. The pipeline turning a recorded *click* into a world write is
+/// parameterized: `d.editor_scale` is the divisor a physical click becomes a
+/// logical position by, so the same file replayed at another value clicks
+/// somewhere else and hashes differently — with nothing in the file to say why.
+/// Every gate runs at defaults, which is why forty milestones never saw it.
+///
+/// Four claims, in the order they have to be made:
+///
+/// 1. the knob moves the hash **at all** — asserted in §8 as reasoning and
+///    demonstrated nowhere, and the leg is worthless if it does not;
+/// 2. a file carrying it reproduces that hash on a process started at defaults;
+/// 3. a record at tick *k* parts from the default run *later* than one at tick
+///    0 does, which is what says the channel is applied per tick rather than
+///    read as a header wearing a channel's clothes;
+/// 4. a name this build does not declare stops the run, by that name.
+///
+/// The material is the checked-in editor session, spliced in `xtask` the way
+/// `--node`'s stream was (§6 M39), so no checked-in replay is re-authored to
+/// build the gate that tests it.
+fn knob() -> anyhow::Result<()> {
+    let path = editor_replay_path();
+    let source = Replay::decode(&std::fs::read(&path).map_err(|e| {
+        anyhow::anyhow!(
+            "no editor stream at {} ({e}) — `cargo xtask replay --bless` authors it",
+            path.display()
+        )
+    })?)?;
+    let (host, game) = stage_game(&HASHED_TIERS[0], "demo-05-many", "demo_05_many")?;
+    let dir = workspace_root().join("target/knob");
+    std::fs::create_dir_all(&dir)?;
+    let file = |name: &str, replay: &Replay| -> anyhow::Result<String> {
+        let at = dir.join(name);
+        std::fs::write(&at, replay.encode())?;
+        Ok(at.display().to_string())
+    };
+    let replay = path.display().to_string();
+
+    // 1. The same file twice, one `--set` apart.
+    let at_defaults = play(&host, &game, &["--replay", &replay, "--editor"], true)?;
+    let moved = play(
+        &host,
+        &game,
+        &[
+            "--replay",
+            &replay,
+            "--editor",
+            "--set",
+            &format!("{KNOB}={KNOB_VALUE}"),
+        ],
+        true,
+    )?;
+    let (base, off) = (sequence(&at_defaults)?, sequence(&moved)?);
+    let parted =
+        divergence(&("defaults", base.clone()), &("--set", off.clone())).ok_or_else(|| {
+            anyhow::anyhow!(
+                "§6 M40: `{KNOB} {KNOB_VALUE}` did not move the session's hash, so this leg \
+                 grades nothing — §8's claim is that this knob reaches a click, and either it \
+                 stopped or the script stopped clicking where it mattered"
+            )
+        })?;
+    // What "clicks elsewhere" means, in the log rather than in a hash: at this
+    // scale the whole script misses. Asserted so a hash that moved for some
+    // *other* reason could not stand in for the one this leg is about.
+    anyhow::ensure!(
+        at_defaults.contains("editor: picked") && !moved.contains("editor: picked"),
+        "§6 M40: the knob moved the hash without moving where the clicks landed — this leg is \
+         then measuring something other than hit-testing"
+    );
+
+    // 2. The knob in the file instead of on the command line.
+    let opening = file(
+        "opening.ggrp",
+        &with_knobs(&source, &[(0, KNOB, KNOB_VALUE)]),
+    )?;
+    let carried = sequence(&play(
+        &host,
+        &game,
+        &["--replay", &opening, "--editor"],
+        true,
+    )?)?;
+    if let Some(found) = divergence(&("--set", off.clone()), &("carried", carried.clone())) {
+        anyhow::bail!(
+            "§6 M40: the file's own knob did not reproduce the run `--set` produced — {found}"
+        );
+    }
+    anyhow::ensure!(
+        divergence(&("defaults", base.clone()), &("carried", carried)).is_some(),
+        "§6 M40: the carried run matched the default one, so the record was not applied at all"
+    );
+
+    // 3. The same knob, later. A header would be indistinguishable from leg 2.
+    let late = file(
+        "late.ggrp",
+        &with_knobs(&source, &[(KNOB_AT, KNOB, KNOB_VALUE)]),
+    )?;
+    let late = sequence(&play(&host, &game, &["--replay", &late, "--editor"], true)?)?;
+    let after = divergence(&("defaults", base.clone()), &("late", late)).ok_or_else(|| {
+        anyhow::anyhow!("§6 M40: a knob applied at tick {KNOB_AT} changed nothing at all")
+    })?;
+    anyhow::ensure!(
+        after != parted,
+        "§6 M40: a knob recorded at tick {KNOB_AT} parted from the default run at the same tick \
+         as one recorded at tick 0 — the channel is being read as a header, and the tick in each \
+         record means nothing: {parted}"
+    );
+
+    // 4. A name nothing declares. `World::load`'s policy (§4.5): refused before
+    // the run rather than applied as nothing.
+    let unknown = file("unknown.ggrp", &with_knobs(&source, &[(0, MISSING, "1")]))?;
+    let refused = Command::new(&host)
+        .arg("--game")
+        .arg(&game)
+        .args(["--replay", &unknown, "--editor"])
+        .env("GG_HEADLESS", "1")
+        .output()?;
+    let said = format!("{}{}", plain(&refused.stdout), plain(&refused.stderr));
+    anyhow::ensure!(
+        !refused.status.success() && said.contains(MISSING),
+        "§6 M40: a replay naming `{MISSING}` was not refused by that name — applying nothing and \
+         replaying anyway is the silent wrong answer this milestone deletes:\n{said}"
+    );
+
+    println!(
+        "xtask reload: demo 05's editor session hashes differently under `{KNOB} {KNOB_VALUE}` \
+         ({parted}), and a file carrying that knob reproduces it on a process started at \
+         defaults — the same record at tick {KNOB_AT} parts later instead ({after}), and one \
+         naming a knob this build does not declare is refused (§6 M40)"
+    );
+    Ok(())
+}
+
+/// The knob this leg turns, and why it is that one.
+///
+/// `d.editor_scale` is the divisor `gg_editor::ui_scale` hands hit-testing, so
+/// it moves *every* click rather than one. 3 and not 1: auto already resolves to
+/// the same layout as 1 on a headless canvas, so 1 is a change that changes
+/// nothing and would make this leg green for the wrong reason. `r.fov` is in the
+/// set on the same reasoning and is deliberately **not** the subject — the
+/// session's one viewport pick is aimed down the camera's forward axis, at the
+/// centre of the pane, which is the one point a field of view cannot move (§6
+/// M15.4 authored it that way so the click could be aimed blind).
+const KNOB: &str = "d.editor_scale";
+const KNOB_VALUE: &str = "3";
+
+/// Where the *late* record goes: inside the session, after its opening ticks and
+/// before the clicks that this knob moves.
+const KNOB_AT: u64 = 200;
+
+/// A name no build declares, for the refusal leg. Spelled here so the assertion
+/// and the file cannot drift apart.
+const MISSING: &str = "d.editor_nosuch";
+
+/// The same stream with knob records spliced in (§6 M40).
+///
+/// Re-recorded rather than patched: the channel is the recorder's to write, and
+/// a gate that assembled the bytes itself would test its own encoder. The frames
+/// come back out of the source by tick, which the delta encoding reproduces
+/// exactly.
+fn with_knobs(source: &Replay, knobs: &[(u64, &str, &str)]) -> Replay {
+    let mut recorder = Recorder::new(source.meta().clone());
+    for segment in source.segments() {
+        recorder.open_segment(segment.first_tick, segment.code_hash);
+    }
+    for tick in 0..source.ticks() {
+        recorder.record(tick, source.frame(tick));
+        recorder.record_text(tick, source.text_at(tick));
+        for (_, name, value) in knobs.iter().filter(|(at, ..)| *at == tick) {
+            recorder.record_knobs(tick, &[(name, (*value).to_owned())]);
+        }
+    }
+    recorder.finish()
 }
 
 /// The two points the latency instrument measures, as generated-system counts.
@@ -5172,13 +5356,14 @@ fn editor() -> anyhow::Result<()> {
          path (§4.7)"
     );
 
-    // §6 M15.1's residual, exercised rather than described. A session authored
-    // for a *window* is replayed by a shell that has none: the panes fill their
-    // surface, so without `--editor-extent` every click below lands on a
-    // different pane — which the second half of this asserts, because an escape
-    // hatch that would pass anyway is not one.
-    let windowed = save_dir()?.join("editor-1080p.ggrp");
-    std::fs::write(&windowed, editor_replay_at(WINDOWED_EXTENT)?.encode())?;
+    // §6 M15.1's residual, and §6 M40 closing it. A session authored for a
+    // *window* is replayed by a shell that has none: the panes fill their
+    // surface, so a click aimed at one layout lands on a different pane in the
+    // other. Three runs, because the closure is only worth anything if the leg
+    // can still see the failure it removed.
+    let authored = editor_replay_at(WINDOWED_EXTENT)?;
+    let windowed = save_dir()?.join("editor-1600x900.ggrp");
+    std::fs::write(&windowed, authored.encode())?;
     let windowed = windowed.display().to_string();
     let extent = format!("{}x{}", WINDOWED_EXTENT.0, WINDOWED_EXTENT.1);
     let named = play(
@@ -5196,14 +5381,36 @@ fn editor() -> anyhow::Result<()> {
     anyhow::ensure!(
         reaches(&named, EDITOR_LOG) == EDITOR_LOG.len(),
         "§6 M15.1: a session recorded at {extent} did not replay under `--editor-extent {extent}` \
-         — the flag is the whole of how a windowed recording is reproduced headlessly:\n{named}"
+         — the flag still overrides the header, which is what authors a session for a surface \
+         other than its own:\n{named}"
     );
-    let unnamed = play(&host, &game, &["--replay", &windowed, "--editor"], false)?;
+    // The same session with no flag at all. Before M40 this reached fewer
+    // events; the file now says what it was laid out for.
+    let carried = play(&host, &game, &["--replay", &windowed, "--editor"], false)?;
     anyhow::ensure!(
-        reaches(&unnamed, EDITOR_LOG) < EDITOR_LOG.len(),
-        "§6 M15.1: the same session reached every event *without* `--editor-extent`, so this leg \
-         proves nothing — either the layout stopped depending on the extent or the script stopped \
-         aiming at one:\n{unnamed}"
+        reaches(&carried, EDITOR_LOG) == EDITOR_LOG.len(),
+        "§6 M40: a session recorded at {extent} did not replay without `--editor-extent` — the \
+         header carries the surface now, and a replay that needs a flag to reproduce is not \
+         self-describing (§4.7):\n{carried}"
+    );
+    // And with the surface stripped back out, which is what a v2 file is. The
+    // negative control: without it this leg would pass over a header nothing
+    // read.
+    let mut stripped = editor_replay_at(WINDOWED_EXTENT)?;
+    stripped.set_surface((0, 0));
+    let blind = save_dir()?.join("editor-1600x900-blind.ggrp");
+    std::fs::write(&blind, stripped.encode())?;
+    let blind = play(
+        &host,
+        &game,
+        &["--replay", &blind.display().to_string(), "--editor"],
+        false,
+    )?;
+    anyhow::ensure!(
+        reaches(&blind, EDITOR_LOG) < EDITOR_LOG.len(),
+        "§6 M40: the same session reached every event with its surface stripped out, so the run \
+         above proves nothing — either the layout stopped depending on the extent or the script \
+         stopped aiming at one:\n{blind}"
     );
 
     for pair in worlds.windows(2) {
@@ -5275,8 +5482,10 @@ fn editor() -> anyhow::Result<()> {
         "xtask reload: the recorded editor session replayed over demo 05 under dev and \
          instrumented and again under dev — {EDITOR_NUDGES} inspector edits inside the paused \
          window, identical hashes over {} of {total} ticks, and one {}-byte world out of the \
-         title bar's `file` menu (§6 M15); a {}x{} session replayed headlessly under --editor-extent \
-         and only under it (§6 M15.1); and the same save reopened as `scene.ggsave` — Stopped at \
+         title bar's `file` menu (§6 M15); a {}x{} session replayed headlessly under \
+         --editor-extent, without it because the file now says what it was laid out for, and not \
+         at all with that stripped back out (§6 M15.1, M40); and the same save reopened as \
+         `scene.ggsave` — Stopped at \
          its own tick, hash frozen over 40 ticks, no play edge in the log (§6 M15.2 post-close)",
         runs[0].1.len(),
         worlds[0].2.len(),

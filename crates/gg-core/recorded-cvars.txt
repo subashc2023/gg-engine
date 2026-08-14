@@ -1,0 +1,11 @@
+# The CVar::recorded set (§6 M40): knobs a replay carries, because moving one
+# moves where a recorded click lands or what it hits. Sorted, one per line.
+#
+# Adding a line means a knob reached the input pipeline; removing one means it
+# stopped. Neither is provable from outside the declaration, which is why this
+# file exists — the change arrives as a diff instead of as a remembered rule.
+# `cargo xtask ci` compares the tree against it.
+d.editor_scale
+d.editor_undo
+r.fov
+r.near

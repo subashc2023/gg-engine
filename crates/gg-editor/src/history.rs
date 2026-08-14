@@ -29,7 +29,12 @@ use gg_core::cvar::CVar;
 
 /// How many steps are kept. A CVar because the right depth is a trade against
 /// the memory a world costs, and only the operator knows how big theirs is.
-pub(crate) static DEPTH: CVar = CVar::new_int("d.editor_undo", 16, "editor undo steps kept");
+///
+/// `recorded` (§6 M40) because depth is not only a memory bound: the undo past
+/// the end of a shorter ring restores nothing, so a recorded session's world
+/// depends on this number.
+pub(crate) static DEPTH: CVar =
+    CVar::new_int("d.editor_undo", 16, "editor undo steps kept").recorded();
 
 /// The ring, and what has been undone out of it.
 #[derive(Default)]

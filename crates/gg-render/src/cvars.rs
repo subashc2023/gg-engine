@@ -10,12 +10,14 @@ use gg_core::cvar::{self, CVar, CVarError};
 /// Vertical field of view, in radians rather than the degrees a human would
 /// type: [`crate::View`] is radians everywhere else, and converting here would
 /// be a second place for fov to be wrong.
-pub static FOV: CVar = CVar::new_float("r.fov", 1.0, "vertical field of view, radians");
+/// `recorded` because the editor builds its pick ray from it (§6 M40): move
+/// this and a recorded click hits a different entity.
+pub static FOV: CVar = CVar::new_float("r.fov", 1.0, "vertical field of view, radians").recorded();
 
 /// With reverse-Z and an infinite far plane this is the *only* depth-precision
 /// knob there is (§2, Math row) — which is what makes it worth turning without
-/// a rebuild.
-pub static NEAR: CVar = CVar::new_float("r.near", 0.05, "near plane distance");
+/// a rebuild. `recorded` for [`FOV`]'s reason: it is the pick ray's other end.
+pub static NEAR: CVar = CVar::new_float("r.near", 0.05, "near plane distance").recorded();
 
 /// The orthographic path's far plane (§6 M20). Perspective keeps its far at
 /// infinity (§2) and never reads this; an orthographic projection *must* pick a

@@ -79,9 +79,21 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   to be extracted before the instances are culled against it — is a property of
 ///   the frame the shell composes and of nothing either crate can see.
 ///
+/// - **A replay and the CVar registry meeting** (1370 → 1385, §6 M40): nine
+///   lines, and the same argument the two above make.
+///
+///   `gg-input` owns the replay and has never heard of a CVar — it depends on
+///   `gg-abi` and `thiserror`, which is the whole list, and adding the registry
+///   to it would point the input crate at configuration. `gg-core` owns the
+///   registry and cannot see a tick, which is why `cvar::apply` takes pairs. So
+///   the diff, the seam call and the apply are three lines here because the shell
+///   is the only place a file and a knob are both in scope — plus the surface
+///   recorded once at tick 0, and `gg_editor::register` moved up beside every
+///   other crate's, which is the ordering bug this milestone found.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio) — each argued the same way as above.
-const SHELL_BUDGET: usize = 1370;
+const SHELL_BUDGET: usize = 1385;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.
