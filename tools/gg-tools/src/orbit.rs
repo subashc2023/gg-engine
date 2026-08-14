@@ -7,7 +7,10 @@
 //! and nothing in the tree can see it, which is what makes this an instrument
 //! before it is a gate.
 //!
-//! Three tables, in the order the decisions come:
+//! Seven tables, in the order the decisions come — the first four grade the two
+//! regimes against each other (item 7), the last three grade the *boundary*
+//! between them (item 8), which §2 called the hard design problem before any of
+//! this existed:
 //!
 //! - **the solve** — Kepler's equation is the only thing in the analytic half
 //!   that is iterative at all, so its residual is where an on-rails body's
@@ -25,6 +28,16 @@
 //! - **the budget** — how long a body may stay in the bubble before the two
 //!   halves disagree by more than a metre, which is the number that sizes the
 //!   regime boundary rather than a taste about it.
+//! - **the round trip** — [`Orbit::from_state`] graded on the two things a
+//!   regime condition might be written against, which fail in opposite
+//!   directions as an orbit approaches circular or equatorial: the **elements**,
+//!   which go arbitrary, and the **state**, which does not move off its floor.
+//! - **the boundary** — a body `d` from a planet propagated three ways, where
+//!   rails error falls as `1/d²` and the bubble's does not depend on `d` at all,
+//!   so they cross; every row carries the reference's own floor, because past
+//!   the crossing both columns are measuring it.
+//! - **the transition** — whether *crossing* costs anything, with total bubble
+//!   time held fixed and only the number of handovers changing.
 //!
 //! The reference is the analytic propagator, and it is a reference because a
 //! two-body trajectory conserves energy and angular momentum *exactly* — a
@@ -355,10 +368,337 @@ fn table_cost() {
     }
 }
 
+/// Radians folded to `(-π, π]`. An element difference of a full turn is the
+/// representation and not a disagreement.
+fn wrap(angle: f64) -> f64 {
+    let tau = core::f64::consts::TAU;
+    angle - tau * (angle / tau).round()
+}
+
+/// Table 5 — the conversion the boundary is made of, graded on the two things a
+/// regime condition might be written against.
+///
+/// **elements** is what a condition reading `argument_of_periapsis` would see;
+/// **state** is what the picture, the hash and the player see. They fail in
+/// opposite directions down the degeneracy axis, and the third column is why —
+/// the sum the elements are ill-conditioned *around* is not.
+fn table_round_trip() {
+    println!(
+        "
+
+the round trip — Orbit::from_state after state_at, at real magnitudes (1 AU)
+"
+    );
+    println!(
+        "  {:<12}{:<12}{:>14}{:>14}{:>14}",
+        "e", "i", "worst element", "Ω+ω+M", "state, m"
+    );
+    for &(eccentricity, inclination) in &[
+        (0.3, 0.62),
+        (1.0e-3, 0.62),
+        (1.0e-6, 0.62),
+        (1.0e-9, 0.62),
+        (1.0e-12, 0.62),
+        (0.0, 0.62),
+        (0.3, 1.0e-6),
+        (0.3, 1.0e-12),
+        (0.3, 0.0),
+        (0.0, 0.0),
+    ] {
+        let reference = Orbit {
+            semi_major: 1.495_978_707e11,
+            eccentricity,
+            inclination,
+            ascending_node: -2.4,
+            argument_of_periapsis: 1.15,
+            mean_anomaly: 0.37,
+            mu: MU_SUN,
+        };
+        let period = reference.period().unwrap_or(1.0);
+        let (mut worst_element, mut worst_sum, mut worst_state) = (0.0f64, 0.0f64, 0.0f64);
+        for step in 0..16 {
+            let seconds = period * f64::from(step) / 16.0;
+            let (position, velocity) = reference.state_at(seconds);
+            let Some(back) = Orbit::from_state(position, velocity, MU_SUN) else {
+                continue;
+            };
+            // What the elements *should* have been at this epoch: only the mean
+            // anomaly has moved, and it moved by a quantity with no cancellation
+            // in it.
+            let expected = reference.mean_anomaly + reference.mean_motion() * seconds;
+            for (had, wanted) in [
+                (back.ascending_node, reference.ascending_node),
+                (back.argument_of_periapsis, reference.argument_of_periapsis),
+                (back.mean_anomaly, expected),
+            ] {
+                worst_element = worst_element.max(wrap(had - wanted).abs());
+            }
+            worst_sum = worst_sum.max(
+                wrap(
+                    (back.ascending_node + back.argument_of_periapsis + back.mean_anomaly)
+                        - (reference.ascending_node + reference.argument_of_periapsis + expected),
+                )
+                .abs(),
+            );
+            worst_state = worst_state.max((back.state_at(0.0).0 - position).length());
+        }
+        println!(
+            "  {eccentricity:<12.0e}{inclination:<12.0e}\
+             {worst_element:>14.2e}{worst_sum:>14.2e}{worst_state:>14.2e}"
+        );
+    }
+    println!(
+        "
+  an f64 metre at 1 AU is {:.1e} of it — the state column's own floor",
+        f64::EPSILON
+    );
+}
+
+/// The acceleration a bubble body feels: the primary, plus a secondary that is
+/// itself on rails — which is what a planet is in this architecture.
+fn perturbed(position: DVec3, secondary: Orbit, seconds: f64) -> DVec3 {
+    let (centre, _) = secondary.state_at(seconds);
+    gravity(position, MU_SUN) + gravity(position - centre, MU_EARTH)
+}
+
+/// One step against a *time-varying* field — the perturber moves inside the
+/// step, so each stage carries its own time and `advance`'s two-body form cannot
+/// be reused.
+fn advance_perturbed(kind: Step, state: &mut (DVec3, DVec3), at: f64, dt: f64, secondary: Orbit) {
+    let force = |p: DVec3, t: f64| perturbed(p, secondary, t);
+    let (position, velocity) = *state;
+    *state = match kind {
+        Step::Euler => {
+            let v = velocity + force(position, at) * dt;
+            (position + v * dt, v)
+        }
+        Step::Leapfrog => {
+            let half = velocity + force(position, at) * (dt * 0.5);
+            let p = position + half * dt;
+            (p, half + force(p, at + dt) * (dt * 0.5))
+        }
+        Step::Rk4 => {
+            let (half, mid) = (dt * 0.5, at + dt * 0.5);
+            let (k1p, k1v) = (velocity, force(position, at));
+            let (k2p, k2v) = (velocity + k1v * half, force(position + k1p * half, mid));
+            let (k3p, k3v) = (velocity + k2v * half, force(position + k2p * half, mid));
+            let (k4p, k4v) = (velocity + k3v * dt, force(position + k3p * dt, at + dt));
+            (
+                position + (k1p + k2p * 2.0 + k3p * 2.0 + k4p) * (dt / 6.0),
+                velocity + (k1v + k2v * 2.0 + k3v * 2.0 + k4v) * (dt / 6.0),
+            )
+        }
+    };
+}
+
+/// Propagate `state` to each checkpoint, returning the position at each.
+///
+/// An integer step count per mark, and `at` recovered from it rather than
+/// accumulated. A `while at < mark` loop overshoots by up to one step, and at
+/// heliocentric speed a 480 Hz step is 62 metres — which is what the first
+/// version of table 6 measured, in every column, including the ones where the
+/// physics it claimed to be showing had gone to zero. The reference-against-
+/// itself line is what caught it.
+fn checkpoints(
+    kind: Step,
+    mut state: (DVec3, DVec3),
+    hz: f64,
+    marks: &[f64],
+    secondary: Orbit,
+) -> Vec<DVec3> {
+    let dt = 1.0 / hz;
+    let mut out = Vec::with_capacity(marks.len());
+    let mut taken = 0i64;
+    for &mark in marks {
+        #[allow(clippy::cast_possible_truncation)]
+        let wanted = (mark * hz).round() as i64;
+        while taken < wanted {
+            #[allow(clippy::cast_precision_loss)]
+            let at = taken as f64 * dt;
+            advance_perturbed(kind, &mut state, at, dt, secondary);
+            taken += 1;
+        }
+        out.push(state.0);
+    }
+    out
+}
+
+/// Table 6 — the boundary itself. A body near a planet, propagated three ways
+/// over the same interval: **rails**, which is the conic about the star with the
+/// planet ignored; **bubble**, which is leapfrog at the tick rate with both
+/// masses; and a converged reference neither of them is.
+///
+/// The two numbers fail in opposite directions across the separation axis. Rails
+/// error is the neglected planet and falls as `1/d²`; bubble error is the step's
+/// own and does not care about `d` at all. Where they cross is where putting a
+/// body on rails stops being an approximation and starts being an *improvement*,
+/// and the point of measuring rather than asserting is that the crossing is not
+/// where the classical sphere of influence puts it.
+fn table_boundary() {
+    const MARKS: [f64; 3] = [60.0, 600.0, 3600.0];
+    // The planet, on its own rails: circular, one AU, and the only body in this
+    // table whose own motion is analytic by construction rather than by choice.
+    let planet = Orbit {
+        semi_major: 1.495_978_707e11,
+        eccentricity: 0.0,
+        inclination: 0.0,
+        ascending_node: 0.0,
+        argument_of_periapsis: 0.0,
+        mean_anomaly: 0.0,
+        mu: MU_SUN,
+    };
+    println!(
+        "
+
+the boundary — a body `d` from a planet, over {:.0} s
+",
+        MARKS[MARKS.len() - 1]
+    );
+    println!(
+        "  {:<12}{:>12}{:>32}{:>32}{:>12}",
+        "d, m",
+        "a_p/a_star",
+        "rails error at 60/600/3600 s",
+        "bubble error at 60/600/3600 s",
+        "floor"
+    );
+    let (centre, drift) = planet.state_at(0.0);
+    for &separation in &[1.0e7, 1.0e8, 1.0e9, 1.5e9, 1.0e10, 1.0e11, 1.0e12] {
+        // Offset along the star line and given the circular speed for *its* own
+        // radius, so the body is on a genuine heliocentric orbit that happens to
+        // pass near the planet rather than one bolted to it.
+        let Some(radial) = centre.try_normalize() else {
+            continue;
+        };
+        let position = centre + radial * separation;
+        let radius = position.length();
+        let Some(heading) = drift.try_normalize() else {
+            continue;
+        };
+        let velocity = heading * sim::sqrt(MU_SUN / radius);
+        let ratio = MU_EARTH / (separation * separation) / (MU_SUN / (radius * radius));
+
+        let Some(rails) = Orbit::from_state(position, velocity, MU_SUN) else {
+            continue;
+        };
+        let truth = checkpoints(Step::Rk4, (position, velocity), 480.0, &MARKS, planet);
+        // The same reference at double the rate. A row whose errors sit at this
+        // is a row that measured the reference, and the far rows do — without the
+        // column a reader takes the noise for the physics, which is the mistake
+        // this table's first version made in every cell.
+        let floor = checkpoints(Step::Rk4, (position, velocity), 960.0, &MARKS, planet)
+            .iter()
+            .zip(&truth)
+            .map(|(a, b)| (*a - *b).length())
+            .fold(0.0f64, f64::max);
+        let bubble = checkpoints(
+            Step::Leapfrog,
+            (position, velocity),
+            TICK_HZ,
+            &MARKS,
+            planet,
+        );
+        let rails_error: Vec<f64> = MARKS
+            .iter()
+            .zip(&truth)
+            .map(|(&mark, &want)| (rails.state_at(mark).0 - want).length())
+            .collect();
+        let bubble_error: Vec<f64> = bubble
+            .iter()
+            .zip(&truth)
+            .map(|(&had, &want)| (had - want).length())
+            .collect();
+        let show = |errors: &[f64]| {
+            errors
+                .iter()
+                .map(|e| format!("{e:.1e}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        println!(
+            "  {separation:<12.1e}{ratio:>12.1e}{:>32}{:>32}{floor:>12.1e}",
+            show(&rails_error),
+            show(&bubble_error)
+        );
+    }
+    println!(
+        "
+  the planet's Hill radius is 1.5e9 m — where the classical answer puts the boundary"
+    );
+}
+
+/// Table 7 — whether crossing the boundary *costs* anything, which nothing else
+/// here answers. Total time in the bubble is held fixed and only the number of
+/// handovers changes, so a curve that rises with `k` is the conversion's price
+/// and a flat one says the price is zero and only residence matters.
+fn table_transition() {
+    let reference = path(MU_EARTH, LEO_RADIUS, 0.3);
+    let period = reference.period().unwrap_or(1.0);
+    let dt = 1.0 / TICK_HZ;
+    println!(
+        "
+
+the transition — one LEO revolution, half of it integrated, split k ways
+"
+    );
+    println!(
+        "  {:<10}{:>16}{:>16}{:>18}",
+        "handovers", "position, m", "elements, rad", "converted only, m"
+    );
+    for handovers in [1, 2, 4, 8, 16, 64] {
+        let span = period / f64::from(handovers);
+        // The control: the same k handovers with *no* integration between them,
+        // which is the conversion's price on its own. Without it a curve rising
+        // in k cannot be told from the integrator's envelope being sampled more.
+        let mut clean = reference.state_at(0.0);
+        for step in 0..handovers {
+            if let Some(rails) = Orbit::from_state(clean.0, clean.1, MU_EARTH) {
+                clean = rails.state_at(span);
+            }
+            let _ = step;
+        }
+        let converted = (clean.0 - reference.state_at(period).0).length();
+
+        let mut state = reference.state_at(0.0);
+        let mut at = 0.0;
+        for _ in 0..handovers {
+            // Rails for the first half of the slice: elements from the state we
+            // are holding, then evaluated forward — exactly the handover a
+            // regime exit performs.
+            if let Some(rails) = Orbit::from_state(state.0, state.1, MU_EARTH) {
+                state = rails.state_at(span * 0.5);
+            }
+            at += span * 0.5;
+            let until = at + span * 0.5;
+            while at < until {
+                advance(Step::Leapfrog, &mut state, dt, MU_EARTH);
+                at += dt;
+            }
+        }
+        let (wanted, _) = reference.state_at(at);
+        let elements = Orbit::from_state(state.0, state.1, MU_EARTH).map_or(f64::NAN, |had| {
+            wrap(had.mean_anomaly - reference.mean_anomaly - reference.mean_motion() * at).abs()
+        });
+        println!(
+            "  {handovers:<10}{:>16.2e}{elements:>16.2e}{converted:>18.2e}",
+            (state.0 - wanted).length()
+        );
+    }
+    println!(
+        "
+  the same half-revolution integrated in one stretch is the k = 1 row; the
+  leapfrog envelope over a whole revolution is table 2's {:.2e} m",
+        envelope(Step::Leapfrog, reference, 1.0, TICK_HZ).0
+    );
+}
+
 pub fn run(_args: &[String]) -> anyhow::Result<()> {
     table_solve();
     table_regimes();
     table_budget();
     table_cost();
+    table_round_trip();
+    table_boundary();
+    table_transition();
     Ok(())
 }

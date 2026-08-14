@@ -125,3 +125,15 @@ f64/orbit.position.z = 0x4240B8FC553B4976
 f64/orbit.velocity.x = 0x40C704CA33BF31F1
 f64/orbit.velocity.z = 0x40D12C88211868A4
 f64/orbit.mean_motion = 0x3E8AB8F7C2BFBCE2
+
+# Added for §6 M38 item 8: `Orbit::from_state`, the regime boundary's own
+# conversion. Again new lines and again nothing above moved. It is worth its
+# own section rather than folded into the six above because a boundary is a
+# decision — two architectures that disagree here disagree about which regime
+# a body is in, which is a divergence no position tolerance would catch.
+f64/from_state.semi_major = 0x42416A5D2D360006
+f64/from_state.eccentricity = 0x3FDA3D70A3D70A31
+f64/from_state.inclination = 0x3FD7AE147AE147AE
+f64/from_state.ascending_node = 0x4000E147AE147AE2
+f64/from_state.argument_of_periapsis = 0xBFEA8F5C28F5C284
+f64/from_state.mean_anomaly = 0x40020A7255708E37

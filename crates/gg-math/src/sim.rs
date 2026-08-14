@@ -1088,6 +1088,113 @@ impl Orbit {
         let frame = node.mul(tilt).mul(peri);
         (frame.rotate(DVec3::X), frame.rotate(-DVec3::Z))
     }
+
+    /// Elements from a state vector — the *bubble → rails* direction, and the
+    /// conversion §2's regime boundary is made of. `None` for a state with no
+    /// conic: no angular momentum (a radial fall), or a parabola, which has no
+    /// semi-major axis and [`Orbit`] cannot hold.
+    ///
+    /// # Degenerate conventions
+    ///
+    /// Two elements are undefined on a measure-zero set, and the choice is made
+    /// here rather than left to a caller who would make it differently twice.
+    /// An orbit exactly in the reference plane has no node line, so
+    /// `ascending_node` is `0` and `argument_of_periapsis` is measured from
+    /// `+X`; an exactly circular orbit has no periapsis, so
+    /// `argument_of_periapsis` is `0` and `mean_anomaly` is measured from the
+    /// node.
+    ///
+    /// Both tests are `try_normalize`'s **exact** zero and never a tolerance —
+    /// a tolerance is a threshold a body can sit astride, and elements that
+    /// change convention between two ticks are a discontinuity in the hash for
+    /// a body that did not move. The cost of that choice is that
+    /// *near*-degenerate is ill-conditioned rather than wrong: at `e = 1e-9`,
+    /// `argument_of_periapsis` and `mean_anomaly` have each lost half their
+    /// digits while their **sum** has lost none, and [`state_at`] reads only
+    /// that sum. So a round trip through state holds to the metre floor exactly
+    /// where a round trip through elements does not, which is measured in
+    /// `gg-tools orbit` and is the reason a regime condition may not be written
+    /// against an element.
+    ///
+    /// [`state_at`]: Orbit::state_at
+    #[must_use]
+    pub fn from_state(position: DVec3, velocity: DVec3, mu: f64) -> Option<Self> {
+        let radius = position.length();
+        let momentum = position.cross(velocity);
+        let normal = momentum.try_normalize()?;
+        // Energy first: it is the parabola test as well as the `a` it produces,
+        // and `-mu/2ε` is the one expression that carries the sign convention
+        // (negative `a` on hyperbolic) without a branch asking which branch.
+        let energy = velocity.length_squared() * 0.5 - mu / radius;
+        let semi_major = -mu / (2.0 * energy);
+        if !semi_major.is_finite() {
+            return None;
+        }
+        let eccentricity_vector = (position * (velocity.length_squared() - mu / radius)
+            - velocity * position.dot(velocity))
+            * (1.0 / mu);
+        let eccentricity = eccentricity_vector.length();
+
+        // `atan2(|h_xz|, h_y)` rather than `acos(h_y)`: the same angle, but acos
+        // is at its own conditioning floor exactly where an orbit is nearly
+        // in-plane, which is the case this function is otherwise careful about.
+        let inclination = atan2(sqrt(normal.x * normal.x + normal.z * normal.z), normal.y);
+        // `Ŷ × ĥ`, the node line. Equatorial takes `+X` and `Ω = 0`.
+        let (ascending_node, node_axis) = match DVec3::new(normal.z, 0.0, -normal.x).try_normalize()
+        {
+            Some(axis) => (atan2(normal.x, normal.z), axis),
+            None => (0.0, DVec3::X),
+        };
+        // A quarter turn ahead of the node, in-plane: the sine axis both angles
+        // below are read against.
+        let node_normal = normal.cross(node_axis);
+        let (argument_of_periapsis, periapsis_axis) = match eccentricity_vector.try_normalize() {
+            Some(axis) => (atan2(axis.dot(node_normal), axis.dot(node_axis)), axis),
+            None => (0.0, node_axis),
+        };
+
+        // The position resolved in the orbit plane, on the periapsis axis and a
+        // quarter turn ahead of it.
+        let along = position.dot(periapsis_axis);
+        let across = position.dot(normal.cross(periapsis_axis));
+        let radial_rate = position.dot(velocity);
+        let mean_anomaly = if eccentricity < 1.0 {
+            // E against the *same* axis `argument_of_periapsis` was measured
+            // against. `1 - r/a` and `p·v` reach the same angle by an independent
+            // route and are the textbook spelling, and independence is precisely
+            // what fails here: as `e → 0` both ω and E become arbitrary and only
+            // their sum is real, which needs them arbitrary in the *same*
+            // direction. Sharing the axis makes the cancellation exact instead of
+            // approximate — by the independent route a circular orbit's round trip
+            // through state comes back an AU away.
+            //
+            // Scaled by `r` throughout (`e + cos ν` as `er + along`), which costs
+            // nothing in an atan2 and keeps `e = 0` at `atan2(across, along)` —
+            // the angle from the node, which is what the convention promises.
+            let anomaly = atan2(
+                sqrt(1.0 - eccentricity * eccentricity) * across,
+                along + eccentricity * radius,
+            );
+            anomaly - eccentricity * sin(anomaly)
+        } else {
+            let cosh_anomaly = (1.0 - radius / semi_major) / eccentricity;
+            let sinh_anomaly = radial_rate / (eccentricity * sqrt(mu * -semi_major));
+            // `cosh H + sinh H` is exactly `e^H`, so one `ln` reaches H with its
+            // sign — no `asinh` composition and no quadrant to recover.
+            let anomaly = ln(cosh_anomaly + sinh_anomaly);
+            eccentricity * sinh_anomaly - anomaly
+        };
+
+        Some(Self {
+            semi_major,
+            eccentricity,
+            inclination,
+            ascending_node,
+            argument_of_periapsis,
+            mean_anomaly,
+            mu,
+        })
+    }
 }
 
 /// A deterministic random source, sized and shaped to live *in* the world
@@ -1703,5 +1810,92 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every angle nonzero and at real magnitudes — a round trip through an
+    /// identity frame would pass with two of the three rotations transposed.
+    fn tilted(eccentricity: f64) -> Orbit {
+        Orbit {
+            inclination: 0.62,
+            ascending_node: -2.4,
+            argument_of_periapsis: 1.15,
+            mean_anomaly: 0.37,
+            ..orbit(eccentricity)
+        }
+    }
+
+    #[test]
+    fn from_state_round_trips_through_state_on_both_branches() {
+        for eccentricity in [0.0, 0.2, 0.6, 0.9, 1.2, 2.5] {
+            let path = tilted(eccentricity);
+            let span = path.period().unwrap_or(3.0e7);
+            for step in -4..=4 {
+                let (position, velocity) = path.state_at(span * f64::from(step) / 8.0);
+                let back = Orbit::from_state(position, velocity, MU_SUN)
+                    .expect("a bound or hyperbolic state has a conic");
+                // Graded on *state* and not on elements: the elements are the
+                // representation and the state is the answer, and at `e = 0` the
+                // two disagree on purpose (`from_state`'s degenerate conventions).
+                let (again, speed) = back.state_at(0.0);
+                assert!(
+                    (again - position).length() < AU * 1e-12,
+                    "position at e={eccentricity} step={step}"
+                );
+                assert!(
+                    (speed - velocity).length() < velocity.length() * 1e-9,
+                    "velocity at e={eccentricity} step={step}"
+                );
+                // The elements themselves only where they are conditioned: `a`
+                // and `e` are, always, and a wrong frame shows in `i` alone.
+                assert!((back.semi_major - path.semi_major).abs() < AU * 1e-9);
+                assert!((back.eccentricity - eccentricity).abs() < 1e-9);
+                assert!((back.inclination - path.inclination).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn from_state_picks_a_convention_where_an_element_does_not_exist() {
+        let speed = sqrt(MU_SUN / AU);
+        // Exactly circular and exactly equatorial: `v² - μ/r` and `p·v` are both
+        // exactly zero here, so the eccentricity vector is `ZERO` by arithmetic
+        // and not by rounding — the case the conventions are written for.
+        let position = DVec3::new(AU, 0.0, 0.0);
+        let flat = Orbit::from_state(position, DVec3::new(0.0, 0.0, -speed), MU_SUN)
+            .expect("a circle is a conic");
+        assert_eq!(
+            (
+                flat.eccentricity,
+                flat.inclination,
+                flat.ascending_node,
+                flat.argument_of_periapsis,
+                flat.mean_anomaly
+            ),
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        );
+        assert!((flat.semi_major - AU).abs() < AU * 1e-12);
+
+        // Circular but polar: no periapsis, but a node line that exists. The
+        // anomaly must come off the node rather than off `atan2(0, 0)`.
+        let polar = Orbit::from_state(position, DVec3::new(0.0, speed, 0.0), MU_SUN)
+            .expect("a circle is a conic");
+        assert!((polar.inclination - core::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        assert_eq!(polar.eccentricity, 0.0);
+        let (again, _) = polar.state_at(0.0);
+        assert!((again - position).length() < AU * 1e-12);
+
+        // The two refusals, each exact rather than tolerated: a radial fall has
+        // no angular momentum, and a parabola has no `a`.
+        assert!(Orbit::from_state(position, DVec3::new(1.0e4, 0.0, 0.0), MU_SUN).is_none());
+        // Unit magnitudes here alone, and deliberately: `v² = 2μ/r` is exact only
+        // where the square root is, so at real magnitudes escape speed rounds to
+        // one side or the other and a parabola is *unreachable* rather than
+        // merely rare. That is why the guard is `!a.is_finite()` and not a band
+        // around `e = 1` — the band would catch orbits that have a conic.
+        assert!(Orbit::from_state(DVec3::X, DVec3::new(0.0, 0.0, -2.0), 2.0).is_none());
+        let escape = sqrt(2.0 * MU_SUN / AU);
+        let grazing = Orbit::from_state(position, DVec3::new(0.0, 0.0, -escape), MU_SUN)
+            .expect("rounding lands escape speed on one branch or the other");
+        assert!(grazing.semi_major.abs() > AU * 1.0e12);
     }
 }

@@ -165,6 +165,22 @@ fn orbit_report(out: &mut Report) {
     push("orbit.velocity.x", velocity.x);
     push("orbit.velocity.z", velocity.z);
     push("orbit.mean_motion", path.mean_motion());
+
+    // The inverse, which the regime boundary evaluates and therefore puts in the
+    // hash (§6 M38 item 8). Its own composition — `atan2` four times over
+    // differences of large products — is not covered by any line above, and the
+    // whole point of a boundary computed from sim state is that two architectures
+    // agree about which side of it a body is on.
+    let back = Orbit::from_state(position, velocity, path.mu).expect("an ellipse has a conic");
+    push("from_state.semi_major", back.semi_major);
+    push("from_state.eccentricity", back.eccentricity);
+    push("from_state.inclination", back.inclination);
+    push("from_state.ascending_node", back.ascending_node);
+    push(
+        "from_state.argument_of_periapsis",
+        back.argument_of_periapsis,
+    );
+    push("from_state.mean_anomaly", back.mean_anomaly);
 }
 
 fn build_report() -> Report {
