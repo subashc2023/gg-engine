@@ -159,6 +159,58 @@ fn the_stream_hashes_the_same_twice() {
     );
 }
 
+/// §5.6's material claim for this demo: the mission's per-tick canonical hashes
+/// match the checked-in baseline, on every architecture the leg runs — and here
+/// that is a claim about a *transcendental*, because Kepler's equation is
+/// solved by `gg_math::sim`'s `sin`/`cos` on every propagation of every conic.
+#[test]
+fn the_recorded_mission_reproduces_its_checked_in_hash_sequence() {
+    let entry = entry();
+    let sequence = session::hash_sequence(&entry, &session::frames(&entry).unwrap()).unwrap();
+    let path = session::baseline_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "no baseline at {} ({e}) — run `cargo xtask replay --bless`",
+            path.display()
+        )
+    });
+    let baseline = session::parse_baseline(&text).unwrap();
+    if let Some(found) = session::divergence(&sequence, &baseline) {
+        let actual = std::env::temp_dir().join("demo13-orbit.hashes.actual");
+        let _ = std::fs::write(&actual, session::encode_baseline(&sequence));
+        panic!("{found} — fresh sequence at {}", actual.display());
+    }
+}
+
+/// What the milestone is about, as one ratio: the mission is three thousand
+/// host ticks and half a year of sim time. Warp is an `Epoch` the stream steps,
+/// so this number is *in* the recording — a shell that had put it in `TickClock`
+/// would replay the same frames over a flat clock and never leave the parking
+/// orbit.
+#[test]
+fn the_sim_clock_is_not_the_host_clock() {
+    let flight = session::fly(&entry(), session::FLOWN).expect("the pilot flew");
+    let progress = session::progress(&entry(), &flight.frames).expect("driven");
+    let spanned = progress.iter().map(|p| p.epoch).max().expect("ticks");
+    assert!(
+        spanned > progress.len() as u64 * 1_000,
+        "{spanned} sim ticks over {} host ticks is not a warped mission",
+        progress.len()
+    );
+    // Monotone, and the closing restart is what breaks it: an epoch that ever
+    // went backwards mid-flight would be a stride computed from host state.
+    let flight_ticks = &progress[..progress.len() - 1];
+    assert!(
+        flight_ticks.windows(2).all(|w| w[1].epoch >= w[0].epoch),
+        "the epoch went backwards"
+    );
+    assert_eq!(
+        progress.last().expect("ticks").epoch,
+        0,
+        "the restart takes the epoch with the world"
+    );
+}
+
 /// The negative control, and the reason the constants are solved rather than
 /// picked: a departure a few minutes late does not degrade the mission, it ends
 /// it. The window really is one cell of the sweep wide.

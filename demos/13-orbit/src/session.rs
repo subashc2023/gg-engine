@@ -422,6 +422,11 @@ pub struct Progress {
     pub events: u32,
     /// Whether the engine is lit this tick — the regime, as a gate sees it.
     pub lit: bool,
+    /// Sim ticks the world has aged. It is not the host tick and the gap is the
+    /// milestone's subject: warp is an [`Epoch`] the *stream* steps, so a shell
+    /// that put it in `TickClock` instead would replay a different number of
+    /// ticks rather than the same ones over a different span.
+    pub epoch: u64,
 }
 
 /// [`Progress`] after each of `frames`, through the same table
@@ -438,14 +443,17 @@ pub fn progress(entry: &Entry, frames: &[InputFrame]) -> Result<Vec<Progress>, S
     let rails_q = Query::<(&Ship, &Rails)>::new().map_err(SessionError::Alias)?;
     let bubble_q = Query::<(&Ship, &Bubble)>::new().map_err(SessionError::Alias)?;
     let body_q = Query::<&Body>::new().map_err(SessionError::Alias)?;
+    let epoch_q = Query::<&Epoch>::new().map_err(SessionError::Alias)?;
     drive(entry, frames, |world| {
         let mut out = Progress {
             primary: u32::MAX,
             outcome: FLYING,
             events: 0,
             lit: false,
+            epoch: 0,
         };
         world.each_ref(&ship_q, |_, ship: &Ship| out.outcome = ship.outcome);
+        world.each_ref(&epoch_q, |_, epoch: &Epoch| out.epoch = epoch.elapsed);
         world.each_ref(&event_q, |_, _: &crate::Event| out.events += 1);
         let mut primary = Entity::NONE;
         world.each_ref(&rails_q, |_, (_, rails): (&Ship, &Rails)| {

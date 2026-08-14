@@ -980,6 +980,27 @@ fn aarch64_leg() -> anyhow::Result<()> {
             ]),
             &format!("the recorded shooter round on aarch64 under qemu ({profile} profile)"),
         )?;
+        // demo-13-orbit joins at M38, the same arrangement again — and it is the
+        // heaviest transcendental claim of the four by a wide margin. Every
+        // propagation of every conic solves Kepler's equation, so this leg runs
+        // `sin`/`cos`/`atan2` and the hyperbolic pair over three bodies and a
+        // ship for 3510 ticks and asks the other architecture for the same
+        // 128-bit digest at each of them. It is also the only one whose sim
+        // clock is not its host clock: the warp strides are in the recording,
+        // so a divergence here can be a wrong answer *or* a wrong epoch.
+        exec(
+            cargo().args([
+                "nextest",
+                "run",
+                "-p",
+                "demo-13-orbit",
+                "--target",
+                "aarch64-unknown-linux-gnu",
+                "--cargo-profile",
+                profile,
+            ]),
+            &format!("the recorded orbit mission on aarch64 under qemu ({profile} profile)"),
+        )?;
         no_imported_math(profile)?;
     }
     Ok(())

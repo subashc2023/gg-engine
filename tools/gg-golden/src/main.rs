@@ -534,6 +534,31 @@ const SCENES: &[Scene] = &[
         },
         render: render_shooter,
     },
+    Scene {
+        name: "orbit",
+        // §6 M38's map at the moment the transfer is handed to the star — the
+        // roster's only subject whose positions are astronomical, and the only
+        // picture of §1.4's membrane doing the thing it was built at M5 to do.
+        //
+        // What it guards that no neighbour can: 195 balls whose half-extents
+        // span four orders of magnitude in one frame, positioned from `f64`
+        // metres up to 2.3e11 and narrowed only at the camera-relative seam. A
+        // ring is 64 samples of one conic, so a `state_at` that drifted is a
+        // scatter rather than a shade, and the two planet rings plus the
+        // transfer between them are the same closed form asked three questions.
+        //
+        // Judged like `mesh`: a lit sphere is a gradient, and 195 of them
+        // against a dark field is exactly where a per-channel budget alone
+        // would forgive a light that moved.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.25,
+        },
+        render: render_orbit,
+    },
 ];
 
 /// Demo 12's room with §6 M24's material chart standing in the middle of it.
@@ -2139,6 +2164,157 @@ const PLATFORMER_EATEN_FAR: f32 = 10.0;
 
 fn render_platformer() -> Render {
     render_platformer_far(None)
+}
+
+/// The `orbit` reference's own extent, four times every other scene's.
+///
+/// Not a preference: demo 13's map symbols are sized in **map metres** and the
+/// eye never moves, so the view is 18.6 m tall at every zoom and a `TRACE_DOT`
+/// is 0.3 % of it — three pixels in the 1080p window the game is played in, and
+/// *half* a pixel at `BOXES_EXTENT`. A reference where the conics are sub-pixel
+/// noise gates nothing about the conics.
+const ORBIT_EXTENT: (u32, u32) = (1280, 720);
+
+/// The zoom the `orbit` reference is framed at — the demo's **own** far end,
+/// not a number of this file's choosing, so the reference is the picture the
+/// zoom key reaches and a re-framed map moves it.
+const ORBIT_ZOOM: f64 = demo_13_orbit::ZOOM_FAR;
+
+/// Where the mission is, at that zoom: sim ticks since the world opened. Not
+/// tick 0 — the opening state has both planets near their authored anomalies
+/// and the picture is a pair of rings with nothing on the move. This is the
+/// epoch the flown transfer is handed to the star on (§6 M38 item 14), so what
+/// the reference frames is the crossing itself.
+const ORBIT_EPOCH: u64 = 4_925_342;
+
+/// Demo 13's map, framed on the transfer (§6 M38).
+///
+/// The world is dealt from the demo's own constants — [`VERGE`](demo_13_orbit::VERGE),
+/// [`OCHRE`](demo_13_orbit::OCHRE), the star's `mu` and radius, the dot sizes and
+/// the map light — and the rings are stepped by the demo's own
+/// [`sample`](demo_13_orbit::sample), rather than by `present`, which is a system
+/// behind the ABI this binary cannot reach. Same tables and same stepping, so an
+/// element that moves moves this reference instead of diverging from it.
+///
+/// What it guards that nothing else on the roster can: a picture whose subject
+/// is **scale**. Every position here is an absolute `f64` metre — up to 2.3e11
+/// of them — narrowed at `gg-extract`'s camera-relative seam and nowhere else
+/// (§1.4), then drawn under reverse-Z where half-extents span four orders of
+/// magnitude in one frame. A membrane that leaked an absolute `f32` anywhere
+/// would not be subtly wrong here; the ring would be a scatter.
+fn render_orbit() -> Render {
+    use demo_13_orbit as orbit;
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Light, Renderable};
+    use gg_math::sim;
+
+    let extent = ORBIT_EXTENT;
+    let seconds = ORBIT_EPOCH as f64 / f64::from(gg_core::DEFAULT_TICK_HZ);
+    let scale = sim::powf(10.0, -ORBIT_ZOOM);
+
+    // Where each body is at that epoch, absolutely — the same `state_at` the
+    // demo's `advance` runs, which is the whole of what "on rails" means.
+    let stations: Vec<(&orbit::Planet, sim::DVec3)> = [&orbit::VERGE, &orbit::OCHRE]
+        .into_iter()
+        .map(|planet| (planet, planet.orbit().state_at(seconds).0))
+        .collect();
+    // Centred on the departure planet rather than on a ship: this binary cannot
+    // fly the mission (the pilot drives a systems table, and demo 10 owns the
+    // `gg_game_*` names in this graph), and the map's own rule is that the
+    // frame follows the thing the flight is about.
+    let center = stations[0].1;
+    let map = |absolute: sim::DVec3| (absolute - center) * scale;
+
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    world.register::<Light>()?;
+
+    let star = world.spawn();
+    world.insert(
+        star,
+        Renderable::ball(
+            map(sim::DVec3::ZERO),
+            ((orbit::STAR_RADIUS * scale) as f32).max(orbit::MIN_DOT),
+            orbit::STAR_GLOW,
+        ),
+    )?;
+    for (planet, position) in &stations {
+        let body = world.spawn();
+        world.insert(
+            body,
+            Renderable::ball(
+                map(*position),
+                ((planet.radius * scale) as f32).max(orbit::MIN_DOT),
+                planet.color,
+            ),
+        )?;
+        for point in orbit::sample(planet.orbit(), sim::DVec3::ZERO, &map) {
+            let dot = world.spawn();
+            world.insert(
+                dot,
+                Renderable::ball(point, orbit::TRACE_DOT, orbit::dim(planet.color)),
+            )?;
+        }
+    }
+    // The ship is on the transfer the flown plan bought, stated about the star
+    // at the epoch it was handed over on. Its elements are the reference's one
+    // authored number and they are read off `gg-tools transfer`.
+    let transfer = sim::Orbit {
+        semi_major: 1.882_96e11,
+        eccentricity: 0.234_62,
+        inclination: 0.0,
+        ascending_node: 0.0,
+        argument_of_periapsis: 1.796,
+        mean_anomaly: 0.0,
+        mu: orbit::MU_STAR,
+    };
+    let ship = world.spawn();
+    world.insert(
+        ship,
+        Renderable::ball(
+            map(transfer.state_at(0.0).0),
+            orbit::SHIP_DOT,
+            orbit::SHIP_INK,
+        ),
+    )?;
+    for point in orbit::sample(transfer, sim::DVec3::ZERO, &map) {
+        let dot = world.spawn();
+        world.insert(
+            dot,
+            Renderable::ball(point, orbit::TRACE_DOT, orbit::SHIP_TRACE_INK),
+        )?;
+    }
+    // The demo's own light, computed by the demo's own `star_light` — the
+    // intensity is a function of the mapped distance (§6 M38 item 15), so a
+    // reference that lit itself with a constant would be gating a light the
+    // game does not have.
+    let lamp = world.spawn();
+    world.insert(lamp, orbit::star_light(map(sim::DVec3::ZERO)))?;
+
+    let view = gg_render::View {
+        pitch: orbit::EYE_PITCH,
+        ..gg_render::View::default()
+    };
+    let mut extracted = gg_extract::Extracted::default();
+    extracted.clear(orbit::eye_position(), view.frustum(extent));
+    extracted.append::<Renderable>(&world)?;
+    extracted.append_lights(&world)?;
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(
+        device = %renderer.device().chosen,
+        culled = extracted.culled,
+        "offscreen device"
+    );
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?)
+    })?;
+    ensure_clean(&renderer.shutdown())?;
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
 }
 
 /// Demo 11's level under the orthographic camera (§6 M20).

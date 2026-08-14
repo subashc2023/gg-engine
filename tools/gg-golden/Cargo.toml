@@ -72,6 +72,10 @@ demo-11-platformer = { path = "../../demos/11-platformer", default-features = fa
 # deals — its own tables, so the reference moves when the demo does. Without
 # `game`, demo 04's reason again.
 demo-12-shooter = { path = "../../demos/12-shooter", default-features = false }
+# Demo 13 supplies the map's own constants and its `sample` — the `orbit` scene
+# draws the same rings with the same stepping, so a conic that moves moves this
+# reference. Without `game`, demo 04's reason again.
+demo-13-orbit = { path = "../../demos/13-orbit", default-features = false }
 gg-scene = { path = "../../crates/gg-scene" }
 gg-input = { path = "../../crates/gg-input" }
 # The capture trigger (§4.8). `gg-debug` is winit-free by its own dependency

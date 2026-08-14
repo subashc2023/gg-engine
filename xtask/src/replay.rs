@@ -78,6 +78,7 @@ fn check() -> anyhow::Result<()> {
     // re-blessed the recording over.
     crate::shell::check_platformer()?;
     crate::shell::check_shooter()?;
+    crate::shell::check_orbit()?;
     println!("xtask replay: baselines live in {}", dir.display());
     Ok(())
 }

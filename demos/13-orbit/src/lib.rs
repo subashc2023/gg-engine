@@ -150,7 +150,8 @@ pub struct Planet {
 
 impl Planet {
     /// The elements as the ECS holds them, about the star.
-    const fn orbit(&self) -> sim::Orbit {
+    #[must_use]
+    pub const fn orbit(&self) -> sim::Orbit {
         sim::Orbit {
             semi_major: self.semi_major,
             eccentricity: self.eccentricity,
@@ -208,10 +209,20 @@ pub const TRACE: u32 = 64;
 const HYPERBOLIC_SPAN: f64 = 2.5;
 
 /// Zoom, as the negative base-10 log of map metres per real metre. 5.5 frames a
-/// parking orbit; 11.5 frames the whole system.
+/// parking orbit.
 pub const ZOOM_NEAR: f64 = 5.5;
-/// The other end.
-pub const ZOOM_FAR: f64 = 11.5;
+/// The other end: the whole system from wherever the ship is, and the number is
+/// arithmetic rather than a preference. The eye sits [`EYE_RANGE`] back at
+/// `r.fov` 1.0 rad, so the map is `2 * 17 * tan(0.5)` = 18.6 map metres tall —
+/// and the map is centred on the **ship**, so what has to fit is not the system
+/// but a circle of twice the target's aphelion, 1e12 m across. That is
+/// `18.6 / 1e12` = 1.9e-11 metres to the metre.
+///
+/// It was 11.5 until the `orbit` golden was framed (§6 M38 item 15), which is
+/// what a picture is for: 11.5 draws the whole system inside a twelfth of the
+/// height with every body one pixel, and the first correction — 10.4 — forgot
+/// the centring and cropped the far ring off both sides of the frame.
+pub const ZOOM_FAR: f64 = 10.75;
 /// Decades per tick while a zoom key is held — a decade and a half a second.
 const ZOOM_RATE: f64 = 0.025;
 
@@ -221,6 +232,25 @@ const ZOOM_RATE: f64 = 0.025;
 pub const EYE_PITCH: f32 = -0.95;
 /// How far back along that pitch.
 pub const EYE_RANGE: f64 = 17.0;
+
+/// The star's own dot, and the colour of the light that follows it.
+pub const STAR_GLOW: u32 = 0x00ff_e9b0;
+/// The map's one light, sitting where the star is drawn.
+pub const STAR_INK: u32 = 0x00ff_f0d0;
+/// What the star delivers at the map's centre, in the renderer's own units.
+///
+/// Read off the `orbit` golden (§6 M38 item 15), and it is a plateau between
+/// two failures rather than a taste: the map's symbols are lit geometry — the
+/// boundary has no emissive channel and a `Sky` bright enough to floor them
+/// would paint the background it lit them with — so an inverse-square light at
+/// the star spans 16:1 across a ring at 1 AU and a ring at 2.3. Below ~20 the
+/// **outer** ring goes to nothing; far above 60 the inner one saturates to
+/// white and the conics stop being colours. 60 keeps both readable.
+pub const STAR_LUX: f64 = 60.0;
+/// The ship's dot.
+pub const SHIP_INK: u32 = 0x00ff_ffff;
+/// Its trace's.
+pub const SHIP_TRACE_INK: u32 = 0x0060_ffc0;
 
 // ---- verbs --------------------------------------------------------------
 
@@ -401,10 +431,7 @@ pub fn bootstrap(world: &mut GameWorld) {
         index: 0,
         reserved: 0,
     });
-    world.put(
-        star,
-        Renderable::ball(sim::DVec3::ZERO, MIN_DOT, 0x00ff_e9b0),
-    );
+    world.put(star, Renderable::ball(sim::DVec3::ZERO, MIN_DOT, STAR_GLOW));
 
     for planet in [&VERGE, &OCHRE] {
         let body = world.spawn_with(Body {
@@ -462,10 +489,7 @@ pub fn bootstrap(world: &mut GameWorld) {
             since: 0,
         },
     );
-    world.put(
-        ship,
-        Renderable::ball(sim::DVec3::ZERO, SHIP_DOT, 0x00ff_ffff),
-    );
+    world.put(ship, Renderable::ball(sim::DVec3::ZERO, SHIP_DOT, SHIP_INK));
     for slot in 0..TRACE {
         let dot = world.spawn_with(Marker {
             of: Marker::SHIP,
@@ -473,7 +497,7 @@ pub fn bootstrap(world: &mut GameWorld) {
         });
         world.put(
             dot,
-            Renderable::ball(sim::DVec3::ZERO, TRACE_DOT, 0x0060_ffc0),
+            Renderable::ball(sim::DVec3::ZERO, TRACE_DOT, SHIP_TRACE_INK),
         );
     }
 
@@ -489,21 +513,50 @@ pub fn bootstrap(world: &mut GameWorld) {
         zoom: ZOOM_NEAR as f32,
     });
     // A point light where the star is, moved with it every tick: the map is
-    // recentred on the ship, so nothing in render space stays put.
-    world.spawn_with(Light::point(sim::DVec3::ZERO, 0x00ff_f0d0, 40.0, 400.0));
+    // recentred on the ship, so nothing in render space stays put — and its
+    // intensity moves with the zoom for the reason `star_light` gives.
+    world.spawn_with(star_light(sim::DVec3::ZERO));
     world.spawn_with(Eye::at(eye_position(), 0.0, EYE_PITCH));
     world.log(log_level::INFO, "orbit: ready");
 }
 
 /// Where the eye sits, once, for the reason [`EYE_PITCH`] gives.
-fn eye_position() -> sim::DVec3 {
+#[must_use]
+pub fn eye_position() -> sim::DVec3 {
     let (forward, _) = sim::fly_basis(0.0, EYE_PITCH);
     forward * -EYE_RANGE
 }
 
+/// The map's one light, for a star drawn at `star_map`.
+///
+/// A star's illuminance is a property of how far away it *really* is, and the
+/// map's scale must not change it — but the falloff reads the **mapped**
+/// distance, so a light stood at the star's drawn position with a fixed
+/// intensity goes out the moment the view zooms in. That is not a hypothetical:
+/// at [`ZOOM_NEAR`] the star is 474 km away in map metres, and demo 13 drew an
+/// unlit black disc there until the `orbit` golden was framed (§6 M38 item 15).
+///
+/// So the intensity is the one that delivers [`STAR_LUX`] at the map's centre
+/// and the reach is set past it. Both then move with the zoom, which is what
+/// keeps the picture still while the scale sweeps six decades.
+///
+/// Public because the golden scene lights its reference with this and not with
+/// a copy of it.
+#[must_use]
+pub fn star_light(star_map: sim::DVec3) -> Light {
+    let far = star_map.length().max(1.0);
+    Light::point(
+        star_map,
+        STAR_INK,
+        (STAR_LUX * far * far) as f32,
+        (far * 2.0) as f32,
+    )
+}
+
 /// A dimmer shade of a trace's body colour, so a ring reads as a ring and not
 /// as a queue of planets.
-const fn dim(color: u32) -> u32 {
+#[must_use]
+pub const fn dim(color: u32) -> u32 {
     (color >> 1) & 0x007f_7f7f
 }
 
@@ -990,10 +1043,11 @@ pub fn present(world: &mut GameWorld) {
         shape.half_extent = sim::Vec3::splat(SHIP_DOT);
     }
     // The star lights the map from where the star is drawn, so a planet's lit
-    // face still points at it however far the view is scaled.
+    // face still points at it however far the view is scaled — and it is the
+    // whole light that is recomputed, not only its place (`star_light`).
     if let Some(star) = station_of(&bodies, 0) {
-        let star_map = map(star.position);
-        world.visit::<&mut Light>(|_, light| light.position = star_map);
+        let lit = star_light(map(star.position));
+        world.visit::<&mut Light>(|_, light| *light = lit);
     }
 
     // One trace table per conic, sampled before anything is written: the visit
@@ -1039,7 +1093,11 @@ pub fn present(world: &mut GameWorld) {
 /// [`TRACE`] points of one conic, already mapped. Each sample is the same
 /// elements with the mean anomaly stepped, which is the closed form asked the
 /// question it is good at — and it is why a trajectory costs nothing to draw.
-fn sample(
+///
+/// Public because the golden scene draws the same rings and must draw them with
+/// *this* code: `present` runs behind the ABI a reference harness cannot reach,
+/// and a second copy of the stepping is the second table §4.10 forbids.
+pub fn sample(
     orbit: sim::Orbit,
     origin: sim::DVec3,
     map: &impl Fn(sim::DVec3) -> sim::DVec3,

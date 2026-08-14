@@ -63,6 +63,10 @@ demo-11-platformer = { path = "../demos/11-platformer", default-features = false
 # `game` feature off, `session::Entry` taking the four exports out of the built
 # dylib, for the same collision on the fixed `gg_game_*` names.
 demo-12-shooter = { path = "../demos/12-shooter", default-features = false }
+# M38 (§6): the recorded mission — the same arrangement again, and the reason it
+# has to be is now a rule rather than a coincidence: one `gg_game!` per binary,
+# and demo 10 already spent it.
+demo-13-orbit = { path = "../demos/13-orbit", default-features = false }
 # The loader for exactly that: `shell::platformer_entry` resolves demo 11's
 # entry points from the artifact, the way `gg-runtime` does.
 libloading.workspace = true

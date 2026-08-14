@@ -285,6 +285,29 @@ pub fn bless(commit: &str) -> anyhow::Result<()> {
         shooter.change_count(),
         sequence.len(),
     );
+    let entry = orbit_entry()?;
+    let frames = demo_13_orbit::session::frames(&entry)?;
+    let mut orbit = orbit_stream(&frames);
+    orbit.set_engine_commit(commit);
+    std::fs::write(orbit_path(), orbit.encode())?;
+    // Demo 10's pattern once more. This is the tree's longest baseline by a
+    // wide margin — a mission is thousands of ticks where a round is hundreds —
+    // and it is *cheap* for exactly the reason the milestone is about: almost
+    // every tick of it is a coast, so the world it hashes is three conics and a
+    // ship rather than a scene being integrated.
+    let sequence = demo_13_orbit::session::hash_sequence(&entry, &frames)?;
+    std::fs::write(
+        demo_13_orbit::session::baseline_path(),
+        demo_13_orbit::session::encode_baseline(&sequence),
+    )?;
+    println!(
+        "xtask replay: blessed {} ({} ticks, {} change records) and its {}-tick baseline at \
+         {commit}",
+        demo_13_orbit::session::NAME,
+        orbit.ticks(),
+        orbit.change_count(),
+        sequence.len(),
+    );
     Ok(())
 }
 
@@ -632,6 +655,129 @@ pub fn check_shooter() -> anyhow::Result<()> {
     println!(
         "xtask replay: {} matches its script ({} ticks, blessed at {})",
         demo_12_shooter::session::NAME,
+        decoded.ticks(),
+        decoded.meta().engine_commit,
+    );
+    Ok(())
+}
+
+/// Demo 13's verbs, in the id order `gg_game!` declares them (§4.7). All seven,
+/// though the mission presses four: the ids are positions in this list, so a
+/// stream declaring only what it holds down would aim `restart` at `zoom_in`.
+const ORBIT_ACTIONS: &[&str] = &[
+    "burn",
+    "retro",
+    "warp_up",
+    "warp_down",
+    "zoom_in",
+    "zoom_out",
+    "restart",
+];
+/// The empty axis list is this game's own shape, not an economy: a map view
+/// steers with *when* the engine is lit, and demo 13 declares no axes at all.
+const ORBIT_AXES: &[&str] = &[];
+
+/// Demo 13's entry points, resolved out of the **built dev dylib** —
+/// [`platformer_entry`]'s reasoning and its hazards verbatim, including the
+/// staged copy a loaded DLL makes necessary on Windows.
+fn orbit_entry() -> anyhow::Result<demo_13_orbit::session::Entry> {
+    static ENTRY: std::sync::OnceLock<demo_13_orbit::session::Entry> = std::sync::OnceLock::new();
+    if let Some(entry) = ENTRY.get() {
+        return Ok(*entry);
+    }
+    exec(
+        cargo().args(["build", "-p", "demo-13-orbit"]),
+        "build demo-13-orbit [dev]",
+    )?;
+    let built = dylib("debug", "demo_13_orbit");
+    let dir = workspace_root().join("target/entry");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(built.file_name().unwrap_or_default());
+    std::fs::copy(&built, &path)?;
+    // SAFETY: [`platformer_entry`]'s, word for word — the artifact was built
+    // from this working tree one line up, `assemble` refuses a foreign
+    // `AbiInfo` before anything is called, and the library is leaked because a
+    // game dylib is never unloaded (§4.2.2).
+    unsafe {
+        let lib = libloading::Library::new(&path)
+            .map_err(|e| anyhow::anyhow!("loading {} failed: {e}", path.display()))?;
+        let entry = demo_13_orbit::session::Entry {
+            abi: *lib.get(b"gg_game_abi")?,
+            init: *lib.get(b"gg_game_init")?,
+            components: *lib.get(b"gg_game_components")?,
+            systems: *lib.get(b"gg_game_systems")?,
+        };
+        std::mem::forget(lib);
+        Ok(*ENTRY.get_or_init(|| entry))
+    }
+}
+
+/// The recorded mission as a replay file — `demo_13_orbit::session`'s frames,
+/// so this file, the demo's own tests and the baseline are one script.
+///
+/// # Errors
+///
+/// If the pilot cannot fly the mission to a capture — `session::FLOWN` and the
+/// target's phase were solved against each other and the window is one cell
+/// wide, so this fails outright rather than recording a miss.
+pub fn orbit_replay() -> anyhow::Result<Replay> {
+    Ok(orbit_stream(&demo_13_orbit::session::frames(
+        &orbit_entry()?,
+    )?))
+}
+
+/// Demo 13's script as a stream the shell can replay, indexed from 0: this game
+/// builds its system in `bootstrap`, so there is no scene and no seek.
+fn orbit_stream(frames: &[InputFrame]) -> Replay {
+    let mut meta = ReplayMeta::new(
+        gg_math::DETERMINISM_CONTRACT,
+        "curated",
+        gg_core::DEFAULT_TICK_HZ,
+        ORBIT_ACTIONS,
+        ORBIT_AXES,
+    );
+    meta.engine_commit = "generated".to_owned();
+    let mut recorder = Recorder::new(meta);
+    for (tick, frame) in frames.iter().enumerate() {
+        recorder.record(tick as u64, *frame);
+    }
+    recorder.finish()
+}
+
+pub fn orbit_path() -> PathBuf {
+    workspace_root()
+        .join("tests/replays")
+        .join(format!("{}.ggrp", demo_13_orbit::session::NAME))
+}
+
+/// The checked-in orbit stream is still the script, byte for byte —
+/// [`check_tetris`]'s reasoning verbatim, including the encoding-version split.
+pub fn check_orbit() -> anyhow::Result<()> {
+    let path = orbit_path();
+    let on_disk = std::fs::read(&path)
+        .map_err(|e| anyhow::anyhow!("no orbit stream at {} ({e})", path.display()))?;
+    let decoded = Replay::decode(&on_disk)?;
+    let mut fresh = orbit_replay()?;
+    fresh.set_engine_commit(&decoded.meta().engine_commit);
+    anyhow::ensure!(
+        fresh.encode() != decoded.encode() || fresh.encode() == on_disk,
+        "{} is the stream `demo_13_orbit::session::frames()` still produces, written in an older \
+         encoding — `cargo xtask replay --bless` re-authors it at the current \
+         `gg_input::replay::FORMAT`",
+        path.display(),
+    );
+    anyhow::ensure!(
+        fresh.encode() == on_disk,
+        "{} is not what `demo_13_orbit::session::frames()` produces today ({} ticks on disk, {} \
+         from the script) — the recording and the mission have come apart, and `cargo xtask \
+         replay --bless` is the reviewed act that re-joins them",
+        path.display(),
+        decoded.ticks(),
+        fresh.ticks(),
+    );
+    println!(
+        "xtask replay: {} matches its script ({} ticks, blessed at {})",
+        demo_13_orbit::session::NAME,
         decoded.ticks(),
         decoded.meta().engine_commit,
     );
@@ -1331,6 +1477,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     }
     if only("--shooter") {
         shooter()?;
+    }
+    if only("--orbit") {
+        orbit()?;
     }
     if only("--rules") {
         rules()?;
@@ -2770,6 +2919,146 @@ fn shooter() -> anyhow::Result<()> {
          exactly where the baseline the aarch64 leg reads puts them (§6 M37)",
         demo_12_shooter::session::HITS_WANTED,
         runs[0].1.len(),
+    );
+    Ok(())
+}
+
+/// §6 M38's exit row through the shell: **a recorded mission — parking orbit,
+/// departure burn, escape, a crossing under warp, capture — replays
+/// bit-identically under dev, instrumented and dist-verify.**
+///
+/// Its neighbours' three claims over the one thing none of them has: a session
+/// whose **sim clock is not its host clock**. Warp is an `Epoch` the stream
+/// steps (§6 M38 item 10), so these ticks span millions of sim ticks, and a
+/// shell that had put warp in `TickClock` instead would replay a different
+/// number of ticks rather than the same ones over a different span. The span is
+/// asserted below beside the milestones, because a replay that silently ran at
+/// 1x would reach every one of them — thousands of ticks later, on a
+/// trajectory that never left the parking orbit.
+///
+/// It is also the first leg whose milestones are a *targeting* claim rather
+/// than a reflex one: `orbit: intercept` is a 9.2e7 m window across a 2.3e11 m
+/// crossing, so a shell that delivered one press a tick late does not miss by a
+/// little.
+fn orbit() -> anyhow::Result<()> {
+    let replay = orbit_path();
+    anyhow::ensure!(
+        replay.is_file(),
+        "no orbit stream at {} — `cargo xtask replay --bless` authors it",
+        replay.display()
+    );
+    let replay = replay.display().to_string();
+    let baseline = demo_13_orbit::session::parse_baseline(&std::fs::read_to_string(
+        demo_13_orbit::session::baseline_path(),
+    )?)
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let wanted = demo_13_orbit::session::LOG;
+
+    // The ticks the in-process run puts the three middle milestones on, read off
+    // the same pilot flying the same plan. All three must exist: a mission that
+    // never escaped and never arrived would otherwise tie to the shell by
+    // `None == None`, which is demo 11's own audit finding.
+    let entry = orbit_entry()?;
+    let frames = demo_13_orbit::session::frames(&entry).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let progress =
+        demo_13_orbit::session::progress(&entry, &frames).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let at = |find: &dyn Fn(&demo_13_orbit::session::Progress) -> bool| {
+        progress.iter().position(find).map(|i| i as u64)
+    };
+    let (escaped_at, intercept_at, captured_at) = match (
+        at(&|p| p.primary == 0),
+        at(&|p| p.primary == demo_13_orbit::OCHRE.index),
+        at(&|p| p.outcome == demo_13_orbit::CAPTURED),
+    ) {
+        (Some(escaped), Some(intercept), Some(captured)) => (escaped, intercept, captured),
+        (escaped, intercept, captured) => anyhow::bail!(
+            "the in-process mission escaped at {escaped:?}, was taken by the target at \
+             {intercept:?} and captured at {captured:?} — the plan no longer flies, and \
+             `gg-tools transfer` is what re-aims it"
+        ),
+    };
+    // Sim ticks against host ticks: the whole of what warp buys, as one ratio.
+    // The **peak** rather than the last row, because the closing restart takes
+    // the epoch with the world (which is `--best`'s finding one demo along:
+    // a stream's last tick is not its last state).
+    let spanned = progress.iter().map(|p| p.epoch).max().unwrap_or(0);
+    let years = spanned as f64 / f64::from(gg_core::DEFAULT_TICK_HZ) / 31_557_600.0;
+    // The claim no neighbour's leg can make. A shell that had put warp in
+    // `TickClock` would still reach every milestone above — at 1x, thousands of
+    // ticks later, on a trajectory that never left the parking orbit — so the
+    // span is what says these 3510 ticks *are* the mission. The bar is loose on
+    // purpose: it separates a warped mission from an unwarped one and is not a
+    // second copy of the plan.
+    anyhow::ensure!(
+        spanned > progress.len() as u64 * 1_000,
+        "the replayed mission spans {spanned} sim ticks over {} host ticks — warp is supposed to \
+         be an `Epoch` the stream steps, and a run this flat never left the parking orbit",
+        progress.len(),
+    );
+
+    let mut runs: Vec<(&str, Vec<(u64, String)>)> = Vec::new();
+    for tier in HASHED_TIERS {
+        let (host, game) = stage_game(tier, "demo-13-orbit", "demo_13_orbit")?;
+        let log = play(&host, &game, &["--replay", &replay], true)?;
+        let reached = reaches(&log, wanted);
+        anyhow::ensure!(
+            reached == wanted.len(),
+            "[{}] the replayed mission reached {reached} of {} milestones — expected {wanted:?} \
+             in order; a session whose warp arrived wrong stops at the one before `orbit: \
+             intercept`:\n{log}",
+            tier.name,
+            wanted.len(),
+        );
+        // Each exactly once: a second `escaped` or `intercept` is a conic
+        // chattering across the handover ratio, which the 2x band exists to
+        // stop; a second `captured` is an outcome that failed to latch.
+        for once in wanted {
+            let count = log.lines().filter(|l| l.contains(once)).count();
+            anyhow::ensure!(
+                count == 1,
+                "[{}] `{once}` appears {count} times — one recorded mission, one of each",
+                tier.name
+            );
+        }
+
+        let seq = sequence(&log)?;
+        anyhow::ensure!(
+            seq.len() == baseline.len(),
+            "[{}] the shell ran {} ticks and the baseline holds {}",
+            tier.name,
+            seq.len(),
+            baseline.len()
+        );
+        for (needle, want) in [
+            (wanted[1], escaped_at),
+            (wanted[2], intercept_at),
+            (wanted[3], captured_at),
+        ] {
+            let got = logged_at(&log, needle);
+            anyhow::ensure!(
+                got == Some(want),
+                "[{}] `{needle}` landed on tick {got:?} where the in-process run puts it at \
+                 {want} — the shell and the baseline did not fly the same mission",
+                tier.name,
+            );
+        }
+        runs.push((tier.name, seq));
+    }
+
+    for pair in runs.windows(2) {
+        if let Some(found) = divergence(&pair[0], &pair[1]) {
+            anyhow::bail!("§6 M38: {found}");
+        }
+    }
+    println!(
+        "xtask reload: demo 13's recorded mission — a departure burn, the planet's grip left, a \
+         crossing under warp and a capture over {} host ticks spanning {spanned} sim ticks \
+         ({years:.2} years, {:.0}x) — replayed identically under dev, instrumented and \
+         dist-verify, escaping at {escaped_at}, intercepting at {intercept_at} and captured at \
+         {captured_at} exactly where the baseline the aarch64 leg reads puts them (§6 M38)",
+        runs[0].1.len(),
+        spanned as f64 / runs[0].1.len() as f64,
     );
     Ok(())
 }
