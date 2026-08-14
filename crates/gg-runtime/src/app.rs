@@ -22,7 +22,7 @@ use std::path::Path;
 
 use gg_core::reload::rejuvenate::Rejuvenator;
 use gg_core::{GameLib, Stages};
-use gg_ecs::boundary::{Eye, Light, Model, Renderable, TickCtx, Widget, host_api};
+use gg_ecs::boundary::{Eye, Light, Model, Prefs, Renderable, TickCtx, Widget, host_api};
 use gg_ecs::{ComponentOutcome, Save, Snapshot, World};
 use gg_extract::Extracted;
 use gg_input::{ActionMap, Drive, Input, InputFrame, Recorder, Replay, ReplayMeta};
@@ -144,6 +144,9 @@ pub struct App {
     /// dist entirely — `gg-debug` is not in that graph (§3).
     #[cfg(feature = "overlay")]
     overlay: gg_debug::Overlay,
+    /// What the player's settings file asked for, until tick 0 spends it (§6
+    /// M42). `None` in every run that may not read one — see `player_file`.
+    settings: Option<Prefs>,
 }
 
 impl App {
@@ -260,7 +263,20 @@ impl App {
             zones: None,
             #[cfg(feature = "overlay")]
             overlay: gg_debug::Overlay::default(),
+            settings: None,
         })
+    }
+
+    /// What the player's settings file asked for, spent on tick 0 (§6 M42).
+    pub fn want_settings(&mut self, prefs: Prefs) {
+        self.settings = Some(prefs);
+    }
+
+    /// The preferences as the last tick left them — what a session writes back
+    /// out. Read off the UI stage's cache rather than the world, because that
+    /// stage walks for one already and two answers would be one too many.
+    pub fn prefs(&self) -> Prefs {
+        self.ui.prefs()
     }
 
     /// Offer a key to the instruments before anything else sees it. `true` means
@@ -557,6 +573,26 @@ impl App {
             "save written"
         );
         Ok(())
+    }
+
+    /// The player's preferences as text, beside their saves (§6 M42).
+    ///
+    /// Read out of the world, never echoed back from the file that seeded it —
+    /// which is what makes a menu's edit outlive the process that took it, and
+    /// is the whole point of the round trip. A failure is logged and swallowed:
+    /// a game that cannot write a preference is a game that opens at defaults
+    /// next time, and refusing to exit over it would be worse than that.
+    pub fn write_settings(&self, path: &Path) {
+        let prefs = self.prefs();
+        let write = path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(path, gg_ecs::boundary::settings::encode(&prefs)));
+        match write {
+            Ok(()) => info!(path = %path.display(), quiet = prefs.quiet, "settings written"),
+            Err(e) => warn!(path = %path.display(), error = %e, "settings not written"),
+        }
     }
 
     /// The world staged for a successor, once the loop is over and the window is
@@ -1593,6 +1629,32 @@ impl Stages for App {
         {
             error!(error = %refused, tick, "hierarchy refused — sim halted until the next reload");
             self.halted = true;
+        }
+        // The player's own settings (§6 M42), on tick 0 and after the systems,
+        // which is the only moment they can land: a game spawns its `Prefs` in
+        // its bootstrap, so before tick 0 there is no component to write — the
+        // one way this differs from a scene, which arrives as the whole world.
+        // Before the UI tick below, so the stage that caches preferences reads
+        // them on the tick they arrive rather than the one after.
+        //
+        // The file is the *complete* statement of what the player asked for, so
+        // it is assigned rather than merged: a key they deleted is a preference
+        // they gave back. `close` alone survives — it is the quit button's edge
+        // and belongs to this session, and a file that carried it would end
+        // every session that opened one.
+        if tick == 0
+            && let Some(want) = self.settings.take()
+        {
+            let mut applied = 0usize;
+            self.world
+                .each(&gg_ecs::Query::<&mut Prefs>::new()?, |_, p: &mut Prefs| {
+                    *p = Prefs {
+                        close: p.close,
+                        ..want
+                    };
+                    applied += 1;
+                });
+            info!(applied, "settings applied");
         }
         // The UI tick (§4.9). *Before* the hash and after the systems that
         // declared it, so a click lands in `Widget::state` inside the tick that

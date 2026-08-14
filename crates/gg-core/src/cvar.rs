@@ -94,6 +94,11 @@ pub enum CVarSource {
     /// value is otherwise inexplicable — nobody on this machine set it — which
     /// is the case this enum exists for.
     Replay = 5,
+    /// A `name = value` line in the player's own `gg.cfg`, beside their saves
+    /// rather than beside the game (§6 M42). Distinct from [`Self::Config`] and
+    /// not a spelling of it: a bug report from a shipped build has to be able to
+    /// say a knob came from a file the operator never wrote and cannot see.
+    Player = 6,
 }
 
 impl CVarSource {
@@ -106,6 +111,7 @@ impl CVarSource {
             CVarSource::Console => "console",
             CVarSource::Code => "code",
             CVarSource::Replay => "replay",
+            CVarSource::Player => "player",
         }
     }
 
@@ -118,6 +124,7 @@ impl CVarSource {
             3 => CVarSource::Console,
             4 => CVarSource::Code,
             5 => CVarSource::Replay,
+            6 => CVarSource::Player,
             _ => CVarSource::Default,
         }
     }

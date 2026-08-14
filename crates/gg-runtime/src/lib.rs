@@ -130,11 +130,26 @@ pub(crate) fn opening_scene(args: &Args) -> Option<PathBuf> {
 }
 
 /// Whether this run may read or write the project's own files — its scene, its
-/// dock layout (§6 M15.1, M15.2). False under `--record` and `--replay`: a
-/// blessed stream must land its clicks against the layout the gate recorded
-/// with, and must leave no `scene.ggsave` behind for the next run to open.
+/// dock layout (§6 M15.1, M15.2), and the player's own two (§6 M42). False under
+/// `--record` and `--replay`: a blessed stream must land its clicks against the
+/// layout the gate recorded with, and must leave no `scene.ggsave` behind for
+/// the next run to open.
 pub(crate) fn may_touch_project(args: &Args) -> bool {
     args.record.is_none() && args.replay.is_none()
+}
+
+/// One of the player's own files, or `None` when this run may not have it (§6
+/// M42). Two things have to be true: the game has a data directory at all —
+/// only a project does, a dev run writing under `target/` like everything else —
+/// and the run is live. The live rule is [`opening_scene`]'s, for a sharper
+/// reason: a knob here moves the pipeline a recorded click travels (§6 M40) and
+/// a preference here *is* hashed world state, so a file the game wrote itself
+/// would diverge a blessed stream with nobody having typed anything.
+pub(crate) fn player_file(args: &Args, name: &str) -> Option<PathBuf> {
+    may_touch_project(args)
+        .then_some(args.data.as_ref())
+        .flatten()
+        .map(|dir| dir.join(name))
 }
 
 /// One spelling of the handoff flag: [`Args`] parses it and
@@ -206,7 +221,7 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
         // a shortcut must not lose its knobs to whatever directory the shortcut
         // happened to name.
         let config = args.dir.as_deref().unwrap_or(Path::new(".")).join(CONFIG);
-        gg_core::config::boot(&config, argv)?;
+        gg_core::config::boot(&config, player_file(&args, CONFIG).as_deref(), argv)?;
     }
 
     while let Some(next) = session(&args)? {
@@ -252,6 +267,24 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
         info!(scene = %scene.display(), "opening scene");
         app.load_save(&scene)?;
     }
+    // The player's own settings (§6 M42). Absent is *nothing applied*, not a
+    // world at defaults: a game whose opening `Prefs` is not all zeros (demo 12
+    // asks for MSAA) keeps what it declared until there is a file, and the file
+    // is written from the world, so the first exit records it.
+    let settings = player_file(args, gg_ecs::boundary::settings::FILE);
+    if let Some(text) = settings
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+    {
+        let (prefs, stale) = gg_ecs::boundary::settings::decode(&text);
+        if !stale.is_empty() {
+            warn!(
+                ?stale,
+                "settings: lines this build does not answer to — ignored"
+            );
+        }
+        app.want_settings(prefs);
+    }
 
     // Headless is windowless, not invisible-windowed: §1.5 forbids an automated
     // tier from creating an OS window *at all*, and every `xtask ci` tier sets
@@ -285,6 +318,11 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
         && !args.editor
     {
         app.write_save(path)?;
+    }
+    // Same window as the save, and the same reason: what a preference is read
+    // out of is the world, and the world goes with the app (§6 M42).
+    if let Some(path) = &settings {
+        app.write_settings(path);
     }
     // Also before `finish`, and the reason is the same one: the pick is the
     // editor's and the editor goes with the app.
@@ -380,7 +418,14 @@ pub fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
         args.window = found.window;
         args.input = args.input.take().or(found.input);
         args.pack = args.pack.take().or(found.pack);
-        args.game = found.game;
+        // Field by field like the two above, which `game` was not until §6 M42
+        // went looking for a way to give a *gate* a data directory: `--project`
+        // with a `--game` beside it had blanked the dylib, because a demo's
+        // manifest names none and this assigned unconditionally. Argv-wins is
+        // the same rule either way — a shipped folder passes no `--game`.
+        if args.game.as_os_str().is_empty() {
+            args.game = found.game;
+        }
     }
     anyhow::ensure!(
         args.record.is_none() || args.replay.is_none(),

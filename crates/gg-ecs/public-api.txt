@@ -44,6 +44,10 @@ pub const gg_ecs::boundary::cursor::SOFTWARE: u32
 pub mod gg_ecs::boundary::light
 pub const gg_ecs::boundary::light::DIRECTIONAL: u32
 pub const gg_ecs::boundary::light::POINT: u32
+pub mod gg_ecs::boundary::settings
+pub const gg_ecs::boundary::settings::FILE: &str
+pub fn gg_ecs::boundary::settings::decode(&str) -> (gg_ecs::boundary::Prefs, alloc::vec::Vec<alloc::string::String>)
+pub fn gg_ecs::boundary::settings::encode(&gg_ecs::boundary::Prefs) -> alloc::string::String
 pub mod gg_ecs::boundary::shape
 pub const gg_ecs::boundary::shape::BOX: u64
 pub const gg_ecs::boundary::shape::SPHERE: u64

@@ -13,10 +13,11 @@
 //! r.renderscale = 0.75
 //! ```
 //!
-//! **Precedence is call order**, and the shell applies defaults → file → CLI, so
-//! a flag beats the file and the file beats the declaration. Nothing here reads
-//! the environment: an engine that silently obeys `GG_*` variables is an engine
-//! whose bug reports do not reproduce.
+//! **Precedence is call order**, and the shell applies defaults → the game's
+//! file → the player's (§6 M42) → CLI, so a flag beats every file and a file
+//! beats the declaration. Nothing here reads the environment: an engine that
+//! silently obeys `GG_*` variables is an engine whose bug reports do not
+//! reproduce.
 //!
 //! Nothing here decides what an unknown name means, either. [`Report`] carries
 //! them back and the caller picks the policy — because "unknown cvar" is a typo
@@ -86,6 +87,10 @@ impl Report {
 
 /// Apply the contents of a config file.
 pub fn apply_str(text: &str) -> Report {
+    apply_str_from(text, CVarSource::Config)
+}
+
+fn apply_str_from(text: &str, source: CVarSource) -> Report {
     let mut report = Report::default();
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -93,9 +98,7 @@ pub fn apply_str(text: &str) -> Report {
             continue;
         }
         match line.split_once('=') {
-            Some((name, value)) => {
-                apply_one(name.trim(), value.trim(), CVarSource::Config, &mut report)
-            }
+            Some((name, value)) => apply_one(name.trim(), value.trim(), source, &mut report),
             None => report.rejected.push(Rejection {
                 name: line.to_owned(),
                 value: String::new(),
@@ -113,8 +116,12 @@ pub fn apply_str(text: &str) -> Report {
 /// a directory, a permissions failure — is returned, because it means the file
 /// the user *did* write was not read.
 pub fn apply_file(path: &Path) -> std::io::Result<Report> {
+    apply_file_from(path, CVarSource::Config)
+}
+
+fn apply_file_from(path: &Path, source: CVarSource) -> std::io::Result<Report> {
     match std::fs::read_to_string(path) {
-        Ok(text) => Ok(apply_str(&text)),
+        Ok(text) => Ok(apply_str_from(&text, source)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Report::default()),
         Err(e) => Err(e),
     }
@@ -170,9 +177,20 @@ pub fn apply(path: &Path, args: &[String]) -> std::io::Result<Report> {
 ///
 /// Each pass logs under its own source name, because a stale line is a different
 /// bug in a config file than in a flag typed thirty seconds ago.
-pub fn boot(path: &Path, args: &[String]) -> std::io::Result<Report> {
+///
+/// `player` is the same format in the player's own directory (§6 M42), applied
+/// **between** the two: the game's file is what shipped, the player's is what
+/// they changed about it, and a flag is still someone at a keyboard right now.
+/// `None` is every run without one — a dev run, and any run the caller decided
+/// must not read it.
+pub fn boot(path: &Path, player: Option<&Path>, args: &[String]) -> std::io::Result<Report> {
     let mut report = apply_file(path)?;
     report.log(CVarSource::Config.as_str());
+    if let Some(path) = player {
+        let player = apply_file_from(path, CVarSource::Player)?;
+        player.log(CVarSource::Player.as_str());
+        report.merge(player);
+    }
     let cli = apply_args(args);
     cli.log(CVarSource::Cli.as_str());
     report.merge(cli);

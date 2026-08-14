@@ -167,6 +167,78 @@ impl Prefs {
     }
 }
 
+/// The player's own file: [`Prefs`] as text, so a setting survives the process
+/// that set it (§6 M42).
+///
+/// Here rather than in the shell because the keys *are* the field names, and the
+/// component is the only thing that knows them. Text rather than the component's
+/// bytes for two reasons that point the same way: a player may open it, and a
+/// blob would carry [`Prefs::close`], which is the one field that is not a
+/// preference at all.
+///
+/// **The policy is the opposite of a save's** (§4.5: a save may gain, never
+/// lose). A key this build stopped answering to is dropped and named, never
+/// refused — a player's settings file outlives the build that wrote it, and
+/// refusing to start is the wrong answer to a file they own. Nothing validates
+/// a *value*, either, and does not have to: the zero law above means every field
+/// already reads an unknown value as the default.
+pub mod settings {
+    use super::Prefs;
+
+    /// What the file is called inside the game's own data directory.
+    pub const FILE: &str = "settings.cfg";
+
+    /// The keys the file answers to, in the order [`encode`] writes them.
+    /// `close` is absent **by name**: it is the quit button's edge, not a
+    /// preference, and a file carrying it would end every session that opened
+    /// one. A field added to [`Prefs`] is not persisted until it is added here,
+    /// which is the review this table exists to force.
+    #[allow(clippy::type_complexity)]
+    const KEYS: [(&str, fn(&Prefs) -> u32, fn(&mut Prefs, u32)); 3] = [
+        ("cursor", |p| p.cursor, |p, v| p.cursor = v),
+        ("quiet", |p| p.quiet, |p, v| p.quiet = v),
+        ("aa", |p| p.aa, |p, v| p.aa = v),
+    ];
+
+    /// The preferences as the file's own text — `gg.cfg`'s format (§4.8), which
+    /// is the third file in the tree to use it and the reason it stays flat.
+    #[must_use]
+    pub fn encode(prefs: &Prefs) -> String {
+        let mut out = String::from("# Written when the game exits. Yours to edit.\n");
+        for (name, get, _) in KEYS {
+            out.push_str(name);
+            out.push_str(" = ");
+            out.push_str(&get(prefs).to_string());
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The preferences a file asks for, and every line that did not become one.
+    /// Unset keys keep their default, so a truncated, empty or hostile file is a
+    /// game at defaults rather than a game that will not start.
+    #[must_use]
+    pub fn decode(text: &str) -> (Prefs, Vec<String>) {
+        let (mut prefs, mut stale) = (Prefs::default(), Vec::new());
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((name, value)) = line.split_once('=') else {
+                stale.push(line.to_owned());
+                continue;
+            };
+            let (name, value) = (name.trim(), value.trim());
+            match (KEYS.iter().find(|(key, ..)| *key == name), value.parse()) {
+                (Some((_, _, set)), Ok(v)) => set(&mut prefs, v),
+                _ => stale.push(name.to_owned()),
+            }
+        }
+        (prefs, stale)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +321,65 @@ mod tests {
         assert_eq!(at(QUIET_MAX / 2), 0.5);
         assert_eq!(at(QUIET_MAX), 0.0);
         assert_eq!(at(u32::MAX), 0.0, "past the max clamps rather than wraps");
+    }
+
+    #[test]
+    fn a_setting_survives_the_file_it_was_written_to() {
+        let prefs = Prefs {
+            cursor: cursor::HARDWARE,
+            quiet: 512,
+            aa: aa::MSAA_4,
+            close: 0,
+        };
+        let (back, stale) = settings::decode(&settings::encode(&prefs));
+        assert_eq!(back, prefs);
+        assert!(stale.is_empty());
+    }
+
+    /// The field that is an event and not a preference. A file naming it is a
+    /// file this build does not answer to — otherwise every session that opened
+    /// one would end on the tick it opened.
+    #[test]
+    fn a_file_cannot_close_the_session_it_was_read_by() {
+        assert!(
+            !settings::encode(&Prefs {
+                close: 1,
+                ..Default::default()
+            })
+            .contains("close")
+        );
+        let (prefs, stale) = settings::decode("close = 1\n");
+        assert!(!prefs.closing());
+        assert_eq!(stale, ["close"]);
+    }
+
+    /// A player's file outlives the build that wrote it, so nothing in it is
+    /// fatal: a stale key, a value of the wrong shape and a line that is not a
+    /// setting at all are each named and dropped, and what is left still lands.
+    #[test]
+    fn a_hostile_file_is_a_game_at_defaults_rather_than_a_game_that_will_not_start() {
+        let (prefs, stale) = settings::decode(
+            "# mine\nquiet = 256\nshadowquality=ultra\naa = loud\nnonsense\ncursor = 1\n",
+        );
+        assert_eq!(prefs.quiet, 256, "and the good lines still apply");
+        assert_eq!(prefs.cursor, cursor::HARDWARE);
+        assert_eq!(prefs.aa, aa::DEFAULT, "the bad value left the default");
+        assert_eq!(stale, ["shadowquality", "aa", "nonsense"]);
+        assert_eq!(
+            settings::decode("").0,
+            Prefs::default(),
+            "and so is nothing"
+        );
+    }
+
+    /// Every value the file can carry is one some field already forgives, so the
+    /// codec needs no validation of its own — the zero law does it twice.
+    #[test]
+    fn a_value_no_constant_names_is_the_default_it_always_was() {
+        let (prefs, stale) = settings::decode("cursor = 9999\naa = 9999\nquiet = 999999\n");
+        assert!(stale.is_empty(), "well-formed, and still nothing to refuse");
+        assert!(!prefs.hardware_cursor());
+        assert_eq!(prefs.antialias(), None);
+        assert_eq!(prefs.volume(), 0.0, "past silence is silence");
     }
 }

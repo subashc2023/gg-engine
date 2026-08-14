@@ -149,6 +149,46 @@ fn a_malformed_setting_is_a_rejection_rather_than_a_panic() {
     assert_eq!(report.rejected.len(), 1, "no `=` is not a setting");
 }
 
+/// §6 M42's precedence, as `boot` applies it: the game's file is what shipped,
+/// the player's is what they changed about it, and a flag is someone at a
+/// keyboard right now. Written as one `boot` call rather than three `apply_*`
+/// ones because the *order* is what is under test, and the order is `boot`'s.
+#[test]
+fn the_players_file_sits_between_the_games_and_the_command_line() {
+    static SCALE: CVar = CVar::new_float("k.renderscale", 1.0, "");
+    static QUALITY: CVar = CVar::new_int("k.quality", 0, "");
+    cvar::register_all(&[&SCALE, &QUALITY]).unwrap();
+
+    let dir = std::env::temp_dir().join("gg-m42-precedence");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (shipped, player) = (dir.join("gg.cfg"), dir.join("player.cfg"));
+    std::fs::write(&shipped, "k.renderscale = 0.5\nk.quality = 3\n").unwrap();
+    std::fs::write(&player, "k.renderscale = 0.75\n").unwrap();
+
+    let flags = ["--set".to_owned(), "k.renderscale=0.9".to_owned()];
+    config::boot(&shipped, Some(&player), &flags).unwrap();
+
+    assert_eq!(SCALE.float(), 0.9, "a flag beats both files");
+    assert_eq!(SCALE.source(), CVarSource::Cli);
+    // The knob the player did not name: theirs is an overlay on the game's
+    // file, never a replacement for it.
+    assert_eq!(QUALITY.int(), 3);
+    assert_eq!(QUALITY.source(), CVarSource::Config);
+
+    // And with no flag, the player wins — under their own name, because "why is
+    // this 0" is unanswerable if a file nobody typed reads as `config`.
+    SCALE.reset();
+    config::boot(&shipped, Some(&player), &[]).unwrap();
+    assert_eq!(SCALE.float(), 0.75);
+    assert_eq!(SCALE.source(), CVarSource::Player);
+
+    // A player who has never opened the settings menu has no file at all.
+    SCALE.reset();
+    config::boot(&shipped, Some(&dir.join("absent.cfg")), &[]).unwrap();
+    assert_eq!(SCALE.float(), 0.5);
+    assert_eq!(SCALE.source(), CVarSource::Config);
+}
+
 #[test]
 fn a_config_file_that_was_never_written_is_not_a_failure() {
     // Not having written a config yet is the normal case, not an error worth

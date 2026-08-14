@@ -109,9 +109,28 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   the slug all went to `gg-core` where they are tested without a shell, and
 ///   the assembly went to `xtask ship`. What is left is the conjunction, once.
 ///
+/// - **The player's own two files** (1435 → 1485, §6 M42): the settings file and
+///   the user `gg.cfg`, and the argument is M41's one step further in.
+///
+///   Where a player's bytes go is `gg-core`'s (`Project::data_dir`) and what a
+///   preference *is* is `gg-ecs`'s (`Prefs`, whose fields are the file's keys and
+///   whose codec sits beside them). Neither crate can see the other: `gg-ecs` has
+///   never heard of a data directory and does no file IO at all — `Save` is bytes
+///   and the shell writes them — while `gg-core` cannot name a boundary component
+///   without pointing the loop at the ECS. So the shell is again the only place
+///   both are in scope, and what it says is: read here, apply on tick 0, write
+///   back at exit. The precedence lives in `gg_core::config::boot` and the policy
+///   in `player_file` — one predicate, reused for both files.
+///
+///   The tick-0 apply is the half with no other home *at all*: a scene arrives as
+///   the whole world and can land before tick 0, but a `Prefs` is spawned by the
+///   game's own bootstrap, so the only moment a file can reach it is after the
+///   systems have run once — which is a fact about the frame the shell composes
+///   and about nothing either crate can see.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio) — each argued the same way as above.
-const SHELL_BUDGET: usize = 1435;
+const SHELL_BUDGET: usize = 1485;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

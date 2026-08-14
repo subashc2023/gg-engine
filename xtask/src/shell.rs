@@ -1163,8 +1163,22 @@ fn stage_game(tier: &Tier, package: &str, stem: &str) -> anyhow::Result<(PathBuf
 
 /// Run a staged shell over a staged game and return its whole log.
 fn play(host: &Path, game: &Path, args: &[&str], hashes: bool) -> anyhow::Result<String> {
+    play_env(host, game, args, hashes, &[])
+}
+
+/// [`play`], plus environment the child needs. One caller (§6 M42): a data
+/// directory is the OS's own (`LOCALAPPDATA`, `XDG_DATA_HOME`), and a gate that
+/// wrote into the operator's real one would be a gate with a side effect.
+fn play_env(
+    host: &Path,
+    game: &Path,
+    args: &[&str],
+    hashes: bool,
+    env: &[(&str, &str)],
+) -> anyhow::Result<String> {
     let mut cmd = Command::new(host);
     cmd.arg("--game").arg(game).args(args);
+    cmd.envs(env.iter().copied());
     cmd.env("GG_HEADLESS", "1");
     // The hash target is off by default (one line per tick); this is the gate
     // that wants it.
@@ -1520,6 +1534,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     }
     if only("--best") {
         best()?;
+    }
+    if only("--settings") {
+        settings()?;
     }
     if only("--agent") {
         agent()?;
@@ -4765,6 +4782,172 @@ const BEST_TAIL: usize = 12;
 ///
 /// The expected number is not written here: it is the highest score the
 /// in-process script reaches, so an edit to the session moves the gate with it.
+/// The bytes a player owns (§6 M42), proven by the one number that can tell the
+/// two halves apart: `Prefs` is hashed world state, so a settings file's effect
+/// **is** the state hash, and the milestone's whole claim is that the same file
+/// moves it in a live session and cannot move it in a replayed one.
+///
+/// Two failures in opposite directions, which is why both legs are here rather
+/// than only the reassuring one. A file that reached a replay would diverge a
+/// blessed stream with nobody having typed anything — the hazard that made this
+/// live-only. A file that reached *nothing* would be a settings menu that
+/// forgets, which is the milestone silently not existing; leg 2 is what refuses
+/// to pass in that case.
+///
+/// The third leg is the one a player would notice: the value has to come out of
+/// the **world**, not out of the file that seeded it. Proven by loading a save
+/// whose preference was never in any file this run read, and finding it written
+/// back at exit.
+fn settings() -> anyhow::Result<()> {
+    let (host, game) = stage_game(&HASHED_TIERS[0], "demo-10-tetris", "demo_10_tetris")?;
+    let dir = workspace_root().join("target/settings");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    // A manifest is what gives a run a data directory at all (§6 M41), and a
+    // demo names no dylib — `--game` beside `--project` is what argv-wins is
+    // for. The title is the slug is the directory, so the file lands at
+    // `<data>/m42-settings/settings.cfg` and nothing here has to spell it twice.
+    let manifest = dir.join("game.ggproj");
+    std::fs::write(&manifest, "title = M42 Settings\n")?;
+    let data = dir.join("data");
+    let file = data
+        .join("m42-settings")
+        .join(gg_ecs::boundary::settings::FILE);
+    let (manifest, data) = (manifest.display().to_string(), data.display().to_string());
+    // Both, so one gate body runs on either host — each is ignored where it is
+    // not the convention.
+    let env = [("LOCALAPPDATA", data.as_str()), ("XDG_DATA_HOME", &data)];
+
+    let quiet = |text: &str| -> anyhow::Result<()> {
+        std::fs::create_dir_all(file.parent().unwrap_or(&file))?;
+        std::fs::write(&file, text)?;
+        Ok(())
+    };
+    let forget = || {
+        let _ = std::fs::remove_file(&file);
+    };
+    let replay = tetris_path();
+    let replay = replay.display().to_string();
+    let run = |args: &[&str]| play_env(&host, &game, args, true, &env);
+
+    // 1. A replayed session cannot be moved by a file, and leaves none behind.
+    //    Three ways the file can be — absent, meaning something, and garbage —
+    //    against one sequence.
+    forget();
+    let blessed = sequence(&run(&[
+        "--replay",
+        &replay,
+        "--frames",
+        "300",
+        "--project",
+        &manifest,
+    ])?)?;
+    anyhow::ensure!(
+        !file.exists(),
+        "a replayed session wrote {} — a gate's own run must leave nothing for the next one",
+        file.display()
+    );
+    for (what, text) in [
+        ("a file the player wrote", "quiet = 512\ncursor = 1\n"),
+        (
+            "a file nothing wrote",
+            "shadowquality=ultra\nquiet = loud\n!\n",
+        ),
+    ] {
+        quiet(text)?;
+        let seq = sequence(&run(&[
+            "--replay",
+            &replay,
+            "--frames",
+            "300",
+            "--project",
+            &manifest,
+        ])?)?;
+        if let Some(found) = divergence(&("the blessed stream", blessed.clone()), &(what, seq)) {
+            anyhow::bail!("§6 M42: {found} — a replay may not read the player's file");
+        }
+    }
+
+    // 2. A live session *is* moved by it, and the two runs must not be the same
+    //    run: without this leg every assertion above passes on a shell that
+    //    reads no settings at all.
+    forget();
+    let plain = sequence(&run(&["--frames", "300", "--project", &manifest])?)?;
+    anyhow::ensure!(
+        file.exists(),
+        "a live session wrote no {} — a menu that forgets is the milestone missing",
+        file.display()
+    );
+    quiet("quiet = 512\ncursor = 1\n")?;
+    let set = sequence(&run(&["--frames", "300", "--project", &manifest])?)?;
+    anyhow::ensure!(
+        divergence(&("at defaults", plain.clone()), &("with settings", set)).is_some(),
+        "the same live run with and without a settings file hashed identically — the file \
+         reached nothing, and `Prefs` is hashed state precisely so that it cannot"
+    );
+    anyhow::ensure!(
+        std::fs::read_to_string(&file)?.contains("quiet = 512"),
+        "the session that read 512 wrote something else back"
+    );
+
+    // 3. A hostile file is a game at defaults, never a game that will not start:
+    //    the player's file outlives the build that wrote it.
+    quiet("shadowquality=ultra\nquiet = loud\n!\n")?;
+    let log = run(&["--frames", "300", "--project", &manifest])?;
+    anyhow::ensure!(
+        log.contains("settings: lines this build does not answer to"),
+        "a stale settings line passed unnamed:\n{log}"
+    );
+    if let Some(found) = divergence(
+        &("at defaults", plain),
+        &("with a hostile file", sequence(&log)?),
+    ) {
+        anyhow::bail!("§6 M42: {found} — a file this build cannot read is a file it ignores");
+    }
+
+    // 4. The round trip, and the half that cannot be faked: the value written at
+    //    exit comes out of the world. `--load` puts a preference in it that no
+    //    file this run reads has ever held.
+    quiet("quiet = 768\n")?;
+    let save = dir.join("round-trip.ggsv");
+    let save_arg = save.display().to_string();
+    run(&[
+        "--frames",
+        "300",
+        "--project",
+        &manifest,
+        "--save",
+        &save_arg,
+    ])?;
+    forget();
+    let log = run(&[
+        "--frames",
+        "60",
+        "--project",
+        &manifest,
+        "--load",
+        &save_arg,
+    ])?;
+    anyhow::ensure!(
+        log.contains("save loaded"),
+        "the save did not reopen:\n{log}"
+    );
+    let written = std::fs::read_to_string(&file)?;
+    anyhow::ensure!(
+        written.contains("quiet = 768"),
+        "a preference that crossed a save file did not reach the settings file: {written:?}"
+    );
+    // And the field that is an event rather than a preference is not in it —
+    // the codec's own test says so, and this says the shipped path agrees.
+    anyhow::ensure!(
+        !written.contains("close"),
+        "the quit flag reached the player's file: {written:?}"
+    );
+
+    println!("xtask reload --settings: a file moves a live run and not a replayed one");
+    Ok(())
+}
+
 fn best() -> anyhow::Result<()> {
     let source = game_source(DEMO_10)?;
     let frames = demo_10_tetris::session::frames();
