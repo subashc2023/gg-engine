@@ -38,6 +38,9 @@
 //!                                   gradient, swept over `r.dither`
 //!   gg-tools pace                   what a display rate does to a turn the hand
 //!                                   made at a constant speed
+//!   gg-tools hash-scale             what the per-tick full-world passes cost at
+//!                                   the scale §6 M38 brings — the contract's
+//!                                   sorted walk against a storage-order floor
 //!   gg-tools panorama [--out P]   write the synthetic equirectangular `.hdr`
 //!                                   demo 06's environment is compiled from
 //!   gg-tools fp-isa [--target T]    which floating-point instructions the
@@ -52,6 +55,7 @@ mod bounce;
 mod cull;
 mod fp_isa;
 mod furnace;
+mod hash_scale;
 mod lamps;
 mod lights;
 mod mcp;
@@ -97,6 +101,7 @@ fn main() -> anyhow::Result<()> {
         "bounce" => bounce::run(rest),
         "banding" => banding::run(rest),
         "pace" => pace::run(rest),
+        "hash-scale" => hash_scale::run(rest),
         "panorama" => panorama::run(rest),
         "fp-isa" => fp_isa::run(rest),
         "mcp" => mcp::run(rest),
@@ -104,7 +109,7 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
                  shadow-flat, shadow-sweep, shadow-edge, lights, lamps, cull, furnace, \
-                 split-sum, ao, bounce, banding, pace, panorama, fp-isa, mcp. A new \
+                 split-sum, ao, bounce, banding, pace, hash-scale, panorama, fp-isa, mcp. A new \
                  instrument is a new subcommand here, not a new crate"
             )
         }

@@ -33,6 +33,12 @@ gg-extract = { path = "../../crates/gg-extract" }
 # components in a World, read through the same typed query the shell uses.
 gg-ecs = { path = "../../crates/gg-ecs" }
 gg-math = { path = "../../crates/gg-math" }
+# `hash-scale` declares its own components rather than borrowing the boundary's:
+# its spread axis needs *zero-sized* markers, so archetype count moves without
+# the byte count moving with it, and a component must be `Pod` to exist at all
+# (§4.2). One derive macro, no budget — `xtask::budgets` prices the shipping
+# crates and an instrument is not one.
+bytemuck = { workspace = true }
 # `pace` drives the two clocks the shell drives — the tick accumulator and the
 # input one — rather than modelling them, which is the only way a number it
 # prints is a number `gg-runtime` would have produced.

@@ -1165,6 +1165,7 @@ name = "gg-tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "demo-05-many",
  "demo-12-shooter",
  "gg-core",
