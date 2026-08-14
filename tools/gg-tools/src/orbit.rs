@@ -7,10 +7,10 @@
 //! and nothing in the tree can see it, which is what makes this an instrument
 //! before it is a gate.
 //!
-//! Seven tables, in the order the decisions come — the first four grade the two
-//! regimes against each other (item 7), the last three grade the *boundary*
+//! Ten tables, in the order the decisions come — the first four grade the two
+//! regimes against each other (item 7), the next three grade the *boundary*
 //! between them (item 8), which §2 called the hard design problem before any of
-//! this existed:
+//! this existed, and the last three are what **warp** asks of both (item 10):
 //!
 //! - **the solve** — Kepler's equation is the only thing in the analytic half
 //!   that is iterative at all, so its residual is where an on-rails body's
@@ -38,6 +38,18 @@
 //!   the crossing both columns are measuring it.
 //! - **the transition** — whether *crossing* costs anything, with total bubble
 //!   time held fixed and only the number of handovers changing.
+//! - **the stride** — a warp factor spent as the tick period, which is the
+//!   candidate design pull 2 has to choose against. Two currencies: metres for
+//!   the regime that steps, nothing at all for the regime that does not.
+//! - **the second conic** — the column table 6 never had. A coasting body near a
+//!   planet is still analytic, about a *different primary*, and the two conics
+//!   fail in opposite directions across the separation axis. Which matters for
+//!   warp rather than for accuracy: warp is refused while anything is
+//!   integrated, so an analytic answer close in is what makes warp reachable.
+//! - **the sampling** — the hazard a stride creates for the *condition* rather
+//!   than the physics, since item 8's regime test is read every `k` ticks and a
+//!   band crossed in fewer than `k` is crossed invisibly. Measured off a real
+//!   encounter's own trajectory, and the answer is that it never binds.
 //!
 //! The reference is the analytic propagator, and it is a reference because a
 //! two-body trajectory conserves energy and angular momentum *exactly* — a
@@ -692,6 +704,321 @@ the transition — one LEO revolution, half of it integrated, split k ways
     );
 }
 
+/// The envelope again, sampled every step rather than every 64th.
+///
+/// Table 8's low rates run tens of steps per revolution, where a stride of 64
+/// takes no sample at all and the row reads a confident zero — the same class of
+/// mistake as table 6's overshoot, and caught the same way, by a row that had no
+/// business being clean. Every step is affordable here precisely because the
+/// rates are low.
+fn envelope_every_step(reference: Orbit, hz: f64) -> (f64, f64, f64) {
+    let dt = 1.0 / hz;
+    let span = reference.period().unwrap_or(1.0);
+    let mut state = reference.state_at(0.0);
+    let start = energy(state, MU_EARTH);
+    let (mut worst_radial, mut worst_track) = (0.0f64, 0.0f64);
+    #[allow(clippy::cast_possible_truncation)]
+    let steps = (span * hz).round().max(1.0) as i64;
+    for i in 1..=steps {
+        advance(Step::Leapfrog, &mut state, dt, MU_EARTH);
+        if !(state.0.length_squared() + state.1.length_squared()).is_finite() {
+            return (f64::INFINITY, f64::INFINITY, f64::INFINITY);
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let (radial, track) = split_error(state.0, reference.state_at(i as f64 * dt));
+        worst_radial = worst_radial.max(radial.abs());
+        worst_track = worst_track.max(track.abs());
+    }
+    (
+        worst_radial,
+        worst_track,
+        (energy(state, MU_EARTH) - start) / start.abs(),
+    )
+}
+
+/// Table 8 — the first of pull 2's two candidate warp designs, and the one this
+/// kills. Spending a warp factor `k` as tick *stride* means the integrated
+/// regime steps `k / hz` seconds at a time while the analytic one is evaluated
+/// `k` periods further along — so the two halves pay in different currencies and
+/// the table is worth reading as two columns rather than one verdict.
+///
+/// The analytic column is not measured because there is nothing to measure: a
+/// conic evaluated at `t + k` is the same closed form as at `t + 1`, exact at
+/// every row by construction, and table 4 already priced it flat in `k`.
+fn table_stride() {
+    println!(
+        "
+the stride — a warp factor spent as the tick period, LEO e = 0.3
+"
+    );
+    println!(
+        "  {:<10}{:>12}{:>14}{:>26}{:>13}{:>12}",
+        "warp k", "dt, s", "steps / rev", "radial / in-track, m", "energy", "analytic"
+    );
+    let reference = path(MU_EARTH, LEO_RADIUS, 0.3);
+    let period = reference.period().unwrap_or(1.0);
+    for k in [1.0, 4.0, 16.0, 64.0, 256.0, 1024.0, 4096.0] {
+        let hz = TICK_HZ / k;
+        let (radial, track, drift) = envelope_every_step(reference, hz);
+        let shape = if radial.is_finite() {
+            format!("{radial:.2e} / {track:.2e}")
+        } else {
+            "diverged".to_string()
+        };
+        println!(
+            "  {k:<10.0}{:>12.3}{:>14.1}{shape:>26}{:>13}{:>12}",
+            1.0 / hz,
+            period * hz,
+            if drift.is_finite() {
+                format!("{drift:.2e}")
+            } else {
+                "—".to_string()
+            },
+            "exact"
+        );
+    }
+    println!(
+        "
+  sampled every step, not table 3's every 64th — at the bottom rows a revolution
+  is fewer than 64 steps and a strided sample would report a confident zero.
+  the energy column stays at the floor while the position column crosses four
+  orders: leapfrog is symplectic at any step, so the invariant anyone would have
+  checked forgives a stride that has already lost the orbit's shape"
+    );
+}
+
+/// The absolute position of a body held as a conic about the *planet* — the
+/// third answer nothing had asked for, and the one patched conics are made of.
+///
+/// The planet frame is not inertial, so this is an approximation in its own
+/// right and fails in the opposite direction from the star conic: it ignores the
+/// star entirely, which is ruinous far out and correct close in.
+fn planet_conic(relative: (DVec3, DVec3), planet: Orbit, seconds: f64) -> Option<DVec3> {
+    let conic = Orbit::from_state(relative.0, relative.1, MU_EARTH)?;
+    Some(planet.state_at(seconds).0 + conic.state_at(seconds).0)
+}
+
+/// Table 9 — the column table 6 did not have, and the reason it matters is
+/// pull 2 rather than pull 6. Warp is forbidden while anything is being
+/// integrated, so the cost of the regime boundary is *residence in the bubble*,
+/// and table 6 asked only whether the star conic or an integration was closer.
+/// A body coasting near a planet is still analytic — about a different primary —
+/// and where the two conics cross is where the primary changes, which is a
+/// different question with a different answer.
+fn table_second_conic() {
+    const MARKS: [f64; 3] = [60.0, 600.0, 3600.0];
+    let planet = Orbit {
+        semi_major: 1.495_978_707e11,
+        eccentricity: 0.0,
+        inclination: 0.0,
+        ascending_node: 0.0,
+        argument_of_periapsis: 0.0,
+        mean_anomaly: 0.0,
+        mu: MU_SUN,
+    };
+    println!(
+        "
+
+the second conic — the same body, both analytic answers and the integrated one
+"
+    );
+    println!(
+        "  {:<12}{:>12}{:>16}{:>16}{:>14}{:>12}",
+        "d, m", "a_p/a_star", "about star, m", "about planet, m", "bubble, m", "floor"
+    );
+    let (centre, drift) = planet.state_at(0.0);
+    for &separation in &[1.0e7, 1.0e8, 5.0e8, 1.0e9, 1.5e9, 5.0e9, 1.0e10, 1.0e11] {
+        let (Some(radial), Some(heading)) = (centre.try_normalize(), drift.try_normalize()) else {
+            continue;
+        };
+        let position = centre + radial * separation;
+        let radius = position.length();
+        let velocity = heading * sim::sqrt(MU_SUN / radius);
+        let ratio = MU_EARTH / (separation * separation) / (MU_SUN / (radius * radius));
+
+        let truth = checkpoints(Step::Rk4, (position, velocity), 480.0, &MARKS, planet);
+        let floor = checkpoints(Step::Rk4, (position, velocity), 960.0, &MARKS, planet)
+            .iter()
+            .zip(&truth)
+            .map(|(a, b)| (*a - *b).length())
+            .fold(0.0f64, f64::max);
+        let worst = |f: &dyn Fn(f64) -> Option<DVec3>| {
+            MARKS
+                .iter()
+                .zip(&truth)
+                .map(|(&mark, &want)| f(mark).map_or(f64::NAN, |had| (had - want).length()))
+                .fold(0.0f64, f64::max)
+        };
+        let star = Orbit::from_state(position, velocity, MU_SUN);
+        let relative = (position - centre, velocity - drift);
+        let about_star = worst(&|mark| star.map(|o| o.state_at(mark).0));
+        let about_planet = worst(&|mark| planet_conic(relative, planet, mark));
+        let bubble = checkpoints(
+            Step::Leapfrog,
+            (position, velocity),
+            TICK_HZ,
+            &MARKS,
+            planet,
+        );
+        let integrated = bubble
+            .iter()
+            .zip(&truth)
+            .map(|(&had, &want)| (had - want).length())
+            .fold(0.0f64, f64::max);
+        println!(
+            "  {separation:<12.1e}{ratio:>12.1e}{about_star:>16.2e}\
+             {about_planet:>16.2e}{integrated:>14.2e}{floor:>12.1e}"
+        );
+    }
+    println!(
+        "
+  worst of the three marks, so a row is the whole hour and not one instant; the
+  planet's Hill radius is 1.5e9 m, and the two analytic columns cross just past
+  it — which is the classical answer being right about the question it was asked"
+    );
+}
+
+/// The acceleration ratio §6 M38 item 8 put the regime condition on, at a body's
+/// own state — the quantity the condition reads, evaluated here at whatever
+/// cadence a warp stride leaves it.
+fn accel_ratio(body: DVec3, planet_at: DVec3) -> f64 {
+    let separation = (body - planet_at).length_squared();
+    let radius = body.length_squared();
+    (MU_EARTH / separation) / (MU_SUN / radius)
+}
+
+/// The first root of `ratio - threshold` in `[lo, hi]`, bisected. The ratio is
+/// smooth in `t`, so bisection converges on the crossing rather than on a
+/// sampling artefact — which is the whole distinction this table is about.
+fn bisect(body: Orbit, planet: Orbit, threshold: f64, lo: f64, hi: f64) -> f64 {
+    let (mut lo, mut hi) = (lo, hi);
+    for _ in 0..80 {
+        let mid = (lo + hi) * 0.5;
+        let inside = accel_ratio(body.state_at(mid).0, planet.state_at(mid).0) >= threshold;
+        if inside { hi = mid } else { lo = mid }
+    }
+    (lo + hi) * 0.5
+}
+
+/// Table 10 — the hazard a stride creates for the *condition* rather than for
+/// the physics: item 8's regime test is a function of state, so a warp factor
+/// evaluates it every `k` ticks instead of every one, and a band crossed in
+/// fewer than `k` ticks is crossed invisibly.
+///
+/// The two directions are residence and stride. A tighter threshold puts the
+/// boundary further out, which makes the band wider in time and the sampling
+/// safer — and buys that safety with bubble seconds, which are the seconds warp
+/// may not touch. Both columns are here so the trade is one table.
+fn table_sampling() {
+    let planet = Orbit {
+        semi_major: 1.495_978_707e11,
+        eccentricity: 0.0,
+        inclination: 0.0,
+        ascending_node: 0.0,
+        argument_of_periapsis: 0.0,
+        mean_anomaly: 0.0,
+        mu: MU_SUN,
+    };
+    // An encounter rather than a static separation: closest approach at
+    // `ENCOUNTER`, 1e8 m off along the planet's own track, 3 km/s of relative
+    // speed across it. Late enough that even the widest band opens after t = 0.
+    const ENCOUNTER: f64 = 5.0e7;
+    const SCAN: f64 = 200.0;
+    let (centre, drift) = planet.state_at(ENCOUNTER);
+    let (Some(radial), Some(heading)) = (centre.try_normalize(), drift.try_normalize()) else {
+        return;
+    };
+    let at_encounter = (centre + heading * 1.0e8, drift + radial * 3.0e3);
+    let Some(mut body) = Orbit::from_state(at_encounter.0, at_encounter.1, MU_SUN) else {
+        return;
+    };
+    // `from_state` puts the epoch at the state it was handed, so the body's
+    // clock would start at closest approach while the planet's starts at zero —
+    // two propagators on two clocks, which reads as a body that never meets
+    // anything. Rebased so both are on the sim's one clock, which is the same
+    // property the regime condition needs and the reason it is worth a line.
+    body.mean_anomaly -= body.mean_motion() * ENCOUNTER;
+    println!(
+        "
+
+the sampling — item 8's condition read every k ticks, one encounter
+"
+    );
+    println!(
+        "  {:<12}{:>12}{:>16}{:>14}{:>14}{:>16}",
+        "threshold",
+        "boundary, m",
+        "entry, s before",
+        "residence, s",
+        "band, ticks",
+        "k for 8 samples"
+    );
+    for threshold in [2.0e-5, 1.0e-3, 1.0e-2, 1.0e-1, 1.0] {
+        // The boundary as a separation, for the reader: the ratio is what the
+        // condition reads, and a distance is what a level author would picture.
+        let boundary = sim::sqrt(MU_EARTH / (threshold * MU_SUN)) * centre.length();
+        let inside = |t: f64| accel_ratio(body.state_at(t).0, planet.state_at(t).0) >= threshold;
+        // Coarse scan for the sign changes, then bisect each — the residence is
+        // measured off the trajectory the body actually flies and not off
+        // `2d/v`, which assumes a straight line through a two-body encounter.
+        // Scanned from before t = 0, and the pair that *brackets closest
+        // approach* is the one taken. At the widest threshold the band already
+        // contains the scan's start, so the first edge found is an exit — read
+        // as an entry it reports this encounter's residence as the gap until
+        // the body's next pass, which is a plausible-looking number for the
+        // wrong event.
+        let mut edges: Vec<(f64, bool)> = Vec::new();
+        let mut t = -ENCOUNTER;
+        let mut was = inside(t);
+        while t <= ENCOUNTER * 2.0 {
+            t += SCAN;
+            let now = inside(t);
+            if now != was {
+                edges.push((bisect(body, planet, threshold, t - SCAN, t), now));
+                was = now;
+            }
+        }
+        let entry = edges
+            .iter()
+            .filter(|(at, entering)| *entering && *at <= ENCOUNTER)
+            .map(|(at, _)| *at)
+            .fold(f64::NAN, f64::max);
+        let exit = edges
+            .iter()
+            .filter(|(at, entering)| !*entering && *at >= ENCOUNTER)
+            .map(|(at, _)| *at)
+            .fold(f64::NAN, f64::min);
+        let residence = exit - entry;
+        if !residence.is_finite() {
+            // Not a failure to measure: a threshold whose band has no edge
+            // inside ±5e7 s is one the body never crosses, which is a stronger
+            // statement about it than any number in the remaining columns.
+            println!(
+                "  {threshold:<12.0e}{boundary:>12.1e}{:>16}{:>14}{:>14}{:>16}",
+                "no edge", "> window", "> window", "unbounded"
+            );
+            continue;
+        }
+        let ticks = residence * TICK_HZ;
+        println!(
+            "  {threshold:<12.0e}{boundary:>12.1e}{:>16.2e}{residence:>14.2e}\
+             {ticks:>14.1e}{:>16.1e}",
+            ENCOUNTER - entry,
+            ticks / 8.0
+        );
+    }
+    println!(
+        "
+  a 259-day transfer is 1.34e9 ticks, so the coast wants k near 1e5 to fit in a
+  few minutes. the last column never falls under it — 1.2e6 at the loosest
+  threshold measured — so the sampling hazard this table was built to price is
+  the one constraint that does not bind, by an order of magnitude at the worst
+  row and three at item 8's. the residence column is the one that does: warp is
+  refused while anything is integrated, and 1.6e5 s of it is 44 hours a player
+  spends at 1x. boundary, m assumes r = 1 AU; item 8's 1e11 row sat further out"
+    );
+}
+
 pub fn run(_args: &[String]) -> anyhow::Result<()> {
     table_solve();
     table_regimes();
@@ -700,5 +1027,8 @@ pub fn run(_args: &[String]) -> anyhow::Result<()> {
     table_round_trip();
     table_boundary();
     table_transition();
+    table_stride();
+    table_second_conic();
+    table_sampling();
     Ok(())
 }
