@@ -59,6 +59,10 @@ demo-10-tetris = { path = "../demos/10-tetris" }
 # four exports out of the **built dylib** instead (libloading below) — the
 # host's own road to the same declared tables (§4.2.2).
 demo-11-platformer = { path = "../demos/11-platformer", default-features = false }
+# M37 (§6): the recorded shooter session, demo 11's arrangement exactly — the
+# `game` feature off, `session::Entry` taking the four exports out of the built
+# dylib, for the same collision on the fixed `gg_game_*` names.
+demo-12-shooter = { path = "../demos/12-shooter", default-features = false }
 # The loader for exactly that: `shell::platformer_entry` resolves demo 11's
 # entry points from the artifact, the way `gg-runtime` does.
 libloading.workspace = true

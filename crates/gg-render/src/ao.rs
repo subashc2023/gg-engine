@@ -206,72 +206,29 @@ fn meet(
     })
 }
 
-/// Ray versus an origin-centred box: the slab test, with the axis that produced
-/// the entry carried out as the normal.
+/// Ray versus an origin-centred box: [`sim::Ray::aabb`]'s interval (§6 M37
+/// item 1), and this pass's own answer to what that interval means.
 fn slab(
     origin: sim::Vec3,
     direction: sim::Vec3,
     half: sim::Vec3,
     near: f32,
 ) -> Option<(f32, sim::Vec3)> {
-    let (mut enter, mut exit) = (f32::NEG_INFINITY, f32::INFINITY);
-    let mut axis = 0usize;
-    let (o, d, h) = (
-        [origin.x, origin.y, origin.z],
-        [direction.x, direction.y, direction.z],
-        [half.x, half.y, half.z],
-    );
-    for i in 0..3 {
-        if d[i].abs() < 1e-12 {
-            // Parallel to this pair of planes: outside them is a miss whatever
-            // the other four say.
-            if o[i].abs() > h[i] {
-                return None;
-            }
-            continue;
-        }
-        let inverse = 1.0 / d[i];
-        let (mut lo, mut hi) = ((-h[i] - o[i]) * inverse, (h[i] - o[i]) * inverse);
-        if lo > hi {
-            core::mem::swap(&mut lo, &mut hi);
-        }
-        if lo > enter {
-            enter = lo;
-            axis = i;
-        }
-        exit = exit.min(hi);
-        if enter > exit {
-            return None;
-        }
-    }
+    let span = sim::Ray::new(origin, direction).aabb(half)?;
     // Past `near` on the way in, or — for a ray that started *inside* — on the
     // way out. The second branch needs `enter` clearly behind rather than merely
     // not ahead, and that is the whole difficulty: a ray leaving a point that
     // lies **on** this box's face is tangent to one of its slabs and enters at
     // 0.0, which is neither in front nor behind. Reading that as "started
     // inside" makes every surface occlude itself along its own plane.
-    let distance = if enter > near {
-        enter
-    } else if enter < -near && exit > near {
-        exit
+    let distance = if span.enter > near {
+        span.enter
+    } else if span.enter < -near && span.exit > near {
+        span.exit
     } else {
         return None;
     };
-    let mut normal = [0.0f32; 3];
-    normal[axis] = if direction_component(direction, axis) < 0.0 {
-        1.0
-    } else {
-        -1.0
-    };
-    Some((distance, sim::Vec3::new(normal[0], normal[1], normal[2])))
-}
-
-fn direction_component(direction: sim::Vec3, axis: usize) -> f32 {
-    match axis {
-        0 => direction.x,
-        1 => direction.y,
-        _ => direction.z,
-    }
+    Some((distance, span.normal))
 }
 
 /// Ray versus an origin-centred ellipsoid, by squashing both into the unit

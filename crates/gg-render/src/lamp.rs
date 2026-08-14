@@ -34,6 +34,20 @@
 //! a small one loses to it, and two lamps swapping distance order swap shadows
 //! in one frame.
 //!
+//! §6 M37 item 4 added a *rate* to that, not a new kind. A muzzle flash is a
+//! light at the eye lasting two ticks, so it is always nearest and always takes
+//! row zero: with headroom nobody is evicted and every established lamp shifts
+//! down a row, which is free because a lamp's faces, its tile and the shader's
+//! index are one array position. With `r.lamps` tuned to exactly what a scene
+//! has, the farthest lamp loses its shadows for two ticks of every shot.
+//!
+//! **P2**: the same flash alternates two [`Lamps::extent`] sizes, and
+//! `Transients` keys on the extent and retires after a few idle frames — so an
+//! atlas is created and destroyed per shot, per frame slot. Sizing it to the
+//! budget instead would make that allocation constant and the clear permanently
+//! larger; which is cheaper is a measurement for `gg-tools lamps`, not an
+//! argument to be had here.
+//!
 //! # The gutter
 //!
 //! Each face is rendered slightly wider than 90° so that its own edge sits
@@ -319,6 +333,111 @@ mod tests {
         let lamp = lamp();
         let kept = (0..FACES).filter(|&f| lamp.fit(render::Vec3::ZERO, 2.0, f) != Fit::Outside);
         assert_eq!(kept.count(), FACES);
+    }
+
+    /// A point light `metres` down +X, reaching eleven — demo 12's lamp range,
+    /// so the numbers under test are a shipped scene's.
+    fn point(metres: f32) -> ExtractedLight {
+        ExtractedLight {
+            offset: render::Vec3::new(metres, 0.0, 0.0),
+            direction: render::Vec3::ZERO,
+            color: 0x00ff_ffff,
+            intensity: 10.0,
+            range: 11.0,
+            kind: gg_extract::light::POINT,
+        }
+    }
+
+    /// Extract's own array: one sun, then the points nearest-first. Sorted here
+    /// rather than asked of the caller, because `build`'s prefix rule is only
+    /// meaningful against an input in that order.
+    fn scene(metres: &[f32]) -> Vec<ExtractedLight> {
+        let mut lights = vec![ExtractedLight {
+            offset: render::Vec3::ZERO,
+            direction: render::Vec3::NEG_Y,
+            color: 0x00ff_ffff,
+            intensity: 3.0,
+            range: 0.0,
+            kind: gg_extract::light::DIRECTIONAL,
+        }];
+        let mut points: Vec<f32> = metres.to_vec();
+        points.sort_by(f32::total_cmp);
+        lights.extend(points.into_iter().map(point));
+        lights
+    }
+
+    /// Where each lamp sits, in row order — the axis the flash perturbs.
+    fn rows(lamps: &Lamps) -> Vec<f32> {
+        lamps.lamps().iter().map(|lamp| lamp.position.x).collect()
+    }
+
+    #[test]
+    fn a_light_that_appears_at_the_eye_takes_the_first_row_and_evicts_nobody() {
+        // §6 M37 item 4: demo 12's muzzle flash is the first light in the tree
+        // that appears and vanishes while a scene is being played, and it is at
+        // the eye — so it is *always* the nearest, which is the one axis this
+        // module ranks on. Two static lamps under a budget of four is the
+        // shipped arrangement.
+        cvars::LAMPS.set_int(4);
+        let quiet = Lamps::build(&scene(&[6.0, 9.0]));
+        let lit = Lamps::build(&scene(&[0.4, 6.0, 9.0]));
+        assert_eq!(rows(&quiet), [6.0, 9.0]);
+        assert_eq!(rows(&lit), [0.4, 6.0, 9.0], "the flash goes in front");
+        // Nobody stopped casting: with headroom the flash is *added*, and every
+        // established lamp is still there one row further down.
+        for (index, lamp) in rows(&quiet).iter().enumerate() {
+            assert_eq!(rows(&lit)[index + 1], *lamp, "lamp {index} moved a row");
+        }
+        // And a row is not a flicker, because the lamp's faces and the tile they
+        // are drawn into are the *same* array position — `lamp_draws` indexes
+        // both by it, and the shader reads `GpuLamp[i]` beside light `i`. So a
+        // shift moves a lamp's map and its lookup together, by construction.
+        for lamps in [&quiet, &lit] {
+            for index in 0..lamps.lamps().len() {
+                assert_eq!(lamps.tile_at(index, 0).y, index as u32 * lamps.tile());
+            }
+        }
+    }
+
+    #[test]
+    fn a_flash_a_full_budget_cannot_hold_takes_the_farthest_lamps_shadows() {
+        // The cost, named rather than hidden. `r.lamps` tuned down to exactly
+        // what a scene has — which is what an operator does on a weak device,
+        // and what `gg-tools lamps` sweeps — turns every shot into a two-tick
+        // eviction of the farthest lamp. The module's contract already allows
+        // "two lamps swapping distance order swap shadows in one frame"; what
+        // M37 adds is a *rate*, seven times a second under held fire.
+        cvars::LAMPS.set_int(2);
+        assert_eq!(rows(&Lamps::build(&scene(&[6.0, 9.0]))), [6.0, 9.0]);
+        assert_eq!(
+            rows(&Lamps::build(&scene(&[0.4, 6.0, 9.0]))),
+            [0.4, 6.0],
+            "the flash displaces the farthest, and only it"
+        );
+        // It comes back the tick the flash dies: nothing here is sticky.
+        assert_eq!(rows(&Lamps::build(&scene(&[6.0, 9.0]))), [6.0, 9.0]);
+    }
+
+    #[test]
+    fn a_light_appearing_changes_the_atlas_the_pool_keys_on() {
+        // The other half of item 4, and the half that is a *cost* rather than a
+        // picture: `extent` is sized to the live count, so a light that comes
+        // and goes alternates two atlas sizes. `Transients` keys on the extent
+        // and retires after `IDLE_FRAMES`, so a flash every `FIRE_TICKS` frames
+        // is an image created and destroyed per shot, per frame slot.
+        //
+        // P2: size the atlas to the budget instead, trading that allocation for
+        // a permanently larger clear (`lamp_draws` clears the atlas once). Which
+        // is cheaper is a measurement — `gg-tools lamps` is where it belongs —
+        // and not an argument, so it is not made here.
+        cvars::LAMPS.set_int(4);
+        let quiet = Lamps::build(&scene(&[6.0, 9.0]));
+        let lit = Lamps::build(&scene(&[0.4, 6.0, 9.0]));
+        assert_eq!(quiet.extent().0, lit.extent().0, "six faces across, always");
+        assert_eq!(quiet.extent().1, 2 * quiet.tile());
+        assert_eq!(lit.extent().1, 3 * lit.tile(), "and a row taller while lit");
+        assert_eq!(quiet.uv_scale()[1], 0.5);
+        assert_eq!(lit.uv_scale()[1], 1.0 / 3.0, "which the lookup follows");
     }
 
     #[test]

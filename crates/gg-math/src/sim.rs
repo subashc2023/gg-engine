@@ -337,7 +337,10 @@ pub fn mul_add<T: SimFloat>(a: T, b: T, c: T) -> T {
 // ---- the type families, macro-generated per width -----------------------
 
 macro_rules! sim_types {
-    ($t:ty, $Vec2:ident, $Vec3:ident, $Vec4:ident, $Quat:ident, $Mat3:ident, $Mat4:ident) => {
+    (
+        $t:ty, $Vec2:ident, $Vec3:ident, $Vec4:ident, $Quat:ident, $Mat3:ident, $Mat4:ident,
+        $Ray:ident, $Span:ident
+    ) => {
         #[repr(C)]
         #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
         pub struct $Vec2 {
@@ -710,6 +713,114 @@ macro_rules! sim_types {
             }
         }
 
+        /// A ray in sim space. `direction` need not be unit — every distance
+        /// out of a [`$Span`] is a multiple of it — but a unit one reads metres.
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+        pub struct $Ray {
+            pub origin: $Vec3,
+            pub direction: $Vec3,
+        }
+
+        /// The interval a ray spends inside a box, and the outward normal of the
+        /// face it entered by: the *geometry* of a hit with none of the policy.
+        /// Whether `enter < 0` means a hit from inside, a surface hitting itself,
+        /// or a miss is the caller's question, and this tree's three callers
+        /// answer it three ways (§6 M37 item 1) — which is why the split is here
+        /// and not one function with a mode flag.
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+        pub struct $Span {
+            /// Multiples of `direction` to the entry face; negative behind the
+            /// origin, which is what a ray starting inside the box reports.
+            pub enter: $t,
+            /// Multiples of `direction` to the exit face. Never below `enter`.
+            pub exit: $t,
+            /// Outward unit normal of the entry face, in the frame the test ran
+            /// in — box-local for [`$Ray::aabb`], world for [`$Ray::obb`].
+            /// Meaningful when `enter` is finite; a ray parallel to every slab
+            /// it lies inside entered through no face at all.
+            pub normal: $Vec3,
+        }
+
+        impl $Ray {
+            pub const fn new(origin: $Vec3, direction: $Vec3) -> Self {
+                Self { origin, direction }
+            }
+
+            /// The slab test against a box of half-extents `half`, centred on the
+            /// origin and axis-aligned. `None` is a miss of the whole **line**;
+            /// the forward half is a policy the caller applies to `enter`.
+            ///
+            /// Half-extents are read as magnitudes, since `-h` and `h` describe
+            /// the same slab and the parallel branch would otherwise call every
+            /// ray a miss.
+            pub fn aabb(self, half: $Vec3) -> Option<$Span> {
+                // A ray with no direction is not a ray: every axis would take the
+                // parallel branch and the answer would be the whole line. Refused
+                // rather than answered — a span of infinities in sim state is
+                // hazard 6 wearing a different hat.
+                if self.direction == $Vec3::ZERO {
+                    return None;
+                }
+                let o = [self.origin.x, self.origin.y, self.origin.z];
+                let d = [self.direction.x, self.direction.y, self.direction.z];
+                let h = [half.x.abs(), half.y.abs(), half.z.abs()];
+                let (mut enter, mut exit) = (<$t>::NEG_INFINITY, <$t>::INFINITY);
+                let mut axis = 0usize;
+                for i in 0..3 {
+                    // Exactly zero rather than an epsilon: the guard exists to keep
+                    // `0/0` out, and a nonzero component orders its own slab
+                    // correctly however small it is. A threshold would decide by
+                    // feel which near-parallel rays miss, and two widths would
+                    // then have to agree on the feel.
+                    if d[i] == 0.0 {
+                        if o[i] > h[i] || o[i] < -h[i] {
+                            return None;
+                        }
+                        continue;
+                    }
+                    let (lo, hi) = ((-h[i] - o[i]) / d[i], (h[i] - o[i]) / d[i]);
+                    let (lo, hi) = if lo > hi { (hi, lo) } else { (lo, hi) };
+                    if lo > enter {
+                        enter = lo;
+                        axis = i;
+                    }
+                    if hi < exit {
+                        exit = hi;
+                    }
+                    if enter > exit {
+                        return None;
+                    }
+                }
+                let mut normal = [0.0 as $t; 3];
+                // The face met on the way in faces back along the ray.
+                normal[axis] = if d[axis] < 0.0 { 1.0 } else { -1.0 };
+                Some($Span {
+                    enter,
+                    exit,
+                    normal: $Vec3::new(normal[0], normal[1], normal[2]),
+                })
+            }
+
+            /// The same box placed at `center` and turned by `rotation`. Rotating
+            /// the *ray* by the inverse is one quaternion multiply against the
+            /// three a turned box's axes would cost and leaves the test
+            /// axis-aligned; the normal comes back turned into world.
+            pub fn obb(self, center: $Vec3, rotation: $Quat, half: $Vec3) -> Option<$Span> {
+                let inverse = rotation.conjugate();
+                let local = Self::new(
+                    inverse.rotate(self.origin - center),
+                    inverse.rotate(self.direction),
+                );
+                let span = local.aabb(half)?;
+                Some($Span {
+                    normal: rotation.rotate(span.normal),
+                    ..span
+                })
+            }
+        }
+
         sim_vec_ops!($t, $Vec2, x, y);
         sim_vec_ops!($t, $Vec3, x, y, z);
         sim_vec_ops!($t, $Vec4, x, y, z, w);
@@ -763,8 +874,8 @@ macro_rules! sim_vec_ops {
     };
 }
 
-sim_types!(f32, Vec2, Vec3, Vec4, Quat, Mat3, Mat4);
-sim_types!(f64, DVec2, DVec3, DVec4, DQuat, DMat3, DMat4);
+sim_types!(f32, Vec2, Vec3, Vec4, Quat, Mat3, Mat4, Ray, Span);
+sim_types!(f64, DVec2, DVec3, DVec4, DQuat, DMat3, DMat4, DRay, DSpan);
 
 /// A fly camera's `(forward, right)` at `yaw`/`pitch`, in sim space.
 ///
@@ -1011,6 +1122,111 @@ mod tests {
         assert_eq!(one, [42]);
     }
 
+    /// Head-on, and exact: every number here is a quotient of small integers, so
+    /// an epsilon would only hide a wrong answer.
+    #[test]
+    fn a_ray_meeting_a_box_reports_the_interval_and_the_face_it_entered_by() {
+        let span = DRay::new(DVec3::new(-5.0, 0.0, 0.0), DVec3::X)
+            .aabb(DVec3::new(1.0, 2.0, 3.0))
+            .unwrap();
+        assert_eq!((span.enter, span.exit), (4.0, 6.0));
+        assert_eq!(span.normal, -DVec3::X);
+        // Both widths, because the type comes out of a macro and a second
+        // invocation is the only thing proving the first was not special.
+        let span = Ray::new(Vec3::new(-5.0, 0.0, 0.0), Vec3::X)
+            .aabb(Vec3::new(1.0, 2.0, 3.0))
+            .unwrap();
+        assert_eq!((span.enter, span.exit), (4.0, 6.0));
+        // A negative half-extent describes the same slab rather than an empty one.
+        let mirrored = Ray::new(Vec3::new(-5.0, 0.0, 0.0), Vec3::X)
+            .aabb(Vec3::new(-1.0, -2.0, -3.0))
+            .unwrap();
+        assert_eq!(span, mirrored);
+    }
+
+    /// The two cases the policy split exists for (§6 M37 item 1). Neither is a
+    /// miss and neither is an ordinary hit, and a predicate that decided either
+    /// one by itself would be wrong for two of this tree's three callers.
+    #[test]
+    fn starting_inside_and_pointing_away_are_reported_rather_than_judged() {
+        // Inside: the entry is *behind* the origin, which is the fact a caller
+        // needs to tell "I am in this box" from "I am about to enter it". Zero
+        // would erase it.
+        let span = DRay::new(DVec3::ZERO, DVec3::X).aabb(DVec3::ONE).unwrap();
+        assert_eq!((span.enter, span.exit), (-1.0, 1.0));
+        // Behind: the whole line meets the box and the forward ray does not, so
+        // this is a `Some` with both ends negative. `aabb` misses lines, not rays.
+        let span = DRay::new(DVec3::new(5.0, 0.0, 0.0), DVec3::X)
+            .aabb(DVec3::ONE)
+            .unwrap();
+        assert_eq!((span.enter, span.exit), (-6.0, -4.0));
+        assert!(span.exit < 0.0);
+        // A genuine miss beside the box is still `None`.
+        assert!(
+            DRay::new(DVec3::new(-5.0, 3.0, 0.0), DVec3::X)
+                .aabb(DVec3::ONE)
+                .is_none()
+        );
+    }
+
+    /// The measure-zero case `gg_render::ao` argues and pays for: a ray running
+    /// along a face lies *in* the slab, not outside it, so the predicate calls it
+    /// a hit at the face's own plane. Refusing it here would make an AO ray leave
+    /// its own surface and immediately fail to find it; accepting it in the
+    /// caller is what makes a surface shadow itself. The predicate reports; the
+    /// caller decides.
+    #[test]
+    fn a_ray_along_a_face_is_a_hit_and_the_caller_decides_what_that_means() {
+        let span = DRay::new(DVec3::new(0.0, 1.0, -5.0), DVec3::Z)
+            .aabb(DVec3::ONE)
+            .unwrap();
+        assert_eq!((span.enter, span.exit), (4.0, 6.0));
+        assert_eq!(span.normal, -DVec3::Z);
+        // One texel further out and the same ray misses, so the case above is the
+        // boundary itself and not a fat tolerance around it.
+        assert!(
+            DRay::new(DVec3::new(0.0, 1.000_000_1, -5.0), DVec3::Z)
+                .aabb(DVec3::ONE)
+                .is_none()
+        );
+    }
+
+    /// A direction of zero would take the parallel branch on all three axes and
+    /// answer "the whole line", which is a span of infinities into sim state.
+    #[test]
+    fn a_ray_with_no_direction_is_refused_rather_than_answered() {
+        assert!(
+            DRay::new(DVec3::ZERO, DVec3::ZERO)
+                .aabb(DVec3::ONE)
+                .is_none()
+        );
+        // Negative zero is zero; the guard is `==`, which agrees.
+        let signed = DVec3::new(-0.0, -0.0, -0.0);
+        assert!(DRay::new(DVec3::ZERO, signed).aabb(DVec3::ONE).is_none());
+    }
+
+    /// Turning the box moves the entry and brings the normal back out in world,
+    /// which is the whole difference between [`DRay::obb`] and [`DRay::aabb`].
+    #[test]
+    fn turning_a_box_moves_the_entry_and_returns_the_normal_in_world() {
+        let half = DVec3::new(2.0, 1.0, 0.5);
+        let ray = DRay::new(DVec3::new(0.0, 0.0, -5.0), DVec3::Z);
+        let square = ray.obb(DVec3::ZERO, DQuat::IDENTITY, half).unwrap();
+        assert_eq!(square.enter, 4.5); // the 0.5 half-extent faces the ray
+        let turned = DQuat::from_axis_angle(DVec3::Y, core::f64::consts::FRAC_PI_2);
+        let span = ray.obb(DVec3::ZERO, turned, half).unwrap();
+        // The 2 m axis now faces the ray: 5 - 2 rather than 5 - 0.5. Not exact —
+        // `from_axis_angle` is one `sin_cos` away from a right angle.
+        assert!((span.enter - 3.0).abs() < 1e-15, "{}", span.enter);
+        assert!((span.normal - -DVec3::Z).length() < 1e-15);
+        // The box's placement is not its rotation: moving it moves the entry by
+        // exactly as much, which pins the `origin - center` order.
+        let moved = ray
+            .obb(DVec3::new(0.0, 0.0, 1.0), DQuat::IDENTITY, half)
+            .unwrap();
+        assert_eq!(moved.enter, 5.5);
+    }
+
     #[test]
     fn every_type_is_pod_with_expected_layout() {
         assert_pod::<Vec2>();
@@ -1025,6 +1241,12 @@ mod tests {
         assert_pod::<DQuat>();
         assert_pod::<DMat3>();
         assert_pod::<DMat4>();
+        // §6 M37: a shot is sim state, so what it asked and what came back are
+        // both storable in a component rather than only passed between calls.
+        assert_pod::<Ray>();
+        assert_pod::<Span>();
+        assert_pod::<DRay>();
+        assert_pod::<DSpan>();
         // §6 M18: an RNG a game keeps in a component is hashed state like the
         // rest, which is exactly what `Pod` is the entry fee for.
         assert_pod::<Rng>();

@@ -171,49 +171,20 @@ impl Ray {
     /// Metres to where this enters `box_`, or `None` for a miss. Zero when the
     /// ray starts inside it, which is a hit and the nearest one there can be.
     ///
-    /// The slab test, in the box's own frame: rotating the *ray* by the inverse
-    /// is one quaternion multiply against the three a rotated OBB's axes would
-    /// otherwise cost, and it leaves the comparison axis-aligned.
+    /// The geometry is [`sim::DRay::obb`]'s (§6 M37 item 1); what stays here is
+    /// the *policy*, and it is the editor's alone: an operator clicking from
+    /// inside a box has selected it, and a box behind the eye has not been
+    /// clicked at all. `exit >= 0` is the half of that which matters — without
+    /// it every ray hits everything on its line, in both directions.
     pub(crate) fn hits(&self, box_: &Renderable) -> Option<f64> {
-        let inverse = box_.rotation.conjugate();
-        let origin = inverse.rotate(self.origin - box_.position);
-        let direction = inverse.rotate(self.direction);
         let half = sim::DVec3::new(
-            f64::from(box_.half_extent.x).abs(),
-            f64::from(box_.half_extent.y).abs(),
-            f64::from(box_.half_extent.z).abs(),
+            f64::from(box_.half_extent.x),
+            f64::from(box_.half_extent.y),
+            f64::from(box_.half_extent.z),
         );
-        let (mut enter, mut exit) = (f64::NEG_INFINITY, f64::INFINITY);
-        for axis in 0..3 {
-            let (o, d, h) = (
-                component(origin, axis),
-                component(direction, axis),
-                component(half, axis),
-            );
-            // Parallel to this pair of slabs: inside them or nowhere. Guarded
-            // rather than left to `0.0 / 0.0`, which is a NaN that compares
-            // false against everything and would report a miss as a hit.
-            if d.abs() < f64::EPSILON {
-                if o.abs() > h {
-                    return None;
-                }
-                continue;
-            }
-            let (near, far) = ((-h - o) / d, (h - o) / d);
-            enter = enter.max(near.min(far));
-            exit = exit.min(near.max(far));
-        }
-        // `exit >= 0` is what keeps a box *behind* the eye from being picked;
-        // without it every ray hits everything on its line, in both directions.
-        (exit >= enter.max(0.0)).then(|| enter.max(0.0))
-    }
-}
-
-fn component(v: sim::DVec3, axis: usize) -> f64 {
-    match axis {
-        0 => v.x,
-        1 => v.y,
-        _ => v.z,
+        let span =
+            sim::DRay::new(self.origin, self.direction).obb(box_.position, box_.rotation, half)?;
+        (span.exit >= span.enter.max(0.0)).then(|| span.enter.max(0.0))
     }
 }
 

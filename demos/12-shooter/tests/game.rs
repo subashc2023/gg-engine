@@ -10,19 +10,23 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use demo_12_shooter::{
-    AIM_X, ARMS, BUFFER_TICKS, CHART_BALLS, COYOTE_TICKS, CUE_JUMP, CUE_LAND, CUES, Cue, EYE_LIFT,
-    HALF_H, HALF_W, HUD_SPEED, HUD_STATE, Hud, JUMP, JUMP_VELOCITY, MENU_AA, MENU_BACK, MENU_ITEMS,
-    MENU_LOOK, MENU_LOOK_DOWN, MENU_LOOK_UP, MENU_QUIT, MENU_RESTART, MENU_RESUME, MENU_SETTINGS,
-    MENU_TITLE, MENU_VOLUME, MENU_VOLUME_DOWN, MOVE_FORWARD, MOVE_RIGHT, Menu, PAGE_MAIN,
-    PAGE_SETTINGS, PAUSE, RESTART, ROOM, SENS_DEFAULT, SENS_MAX, SENS_MIN, SENS_ONE, SENS_STEP,
-    SHELTER, SKIN, START, STEP_HEIGHT, Session, Solid, WALK_SPEED, Walker, counts_per_turn,
-    look_per_count,
+    AIM_X, AIM_Y, ARMS, BUFFER_TICKS, CHART_BALLS, COYOTE_TICKS, CUE_JUMP, CUE_LAND, CUES, Cue,
+    EYE_LIFT, FIRE, FIRE_TICKS, FLASH_TICKS, Gun, HALF_H, HALF_W, HITMARK_TICKS, HUD_MISS,
+    HUD_ROWS, HUD_SPEED, HUD_STATE, Hud, JUMP, JUMP_VELOCITY, LAMPS, MENU_AA, MENU_BACK,
+    MENU_ITEMS, MENU_LOOK, MENU_LOOK_DOWN, MENU_LOOK_UP, MENU_QUIT, MENU_RESTART, MENU_RESUME,
+    MENU_SETTINGS, MENU_TITLE, MENU_VOLUME, MENU_VOLUME_DOWN, MISSES_ALLOWED, MOVE_FORWARD,
+    MOVE_RIGHT, Menu, PAGE_MAIN, PAGE_SETTINGS, PAUSE, RECOIL_KICK, RECOIL_TICKS, RESTART, ROOM,
+    Range, SENS_DEFAULT, SENS_MAX, SENS_MIN, SENS_ONE, SENS_STEP, SHELTER, SHOT_RANGE, SKIN,
+    SPARK_TICKS, SPOTS, START, STATE_OVER, STATE_RUNNING, STEP_HEIGHT, STREAK_STEP, Session, Solid,
+    Spark, TARGET_HALF, TARGET_INK, TARGET_LIFE, TARGET_WORTH, TARGETS_LIVE, Target, WALK_SPEED,
+    Walker, counts_per_turn, look_per_count, session,
 };
 use gg_ecs::boundary::{
     self, AbiInfo, ActionId, AxisId, ComponentsTable, Eye, HostApiV1, InputFrame, Light, Prefs,
     QUIET_MAX, Renderable, Sky, Sound, SystemsTable, TickCtx, Widget, aa, state,
 };
 use gg_ecs::{Query, World};
+use gg_math::sim;
 
 // The symbols `gg_game!` exported into this crate's rlib.
 unsafe extern "C" {
@@ -68,7 +72,7 @@ impl Game {
             let declared = world.adopt(&gg_game_components()).unwrap();
             (gg_game_systems(), declared)
         };
-        assert_eq!(declared, 13, "six of ours and the protocol's seven");
+        assert_eq!(declared, 17, "ten of ours and the protocol's seven");
         Game {
             world,
             table,
@@ -332,8 +336,8 @@ fn one_tick_deals_the_room_the_body_and_the_hud() {
     );
     assert_eq!(
         game.all::<Renderable>().len(),
-        ROOM.len() + CHART_BALLS,
-        "the room and the chart, and nothing else"
+        ROOM.len() + CHART_BALLS + TARGETS_LIVE,
+        "the room, the chart, and the course's first three targets"
     );
     assert_eq!(
         game.all::<Sky>().len(),
@@ -345,8 +349,8 @@ fn one_tick_deals_the_room_the_body_and_the_hud() {
     assert_eq!(game.all::<Sound>().len(), CUES);
     assert_eq!(
         game.all::<Widget>().len(),
-        ARMS + 2 + MENU_ITEMS.len(),
-        "arms, two text rows and the menu"
+        ARMS + HUD_ROWS.len() + MENU_ITEMS.len(),
+        "arms, the text rows and the menu"
     );
     assert_eq!(game.hud(HUD_STATE), "GROUND");
 }
@@ -358,9 +362,17 @@ fn bootstrap_run_again_spawns_nothing_new() {
     let mut game = Game::load();
     game.steps(8);
     assert_eq!(game.all::<Walker>().len(), 1);
-    assert_eq!(game.all::<Renderable>().len(), ROOM.len() + CHART_BALLS);
+    assert_eq!(game.all::<Gun>().len(), 1);
+    assert_eq!(game.all::<Range>().len(), 1);
+    assert_eq!(
+        game.all::<Renderable>().len(),
+        ROOM.len() + CHART_BALLS + TARGETS_LIVE
+    );
     assert_eq!(game.all::<Light>().len(), 3);
-    assert_eq!(game.all::<Widget>().len(), ARMS + 2 + MENU_ITEMS.len());
+    assert_eq!(
+        game.all::<Widget>().len(),
+        ARMS + HUD_ROWS.len() + MENU_ITEMS.len()
+    );
 }
 
 /// The body rests *on* the floor, exactly. A resolve puts a face on a face, so
@@ -996,4 +1008,655 @@ fn quit_asks_the_host_to_end_the_session() {
     // Monotone: nothing has to remember to clear it, and nothing does.
     game.steps(5);
     assert!(game.prefs().closing());
+}
+
+// ------------------------------------------------- what the gun is read by --
+
+impl Game {
+    fn range(&self) -> Range {
+        self.one::<Range>()
+    }
+
+    /// Every target standing, with the box it is.
+    fn targets(&self) -> Vec<(Target, Renderable)> {
+        let query = Query::<(&Target, &Renderable)>::new().unwrap();
+        let mut out = Vec::new();
+        self.world
+            .each_ref(&query, |_, (target, shape): (&Target, &Renderable)| {
+                out.push((*target, *shape));
+            });
+        out
+    }
+
+    /// Turn to face `at`, **through the aim axes** exactly as a mouse would —
+    /// the counts are what the sensitivity turns into an angle, and a test that
+    /// wrote the field would be exercising a different game. Costs one tick and
+    /// lands inside one mouse count (0.043°) of the point asked for.
+    fn aim_at(&mut self, at: sim::DVec3) {
+        let eye = self.one::<Eye>().position;
+        let to = (at - eye)
+            .try_normalize()
+            .expect("the eye is not on the point it is aiming at");
+        // `sim::fly_basis` inverted: forward is `(-cosP sinY, sinP, -cosP cosY)`.
+        let yaw = sim::atan2(-to.x, -to.z) as f32;
+        let pitch = sim::asin(to.y) as f32;
+        let walker = self.walker();
+        let per = f64::from(look_per_count(self.session().sens));
+        let counts = |delta: f32| (-f64::from(delta) / per * f64::from(STICK)) as i32;
+        self.axes[AIM_X.index()] = counts(yaw - walker.yaw);
+        self.axes[AIM_Y.index()] = counts(pitch - walker.pitch);
+        self.step();
+    }
+
+    /// The first standing target with a clear line from the eye.
+    ///
+    /// The course deals spots the room can hide — a pillar is a pillar from
+    /// somewhere, and that is the level being a level — so a test that wants a
+    /// hit picks one it can *see* rather than the first in archetype order.
+    /// The reader casts its own ray against [`ROOM`] to decide, which is
+    /// choosing a scenario rather than asserting the predicate under test.
+    fn visible_target(&self) -> Renderable {
+        let eye = self.one::<Eye>().position;
+        self.targets()
+            .into_iter()
+            .map(|(_, shape)| shape)
+            .find(|shape| {
+                let to = shape.position - eye;
+                let reach = to.length();
+                let ray = sim::DRay::new(eye, to / reach);
+                !ROOM.iter().any(|(position, half, _)| {
+                    let extent =
+                        sim::DVec3::new(f64::from(half.x), f64::from(half.y), f64::from(half.z));
+                    ray.obb(*position, sim::DQuat::IDENTITY, extent)
+                        .is_some_and(|span| span.enter > 0.0 && span.enter < reach)
+                })
+            })
+            .expect("something in the course is in view from here")
+    }
+
+    /// Put a target of the test's own at `at`, standing until it is shot.
+    ///
+    /// Its slot is past the end of [`SPOTS`], so the course neither counts it
+    /// as one of its own nor ever deals a second target on top of it.
+    fn plant(&mut self, at: sim::DVec3) {
+        let entity = self.world.spawn();
+        self.world
+            .insert(
+                entity,
+                Target {
+                    age: 0,
+                    life: u32::MAX,
+                    slot: SPOTS.len() as u32,
+                    worth: TARGET_WORTH,
+                },
+            )
+            .unwrap();
+        self.world
+            .insert(
+                entity,
+                Renderable::boxed(at, sim::Vec3::splat(TARGET_HALF), TARGET_INK),
+            )
+            .unwrap();
+    }
+}
+
+/// Whether a box of half-extent `pad` centred on `at` misses `slab` entirely.
+fn clear_of(at: sim::DVec3, pad: f64, slab: (sim::DVec3, sim::Vec3)) -> bool {
+    let (position, half) = slab;
+    (at.x - position.x).abs() >= f64::from(half.x) + pad
+        || (at.y - position.y).abs() >= f64::from(half.y) + pad
+        || (at.z - position.z).abs() >= f64::from(half.z) + pad
+}
+
+/// The room's own bounds, derived from every slab in [`ROOM`] — what a renderer
+/// fits a grid to when the room is all there is.
+fn room_bounds() -> (sim::DVec3, sim::DVec3) {
+    let mut low = sim::DVec3::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut high = sim::DVec3::new(f64::MIN, f64::MIN, f64::MIN);
+    for (position, half, _) in ROOM {
+        let (near, far) = (
+            sim::DVec3::new(
+                position.x - f64::from(half.x),
+                position.y - f64::from(half.y),
+                position.z - f64::from(half.z),
+            ),
+            sim::DVec3::new(
+                position.x + f64::from(half.x),
+                position.y + f64::from(half.y),
+                position.z + f64::from(half.z),
+            ),
+        );
+        low = sim::DVec3::new(low.x.min(near.x), low.y.min(near.y), low.z.min(near.z));
+        high = sim::DVec3::new(high.x.max(far.x), high.y.max(far.y), high.z.max(far.z));
+    }
+    (low, high)
+}
+
+/// A rotated box's axis-aligned extent — the sum of its three turned half-axes,
+/// which is what a bound has to be for a tracer that lies along a shot.
+fn world_extent(shape: &Renderable) -> sim::DVec3 {
+    let half = sim::DVec3::new(
+        f64::from(shape.half_extent.x),
+        f64::from(shape.half_extent.y),
+        f64::from(shape.half_extent.z),
+    );
+    let x = shape.rotation.rotate(sim::DVec3::new(half.x, 0.0, 0.0));
+    let y = shape.rotation.rotate(sim::DVec3::new(0.0, half.y, 0.0));
+    let z = shape.rotation.rotate(sim::DVec3::new(0.0, 0.0, half.z));
+    sim::DVec3::new(
+        x.x.abs() + y.x.abs() + z.x.abs(),
+        x.y.abs() + y.y.abs() + z.y.abs(),
+        x.z.abs() + y.z.abs() + z.z.abs(),
+    )
+}
+
+// ------------------------------------------------------------ the gun ------
+
+/// Every spawn point stands in the room's clear air.
+///
+/// Derived from [`ROOM`] rather than restated, demo 11's pull-2 doctrine: a
+/// slab that moves re-tests this instead of leaving a target inside a pillar
+/// where nothing can be shot and every round ends in three misses.
+#[test]
+fn every_spawn_point_stands_in_the_rooms_clear_air() {
+    for spot in SPOTS {
+        for (position, half, _) in ROOM {
+            assert!(
+                clear_of(*spot, f64::from(TARGET_HALF), (*position, *half)),
+                "a target at {spot:?} stands inside the slab at {position:?}"
+            );
+        }
+        assert!(
+            top_at(spot.x, spot.z, spot.y) >= 0.0,
+            "a target at {spot:?} hangs over no floor at all"
+        );
+    }
+}
+
+/// A shot takes the target it is pointed at, and the score says so.
+#[test]
+fn a_shot_takes_the_target_it_is_pointed_at() {
+    let mut game = Game::load();
+    game.steps(2);
+    assert_eq!(game.targets().len(), TARGETS_LIVE, "the course opens full");
+    let taken = game.visible_target().position;
+
+    game.aim_at(taken);
+    game.hold(FIRE);
+    game.step();
+
+    let range = game.range();
+    assert_eq!(range.shots, 1);
+    assert_eq!(range.hits, 1);
+    assert_eq!(range.streak, 1);
+    assert_eq!(range.score, TARGET_WORTH, "the first hit pays no streak");
+    assert_eq!(
+        range.hitmark,
+        HITMARK_TICKS - 1,
+        "lit on the shot's own tick, and `targets` has already aged it once"
+    );
+    assert!(
+        game.targets()
+            .iter()
+            .all(|(_, shape)| shape.position != taken),
+        "the one it took is gone"
+    );
+    assert_eq!(
+        game.targets().len(),
+        TARGETS_LIVE,
+        "and the course refilled"
+    );
+}
+
+/// The room stops a bullet without knowing it is a wall: one cast, targets and
+/// solids together, and the nearest surface wins.
+///
+/// Two targets planted by the test on the *same line* — one in front of a
+/// pillar and one behind it — which is the pair that fails in opposite
+/// directions. The pillar is found in [`ROOM`] by shape rather than named, so
+/// this re-derives if the room is ever re-authored.
+#[test]
+fn a_pillar_between_the_eye_and_a_target_stops_the_bullet() {
+    let mut game = Game::load();
+    game.steps(2);
+    let eye = game.one::<Eye>().position;
+    let (pillar, half, _) = ROOM
+        .iter()
+        .find(|(_, half, _)| half.x < 1.0 && half.z < 1.0 && half.y > 1.5)
+        .expect("the room has a pillar to hide behind");
+    assert!(
+        f64::from(half.y) * 2.0 > eye.y,
+        "and it is tall enough to be in the way at eye height"
+    );
+    let toward = sim::DVec3::new(pillar.x - eye.x, 0.0, pillar.z - eye.z);
+    let along = toward
+        .try_normalize()
+        .expect("the eye is not in the pillar");
+    let reach = toward.length();
+
+    for (side, distance, taken) in [
+        ("in front of", reach - 1.0, true),
+        ("behind", reach + 2.0, false),
+    ] {
+        let at = eye + along * distance;
+        for (position, extent, _) in ROOM {
+            assert!(
+                clear_of(at, f64::from(TARGET_HALF), (*position, *extent)),
+                "the plant {side} the pillar is inside the slab at {position:?}"
+            );
+        }
+        let before = game.range().hits;
+        game.plant(at);
+        game.aim_at(at);
+        game.hold(FIRE);
+        game.step();
+        assert_eq!(
+            game.range().hits > before,
+            taken,
+            "a target {side} the pillar"
+        );
+        game.steps(u64::from(FIRE_TICKS));
+    }
+}
+
+/// A held trigger answers at the fire rate and not faster.
+#[test]
+fn the_trigger_answers_at_the_fire_rate_and_not_faster() {
+    let mut game = Game::load();
+    game.steps(2);
+    let rounds = 4;
+    for _ in 0..u64::from(FIRE_TICKS) * rounds {
+        game.hold(FIRE);
+        game.step();
+    }
+    assert_eq!(
+        u64::from(game.range().shots),
+        rounds,
+        "one round per FIRE_TICKS while it is held"
+    );
+}
+
+/// The kick settles exactly where it found the view — dyadic constants, so
+/// eight givings-back are the one taking, to the bit.
+#[test]
+fn the_kick_settles_exactly_where_it_found_the_view() {
+    let mut game = Game::load();
+    game.steps(2);
+    let before = game.walker().pitch;
+    game.hold(FIRE);
+    game.step();
+    assert_eq!(
+        game.walker().pitch,
+        before + RECOIL_KICK,
+        "the kick lands on the shot's own tick"
+    );
+    game.steps(u64::from(RECOIL_TICKS));
+    assert_eq!(game.walker().pitch, before, "and is given back exactly");
+}
+
+/// The streak pays, and a shot that meets nothing ends it.
+#[test]
+fn the_streak_pays_and_a_shot_into_the_sky_ends_it() {
+    let mut game = Game::load();
+    game.steps(2);
+    let mut expected = 0;
+    for hit in 0..3 {
+        let at = game.visible_target().position;
+        game.aim_at(at);
+        game.hold(FIRE);
+        game.step();
+        expected += TARGET_WORTH + STREAK_STEP * hit;
+        assert_eq!(game.range().score, expected, "hit {hit}");
+        assert_eq!(game.range().streak, hit + 1);
+        game.steps(u64::from(FIRE_TICKS));
+    }
+
+    // The room is closed on five sides and open above, so this is the one aim
+    // that meets no surface at all.
+    let sky = game.one::<Eye>().position + sim::DVec3::new(0.0, 10.0, -0.5);
+    game.aim_at(sky);
+    game.hold(FIRE);
+    game.step();
+    assert_eq!(game.range().streak, 0, "a shot that hits nothing is a miss");
+    assert_eq!(game.range().score, expected, "and pays nothing");
+}
+
+/// Three targets that walk end the round, and a finished round takes no more
+/// shots. The three the course opens with expire together, which is what makes
+/// standing still for one target's life the whole script.
+#[test]
+fn three_targets_that_walk_end_the_round() {
+    let mut game = Game::load();
+    game.steps(2);
+    game.steps(u64::from(TARGET_LIFE) + 2);
+
+    let range = game.range();
+    assert_eq!(range.misses, MISSES_ALLOWED);
+    assert_eq!(range.state, STATE_OVER);
+    assert_eq!(range.score, 0);
+    assert!(game.targets().is_empty(), "and the course is not refilled");
+
+    game.hold(FIRE);
+    game.step();
+    assert_eq!(
+        game.range().shots,
+        0,
+        "a finished round takes no more shots"
+    );
+    assert_eq!(game.hud(HUD_MISS), "OVER - R TO RESTART");
+}
+
+/// A restart reopens the course and keeps the best — the one number a session
+/// accumulates, and the only thing a save would have to carry.
+#[test]
+fn a_restart_reopens_the_course_and_keeps_the_best() {
+    let mut game = Game::load();
+    game.steps(2);
+    let at = game.visible_target().position;
+    game.aim_at(at);
+    game.hold(FIRE);
+    game.step();
+    let scored = game.range().score;
+    assert!(scored > 0);
+
+    game.tap(RESTART);
+    let range = game.range();
+    assert_eq!(range.score, 0);
+    assert_eq!(range.best, scored);
+    assert_eq!(range.state, STATE_RUNNING);
+    assert_eq!(range.streak, 0);
+    assert_eq!(game.walker().position.x, START.x, "and the body is back");
+    assert_eq!(game.walker().position.z, START.z);
+    assert_eq!(game.targets().len(), TARGETS_LIVE, "on a fresh course");
+    assert_eq!(game.all::<Spark>().len(), 0, "with last round's chips gone");
+}
+
+/// The menu takes the trigger with the pointer: one physical button, two jobs,
+/// and the same fact decides both. The click that closes the menu is not a
+/// shot, and the trigger stays refused until it is let go of.
+#[test]
+fn the_menu_takes_the_trigger_and_gives_it_back_on_a_release() {
+    let mut game = Game::load();
+    game.steps(2);
+    game.tap(PAUSE);
+    for _ in 0..u64::from(FIRE_TICKS) * 3 {
+        game.hold(FIRE);
+        game.step();
+    }
+    assert_eq!(game.range().shots, 0, "the button is the menu's");
+
+    game.hold(PAUSE);
+    game.hold(FIRE);
+    game.step();
+    assert_eq!(game.session().paused, 0, "the menu closed");
+    assert_eq!(
+        game.range().shots,
+        0,
+        "the click that resumed is not a shot"
+    );
+    game.hold(FIRE);
+    game.step();
+    assert_eq!(game.range().shots, 0, "and stays refused while it is held");
+    game.step();
+    game.hold(FIRE);
+    game.step();
+    assert_eq!(
+        game.range().shots,
+        1,
+        "released and pressed again, it fires"
+    );
+}
+
+/// Everything a level shot leaves behind lives and dies inside the room
+/// (§6 M37 item 3): the tracer runs muzzle to contact, a chip is spent where it
+/// meets the floor, and the flash sits at the eye. The renderer fits its light
+/// grid and its per-frame batch bounds to the scene, so this is the claim that
+/// says neither has to move for a shot.
+///
+/// The exception is measured rather than hidden — see
+/// [`a_shot_at_the_sky_is_the_one_transient_that_leaves`].
+#[test]
+fn every_transient_a_level_shot_deals_dies_inside_the_room() {
+    let mut game = Game::load();
+    game.steps(2);
+    let (low, high) = room_bounds();
+    let mut peak = 0;
+    for _ in 0..240 {
+        game.hold(FIRE);
+        game.step();
+        peak = peak.max(game.all::<Spark>().len());
+        for shape in game.all::<Renderable>() {
+            let extent = world_extent(&shape);
+            let (near, far) = (shape.position - extent, shape.position + extent);
+            assert!(
+                near.x >= low.x && near.y >= low.y && near.z >= low.z,
+                "something reaches out of the room at {:?}",
+                shape.position
+            );
+            assert!(
+                far.x <= high.x && far.y <= high.y && far.z <= high.z,
+                "something reaches out of the room at {:?}",
+                shape.position
+            );
+        }
+    }
+    assert!(peak > 0, "four seconds of fire dealt something");
+    assert!(
+        peak < 32,
+        "and the churn stayed bounded: {peak} at its peak"
+    );
+
+    game.steps(u64::from(SPARK_TICKS) + 2);
+    assert_eq!(
+        game.all::<Spark>().len(),
+        0,
+        "and all of it went away again"
+    );
+}
+
+/// The one transient that leaves: a shot with nothing to hit draws its tracer
+/// to [`SHOT_RANGE`], and the room is open above. Named and measured rather
+/// than assumed away — §6 M37 item 3's answer is conditional on it.
+#[test]
+fn a_shot_at_the_sky_is_the_one_transient_that_leaves() {
+    let mut game = Game::load();
+    game.steps(2);
+    let (_, high) = room_bounds();
+    let sky = game.one::<Eye>().position + sim::DVec3::new(0.0, 10.0, -0.5);
+    game.aim_at(sky);
+    game.hold(FIRE);
+    game.step();
+
+    let above = game
+        .all::<Renderable>()
+        .into_iter()
+        .map(|shape| shape.position.y + world_extent(&shape).y)
+        .fold(f64::MIN, f64::max);
+    assert!(
+        above > high.y,
+        "the tracer of a shot that met nothing stayed inside the room"
+    );
+    assert!(
+        above < high.y + SHOT_RANGE,
+        "and it reached no further than the shot did"
+    );
+}
+
+/// The flash is the nearest point light to the eye while it lives, and gone
+/// after — the game's half of §6 M37 item 4.
+///
+/// The renderer ranks casting slots by exactly that distance, so this is what
+/// makes `gg_render::lamp`'s tests (which synthesize lights) claims about *this*
+/// scene: the muzzle is nearer than either of [`LAMPS`], every shot, so a flash
+/// always takes row zero and every established lamp shifts down one.
+#[test]
+fn the_flash_is_the_nearest_point_light_and_leaves_when_it_dies() {
+    let mut game = Game::load();
+    game.steps(2);
+    let eye = game.one::<Eye>().position;
+    let points = |game: &Game| {
+        let mut out: Vec<f64> = game
+            .all::<Light>()
+            .into_iter()
+            .filter(|light| light.kind == boundary::light::POINT)
+            .map(|light| (light.position - eye).length())
+            .collect();
+        out.sort_by(f64::total_cmp);
+        out
+    };
+    assert_eq!(
+        points(&game).len(),
+        LAMPS.len(),
+        "the room's own, and no more"
+    );
+
+    game.hold(FIRE);
+    game.step();
+    let lit = points(&game);
+    assert_eq!(lit.len(), LAMPS.len() + 1, "and the shot's");
+    assert!(
+        lit[0] < 1.0,
+        "which is at the muzzle, not the room: {}",
+        lit[0]
+    );
+    assert!(
+        lit[0] < lit[1],
+        "so it is the one a casting slot goes to first"
+    );
+
+    game.steps(u64::from(FLASH_TICKS) + 1);
+    assert_eq!(
+        points(&game).len(),
+        LAMPS.len(),
+        "and it gives the slot back"
+    );
+}
+
+// ---------------------------------------------- the recorded session (M37) --
+
+/// This crate's own exports as a [`session::Entry`] — the same four pointers
+/// `xtask` resolves out of the built dylib.
+fn entry() -> session::Entry {
+    session::Entry {
+        abi: gg_game_abi,
+        init: gg_game_init,
+        components: gg_game_components,
+        systems: gg_game_systems,
+    }
+}
+
+/// The recorded session is a whole round: restart, three targets taken, then
+/// hands off while the course walks the rest away — every number here re-pinned
+/// by `xtask replay --bless` when the room, the course or the weapon changes
+/// (§6 M37 item 2).
+#[test]
+fn the_recorded_session_plays_a_round_out_to_the_last_miss() {
+    let frames = session::frames(&entry()).unwrap();
+    let progress = session::progress(&entry(), &frames).unwrap();
+    let at =
+        |find: &dyn Fn(&session::Progress) -> bool| progress.iter().position(find).unwrap() as u64;
+    let (hit, escaped, over) = (
+        at(&|p| p.hits == 1),
+        at(&|p| p.misses == 1),
+        at(&|p| p.over),
+    );
+    // Both halves, in order and each with room between them: a session that
+    // only fired would never reach `escaped`, one that only stood still would
+    // never reach `hit`, and either would still be a legal input stream.
+    assert!(hit < escaped && escaped < over, "the round changed shape");
+    assert_eq!(
+        (frames.len(), hit, escaped, over),
+        (288, 14, 211, 257),
+        "the round changed shape — re-bless"
+    );
+
+    let last = *progress.last().unwrap();
+    assert_eq!(last.hits, session::HITS_WANTED, "the bot stopped shooting");
+    assert_eq!(last.misses, MISSES_ALLOWED, "and the course ran out");
+    assert!(
+        last.over,
+        "the tail is played after the round, not during it"
+    );
+    // Five rounds for three targets. The two that went astray are the policy
+    // working, not failing: this room has spots the spawn cannot see, the bot
+    // finds them the only way it can — by firing — and never fires at one
+    // twice. A session that shot five for five would be covering neither the
+    // dust burst nor the streak reset.
+    assert!(last.shots > last.hits, "no round ever met the room");
+    assert_eq!(
+        (last.shots, last.score, last.standing),
+        (5, 325, 2),
+        "the room, the course or the streak moved — re-bless"
+    );
+}
+
+/// §5.6's material claim for this demo: the session's per-tick canonical hashes
+/// match the checked-in baseline, on every architecture the leg runs.
+#[test]
+fn the_recorded_session_reproduces_its_checked_in_hash_sequence() {
+    let sequence = session::hash_sequence(&entry(), &session::frames(&entry()).unwrap()).unwrap();
+    let path = session::baseline_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "no baseline at {} ({e}) — run `cargo xtask replay --bless`",
+            path.display()
+        )
+    });
+    let baseline = session::parse_baseline(&text).unwrap();
+    if let Some(found) = session::divergence(&sequence, &baseline) {
+        let actual = std::env::temp_dir().join("demo12-shooter.hashes.actual");
+        let _ = std::fs::write(&actual, session::encode_baseline(&sequence));
+        panic!("{found} — fresh sequence at {}", actual.display());
+    }
+}
+
+/// §5.6a on this runner: the same script, driven twice, agrees tick for tick —
+/// and the script itself is a pure function of the room and the course.
+#[test]
+fn one_recorded_session_run_twice_on_this_runner_agrees() {
+    let first = session::frames(&entry()).unwrap();
+    let second = session::frames(&entry()).unwrap();
+    assert_eq!(first, second, "the bot is not deterministic");
+    let a = session::hash_sequence(&entry(), &first).unwrap();
+    let b = session::hash_sequence(&entry(), &second).unwrap();
+    assert_eq!(a, b, "one machine, two answers");
+}
+
+/// The fight the retune gate swaps under (§6 M37 item 6): rounds leaving all
+/// session long, a course that is live on every tick but the one it is taken
+/// again on, and a quiet window between shots long enough for a swap to land in
+/// and prove a whole world crossed it.
+#[test]
+fn the_endless_fight_keeps_a_round_in_progress() {
+    const TICKS: usize = 4_000;
+    let frames = session::endless(&entry(), TICKS).unwrap();
+    assert_eq!(
+        frames.len(),
+        TICKS,
+        "the stream is not the length it was asked for"
+    );
+    let progress = session::progress(&entry(), &frames).unwrap();
+
+    let fired: Vec<usize> = (1..progress.len())
+        .filter(|&i| progress[i].shots > progress[i - 1].shots)
+        .collect();
+    let gap = fired.windows(2).map(|w| w[1] - w[0]).min().unwrap();
+    // One `over` tick per round ended: the bot takes the course again on the
+    // tick it sees it out, so all but eight of these four thousand ticks are a
+    // fight in progress.
+    let over = progress.iter().filter(|p| p.over).count();
+    assert_eq!(
+        (fired.len(), over, gap),
+        (117, 8, 27),
+        "the fight changed shape — `xtask reload --retune` reads all three, and the shortest gap          is the window it spends proving the world crossed the swap"
+    );
+    assert!(
+        progress.iter().all(|p| p.standing <= 3),
+        "the course dealt more targets than it holds at once"
+    );
+    let last = *progress.last().unwrap();
+    assert!(
+        !last.over && last.hits > 0,
+        "the stream does not end mid-fight"
+    );
 }

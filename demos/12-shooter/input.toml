@@ -19,6 +19,11 @@ restart = ["R"]
 pause = ["Escape"]
 ui_click = ["Mouse1"]
 ui_focus = ["Tab"]
+# The same physical button as `ui_click`, deliberately. A binding table maps a
+# key to *actions*, not to one action, so both verbs arrive together and the
+# game decides which one this tick meant — which is the same fact the host
+# arbitrates the pointer on, arrived at from the other side (§6 M37).
+fire = ["Mouse1"]
 
 [game.axes]
 move_right = ["+D", "-A"]

@@ -77,6 +77,7 @@ fn check() -> anyhow::Result<()> {
     // checked-in scene, so this also catches a re-authored level nobody
     // re-blessed the recording over.
     crate::shell::check_platformer()?;
+    crate::shell::check_shooter()?;
     println!("xtask replay: baselines live in {}", dir.display());
     Ok(())
 }

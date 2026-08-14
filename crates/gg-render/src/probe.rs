@@ -902,6 +902,22 @@ fn record_desc(
 /// number of probes on whatever it is told to cover. Models keep the radius:
 /// their `half_extent` is a scale rather than an extent (`gg_extract::Instance`),
 /// so a sphere is the only bound this has.
+///
+/// **Every visible instance counts, including one that is there for three
+/// ticks** (§6 M37 item 3, `tests/transient.rs`). Demo 12's room is closed on
+/// five sides and open to the sky, so a shot aimed up draws a 40 m tracer
+/// through a ceiling that is not there — and that sliver widens the spacing from
+/// 4 m to 8 m, refits the grid, and throws the gathered field away. Twice per
+/// shot: once when it appears and once when it dies, `covers` being no help
+/// because the fitted *spacing* differs either way.
+///
+/// P2: bound the grid by something a three-tick sliver cannot dominate. The
+/// candidates all have a cost and none is obviously right — a volume floor
+/// discards a small distant receiver, growth hysteresis makes the grid a
+/// function of the frame the way this doc says it is not, and a receiver flag
+/// widens the render protocol for the renderer's convenience rather than
+/// because a game asked (§2). Named rather than settled by argument, and the
+/// test pins today's numbers so the day one is chosen the diff says what moved.
 fn bounds_of(extracted: &gg_extract::Extracted) -> Option<(sim::DVec3, sim::DVec3)> {
     let mut bounds: Option<(render::Vec3, render::Vec3)> = None;
     let boxes = extracted.visible().iter().map(|instance| {

@@ -264,6 +264,27 @@ pub fn bless(commit: &str) -> anyhow::Result<()> {
         platformer.change_count(),
         sequence.len(),
     );
+    let entry = shooter_entry()?;
+    let frames = demo_12_shooter::session::frames(&entry)?;
+    let mut shooter = shooter_stream(&frames);
+    shooter.set_engine_commit(commit);
+    std::fs::write(shooter_path(), shooter.encode())?;
+    // Demo 10's pattern again: the baseline beside the stream, authored by the
+    // same code the aarch64 leg reads it with. This game deals its own room, so
+    // there is no scene to re-author and the tick column starts at 0.
+    let sequence = demo_12_shooter::session::hash_sequence(&entry, &frames)?;
+    std::fs::write(
+        demo_12_shooter::session::baseline_path(),
+        demo_12_shooter::session::encode_baseline(&sequence),
+    )?;
+    println!(
+        "xtask replay: blessed {} ({} ticks, {} change records) and its {}-tick baseline at \
+         {commit}",
+        demo_12_shooter::session::NAME,
+        shooter.ticks(),
+        shooter.change_count(),
+        sequence.len(),
+    );
     Ok(())
 }
 
@@ -494,6 +515,123 @@ pub fn check_platformer() -> anyhow::Result<()> {
     println!(
         "xtask replay: {} matches its script ({} ticks, blessed at {})",
         demo_11_platformer::session::NAME,
+        decoded.ticks(),
+        decoded.meta().engine_commit,
+    );
+    Ok(())
+}
+
+/// Demo 12's verbs, in the id order `gg_game!` declares them (§4.7). Unlike
+/// demo 11's two, this list runs all the way to `fire` — the trigger is verb 5,
+/// and a stream declaring only the ones it presses would index its bits against
+/// a shorter list and press something else. The two `ui_*` in the middle are
+/// along for that reason and no other.
+const SHOOTER_ACTIONS: &[&str] = &["jump", "restart", "pause", "ui_click", "ui_focus", "fire"];
+/// The same rule on the axis side: the aim pair is 2 and 3, so the walk pair
+/// has to be declared to reach them.
+const SHOOTER_AXES: &[&str] = &["move_right", "move_forward", "aim_x", "aim_y"];
+
+/// Demo 12's entry points, resolved out of the **built dev dylib** —
+/// [`platformer_entry`]'s reasoning and its hazards verbatim, including the
+/// staged copy a loaded DLL makes necessary on Windows.
+fn shooter_entry() -> anyhow::Result<demo_12_shooter::session::Entry> {
+    static ENTRY: std::sync::OnceLock<demo_12_shooter::session::Entry> = std::sync::OnceLock::new();
+    if let Some(entry) = ENTRY.get() {
+        return Ok(*entry);
+    }
+    exec(
+        cargo().args(["build", "-p", "demo-12-shooter"]),
+        "build demo-12-shooter [dev]",
+    )?;
+    let built = dylib("debug", "demo_12_shooter");
+    let dir = workspace_root().join("target/entry");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(built.file_name().unwrap_or_default());
+    std::fs::copy(&built, &path)?;
+    // SAFETY: [`platformer_entry`]'s, word for word — the artifact was built
+    // from this working tree one line up, `assemble` refuses a foreign
+    // `AbiInfo` before anything is called, and the library is leaked because a
+    // game dylib is never unloaded (§4.2.2).
+    unsafe {
+        let lib = libloading::Library::new(&path)
+            .map_err(|e| anyhow::anyhow!("loading {} failed: {e}", path.display()))?;
+        let entry = demo_12_shooter::session::Entry {
+            abi: *lib.get(b"gg_game_abi")?,
+            init: *lib.get(b"gg_game_init")?,
+            components: *lib.get(b"gg_game_components")?,
+            systems: *lib.get(b"gg_game_systems")?,
+        };
+        std::mem::forget(lib);
+        Ok(*ENTRY.get_or_init(|| entry))
+    }
+}
+
+/// The recorded round as a replay file — `demo_12_shooter::session`'s frames,
+/// so this file, the demo's own tests and the baseline are one script.
+///
+/// # Errors
+///
+/// If the bot cannot play the round out — no target the spawn can reach, or a
+/// weapon that never cools.
+pub fn shooter_replay() -> anyhow::Result<Replay> {
+    Ok(shooter_stream(&demo_12_shooter::session::frames(
+        &shooter_entry()?,
+    )?))
+}
+
+/// Any of demo 12's scripts as a stream the shell can replay, indexed from 0:
+/// this game deals its own room from `bootstrap`, so unlike demo 11 there is no
+/// `--load` and no scene tick to seek to.
+fn shooter_stream(frames: &[InputFrame]) -> Replay {
+    let mut meta = ReplayMeta::new(
+        gg_math::DETERMINISM_CONTRACT,
+        "curated",
+        gg_core::DEFAULT_TICK_HZ,
+        SHOOTER_ACTIONS,
+        SHOOTER_AXES,
+    );
+    meta.engine_commit = "generated".to_owned();
+    let mut recorder = Recorder::new(meta);
+    for (tick, frame) in frames.iter().enumerate() {
+        recorder.record(tick as u64, *frame);
+    }
+    recorder.finish()
+}
+
+pub fn shooter_path() -> PathBuf {
+    workspace_root()
+        .join("tests/replays")
+        .join(format!("{}.ggrp", demo_12_shooter::session::NAME))
+}
+
+/// The checked-in shooter stream is still the script, byte for byte —
+/// [`check_tetris`]'s reasoning verbatim, including the encoding-version split.
+pub fn check_shooter() -> anyhow::Result<()> {
+    let path = shooter_path();
+    let on_disk = std::fs::read(&path)
+        .map_err(|e| anyhow::anyhow!("no shooter stream at {} ({e})", path.display()))?;
+    let decoded = Replay::decode(&on_disk)?;
+    let mut fresh = shooter_replay()?;
+    fresh.set_engine_commit(&decoded.meta().engine_commit);
+    anyhow::ensure!(
+        fresh.encode() != decoded.encode() || fresh.encode() == on_disk,
+        "{} is the stream `demo_12_shooter::session::frames()` still produces, written in an \
+         older encoding — `cargo xtask replay --bless` re-authors it at the current \
+         `gg_input::replay::FORMAT`",
+        path.display(),
+    );
+    anyhow::ensure!(
+        fresh.encode() == on_disk,
+        "{} is not what `demo_12_shooter::session::frames()` produces today ({} ticks on disk, {} \
+         from the script) — the recording and the script (or the room it is played in) have come \
+         apart, and `cargo xtask replay --bless` is the reviewed act that re-joins them",
+        path.display(),
+        decoded.ticks(),
+        fresh.ticks(),
+    );
+    println!(
+        "xtask replay: {} matches its script ({} ticks, blessed at {})",
+        demo_12_shooter::session::NAME,
         decoded.ticks(),
         decoded.meta().engine_commit,
     );
@@ -950,9 +1088,10 @@ fn divergence(a: &(&str, Vec<(u64, String)>), b: &(&str, Vec<(u64, String)>)) ->
 
 /// The crate a generated variant is a copy of.
 ///
-/// Two, because the gates below ask different questions of different games:
-/// demo 03 is the migration and latency subject, and demo 10 is the one with a
-/// game in progress to change the rules of.
+/// One per question the gates below ask of a *different* game: demo 03 is the
+/// migration and latency subject, demo 10 the game with a rule to rewrite under
+/// a stack, demo 11 the run with a feel to retune under it, demo 12 the fight
+/// with a weapon to retune under that.
 struct Kind {
     /// The demo directory, under the workspace root.
     dir: &'static str,
@@ -986,6 +1125,13 @@ const DEMO_10: &Kind = &Kind {
 const DEMO_11: &Kind = &Kind {
     dir: "demos/11-platformer",
     lib: "demo_11_platformer",
+    beside: &["session.rs"],
+    features: &["game"],
+};
+
+const DEMO_12: &Kind = &Kind {
+    dir: "demos/12-shooter",
+    lib: "demo_12_shooter",
     beside: &["session.rs"],
     features: &["game"],
 };
@@ -1183,11 +1329,17 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--platformer") {
         platformer()?;
     }
+    if only("--shooter") {
+        shooter()?;
+    }
     if only("--rules") {
         rules()?;
     }
     if only("--feel") {
         feel()?;
+    }
+    if only("--retune") {
+        retune()?;
     }
     if only("--best") {
         best()?;
@@ -2495,6 +2647,133 @@ fn platformer() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// §6 M37's exit row through the shell: **a recorded full round — restart,
+/// three targets taken, then the course run out — replays bit-identically under
+/// dev, instrumented and dist-verify.**
+///
+/// The tetris gate's three claims over a game that is *aimed* rather than
+/// tapped, which is the one thing neither neighbour covers: demo 10's stream is
+/// buttons and demo 11's carries one axis with two values in it. This one
+/// carries a pointer delta per aiming tick, encoded in §4.7's fixed point, and
+/// a shell that rounded them differently or delivered them a tick late would
+/// put every round somewhere else. What proves it did not is that the rounds
+/// *landed*: `shooter: hit` cannot be reached by a session whose aim arrived
+/// wrong, and the score is on the tick the in-process bot puts it on.
+///
+/// The scene claim demo 11 adds is absent by construction — this game deals its
+/// room from `bootstrap`, so the stream is replayed with no `--load` at all and
+/// the milestone ticks are the only tie to the baseline.
+fn shooter() -> anyhow::Result<()> {
+    let replay = shooter_path();
+    anyhow::ensure!(
+        replay.is_file(),
+        "no shooter stream at {} — `cargo xtask replay --bless` authors it",
+        replay.display()
+    );
+    let replay = replay.display().to_string();
+    let baseline = demo_12_shooter::session::parse_baseline(&std::fs::read_to_string(
+        demo_12_shooter::session::baseline_path(),
+    )?)
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let wanted = demo_12_shooter::session::LOG;
+
+    // The ticks the in-process run puts the three middle milestones on, read off
+    // the same bot over the same room the shell is about to deal. All three must
+    // exist: a run that never hit and never ran out would otherwise tie to the
+    // shell by `None == None`, which is demo 11's own audit finding.
+    let entry = shooter_entry()?;
+    let frames = demo_12_shooter::session::frames(&entry).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let progress =
+        demo_12_shooter::session::progress(&entry, &frames).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let at = |find: &dyn Fn(&demo_12_shooter::session::Progress) -> bool| {
+        progress.iter().position(find).map(|i| i as u64)
+    };
+    let (hit_at, escaped_at, over_at) = match (
+        at(&|p| p.hits == 1),
+        at(&|p| p.misses == 1),
+        at(&|p| p.over),
+    ) {
+        (Some(hit), Some(escaped), Some(over)) => (hit, escaped, over),
+        (hit, escaped, over) => anyhow::bail!(
+            "the in-process round hit at {hit:?}, lost one at {escaped:?} and ended at {over:?} \
+             — the bot no longer plays this room out, so there is nothing for the shell to agree \
+             with"
+        ),
+    };
+    let scored = progress.last().map_or(0, |p| p.score);
+
+    let mut runs: Vec<(&str, Vec<(u64, String)>)> = Vec::new();
+    for tier in HASHED_TIERS {
+        let (host, game) = stage_game(tier, "demo-12-shooter", "demo_12_shooter")?;
+        let log = play(&host, &game, &["--replay", &replay], true)?;
+        let reached = reaches(&log, wanted);
+        anyhow::ensure!(
+            reached == wanted.len(),
+            "[{}] the replayed round reached {reached} of {} milestones — expected {wanted:?} in \
+             order; a session whose aim arrived wrong stops at the one before `shooter: \
+             hit`:\n{log}",
+            tier.name,
+            wanted.len(),
+        );
+        // Each exactly once: a second "ready" is a stream that restarted the
+        // world, a second "hit"/"escaped"/"over" is a counter that failed to
+        // latch, a second "restarted" is a press this recording never held.
+        for once in wanted {
+            let count = log.lines().filter(|l| l.contains(once)).count();
+            anyhow::ensure!(
+                count == 1,
+                "[{}] `{once}` appears {count} times — one recorded round, one of each",
+                tier.name
+            );
+        }
+
+        let seq = sequence(&log)?;
+        anyhow::ensure!(
+            seq.len() == baseline.len(),
+            "[{}] the shell ran {} ticks and the baseline holds {}",
+            tier.name,
+            seq.len(),
+            baseline.len()
+        );
+        // The tie to the in-process run. Tetris ties by quiet ticks; this world
+        // ages a spark or counts a hitmark down on nearly every tick of the
+        // round, so that comparison would be two nearly-empty lists agreeing.
+        // Where the three milestones land is the shape this run *has*, and each
+        // is the bot's own doing: re-seed the course or move a pillar and they
+        // move with it.
+        for (needle, want) in [
+            (wanted[2], hit_at),
+            (wanted[3], escaped_at),
+            (wanted[4], over_at),
+        ] {
+            let got = logged_at(&log, needle);
+            anyhow::ensure!(
+                got == Some(want),
+                "[{}] `{needle}` landed on tick {got:?} where the in-process run puts it at \
+                 {want} — the shell and the baseline did not play the same round",
+                tier.name,
+            );
+        }
+        runs.push((tier.name, seq));
+    }
+
+    for pair in runs.windows(2) {
+        if let Some(found) = divergence(&pair[0], &pair[1]) {
+            anyhow::bail!("§6 M37: {found}");
+        }
+    }
+    println!(
+        "xtask reload: demo 12's recorded round — restart, {} targets taken for {scored} points, \
+         then the course run out over {} ticks — replayed identically under dev, instrumented and \
+         dist-verify, hitting at {hit_at}, losing one at {escaped_at} and ending at {over_at} \
+         exactly where the baseline the aarch64 leg reads puts them (§6 M37)",
+        demo_12_shooter::session::HITS_WANTED,
+        runs[0].1.len(),
+    );
+    Ok(())
+}
+
 /// Ticks of the endless stream the rule change is measured over. The swap is
 /// aimed at a tick ([`RULES_SWAPS`]) and lands it plus however far the replay
 /// raced while the sighting crossed a pipe, so the margin is bought in ticks: a
@@ -2996,6 +3275,253 @@ fn feel_once() -> anyhow::Result<u128> {
          airborne tick at {arc} on: {total} ms save to new feel (rebuild {rebuild_ms} + swap \
          {swap_ms}, budget {BUDGET_MS}) (§6 M20)",
         arc - swap - 1,
+    );
+    Ok(total)
+}
+
+/// Ticks of the endless fight the weapon retune is measured over —
+/// [`RULES_TICKS`]' length for the reason that gate already has one.
+const RETUNE_TICKS: usize = 8_000;
+
+/// Ticks to aim the retune swap at, [`RULES_SWAPS`]' way: anchored on the
+/// tick's own hash line, so no wall time is priced. The bot's cadence is one
+/// round every thirty-five ticks, so an aim is overwhelmingly likely to land in
+/// a gap — but *which* tick it lands on is still the machine's, and a swap
+/// landing on a firing tick is uninformative rather than red (the new kick
+/// bites on the tick the new build arrives, so a world that had been rebuilt
+/// cannot be told from one that survived). The gate checks and swings again.
+const RETUNE_SWAPS: [u64; 3] = [1_200, 2_000, 2_800];
+
+/// Ticks that must separate the swap from the next round for the run to count.
+///
+/// Four, against a cadence whose shortest gap is twenty-six: the window this
+/// gate spends is a *slice* of that gap, chosen by where the aim landed, so
+/// three swings at four leave a one-in-seven-hundred chance of the gate running
+/// out of aims. Every tick of the window is one where five chips, a tracer, a
+/// flash, a hitmark, a cooldown and three target lives all had to agree across
+/// two builds — three of them is a claim, one of them is a coincidence.
+const RETUNE_WINDOW: usize = 4;
+
+/// The weapon edit: how hard the gun kicks (§6 M37 item 6).
+///
+/// Chosen by `--rules` and `--feel`'s criterion at a third subject, and against
+/// the more obvious candidate. **Spread** is the knob item 6 names first and it
+/// is the wrong one: `spread` draws a centred step in ±4 per axis, one shot in
+/// eighty-one draws dead centre on both, and *that* shot is bit-identical under
+/// any spread constant — a gate that named the next round would fail on a coin
+/// flip a few runs in. Recoil is a constant rather than a draw. It is read on
+/// exactly the ticks a round leaves and on no others, so the swapped run keeps
+/// matching the unswapped one from the swap until the trigger comes round
+/// again, and then always differs.
+///
+/// What it moves is where the weapon *leaves* the view, not where the round
+/// went: the shot's direction is drawn before the kick is applied, so the two
+/// builds fire the same bullet at the same target and part on `Walker::pitch`
+/// afterwards. Doubled rather than nudged, and still dyadic — a value that made
+/// the kick inexact would be a second change riding along with this one.
+fn with_a_harder_kick(source: &str) -> anyhow::Result<String> {
+    let anchor = "pub const RECOIL_KICK: f32 = 0.015_625;";
+    anyhow::ensure!(
+        source.contains(anchor),
+        "demo 12's recoil is not where this gate expected it — the weapon edit is a text edit, so \
+         a rename here is a gate to re-point rather than one that quietly stops retuning anything"
+    );
+    Ok(source.replace(anchor, "pub const RECOIL_KICK: f32 = 0.031_25;"))
+}
+
+/// §6 M37's reload row: **a weapon retuned under a fight in progress reloads
+/// with the round intact, inside §9's two seconds, and the runs part at the
+/// next shot.**
+///
+/// The subject is demo 12's bot fighting a course that never ends — acquire,
+/// turn, one round, watch, and take the course again when it runs out — and the
+/// edit is one line: the gun kicks twice as hard. The three claims are
+/// [`rules`]'s with this game's own middle:
+///
+/// - **the weapon changed.** The two runs part at exactly the first tick a
+///   round leaves after the swap, which the in-process script names
+///   independently off `Progress::shots`.
+/// - **with the round intact.** They are identical *through* the swap and
+///   across every tick between it and that shot — and those ticks are not quiet
+///   ones. A tetris well between clears is still; this world is ageing five
+///   chips, a tracer, a flash and a hitmark, counting a cooldown down and
+///   walking three targets toward the end of their lives on every one of them.
+///   Ticks of *that* agreeing is what says the whole transient system crossed a
+///   different build untouched — [`RETUNE_WINDOW`] of them at the least, and a
+///   session that had been restarted would part at the swap tick instead.
+/// - **and it was a swap, not a migration.** Nothing in demo 12's schema moved,
+///   so the reload must report no component migrated.
+///
+/// Budget and retry semantics are [`rules`]'s verbatim.
+fn retune() -> anyhow::Result<()> {
+    let total = best_under(
+        "the weapon edit's save-to-new-kick",
+        BUDGET_MS,
+        WALL_CLOCK_TRIES,
+        retune_once,
+    )?;
+    anyhow::ensure!(
+        total <= BUDGET_MS,
+        "the retune reached the running game in {total} ms at its best over {WALL_CLOCK_TRIES} \
+         attempts against §9's {BUDGET_MS} ms — the per-attempt rebuild/swap breakdown is in the \
+         lines above"
+    );
+    Ok(())
+}
+
+/// One full run of the retune gate: every correctness assertion, then the
+/// measured save-to-new-kick total in milliseconds — the verdict is
+/// [`retune`]'s.
+fn retune_once() -> anyhow::Result<u128> {
+    let source = game_source(DEMO_12)?;
+    let edited = with_a_harder_kick(&source)?;
+
+    let entry = shooter_entry()?;
+    let frames = demo_12_shooter::session::endless(&entry, RETUNE_TICKS)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let progress =
+        demo_12_shooter::session::progress(&entry, &frames).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let dir = workspace_root().join("target/retune");
+    std::fs::create_dir_all(&dir)?;
+    let stream = dir.join("fight.ggrp");
+    std::fs::write(&stream, shooter_stream(&frames).encode())?;
+    let stream = stream.display().to_string();
+
+    write_variant(DEMO_12, "retune", &source)?;
+    let before = dir.join("before.bin");
+    std::fs::copy(build_variant(DEMO_12, "retune")?, &before)?;
+
+    write_variant(DEMO_12, "retune", &edited)?;
+    let started = std::time::Instant::now();
+    let built = build_variant(DEMO_12, "retune")?;
+    let rebuild_ms = started.elapsed().as_millis();
+    let after = dir.join("after.bin");
+    std::fs::copy(&built, &after)?;
+
+    exec(
+        cargo().args(["build", "-p", "gg-runtime"]),
+        "build the shell [dev]",
+    )?;
+    let host = exe("debug", "gg-runtime");
+    let game = dir.join(dylib_name(DEMO_12));
+
+    // No `--load`: this game deals its own room, so the stream is the whole of
+    // what the shell is handed (`shooter_stream`'s note).
+    std::fs::copy(&before, &game)?;
+    let untouched = sequence(&play(&host, &game, &["--replay", &stream], true)?)?;
+
+    let mut taken = None;
+    for aim in RETUNE_SWAPS {
+        std::fs::copy(&before, &game)?;
+        let marker = format!("tick={aim} hash=");
+        let log = reload_after(&game, &after, &["--replay", &stream], &marker, 0)?;
+        let swapped = sequence(&log)?;
+        let reloaded = log
+            .lines()
+            .find(|l| l.contains("game reloaded"))
+            .unwrap_or_default();
+        let swap = usize::try_from(crate::util::field_u64(reloaded, "tick")?).unwrap_or(usize::MAX);
+        let swap_ms = u128::from(crate::util::field_u64(reloaded, "save_to_swap_ms")?);
+
+        anyhow::ensure!(
+            log.matches("migrated").count() == 0,
+            "the reload migrated a component — a recoil constant is code, and nothing in demo \
+             12's schema moved:\n{log}"
+        );
+        anyhow::ensure!(
+            untouched.len() == swapped.len() && untouched.len() == RETUNE_TICKS,
+            "the two runs are {} and {} ticks of a {RETUNE_TICKS}-tick stream",
+            untouched.len(),
+            swapped.len()
+        );
+        anyhow::ensure!(
+            swap < RETUNE_TICKS / 2,
+            "the swap landed at tick {swap} of {RETUNE_TICKS} — past halfway is a machine this \
+             stream is too short for, and the next failure it caused would be a confusing one"
+        );
+
+        let Some(at_swap) = progress.get(swap).copied() else {
+            anyhow::bail!("the swap landed at tick {swap}, past the stream");
+        };
+        // A live round with rounds already fired: the configuration the claim
+        // is about. The stream holds one over tick per course, so landing on
+        // one is a coincidence to swing at rather than a failure.
+        if at_swap.over {
+            println!(
+                "xtask: the swap landed at tick {swap} on the tick the course ran out — swinging \
+                 again"
+            );
+            continue;
+        }
+        anyhow::ensure!(
+            at_swap.shots > 0,
+            "the swap landed at tick {swap} before the bot had fired — a weapon whose kick has \
+             never been applied is not a weapon this gate can retune"
+        );
+
+        // Where the new kick first *can* show: the next tick a round leaves,
+        // counted from the swap tick itself because that is the first tick the
+        // new build runs.
+        let shot = (swap..progress.len())
+            .find(|&i| i > 0 && progress[i].shots > progress[i - 1].shots)
+            .ok_or_else(|| anyhow::anyhow!("no round was fired after the swap at tick {swap}"))?;
+        // The window is a slice of the bot's cadence, and which slice is the
+        // machine's — the sighting crosses a pipe while the replay races on, so
+        // the aim lands hundreds of ticks late by an amount that is the desk's
+        // to choose. A swap on the firing tick itself proves nothing (the new
+        // kick bites where the new build arrives), and one or two ticks short
+        // of it is a window too thin to call a world's crossing. Swing rather
+        // than grade a margin.
+        if shot < swap + RETUNE_WINDOW {
+            println!(
+                "xtask: the swap landed at tick {swap}, {} tick(s) before the next round — too \
+                 thin a window to say a world crossed it; swinging again",
+                shot - swap,
+            );
+            continue;
+        }
+        taken = Some((swap, swap_ms, shot, at_swap, swapped));
+        break;
+    }
+    let (swap, swap_ms, shot, at_swap, swapped) = taken.ok_or_else(|| {
+        anyhow::anyhow!(
+            "every one of {} attempts put the swap on an ended course or inside \
+             {RETUNE_WINDOW} ticks of the next round, which is a coincidence worth looking at \
+             rather than retrying further",
+            RETUNE_SWAPS.len()
+        )
+    })?;
+
+    let parted = untouched
+        .iter()
+        .zip(&swapped)
+        .find(|(a, b)| a.1 != b.1)
+        .map(|(a, _)| usize::try_from(a.0).unwrap_or(usize::MAX))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the two runs never parted — a recoil the reload did not pick up makes this gate \
+                 a comparison of a sequence with itself"
+            )
+        })?;
+    anyhow::ensure!(
+        parted == shot,
+        "the runs parted at tick {parted}; the first round fired after the swap at {swap} leaves \
+         at {shot}. Earlier means the swap itself moved the world — the fight did not cross \
+         intact. Later means the retuned kick never ran."
+    );
+
+    let total = rebuild_ms + swap_ms;
+    println!(
+        "xtask reload: demo 12's recoil was retuned under a fight in progress — a new build \
+         swapped in at tick {swap} with the course live at {} shots for {} hits, hashing \
+         identically to the unswapped run through that tick and the {} after it (every one of \
+         them ageing a transient), and differently from the next round fired at {shot} on: \
+         {total} ms save to new weapon (rebuild {rebuild_ms} + swap {swap_ms}, budget \
+         {BUDGET_MS}) (§6 M37)",
+        at_swap.shots,
+        at_swap.hits,
+        shot - swap - 1,
     );
     Ok(total)
 }

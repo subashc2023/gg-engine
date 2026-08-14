@@ -1,11 +1,29 @@
 //! Demo 12 — **the room** (the game ladder's third rung): stand up, look
-//! around, walk, jump, land.
+//! around, walk, jump, land — and, since §6 M37, shoot.
 //!
 //! What Unreal opens into, in this engine's terms: a white-grey block room you
-//! move through in first person. This chunk is the *character controller* — the
-//! first 3D gameplay in the tree — and deliberately nothing else. The gun, the
-//! targets and the score are a second pass; a controller that is wrong is wrong
-//! under everything built on it, so it gets its own pass and its own tuning.
+//! move through in first person. The first chunk was the *character controller*
+//! and deliberately nothing else, on the argument that a controller which is
+//! wrong is wrong under everything built on it. M37 is the second: the gun, the
+//! targets and the score, which is what turns a room into a game with an end —
+//! and an end is what a recorded session needs to record.
+//!
+//! # The shot
+//!
+//! Hitscan, and the ray is [`sim::DRay`] (§6 M37 item 1): a shot's answer
+//! decides what dies, so it is in the tick and in the hash, which is why the
+//! predicate lives in `gg_math::sim` rather than in the two host crates that
+//! also own one. The policy on top of it is this game's alone — past the muzzle
+//! (`enter > 0`, so a target you are standing inside is not one you can shoot)
+//! and inside [`SHOT_RANGE`]. Targets and [`Solid`]s are cast against together
+//! and the nearest wins, so a wall stops a bullet without knowing it is a wall.
+//!
+//! Everything the shot leaves behind is an ordinary entity with a life counter:
+//! the tracer, the debris, and the muzzle flash — which is a [`Light`] that
+//! exists for two ticks and is therefore the first light in this tree that
+//! appears and vanishes while a scene is being played (§6 M37 item 4). Debris
+//! is spent where it meets the floor rather than sinking through it, which is
+//! also what keeps every transient inside the room's static bounds.
 //!
 //! Three things it inherits rather than invents. Mouse-look is demo 06's:
 //! `aim_x`/`aim_y` are raw device deltas the shell records as fixed-point axes,
@@ -50,6 +68,8 @@
 //! moves through one. All physics is `f64` `+ - * /`, comparisons, and the one
 //! `sqrt` IEEE mandates exactly — nothing transcendental crosses a tick except
 //! the `sim::fly_basis` the blessed replays already pin.
+
+pub mod session;
 
 use gg_ecs::Component;
 use gg_ecs::boundary::{
@@ -166,6 +186,143 @@ pub const START: sim::DVec3 = sim::DVec3::new(0.0, HALF_H, 8.0);
 /// so this only fires if a slab moved — a safety net, and a visible one.
 pub const KILL_Y: f64 = -20.0;
 
+// ---------------------------------------------------------------- gun -------
+
+/// Ticks between shots — 6.7 a second at 60 Hz. Above [`RECOIL_TICKS`] on
+/// purpose: a weapon whose kick has not settled when the next round leaves is a
+/// weapon that climbs, and a climb is a second feel decision hiding inside the
+/// fire rate.
+pub const FIRE_TICKS: u32 = 9;
+/// How far a bullet reaches, metres. The room's longest diagonal is 34.2, so
+/// this is "everywhere in here" with room to spare — a shot that expired in
+/// flight would be a range mechanic nobody asked for.
+pub const SHOT_RANGE: f64 = 40.0;
+/// Steps the spread draw has. **Odd**, so dead centre is one of the outcomes
+/// rather than the gap between two of them.
+pub const SPREAD_STEPS: u32 = 9;
+/// Radians one spread step is worth. Four steps either way is ±0.0072 rad —
+/// 25 mm at ten metres, enough that a burst is not a laser and far under what a
+/// standing shot needs to hit a 440 mm target.
+pub const SPREAD_UNIT: f32 = 0.0018;
+/// Radians the view kicks up per shot, and what it gives back per tick.
+///
+/// Dyadic on purpose: 1/64 given back as 8 × 1/512 is exact in `f32`, so a
+/// settled weapon leaves the pitch bit-identical to where the kick found it.
+/// A tenth of a degree of residue per shot would be invisible, deterministic,
+/// and still a number that grew all session.
+pub const RECOIL_KICK: f32 = 0.015_625;
+/// See [`RECOIL_KICK`].
+pub const RECOIL_TICKS: u32 = 8;
+/// See [`RECOIL_KICK`].
+pub const RECOIL_GIVE: f32 = 0.001_953_125;
+/// Where the tracer is *drawn* from, relative to the eye: right, up, forward.
+/// The ray still leaves the eye — item 5's honest minimum is no view model at
+/// all, and a tracer that came out of the crosshair would read as one anyway.
+pub const MUZZLE: (f64, f64, f64) = (0.22, -0.16, 0.35);
+/// What `bootstrap` seeds the spread and the target order with. A constant, not
+/// a clock: a wall-clock seed is a game that cannot be replayed (§4.7).
+pub const SEED: u64 = 0x5348_4f4f_5445_5201;
+
+// ---------------------------------------------------------------- range -----
+
+/// [`Range::state`]: the round is live. **Zero**, so a zeroed migration is a
+/// playable round rather than a finished one — [`Renderable::smoothness`]'s
+/// rule, applied to a game's own state.
+pub const STATE_RUNNING: u32 = 0;
+/// [`Range::state`]: out of misses. The score is frozen and `R` starts again.
+pub const STATE_OVER: u32 = 1;
+/// Targets standing at once. Three: enough that there is always one to swing
+/// to, few enough that the room does not read as a shooting gallery.
+pub const TARGETS_LIVE: usize = 3;
+/// Ticks a target stands before it leaves — 3.5 s, about two swings and a shot.
+pub const TARGET_LIFE: u32 = 210;
+/// Targets allowed to leave before the round ends.
+pub const MISSES_ALLOWED: u32 = 3;
+/// Half-extent of a target, metres — a 440 mm cube.
+pub const TARGET_HALF: f32 = 0.22;
+/// What one target is worth before the streak.
+pub const TARGET_WORTH: u32 = 100;
+/// How a target takes the light — matte enough to read as a board rather than a
+/// mirror. Named for [`shelter_sky`]'s reason: `deal` and the golden that
+/// pictures the course read one number.
+pub const TARGET_SMOOTHNESS: f32 = 0.65;
+/// Added per consecutive hit, up to [`STREAK_CAP`] of them. A miss — a shot
+/// into the room, or a target that walked — puts it back to zero.
+pub const STREAK_STEP: u32 = 25;
+/// See [`STREAK_STEP`]. Eight, so a perfect run tops out at triple.
+pub const STREAK_CAP: u32 = 8;
+/// A target's colour, and what a hit and an escape leave behind.
+pub const TARGET_INK: u32 = 0x00e0_5a3c;
+/// See [`TARGET_INK`].
+pub const HIT_INK: u32 = 0x00ff_d070;
+/// See [`TARGET_INK`].
+pub const DUST_INK: u32 = 0x00c8_c0b4;
+/// See [`TARGET_INK`].
+pub const ESCAPE_INK: u32 = 0x0060_78a0;
+
+/// Where a target can stand: the room's clear air, twelve places.
+///
+/// A table rather than a random point in the volume, and the reason is the same
+/// one [`ROOM`] is a table for: a spawn point has to be *shootable* — clear of
+/// the solids, off the pillars, out of the chart's way and not inside the
+/// shelter's roof — and a uniform draw over a box satisfies none of that. The
+/// test that keeps it true asks the room rather than this list (`tests/game.rs`
+/// checks every spot against every [`ROOM`] entry), which is demo 11's pull-2
+/// doctrine: a claim derives from the scene, or it rots.
+pub const SPOTS: &[sim::DVec3] = &[
+    sim::DVec3::new(-3.0, 2.6, -4.0),
+    sim::DVec3::new(3.5, 2.6, -8.0),
+    sim::DVec3::new(6.0, 1.2, -10.0),
+    sim::DVec3::new(-6.0, 2.8, -9.0),
+    sim::DVec3::new(10.0, 1.6, -2.0),
+    sim::DVec3::new(6.5, 2.2, 2.5),
+    sim::DVec3::new(-9.0, 1.4, 7.5),
+    sim::DVec3::new(-1.5, 2.4, 6.5),
+    sim::DVec3::new(3.6, 1.0, 8.5),
+    sim::DVec3::new(-6.5, 3.0, 0.5),
+    sim::DVec3::new(0.0, 3.2, -6.0),
+    sim::DVec3::new(11.0, 3.0, 5.0),
+];
+
+// ---------------------------------------------------------------- effects ---
+
+/// [`Spark::kind`]: the bullet's streak. Drawn once, goes nowhere, gone.
+pub const SPARK_TRACER: u32 = 0;
+/// [`Spark::kind`]: a chip off whatever was hit. The only kind that moves.
+pub const SPARK_DEBRIS: u32 = 1;
+/// [`Spark::kind`]: the muzzle flash — a [`Light`] and no geometry at all.
+pub const SPARK_FLASH: u32 = 2;
+/// Ticks the tracer is up. Two would read as a flicker on a 60 Hz display and
+/// vanish entirely on a frame the sim ticked twice.
+pub const TRACER_TICKS: u32 = 3;
+/// Half-thickness of the tracer box, metres. A beam is a long thin box —
+/// [`Renderable`]'s own documentation says so, and this is the game that needed
+/// it.
+pub const TRACER_HALF: f32 = 0.012;
+/// See [`TRACER_HALF`].
+pub const TRACER_INK: u32 = 0x00ff_e8b0;
+/// Chips one impact throws.
+pub const SPARKS: u32 = 5;
+/// Ticks one lives, and the pull on it per tick.
+pub const SPARK_TICKS: u32 = 22;
+/// See [`SPARK_TICKS`].
+pub const SPARK_GRAVITY: f64 = 0.0035;
+/// Metres per tick a chip leaves at, along the face's normal.
+pub const SPARK_LIFT: f64 = 0.030;
+/// And the scatter across it, per axis: `±(SPREAD_STEPS-1)/2` steps of this.
+pub const SPARK_SCATTER: f64 = 0.008;
+/// Half-extent of a chip, metres.
+pub const SPARK_HALF: f32 = 0.020;
+/// Ticks the muzzle flash lights the room for. Two: one is a frame a 30 Hz
+/// display can miss entirely, and three starts to read as a lamp.
+pub const FLASH_TICKS: u32 = 2;
+/// The flash's colour, strength and reach — a hot, short, local light.
+pub const FLASH_INK: u32 = 0x00ff_e0a0;
+/// See [`FLASH_INK`].
+pub const FLASH_INTENSITY: f32 = 9.0;
+/// See [`FLASH_INK`].
+pub const FLASH_RANGE: f32 = 4.5;
+
 // ---------------------------------------------------------------- chart -----
 
 /// Steps along each axis of [`chart`] — five, so the ends are 0 and 1 exactly,
@@ -279,6 +436,13 @@ pub const RESTART: ActionId = ActionId::new(1);
 /// Open the menu, and step back out of it. Bound to Escape, which is what takes
 /// Escape off the shell — see this crate's `input.toml`.
 pub const PAUSE: ActionId = ActionId::new(2);
+/// Fire. Id 5 because it was **appended** to the verb list: the order of that
+/// list is the id space a replay records (§4.7), so a verb inserted among the
+/// existing ones would renumber every stream ever made against them. Bound to
+/// the same physical button as `ui_click`, which is not a conflict but the
+/// arbitration itself — the menu is up or it is not, and [`shoot`] and the host
+/// read the same fact off [`Session::paused`].
+pub const FIRE: ActionId = ActionId::new(5);
 /// Strafe.
 pub const MOVE_RIGHT: AxisId = AxisId::new(0);
 /// Forward and back.
@@ -294,8 +458,16 @@ pub const AIM_Y: AxisId = AxisId::new(3);
 pub const CUE_JUMP: u32 = 0;
 /// The landing.
 pub const CUE_LAND: u32 = 1;
+/// The shot — the first [`wave::NOISE`] any game in this tree has fired.
+pub const CUE_SHOT: u32 = 2;
+/// A target taken.
+pub const CUE_HIT: u32 = 3;
+/// A target that left on its own.
+pub const CUE_ESCAPE: u32 = 4;
+/// The round's end.
+pub const CUE_OVER: u32 = 5;
 /// How many cue entities `bootstrap` deals.
-pub const CUES: usize = 2;
+pub const CUES: usize = 6;
 
 // ---------------------------------------------------------------- hud -------
 
@@ -303,6 +475,22 @@ pub const CUES: usize = 2;
 pub const HUD_SPEED: u32 = 0;
 /// Grounded or airborne — the one piece of controller state a tuner watches.
 pub const HUD_STATE: u32 = 1;
+/// The round's score and the streak riding on it.
+pub const HUD_SCORE: u32 = 2;
+/// The best this session has managed.
+pub const HUD_BEST: u32 = 3;
+/// Misses spent, or how the round ended.
+pub const HUD_MISS: u32 = 4;
+/// Every text row `bootstrap` deals, and what it reads before a tick has had
+/// anything to say. One table so the rows and their count cannot drift — the
+/// crosshair arms are the other kind of `Hud` and are counted by [`ARMS`].
+pub const HUD_ROWS: [(u32, &str); 5] = [
+    (HUD_SPEED, "SPEED 0.0"),
+    (HUD_STATE, "GROUND"),
+    (HUD_SCORE, "SCORE 0"),
+    (HUD_BEST, "BEST 0"),
+    (HUD_MISS, "MISS 0/3"),
+];
 /// The first crosshair arm's line. Above the text rows and never equal to one,
 /// so `present`'s match reaches the arms only through its default arm.
 pub const HUD_CROSS: u32 = 8;
@@ -313,6 +501,14 @@ pub const CROSS: (f32, f32, f32) = (6.0, 2.0, 3.0);
 /// The crosshair's colour, `0xAARRGGBB` — not quite opaque, so it sits on the
 /// scene rather than in front of it.
 pub const CROSS_INK: u32 = 0xe0ff_ffff;
+/// What it turns for [`HITMARK_TICKS`] after a target is taken. The one piece
+/// of feedback that reaches the eye already looking at where the shot went.
+pub const HITMARK_INK: u32 = 0xffff_9040;
+/// See [`HITMARK_INK`]. Six ticks counting the shot's own — 100 ms, the same
+/// window [`COYOTE_TICKS`] uses and for the same reason: it is what reads as
+/// *immediate* rather than as a flicker. [`targets`] ages it, so a hit scored
+/// this tick leaves five behind it.
+pub const HITMARK_TICKS: u32 = 6;
 /// How many crosshair rects `bootstrap` deals.
 pub const ARMS: usize = 4;
 
@@ -624,6 +820,22 @@ pub const SHELTER_FADE: f32 = 1.4;
 /// upside-down from the outdoor one and much flatter.
 pub const SHELTER_INTENSITY: f32 = 0.30;
 
+/// The shelter's environment as one value.
+///
+/// A function rather than three constants because `bootstrap` and the golden
+/// that pictures this room both need the whole thing, and a colour copied into
+/// the harness is the second table §4.10 forbids.
+#[must_use]
+pub fn shelter_sky() -> Sky {
+    Sky {
+        zenith: 0x0056_5a60,
+        horizon: 0x006a_6862,
+        ground: 0x0048_423a,
+        ..Sky::daylight(SHELTER_INTENSITY)
+    }
+    .within(SHELTER.0, SHELTER.1, SHELTER_FADE)
+}
+
 // ---------------------------------------------------------------- state -----
 
 /// The body: pose, motion, aim, and the three feel counters. All sim state, all
@@ -653,6 +865,98 @@ pub struct Walker {
     pub grounded: u32,
     /// Padding, named (§4.2.1 hazard 4).
     pub _pad: u32,
+}
+
+/// The weapon, on the body's own entity — a gun is the body's, and a respawn
+/// that left the last round's cooldown behind would be a bug shaped like a
+/// feature.
+///
+/// The stream is *in here* rather than beside it (§6 M18's rule): an `Rng` that
+/// lives outside the world is one the replay gate silently stops covering.
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "shooter.gun")]
+#[repr(C)]
+pub struct Gun {
+    /// The spread stream. First, because it is the `u64` that sets the
+    /// alignment and a trailing one would leave a hole `Pod` refuses.
+    pub rng: sim::Rng,
+    /// Ticks until the trigger answers again.
+    pub cooldown: u32,
+    /// Ticks of kick still owed back to the view.
+    pub recover: u32,
+    /// Whether the trigger has been released since the world last ran. A click
+    /// that closes the menu is not a shot: the button that resumes is the
+    /// button that fires, and without this the first thing a resumed session
+    /// does is put a round through whatever the RESUME row was over. Zero is
+    /// *disarmed*, which is the safe migration — one released tick arms it.
+    pub armed: u32,
+    /// Padding, named (§4.2.1 hazard 4).
+    pub _pad: u32,
+}
+
+/// The round: what has been scored, what is left to lose it with, and the
+/// stream that places the targets.
+///
+/// Separate from [`Gun`] rather than sharing one stream, because the two draw
+/// for unrelated reasons and a single stream would make the *number of shots
+/// fired* decide where the next target stands.
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "shooter.range")]
+#[repr(C)]
+pub struct Range {
+    /// Where the targets stand. First, as [`Gun::rng`] is.
+    pub rng: sim::Rng,
+    /// This round's points.
+    pub score: u32,
+    /// The best this session has seen. Survives a restart on purpose — it is
+    /// the one number a session accumulates, and M14's save is what would carry
+    /// it across sessions the day this game gets one.
+    pub best: u32,
+    /// Consecutive hits, capped at [`STREAK_CAP`] where it pays.
+    pub streak: u32,
+    /// Targets that left on their own. [`MISSES_ALLOWED`] ends the round.
+    pub misses: u32,
+    /// Targets taken, all round.
+    pub hits: u32,
+    /// Shots fired, all round — the accuracy denominator, and the one number
+    /// that says whether the spread is doing anything.
+    pub shots: u32,
+    /// [`STATE_RUNNING`] or [`STATE_OVER`].
+    pub state: u32,
+    /// Ticks the crosshair stays lit after a hit.
+    pub hitmark: u32,
+}
+
+/// A thing to shoot. The geometry is the [`Renderable`] beside it, [`Solid`]'s
+/// rule again: what you see is what you hit.
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "shooter.target")]
+#[repr(C)]
+pub struct Target {
+    /// Ticks it has stood.
+    pub age: u32,
+    /// Ticks it stands for.
+    pub life: u32,
+    /// Which [`SPOTS`] entry it occupies — so two targets cannot share one.
+    pub slot: u32,
+    /// Points it pays before the streak.
+    pub worth: u32,
+}
+
+/// Everything a shot leaves behind: the tracer, the chips, the flash. One
+/// component for three kinds because what they share is the *life counter*, and
+/// three components would be three copies of the ageing system (§6 M37 item 3 —
+/// this is the churn, and it is one archetype and one pass).
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "shooter.spark")]
+#[repr(C)]
+pub struct Spark {
+    /// Metres per tick. Zero for everything but [`SPARK_DEBRIS`].
+    pub velocity: sim::DVec3,
+    /// Ticks left. Zero is dead and is despawned the tick it arrives.
+    pub life: u32,
+    /// One of the `SPARK_*` constants.
+    pub kind: u32,
 }
 
 /// Marks a [`Renderable`] the body collides with. The geometry lives in the
@@ -752,6 +1056,11 @@ pub fn bootstrap(world: &mut GameWorld) {
         return;
     }
     world.put(body, Eye::at(eye_of(&at_start()), 0.0, 0.0));
+    world.put(body, fresh_gun());
+    // The round on its own entity, for `Session`'s reason: `restart` rewrites
+    // the body, and a score the body carried would be a score a kill plane
+    // could clear.
+    world.spawn_with(fresh_range(0));
 
     for (position, half_extent, color) in ROOM {
         let slab = world.spawn_with(Solid { _pad: 0 });
@@ -779,15 +1088,7 @@ pub fn bootstrap(world: &mut GameWorld) {
     // room is open to the sky, so before this the light under a roof was the
     // light beside it — which is the one thing a player standing in a doorway
     // notices without being told to look.
-    world.spawn_with(
-        Sky {
-            zenith: 0x0056_5a60,
-            horizon: 0x006a_6862,
-            ground: 0x0048_423a,
-            ..Sky::daylight(SHELTER_INTENSITY)
-        }
-        .within(SHELTER.0, SHELTER.1, SHELTER_FADE),
-    );
+    world.spawn_with(shelter_sky());
 
     world.spawn_with(Light::sun(SUN, SUN_INK, SUN_INTENSITY));
     for at in LAMPS {
@@ -806,9 +1107,17 @@ pub fn bootstrap(world: &mut GameWorld) {
     // the loudness the ear reported was nowhere near it. A triangle's harmonics
     // fall off as 1/n^2, which is the whole difference; dropping the register
     // and the gain is then arithmetic on a sound that is no longer grating.
+    // The shot is the tree's first `wave::NOISE`, and it is the right waveform
+    // for the reason the jump cue is a triangle: a gunshot is broadband, and
+    // any tone at all would read as a pitch the room does not have. Swept down
+    // and short, so a burst is six separate reports rather than one buzz.
     for (kind, sound) in [
         (CUE_JUMP, chirp(wave::TRIANGLE, 180.0, 260.0, 90, 0.10)),
         (CUE_LAND, chirp(wave::TRIANGLE, 150.0, 110.0, 60, 0.20)),
+        (CUE_SHOT, chirp(wave::NOISE, 1400.0, 420.0, 55, 0.14)),
+        (CUE_HIT, chirp(wave::TRIANGLE, 660.0, 990.0, 70, 0.11)),
+        (CUE_ESCAPE, chirp(wave::TRIANGLE, 240.0, 165.0, 140, 0.13)),
+        (CUE_OVER, chirp(wave::TRIANGLE, 200.0, 85.0, 420, 0.18)),
     ] {
         let entity = world.spawn_with(Cue { kind });
         world.put(entity, sound);
@@ -874,7 +1183,7 @@ pub fn bootstrap(world: &mut GameWorld) {
         world.put(entity, widget);
     }
 
-    for (line, text) in [(HUD_SPEED, "SPEED 0.0"), (HUD_STATE, "GROUND")] {
+    for (line, text) in HUD_ROWS {
         let mut widget = Widget::label(
             [8.0, 6.0 + 14.0 * line as f32, 150.0, 12.0],
             0xffe8_f0ff,
@@ -1011,6 +1320,207 @@ pub fn walk(world: &mut GameWorld) {
     }
 }
 
+/// The shot. After [`walk`] in the table, so the ray leaves the eye where this
+/// tick left it — a hitscan fired from last tick's position disagrees with the
+/// picture the player aimed at, by 110 mm at walking speed.
+pub fn shoot(world: &mut GameWorld) {
+    if session_of(world).paused != 0 {
+        // The trigger and the menu's click are one physical button (see this
+        // crate's `input.toml`), and these two lines are the whole of the
+        // arbitration: the menu is up, so the button is the menu's, and the
+        // trigger is disarmed until it is let go of. The host decides who holds
+        // the *pointer* off the same fact, by a different route (§4.9).
+        world.visit::<&mut Gun>(|_, gun| gun.armed = 0);
+        return;
+    }
+    let mut range = range_of(world);
+    // Held, not the edge: this is an automatic weapon and [`FIRE_TICKS`] is
+    // what makes the rate a rate rather than a measure of how fast a hand can
+    // click.
+    let held = world.pressed(FIRE);
+    let firing = held && range.state == STATE_RUNNING;
+
+    let mut shot = None;
+    world.visit::<(&mut Walker, &mut Gun)>(|_, (walker, gun)| {
+        if gun.recover > 0 {
+            walker.pitch = (walker.pitch - RECOIL_GIVE).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+            gun.recover -= 1;
+        }
+        gun.cooldown = gun.cooldown.saturating_sub(1);
+        if !held {
+            gun.armed = 1;
+        }
+        if !firing || gun.cooldown != 0 || gun.armed == 0 {
+            return;
+        }
+        gun.cooldown = FIRE_TICKS;
+        // Drawn before the kick: the round goes where the player aimed and the
+        // weapon answers afterwards. The other order is a gun that punishes the
+        // shot you have already taken.
+        let yaw = walker.yaw + spread(&mut gun.rng);
+        let pitch = walker.pitch + spread(&mut gun.rng);
+        walker.pitch = (walker.pitch + RECOIL_KICK).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        gun.recover = RECOIL_TICKS;
+        shot = Some((eye_of(walker), yaw, pitch));
+    });
+    let Some((eye, yaw, pitch)) = shot else {
+        return;
+    };
+
+    let (direction, right) = sim::fly_basis(yaw, pitch);
+    let contact = cast(world, eye, direction);
+    range.shots += 1;
+
+    // The tracer comes off a muzzle and the bullet comes off the eye. Not an
+    // inconsistency — item 5's answer is no view model at all, and a streak
+    // that started at the crosshair would read as one anyway while also being
+    // the one thing in the frame with no parallax.
+    let muzzle =
+        eye + right * MUZZLE.0 + sim::DVec3::new(0.0, MUZZLE.1, 0.0) + direction * MUZZLE.2;
+    let end = contact.map_or(eye + direction * SHOT_RANGE, |hit| hit.at);
+    tracer(
+        world,
+        muzzle,
+        direction,
+        yaw,
+        pitch,
+        (end - muzzle).length(),
+    );
+    flash(world, muzzle);
+    cue(world, CUE_SHOT);
+
+    match contact {
+        Some(Contact {
+            at,
+            normal,
+            target: Some((entity, worth)),
+        }) => {
+            world.despawn(entity);
+            range.hits += 1;
+            range.score += worth + STREAK_STEP * range.streak.min(STREAK_CAP);
+            range.streak += 1;
+            range.hitmark = HITMARK_TICKS;
+            burst(world, &mut range.rng, at, normal, HIT_INK);
+            cue(world, CUE_HIT);
+            if range.hits == 1 {
+                world.log(log_level::INFO, "shooter: hit");
+            }
+        }
+        // A wall, or nothing at all: both end the streak, and the difference
+        // between them is a puff of dust. Nothing is reachable — the room is
+        // closed on five sides and open to the sky, so a shot aimed up meets
+        // no surface and its tracer is the one thing this game deals that
+        // leaves the room (§6 M37 item 3).
+        other => {
+            range.streak = 0;
+            if let Some(Contact { at, normal, .. }) = other {
+                burst(world, &mut range.rng, at, normal, DUST_INK);
+            }
+        }
+    }
+    world.visit::<&mut Range>(|_, held| *held = range);
+}
+
+/// The round: age the targets, count the ones that walked, and keep
+/// [`TARGETS_LIVE`] of them standing. After [`shoot`], so a target taken this
+/// tick frees its slot on the same tick and the course is never one short.
+pub fn targets(world: &mut GameWorld) {
+    if session_of(world).paused != 0 {
+        return;
+    }
+    let mut range = range_of(world);
+    range.hitmark = range.hitmark.saturating_sub(1);
+    if range.state != STATE_RUNNING {
+        world.visit::<&mut Range>(|_, held| *held = range);
+        return;
+    }
+
+    let mut escaped = Vec::new();
+    let mut held = Vec::new();
+    world.visit::<(&mut Target, &Renderable)>(|entity, (target, shape)| {
+        target.age += 1;
+        if target.age >= target.life {
+            escaped.push((entity, shape.position));
+        } else {
+            held.push(target.slot);
+        }
+    });
+
+    for (entity, at) in escaped {
+        world.despawn(entity);
+        range.misses += 1;
+        range.streak = 0;
+        burst(
+            world,
+            &mut range.rng,
+            at,
+            sim::DVec3::new(0.0, 1.0, 0.0),
+            ESCAPE_INK,
+        );
+        cue(world, CUE_ESCAPE);
+        if range.misses == 1 {
+            world.log(log_level::INFO, "shooter: escaped");
+        }
+    }
+    // Once: the round is `STATE_OVER` from here and the early return above is
+    // what makes the milestone a milestone rather than a line per tick.
+    if range.misses >= MISSES_ALLOWED {
+        range.state = STATE_OVER;
+        range.best = range.best.max(range.score);
+        cue(world, CUE_OVER);
+        world.log(log_level::INFO, "shooter: over");
+    }
+
+    while range.state == STATE_RUNNING && held.len() < TARGETS_LIVE {
+        let free: Vec<u32> = (0..SPOTS.len() as u32)
+            .filter(|slot| !held.contains(slot))
+            .collect();
+        // `below` is `None` only on an empty range — more targets than places,
+        // which is a table edit and not a tick this can recover inside.
+        let Some(pick) = range.rng.below(free.len() as u32) else {
+            break;
+        };
+        let slot = free[pick as usize];
+        held.push(slot);
+        deal(world, slot);
+    }
+    world.visit::<&mut Range>(|_, held| *held = range);
+}
+
+/// Age everything a shot left behind, and move the one kind that goes anywhere.
+/// Last of the gameplay systems, so a chip dealt this tick is drawn where it was
+/// dealt rather than one step along it.
+pub fn effects(world: &mut GameWorld) {
+    if session_of(world).paused != 0 {
+        return;
+    }
+    world.visit::<(&mut Spark, &mut Renderable)>(|_, (spark, shape)| {
+        if spark.kind != SPARK_DEBRIS {
+            return;
+        }
+        spark.velocity.y -= SPARK_GRAVITY;
+        shape.position += spark.velocity;
+        // Spent where it meets the floor rather than sinking through it. Not a
+        // resolve — a chip is not a body — but it is what keeps every transient
+        // this game deals inside the room's own bounds, which is the claim
+        // §6 M37 item 3 measures rather than assumes.
+        if shape.position.y <= 0.0 {
+            shape.position.y = 0.0;
+            spark.life = 1;
+        }
+    });
+    let mut spent = Vec::new();
+    world.visit::<&mut Spark>(|entity, spark| {
+        spark.life = spark.life.saturating_sub(1);
+        if spark.life == 0 {
+            spent.push(entity);
+        }
+    });
+    for entity in spent {
+        world.despawn(entity);
+    }
+}
+
 /// The pause key, the buttons, and the rectangles they leave behind. Before
 /// [`aim`] in the table, so Escape stops the world on the tick it was pressed
 /// rather than one later — a pause that let a flick through is a pause you can
@@ -1144,10 +1654,31 @@ pub fn present(world: &mut GameWorld) {
     let mut speed = Line::default();
     let _ = write!(speed, "SPEED {}.{}", tenths / 10, tenths % 10);
 
+    let range = range_of(world);
+    let mut score = Line::default();
+    let _ = write!(score, "SCORE {}  X{}", range.score, range.streak + 1);
+    let mut best = Line::default();
+    let _ = write!(best, "BEST {}", range.best.max(range.score));
+    let mut misses = Line::default();
+    let _ = if range.state == STATE_OVER {
+        write!(misses, "OVER - R TO RESTART")
+    } else {
+        write!(misses, "MISS {}/{MISSES_ALLOWED}", range.misses)
+    };
+    let cross = if range.hitmark > 0 {
+        HITMARK_INK
+    } else {
+        CROSS_INK
+    };
+
     world.visit::<(&Hud, &mut Widget)>(|_, (hud, widget)| match hud.line {
         HUD_SPEED => widget.set_text(speed.as_str()),
         HUD_STATE => widget.set_text(if grounded { "GROUND" } else { "AIR" }),
-        _ => {}
+        HUD_SCORE => widget.set_text(score.as_str()),
+        HUD_BEST => widget.set_text(best.as_str()),
+        HUD_MISS => widget.set_text(misses.as_str()),
+        // The four crosshair rects, and nothing else reaches here.
+        _ => widget.color = cross,
     });
 }
 
@@ -1168,12 +1699,259 @@ fn at_start() -> Walker {
     }
 }
 
-/// Put the body back at [`START`]. Not a wipe: the room is `bootstrap`'s and
-/// nothing here could deal it back — and neither the session nor the settings
-/// are the body's to reset.
+/// Put the body back at [`START`] and start a fresh round. Not a wipe: the room
+/// is `bootstrap`'s and nothing here could deal it back — and neither the
+/// session nor the settings are the body's to reset.
+///
+/// The *round* is reset here rather than left alone because that is what `R`
+/// means in a game with a score; [`Range::best`] is the one thing carried
+/// across, which is also the only thing a save would have to carry the day this
+/// game gets one (M14's `--best` is the shape).
 fn respawn(world: &mut GameWorld) {
     world.visit::<&mut Walker>(|_, walker| *walker = at_start());
+    world.visit::<&mut Gun>(|_, gun| *gun = fresh_gun());
+    world.visit::<&mut Range>(|_, range| *range = fresh_range(range.best.max(range.score)));
+    // The course starts empty: a target left standing would be one the new
+    // round did not deal and the old one did not finish, and its slot would be
+    // held by a `Target` whose age belongs to a score that no longer exists.
+    let mut clear = Vec::new();
+    world.visit::<&Target>(|entity, _| clear.push(entity));
+    world.visit::<&Spark>(|entity, _| clear.push(entity));
+    for entity in clear {
+        world.despawn(entity);
+    }
     world.log(log_level::INFO, "shooter: restarted");
+}
+
+/// A cooled weapon on a fresh stream. Seeded from `!`[`SEED`] rather than
+/// [`SEED`]: two generators started at the same state draw the same numbers,
+/// and a spread that agreed with a spawn order would be a correlation nobody
+/// could see and everybody would feel.
+fn fresh_gun() -> Gun {
+    Gun {
+        rng: sim::Rng::from_seed(!SEED),
+        cooldown: 0,
+        recover: 0,
+        armed: 0,
+        _pad: 0,
+    }
+}
+
+/// A round at zero, carrying `best`.
+///
+/// Reseeded from the same constant every time, so every round deals the same
+/// course in the same order. That is a decision and not an oversight: a skill
+/// game whose targets move differently each run is one where a better score can
+/// be a luckier draw, and a fixed course is also what lets a recorded session
+/// be a *session* rather than a seed.
+fn fresh_range(best: u32) -> Range {
+    Range {
+        rng: sim::Rng::from_seed(SEED),
+        score: 0,
+        best,
+        streak: 0,
+        misses: 0,
+        hits: 0,
+        shots: 0,
+        state: STATE_RUNNING,
+        hitmark: 0,
+    }
+}
+
+/// The round as it stands, or the opening one — [`session_of`]'s rule.
+fn range_of(world: &mut GameWorld) -> Range {
+    let mut found = fresh_range(0);
+    world.visit::<&Range>(|_, held| found = *held);
+    found
+}
+
+/// Where a shot landed: the point, the outward normal of the face it met, and
+/// the target it was — `None` being the room itself.
+#[derive(Clone, Copy)]
+struct Contact {
+    at: sim::DVec3,
+    normal: sim::DVec3,
+    target: Option<(gg_ecs::Entity, u32)>,
+}
+
+/// The nearest surface the ray meets, targets and room in one pass — one
+/// because a wall in front of a target has to stop the bullet, and two passes
+/// with two answers would need a third to reconcile them.
+///
+/// `direction` must be unit ([`sim::fly_basis`]'s is), which is what makes the
+/// distances metres rather than multiples of something.
+fn cast(world: &mut GameWorld, from: sim::DVec3, direction: sim::DVec3) -> Option<Contact> {
+    let ray = sim::DRay::new(from, direction);
+    let mut best: Option<(f64, Contact)> = None;
+    world.visit::<(&Target, &Renderable)>(|entity, (target, shape)| {
+        if let Some((distance, normal)) = pierce(ray, shape) {
+            nearer(
+                &mut best,
+                distance,
+                Contact {
+                    at: from + direction * distance,
+                    normal,
+                    target: Some((entity, target.worth)),
+                },
+            );
+        }
+    });
+    world.visit::<(&Solid, &Renderable)>(|_, (_, shape)| {
+        if let Some((distance, normal)) = pierce(ray, shape) {
+            nearer(
+                &mut best,
+                distance,
+                Contact {
+                    at: from + direction * distance,
+                    normal,
+                    target: None,
+                },
+            );
+        }
+    });
+    best.map(|(_, contact)| contact)
+}
+
+/// This game's policy on a span (§6 M37 item 1): **past the muzzle, inside the
+/// weapon's reach**.
+///
+/// `enter <= 0` is the muzzle already inside the box, and that is a miss rather
+/// than a point-blank hit: a target you are standing in is not one you can
+/// shoot, and the *exit* is not the answer either, because a bullet does not
+/// leave through the far face of something it never entered. The editor's pick
+/// answers the same span the opposite way and M35's occlusion answers it a third
+/// — which is why `gg_math::sim` returns the interval and none of the three.
+fn pierce(ray: sim::DRay, shape: &Renderable) -> Option<(f64, sim::DVec3)> {
+    let half = sim::DVec3::new(
+        f64::from(shape.half_extent.x),
+        f64::from(shape.half_extent.y),
+        f64::from(shape.half_extent.z),
+    );
+    let span = ray.obb(shape.position, shape.rotation, half)?;
+    (span.enter > 0.0 && span.enter <= SHOT_RANGE).then_some((span.enter, span.normal))
+}
+
+/// Keep the nearer of two contacts. Strictly nearer, so a target and a wall at
+/// exactly the same distance leave the target standing — the pass that ran
+/// first wins, and targets run first.
+fn nearer(best: &mut Option<(f64, Contact)>, distance: f64, contact: Contact) {
+    if best.is_none_or(|(previous, _)| distance < previous) {
+        *best = Some((distance, contact));
+    }
+}
+
+/// One target at `slot`.
+fn deal(world: &mut GameWorld, slot: u32) {
+    let entity = world.spawn_with(Target {
+        age: 0,
+        life: TARGET_LIFE,
+        slot,
+        worth: TARGET_WORTH,
+    });
+    world.put(
+        entity,
+        Renderable::boxed(
+            SPOTS[slot as usize],
+            sim::Vec3::splat(TARGET_HALF),
+            TARGET_INK,
+        )
+        .surfaced(TARGET_SMOOTHNESS, 0.0),
+    );
+}
+
+/// The bullet's streak: a long thin box lying along the ray that drew it.
+///
+/// [`Renderable`]'s own documentation offers this — "a beam is a long thin box,
+/// and one primitive that stretches beats a second primitive" — and this is the
+/// game that finally needed it. The rotation is built from the shot's own
+/// yaw and pitch rather than fitted to its direction, so the box lies *on* the
+/// ray instead of near it.
+fn tracer(
+    world: &mut GameWorld,
+    from: sim::DVec3,
+    direction: sim::DVec3,
+    yaw: f32,
+    pitch: f32,
+    distance: f64,
+) {
+    let mut shape = Renderable::boxed(
+        from + direction * (distance / 2.0),
+        sim::Vec3::new(TRACER_HALF, TRACER_HALF, distance as f32 / 2.0),
+        TRACER_INK,
+    );
+    shape.rotation = aim_quat(yaw, pitch);
+    let entity = world.spawn_with(Spark {
+        velocity: sim::DVec3::ZERO,
+        life: TRACER_TICKS,
+        kind: SPARK_TRACER,
+    });
+    world.put(entity, shape.surfaced(0.9, 0.0));
+}
+
+/// The muzzle flash: a [`Light`] with a life counter and no geometry at all.
+///
+/// The first light in this tree that appears and vanishes while a scene is being
+/// played (§6 M37 item 4). It is also, by construction, the nearest point light
+/// to the eye whenever it exists — which is exactly the thing the renderer ranks
+/// casting slots by.
+fn flash(world: &mut GameWorld, at: sim::DVec3) {
+    let entity = world.spawn_with(Spark {
+        velocity: sim::DVec3::ZERO,
+        life: FLASH_TICKS,
+        kind: SPARK_FLASH,
+    });
+    world.put(
+        entity,
+        Light::point(at, FLASH_INK, FLASH_INTENSITY, FLASH_RANGE),
+    );
+}
+
+/// Chips off a face: [`SPARKS`] of them, out along the normal and scattered
+/// across it.
+fn burst(world: &mut GameWorld, rng: &mut sim::Rng, at: sim::DVec3, normal: sim::DVec3, ink: u32) {
+    let from = at + normal * f64::from(SPARK_HALF);
+    for _ in 0..SPARKS {
+        let velocity =
+            normal * SPARK_LIFT + sim::DVec3::new(scatter(rng), scatter(rng), scatter(rng));
+        let entity = world.spawn_with(Spark {
+            velocity,
+            life: SPARK_TICKS,
+            kind: SPARK_DEBRIS,
+        });
+        world.put(
+            entity,
+            Renderable::boxed(from, sim::Vec3::splat(SPARK_HALF), ink).surfaced(0.5, 0.0),
+        );
+    }
+}
+
+/// A centred integer draw in `±(SPREAD_STEPS-1)/2`.
+///
+/// Integers and one multiply at each use, because [`sim::Rng`] has **no float
+/// output** on purpose (§6 M18) — and this is the shape that costs nothing for
+/// it: an integer stream is bit-identical on every target with no `libm`
+/// question anywhere near it.
+fn step(rng: &mut sim::Rng) -> i32 {
+    rng.below(SPREAD_STEPS).unwrap_or(0) as i32 - (SPREAD_STEPS as i32 - 1) / 2
+}
+
+/// Radians of aim error on one axis of one shot.
+fn spread(rng: &mut sim::Rng) -> f32 {
+    step(rng) as f32 * SPREAD_UNIT
+}
+
+/// Metres per tick of scatter on one axis of one chip.
+fn scatter(rng: &mut sim::Rng) -> f64 {
+    f64::from(step(rng)) * SPARK_SCATTER
+}
+
+/// The rotation taking a box's local `-Z` onto a shot fired at `yaw`/`pitch` —
+/// yaw about world `+Y`, then pitch about the rotated right axis, which is the
+/// one order [`sim::fly_basis`] builds its forward in.
+fn aim_quat(yaw: f32, pitch: f32) -> sim::DQuat {
+    sim::DQuat::from_axis_angle(sim::DVec3::new(0.0, 1.0, 0.0), f64::from(yaw)).mul(
+        sim::DQuat::from_axis_angle(sim::DVec3::new(1.0, 0.0, 0.0), f64::from(pitch)),
+    )
 }
 
 /// Radians of turn one mouse count is worth at `sens` — [`LOOK_PER_UNIT`] scaled
@@ -1478,9 +2256,10 @@ impl Line {
 #[cfg(feature = "game")]
 gg_ecs::gg_game! {
     components: [
-        Walker, Solid, Cue, Hud, Menu, Session, Renderable, Light, Sky, Eye, Widget, Sound, Prefs
+        Walker, Solid, Cue, Hud, Menu, Session, Gun, Range, Target, Spark,
+        Renderable, Light, Sky, Eye, Widget, Sound, Prefs
     ],
-    actions: ["jump", "restart", "pause", "ui_click", "ui_focus"],
+    actions: ["jump", "restart", "pause", "ui_click", "ui_focus", "fire"],
     axes: ["move_right", "move_forward", "aim_x", "aim_y", "ui_x", "ui_y"],
-    systems: [restart, bootstrap, menu, aim, walk, present],
+    systems: [restart, bootstrap, menu, aim, walk, shoot, targets, effects, present],
 }

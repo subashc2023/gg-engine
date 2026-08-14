@@ -502,6 +502,38 @@ const SCENES: &[Scene] = &[
         },
         render: render_chart,
     },
+    Scene {
+        name: "shooter",
+        // §6 M37's room from inside it — the roster's only first-person
+        // subject, and the first picture of the scene the `ao` and `bounce`
+        // instruments have been measuring all along.
+        //
+        // What it guards that `chart` beside it cannot: `chart` frames the
+        // material grid from four metres square on, which is a studio shot. This
+        // is the eye at [`START`](demo_12_shooter::START) with the player's own
+        // lift and pose, so the picture is the whole room down its long axis —
+        // the two casting lamps at gameplay distance rather than filling the
+        // frame, the shelter's bounded environment (§6 M28) beside the open sky
+        // instead of alone, and the twelve target spots the course deals from,
+        // which is the only reference that would notice a spot moving inside a
+        // wall.
+        //
+        // No HUD: demo 12's overlay is built inside `present`, behind the ABI
+        // this binary cannot reach, and restating the crosshair's rects here
+        // would be the second table §4.10 forbids — the overlay path is already
+        // gated by `ui-overlay`, `ui-text` and `tetris`.
+        //
+        // Judged like `chart`: smooth gradients across every face, plus a
+        // shadow kernel on every contact edge.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.25,
+        },
+        render: render_shooter,
+    },
 ];
 
 /// Demo 12's room with §6 M24's material chart standing in the middle of it.
@@ -1081,6 +1113,112 @@ fn render_lampshade() -> Render {
         "this scene's shadows must be the lamp's and only the lamp's: {:?}",
         frame.order
     );
+    ensure_clean(&renderer.shutdown())?;
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
+}
+
+/// Demo 12's room seen from where the player spawns in it (§6 M37).
+///
+/// Every entity is the demo's own data — [`ROOM`](demo_12_shooter::ROOM),
+/// [`chart`](demo_12_shooter::chart), [`SPOTS`](demo_12_shooter::SPOTS), the
+/// sun, the lamps, the sky and [`shelter_sky`](demo_12_shooter::shelter_sky) —
+/// dealt here rather than by `bootstrap`, which is a system behind the ABI this
+/// binary cannot reach. Same tables, so a slab that moves or a spot that is
+/// re-placed moves this reference instead of diverging from it.
+///
+/// The course is dealt **whole**: a target at every spot, not the three a round
+/// holds. Which three is a draw off `Range::rng` and a reference must not
+/// depend on one, and the full table is also the only thing that would catch a
+/// spot re-placed inside a wall.
+///
+/// The eye is the *player's*, unlike `chart`'s: `START` with the body's own
+/// [`EYE_LIFT`](demo_12_shooter::EYE_LIFT) and the pose
+/// [`at_start`](demo_12_shooter::START) opens on — level, facing the stairs.
+/// That is what makes this the first-person subject rather than a second studio
+/// shot of the same room.
+fn render_shooter() -> Render {
+    use demo_12_shooter as shooter;
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Light, Renderable, Sky};
+
+    let extent = BOXES_EXTENT;
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    world.register::<Light>()?;
+    world.register::<Sky>()?;
+    for (position, half_extent, color) in shooter::ROOM {
+        let slab = world.spawn();
+        world.insert(slab, Renderable::boxed(*position, *half_extent, *color))?;
+    }
+    for (at, smoothness, metallic) in shooter::chart() {
+        let ball = world.spawn();
+        world.insert(
+            ball,
+            Renderable::ball(at, shooter::CHART_RADIUS, shooter::CHART_INK)
+                .surfaced(smoothness, metallic),
+        )?;
+    }
+    for at in shooter::SPOTS {
+        let target = world.spawn();
+        world.insert(
+            target,
+            Renderable::boxed(
+                *at,
+                gg_math::sim::Vec3::splat(shooter::TARGET_HALF),
+                shooter::TARGET_INK,
+            )
+            .surfaced(shooter::TARGET_SMOOTHNESS, 0.0),
+        )?;
+    }
+    let sun = world.spawn();
+    world.insert(
+        sun,
+        Light::sun(shooter::SUN, shooter::SUN_INK, shooter::SUN_INTENSITY),
+    )?;
+    for at in shooter::LAMPS {
+        let lamp = world.spawn();
+        world.insert(
+            lamp,
+            Light::point(
+                at,
+                shooter::LAMP_INK,
+                shooter::LAMP_INTENSITY,
+                shooter::LAMP_RANGE,
+            ),
+        )?;
+    }
+    let sky = world.spawn();
+    world.insert(sky, Sky::daylight(shooter::SKY_INTENSITY))?;
+    let shelter = world.spawn();
+    world.insert(shelter, shooter::shelter_sky())?;
+
+    let eye = gg_math::sim::DVec3::new(
+        shooter::START.x,
+        shooter::START.y + shooter::EYE_LIFT,
+        shooter::START.z,
+    );
+    // Yaw and pitch zero, which is `at_start`'s pose: level, down -z, into the
+    // room. `View::default()` is already that camera, so nothing is overridden.
+    let view = gg_render::View::default();
+    let mut extracted = gg_extract::Extracted::default();
+    extracted.clear(eye, view.frustum(extent));
+    extracted.append::<Renderable>(&world)?;
+    extracted.append_lights(&world)?;
+    extracted.cast_shadows(view.caster_reach(extent));
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(
+        device = %renderer.device().chosen,
+        culled = extracted.culled,
+        "offscreen device"
+    );
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?)
+    })?;
     ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
         pixels: frame.pixels,

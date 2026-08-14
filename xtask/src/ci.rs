@@ -953,6 +953,26 @@ fn aarch64_leg() -> anyhow::Result<()> {
             ]),
             &format!("the recorded platformer run on aarch64 under qemu ({profile} profile)"),
         )?;
+        // demo-12-shooter joins at M37, demo 11's arrangement exactly — and it
+        // is the first of the three whose sim reaches a transcendental every
+        // tick it aims: `sim::fly_basis`, `atan2` and `asin` are what turn a
+        // pointer delta into a direction, and the bullet is cast along it. That
+        // is precisely the arithmetic §4.2.1 hazard 1 bans `std` for, so this
+        // leg is the claim that `gg_math::sim`'s `libm` is the same answer on
+        // the other architecture down to the tick a round connects on.
+        exec(
+            cargo().args([
+                "nextest",
+                "run",
+                "-p",
+                "demo-12-shooter",
+                "--target",
+                "aarch64-unknown-linux-gnu",
+                "--cargo-profile",
+                profile,
+            ]),
+            &format!("the recorded shooter round on aarch64 under qemu ({profile} profile)"),
+        )?;
         no_imported_math(profile)?;
     }
     Ok(())
