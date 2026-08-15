@@ -32,3 +32,10 @@ aim_x = ["MouseX"]
 aim_y = ["MouseY"]
 ui_x = ["PointerX"]
 ui_y = ["PointerY"]
+
+# What still reaches the game while the pause menu is up (§6 M45). `pause` is
+# here because it is the key that *leaves*; `fire` is not, and that is the
+# interesting row — it shares a physical button with `ui_click`, so the two
+# verbs still arrive together at the host and only one of them crosses.
+[game.modal]
+keep = ["pause", "ui_click", "ui_focus", "ui_x", "ui_y"]

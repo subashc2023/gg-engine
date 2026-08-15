@@ -640,13 +640,7 @@ fn drive<T>(
     let mut out = Vec::with_capacity(frames.len());
     let mut previous = idle();
     for (tick, frame) in frames.iter().enumerate() {
-        let ctx = TickCtx {
-            tick: tick as u64,
-            tick_hz: 60,
-            reserved: 0,
-            input: *frame,
-            previous,
-        };
+        let ctx = TickCtx::detached(tick as u64, 60, *frame, previous);
         // SAFETY: the table is this binary's own, its entries live for the
         // process, and `ctx` outlives the call.
         unsafe { world.run_systems(&table, &ctx) }.map_err(SessionError::System)?;

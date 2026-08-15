@@ -94,19 +94,18 @@ impl Game {
     }
 
     fn step(&mut self) {
-        let ctx = TickCtx {
-            tick: self.tick,
-            tick_hz: 60,
-            reserved: 0,
-            input: InputFrame {
+        let ctx = TickCtx::detached(
+            self.tick,
+            60,
+            InputFrame {
                 buttons: self.held,
                 axes: self.axes,
             },
-            previous: InputFrame {
+            InputFrame {
                 buttons: self.previous,
                 axes: [0; boundary::MAX_AXES],
             },
-        };
+        );
         // SAFETY: the table is this binary's own, its entries live for the
         // process, and `ctx` outlives the call.
         unsafe { self.world.run_systems(&self.table, &ctx) }.expect("no system panicked");
@@ -773,7 +772,8 @@ fn escape_stops_the_world_on_the_tick_it_is_pressed() {
 /// And the mouse keeps arriving while it is up — raw device motion is a device
 /// delta and reaches the axis whatever the host does with the pointer — so the
 /// refusal has to be the game's. This is the test that fails if `aim` stops
-/// checking.
+/// checking, and it still is after §6 M45: the host withholds the aim axes too,
+/// but one tick later than this, and in-process there is no host at all.
 #[test]
 fn a_paused_view_does_not_turn_however_hard_the_mouse_moves() {
     let mut game = Game::load();
@@ -785,6 +785,32 @@ fn a_paused_view_does_not_turn_however_hard_the_mouse_moves() {
         game.step();
     }
     assert_eq!(game.walker().yaw, before);
+}
+
+/// The other half, which is the host's (§6 M45): pausing raises the flag the
+/// shell arbitrates on, and this crate's own map says which verbs still cross.
+/// Read as text — a game crate may not link `gg-input` (§3), and the shape being
+/// checked is a line of the file rather than a parse of it.
+#[test]
+fn pausing_raises_the_flag_the_host_withholds_on() {
+    let mut game = Game::load();
+    game.steps(2);
+    assert_eq!(game.prefs().modal, 0, "a running game withholds nothing");
+    game.tap(PAUSE);
+    assert_eq!(game.prefs().modal, 1);
+    game.tap(PAUSE);
+    assert_eq!(game.prefs().modal, 0, "and it comes back down");
+
+    let keep = include_str!("../input.toml")
+        .lines()
+        .find(|line| line.trim_start().starts_with("keep ="))
+        .expect("demo 12 declares a keep list");
+    assert!(
+        !keep.contains("aim_"),
+        "the camera must not turn behind a menu"
+    );
+    assert!(!keep.contains("\"fire\""), "nor the gun fire through it");
+    assert!(keep.contains("\"pause\""), "and Escape must still leave it");
 }
 
 /// Escape layers: out of the settings page, then out of the menu. Two presses

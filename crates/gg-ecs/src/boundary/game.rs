@@ -8,8 +8,8 @@
 //! query costs one FFI call per page of archetypes rather than one per entity.
 
 use gg_abi::{
-    AbiStatus, ActionId, ArchetypeMatch, AxisId, ColumnView, Entity, HostApiV1, InputFrame,
-    MAX_QUERY_COLUMNS, QueryDesc, TickCtx, WorldHandle,
+    AbiStatus, ActionId, ArchetypeMatch, AxisId, Binding, ColumnView, Entity, HostApiV1,
+    InputFrame, MAX_QUERY_COLUMNS, QueryDesc, TickCtx, WorldHandle,
 };
 
 use crate::component::Component;
@@ -122,6 +122,32 @@ impl<'a> GameWorld<'a> {
     #[must_use]
     pub fn axis(&self, axis: AxisId) -> f32 {
         self.ctx.input.axis(axis)
+    }
+
+    /// What `action` is bound to, spelled as the map spells it, in the map's own
+    /// order (§6 M45) — `["A", "Left"]` for a verb bound twice.
+    ///
+    /// Empty when the session was given no map, which every windowed run has one
+    /// of and a bare `--frames` run does not. A legend built from this is a
+    /// legend that cannot drift from `input.toml`, which is the whole point:
+    /// before M45 a game that wanted to tell the player its keys retyped them.
+    pub fn bindings(&self, action: ActionId) -> impl Iterator<Item = &str> {
+        self.binding_table()
+            .iter()
+            .filter(move |b| b.action as usize == action.index())
+            .map(Binding::name)
+    }
+
+    /// The whole table, host-owned and valid for this call.
+    fn binding_table(&self) -> &[Binding] {
+        if self.ctx.bindings.is_null() {
+            return &[];
+        }
+        // SAFETY: the host's contract for `TickCtx::bindings` — non-null with a
+        // nonzero length, `bindings_len` initialized entries, live for the call.
+        // The `&self` borrow ties the slice to the context, which cannot outlive
+        // the tick it was handed for.
+        unsafe { core::slice::from_raw_parts(self.ctx.bindings, self.ctx.bindings_len as usize) }
     }
 
     /// Emit a line into the host's log stream.

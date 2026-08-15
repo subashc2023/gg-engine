@@ -1572,6 +1572,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--progress") {
         progress()?;
     }
+    if only("--keys") {
+        keys()?;
+    }
     if only("--platformer") {
         platformer()?;
     }
@@ -4885,6 +4888,220 @@ fn with_the_node_renamed(source: &str) -> anyhow::Result<String> {
 /// `RESTART`, then room for the new game to start. The press is what makes the
 /// reopened build print the record it inherited.
 const BEST_TAIL: usize = 12;
+
+/// Demo 10's `step`, with the screen guard cut out.
+///
+/// The **losing** build of the arbitration leg, and the reason it has to exist:
+/// every early return M45's draft expected to delete turned out to be a *time*
+/// freeze that gates input as a side effect (§6 M45's finding), so arbitration
+/// changes no hash in a game that guards. What it buys is the game that does
+/// not — and there is no such game in the tree, so the gate builds one.
+fn with_the_screen_guard_cut(source: &str) -> anyhow::Result<String> {
+    let anchor = "    let _ = world.each::<&Screen>(|_, s| playing = s.at == SCREEN_PLAYING);
+    if !playing {
+        return;
+    }
+";
+    anyhow::ensure!(
+        source.contains(anchor),
+        "demo 10's `step` no longer opens with the screen guard — this gate cuts it out by text, \
+         and a missed anchor would build an ordinary demo 10 and pass for the wrong reason"
+    );
+    Ok(source.replace(
+        anchor,
+        "    let _ = world.each::<&Screen>(|_, s| playing = s.at == SCREEN_PLAYING);
+    let _ = playing;
+",
+    ))
+}
+
+/// §6 M45: the legend a player reads is the map's, and the map is the player's.
+///
+/// Four legs, failing in four directions.
+///
+/// 1. A rebind changes the picture. The key column is a `Widget`'s text and a
+///    widget is hashed world state, so a session under a `bindings.cfg` must
+///    **not** hash like one without it — which is what refuses to pass on a
+///    shell that reads the file and never applies it, and on a game whose
+///    legend is still a table in its own source.
+/// 2. A garbage file is not a different game. Every line named and dropped, and
+///    the hashes back to leg 1's unbound sequence exactly — so "the hash moved"
+///    in leg 1 means the rebind and not the file's mere presence.
+/// 3. A replayed session reads none of it. `player_file`'s rule (§6 M42), and
+///    the claim that makes rebinding safe at all: a stream drives verb *ids*, so
+///    the blessed tetris sequence is untouched with a rebind sitting on disk.
+/// 4. Arbitration withholds what the map does not keep. Measured against a
+///    build whose `step` has no screen guard, because a game that guards
+///    already withholds everything and would pass without the feature — which
+///    is M45's own finding: every early return the draft expected to delete
+///    turned out to freeze *time*, and gates input only as a side effect.
+fn keys() -> anyhow::Result<()> {
+    let (host, game) = stage_game(&HASHED_TIERS[0], "demo-10-tetris", "demo_10_tetris")?;
+    let dir = workspace_root().join("target/keys");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let manifest = dir.join("game.ggproj");
+    std::fs::write(&manifest, "title = M45 Keys\n")?;
+    let data = dir.join("data");
+    let file = data.join("m45-keys").join("bindings.cfg");
+    std::fs::create_dir_all(file.parent().unwrap_or(&data))?;
+    let (manifest, data) = (manifest.display().to_string(), data.display().to_string());
+    let env = [("LOCALAPPDATA", data.as_str()), ("XDG_DATA_HOME", &data)];
+    let input = workspace_root().join(DEMO_10.dir).join("input.toml");
+    let input = input.display().to_string();
+    let live = ["--frames", "150", "--project", &manifest, "--input", &input];
+    // Every live run here writes a `progress.ggsave` and the next one resumes it
+    // (§6 M44), so without this each leg would be comparing a fresh boot against
+    // a session that opened at tick 150 — a difference that has nothing to do
+    // with a key. It cost leg 2 a red to find, which is the gate working.
+    let session = file.with_file_name("progress.ggsave");
+    let run = |game: &std::path::Path, args: &[&str]| {
+        let _ = std::fs::remove_file(&session);
+        play_env(&host, game, args, true, &env)
+    };
+    let forget = || {
+        let _ = std::fs::remove_file(&file);
+    };
+
+    // 1. The rebind reaches the picture.
+    forget();
+    let plain = sequence(&run(&game, &live)?)?;
+    // `Left`/`Right` rather than two letters: the row is `A D` unbound and
+    // `Left Right` bound, which is a different *length* as well as different
+    // bytes — so a legend clipped to its column still differs.
+    std::fs::write(
+        &file,
+        "[game.actions]\nleft = [\"Left\"]\nright = [\"Right\"]\n",
+    )?;
+    let log = run(&game, &live)?;
+    anyhow::ensure!(
+        log.contains("the player's own bindings applied"),
+        "the shell did not say it read {}:\n{log}",
+        file.display()
+    );
+    let rebound = sequence(&log)?;
+    let moved = divergence(
+        &("stock keys", plain.clone()),
+        &("rebound", rebound.clone()),
+    );
+    anyhow::ensure!(
+        moved.is_some(),
+        "a session under the player's own bindings hashed exactly like one without them — the \
+         legend is world state, so either the file reached nothing or demo 10 is still drawing a \
+         table of key names from its own source, which is the defect §6 M45 exists to close"
+    );
+
+    // 2. A file this build cannot use is named, dropped, and changes nothing.
+    std::fs::write(
+        &file,
+        "[game.actions]\nsprint = [\"Q\"]\nleft = [\"Sneeze\"]\n[nowhere.axes]\nui_x = [\"MouseX\"]\n",
+    )?;
+    let log = run(&game, &live)?;
+    for named in ["sprint", "left", "nowhere.axes"] {
+        anyhow::ensure!(
+            log.contains(named),
+            "the shell dropped `{named}` from {} without naming it — this is a file the player \
+             owns and every line it could not use has to come back at them:\n{log}",
+            file.display()
+        );
+    }
+    let garbage = sequence(&log)?;
+    anyhow::ensure!(
+        divergence(&("stock keys", plain.clone()), &("garbage", garbage)).is_none(),
+        "a bindings file made entirely of lines this build refused still moved the hash — then \
+         leg 1's difference is the file's presence rather than the rebind in it"
+    );
+
+    // 3. And a replay reads none of it.
+    let replay = tetris_path();
+    let replay = replay.display().to_string();
+    std::fs::write(
+        &file,
+        "[game.actions]\nleft = [\"Left\"]\nright = [\"Right\"]\n",
+    )?;
+    let played = [
+        "--replay",
+        &replay,
+        "--frames",
+        "200",
+        "--project",
+        &manifest,
+        "--input",
+        &input,
+    ];
+    let log = run(&game, &played)?;
+    anyhow::ensure!(
+        !log.contains("the player's own bindings applied"),
+        "a replayed session read the player's bindings — a blessed stream must land against the \
+         map it was recorded with, or an operator's own keyboard would diverge the gate:\n{log}"
+    );
+    forget();
+    let bare = sequence(&run(&game, &played)?)?;
+    let with_file = sequence(&log)?;
+    anyhow::ensure!(
+        divergence(&("no file", bare), &("a rebind on disk", with_file)).is_none(),
+        "a replayed session hashed differently with a `bindings.cfg` present — rebinding is only \
+         safe because a recording drives action ids and never keys"
+    );
+
+    // 4. Arbitration, against the build that forgot to guard.
+    let source = std::fs::read_to_string(workspace_root().join(DEMO_10.dir).join("src/lib.rs"))?;
+    write_variant(DEMO_10, "keys", &with_the_screen_guard_cut(&source)?)?;
+    let unguarded = build_variant(DEMO_10, "keys")?;
+    // Driven by a stream authored here, and it has to be: the blessed one leaves
+    // the title screen within a few ticks, and what this leg needs is a session
+    // that *stays* modal with a gameplay verb held down. Ninety ticks of `left`
+    // and nothing else — START is never pressed, so the title never goes.
+    let mut held_left = [gg_input::InputFrame::default(); 90];
+    for frame in &mut held_left {
+        frame.buttons = 1 << demo_10_tetris::LEFT.index();
+    }
+    let stream = dir.join("title.ggrp");
+    std::fs::write(&stream, tetris_stream(&held_left).encode())?;
+    let stream = stream.display().to_string();
+
+    // The falsification is the same map with its `[game.modal]` table cut off,
+    // which is arbitration *off*: an empty `keep` withholds nothing, so the only
+    // difference between these two runs is the table.
+    let text = std::fs::read_to_string(&input)?;
+    let (open, _) = text.split_once("[game.modal]").ok_or_else(|| {
+        anyhow::anyhow!("demo 10's map no longer declares a `[game.modal]` table")
+    })?;
+    let opened = dir.join("open.toml");
+    std::fs::write(&opened, open)?;
+    let opened = opened.display().to_string();
+    let driven = |map: &str| {
+        vec![
+            "--replay".to_owned(),
+            stream.clone(),
+            "--frames".to_owned(),
+            "90".to_owned(),
+            "--project".to_owned(),
+            manifest.clone(),
+            "--input".to_owned(),
+            map.to_owned(),
+        ]
+    };
+    fn borrow(args: &[String]) -> Vec<&str> {
+        args.iter().map(String::as_str).collect()
+    }
+    forget();
+    let (arbitrated, unarbitrated) = (driven(&input), driven(&opened));
+    let held = sequence(&run(&unguarded, &borrow(&arbitrated))?)?;
+    let loose = sequence(&run(&unguarded, &borrow(&unarbitrated))?)?;
+    anyhow::ensure!(
+        divergence(&("arbitrated", held), &("no keep list", loose)).is_some(),
+        "a build with no screen guard slid its piece behind its own title screen whether the map \
+         withheld `left` or not — which is the whole of what `[game.modal]` buys, since every \
+         guard it was meant to replace turned out to be a time freeze (§6 M45)"
+    );
+
+    println!(
+        "xtask reload: the legend is the map's answer, a rebind moves it, a replay ignores it, \
+         and `keep` withholds what a game forgot to guard (§6 M45)"
+    );
+    Ok(())
+}
 
 /// M42's own gap, closed (§6 M44): **a shipped game forgot every score at exit**.
 ///

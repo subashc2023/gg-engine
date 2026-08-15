@@ -13,7 +13,7 @@
 //! sidesteps cross-dylib unwinding entirely.
 
 use crate::host::WorldHandle;
-use crate::input::InputFrame;
+use crate::input::{Binding, InputFrame};
 
 /// What a system is handed each tick.
 ///
@@ -39,6 +39,44 @@ pub struct TickCtx {
     pub input: InputFrame,
     /// Last tick's, for edges.
     pub previous: InputFrame,
+    /// [`bindings_len`](Self::bindings_len) spellings of this session's map (§6
+    /// M45), host-owned and valid for the call — never null when the length is
+    /// nonzero. A *pointer* and not a value, unlike the two frames above: the
+    /// table is the same every tick, and 64 actions of them would be four
+    /// kilobytes copied per tick to say something that did not change.
+    pub bindings: *const Binding,
+    /// Entries at [`bindings`](Self::bindings). Zero is a session with no map,
+    /// which is every run given no `--input`.
+    pub bindings_len: u32,
+    /// Must be zero — [`reserved`](Self::reserved)'s reason, for the hole the
+    /// pointer's alignment would otherwise leave at the end.
+    pub reserved2: u32,
+}
+
+impl TickCtx {
+    /// A context with no binding table — what an in-process harness builds
+    /// (§6 M45): there is no map to spell verbs out of and no host to own one,
+    /// so [`GameWorld::bindings`][b] reads empty and a legend comes out blank.
+    ///
+    /// [b]: ../gg_ecs/boundary/struct.GameWorld.html#method.bindings
+    #[must_use]
+    pub const fn detached(
+        tick: u64,
+        tick_hz: u32,
+        input: InputFrame,
+        previous: InputFrame,
+    ) -> Self {
+        Self {
+            tick,
+            tick_hz,
+            reserved: 0,
+            input,
+            previous,
+            bindings: core::ptr::null(),
+            bindings_len: 0,
+            reserved2: 0,
+        }
+    }
 }
 
 /// A system's outcome.

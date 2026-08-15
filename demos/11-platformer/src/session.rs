@@ -416,13 +416,7 @@ fn drive<T>(
     let mut previous = idle();
     for (offset, frame) in frames.iter().enumerate() {
         let tick = opening + offset as u64;
-        let ctx = TickCtx {
-            tick,
-            tick_hz: 60,
-            reserved: 0,
-            input: *frame,
-            previous,
-        };
+        let ctx = TickCtx::detached(tick, 60, *frame, previous);
         // SAFETY: the table is this binary's own, its entries live for the
         // process, and `ctx` outlives the call.
         unsafe { world.run_systems(&table, &ctx) }.map_err(SessionError::System)?;
@@ -511,13 +505,7 @@ impl Bot {
 
     /// Run one tick under `frame` and record it.
     fn play(&mut self, frame: InputFrame) -> Result<(), SessionError> {
-        let ctx = TickCtx {
-            tick: self.tick,
-            tick_hz: 60,
-            reserved: 0,
-            input: frame,
-            previous: self.previous,
-        };
+        let ctx = TickCtx::detached(self.tick, 60, frame, self.previous);
         // SAFETY: as `drive` — this binary's own table, `ctx` outlives the call.
         unsafe { self.world.run_systems(&self.table, &ctx) }.map_err(SessionError::System)?;
         self.tick += 1;

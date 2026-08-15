@@ -60,7 +60,7 @@ impl Game {
             let declared = world.adopt(&gg_game_components()).unwrap();
             (gg_game_systems(), declared)
         };
-        assert_eq!(declared, 16, "thirteen of ours and the protocol's three");
+        assert_eq!(declared, 17, "fourteen of ours and the protocol's three");
         Game {
             world,
             table,
@@ -89,19 +89,18 @@ impl Game {
     }
 
     fn step(&mut self) {
-        let ctx = TickCtx {
-            tick: self.tick,
-            tick_hz: 60,
-            reserved: 0,
-            input: InputFrame {
+        let ctx = TickCtx::detached(
+            self.tick,
+            60,
+            InputFrame {
                 buttons: self.held,
                 axes: [0; gg_ecs::boundary::MAX_AXES],
             },
-            previous: InputFrame {
+            InputFrame {
                 buttons: self.previous,
                 axes: [0; gg_ecs::boundary::MAX_AXES],
             },
-        };
+        );
         // SAFETY: the table is this binary's own, its entries live for the
         // process, and `ctx` outlives the call.
         unsafe { self.world.run_systems(&self.table, &ctx) }.expect("no system panicked");
@@ -258,7 +257,7 @@ fn the_shape_table_is_seven_tetrominoes() {
 /// so adding a legend row does not fail a number nobody can place.
 fn expected_widgets() -> usize {
     let chrome = 4 + 1; // four panels and the well's surround
-    let text = demo_10_tetris::KEYS.len() * 2 + 8 + 4 + 3; // legend, captions, values, banner
+    let text = demo_10_tetris::LEGEND.len() * 2 + 8 + 4 + 3; // legend, captions, values, banner
     (HEIGHT - HIDDEN) * WIDTH + 32 + chrome + text + MENU.len()
 }
 

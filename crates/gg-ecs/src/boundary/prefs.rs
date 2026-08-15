@@ -15,7 +15,9 @@
 //! [`close`](Prefs::close) of 0 is a session that keeps running — which is the
 //! constraint that decided both spellings: an "antialiasing on" whose zero was
 //! *off* would silently un-antialias a reloaded game, and a `keep_running` flag
-//! would end every session a migration touched.
+//! would end every session a migration touched. M45's
+//! [`modal`](Prefs::modal) keeps it too, and needed the same care: a
+//! `gameplay_live` flag would have suppressed every migrated game's controls.
 
 use crate::Component;
 
@@ -120,6 +122,21 @@ pub struct Prefs {
     /// Monotone rather than an edge: a game sets it once and the session is
     /// over, so there is no tick on which anyone has to remember to clear it.
     pub close: u32,
+    /// Nonzero while a modal screen is up: the host then delivers only the verbs
+    /// the map's `keep` list names and reads every other action and axis as idle
+    /// (§6 M45). Zero is a game nobody is arbitrating for, which is what every
+    /// game got before M45 and what one with no menu still gets.
+    ///
+    /// **Read on the tick after it is written, and that is the correct tick.**
+    /// The screen a player sees at tick N+1 is the one the game declared at N —
+    /// widgets reach the glass the same way — so suppression and the picture it
+    /// belongs to move together. What it replaces is an early return per system
+    /// per game, which no compiler ever asked for and which demo 12 had five of.
+    ///
+    /// Not a preference, like [`close`](Self::close), and the second of those:
+    /// a third is the signal to split this type into what the player asked for
+    /// and what the game is telling the host.
+    pub modal: u32,
 }
 
 impl Prefs {
@@ -165,6 +182,12 @@ impl Prefs {
     pub fn closing(&self) -> bool {
         self.close != 0
     }
+
+    /// Whether a modal screen is up and gameplay verbs are to be withheld.
+    #[must_use]
+    pub fn modal(&self) -> bool {
+        self.modal != 0
+    }
 }
 
 /// The player's own file: [`Prefs`] as text, so a setting survives the process
@@ -189,10 +212,11 @@ pub mod settings {
     pub const FILE: &str = "settings.cfg";
 
     /// The keys the file answers to, in the order [`encode`] writes them.
-    /// `close` is absent **by name**: it is the quit button's edge, not a
-    /// preference, and a file carrying it would end every session that opened
-    /// one. A field added to [`Prefs`] is not persisted until it is added here,
-    /// which is the review this table exists to force.
+    /// `close` and `modal` are absent **by name**: neither is a preference —
+    /// one is the quit button's edge and the other is which screen is up — and a
+    /// file carrying them would end every session that opened one, or open one
+    /// with its controls already withheld. A field added to [`Prefs`] is not
+    /// persisted until it is added here, which is the review this table forces.
     #[allow(clippy::type_complexity)]
     const KEYS: [(&str, fn(&Prefs) -> u32, fn(&mut Prefs, u32)); 3] = [
         ("cursor", |p| p.cursor, |p, v| p.cursor = v),
@@ -247,7 +271,7 @@ mod tests {
     fn the_protocol_type_is_flat_and_padding_free() {
         // `Pod` already refuses padding; this pins the number so a field added
         // is a visible edit rather than a silent layout move.
-        assert_eq!(size_of::<Prefs>(), 16);
+        assert_eq!(size_of::<Prefs>(), 20);
         assert_eq!(align_of::<Prefs>(), 4);
     }
 
@@ -263,6 +287,10 @@ mod tests {
         assert_eq!(zeroed.antialias(), None, "the host's knob is left alone");
         assert_eq!(zeroed.samples(), None, "and so is the other one");
         assert!(!zeroed.closing());
+        assert!(
+            !zeroed.modal(),
+            "a migrated game is not a game with no controls"
+        );
         assert_eq!(zeroed, Prefs::default(), "and `..Default::default()` is it");
     }
 
@@ -281,6 +309,7 @@ mod tests {
                 quiet: 0,
                 aa,
                 close: 0,
+                modal: 0,
             };
             (prefs.antialias(), prefs.samples())
         };
@@ -302,6 +331,7 @@ mod tests {
             quiet: 0,
             aa: 0,
             close: 0,
+            modal: 0,
         };
         assert!(!prefs.hardware_cursor());
     }
@@ -314,6 +344,7 @@ mod tests {
                 quiet,
                 aa: 0,
                 close: 0,
+                modal: 0,
             }
             .volume()
         };
@@ -330,6 +361,7 @@ mod tests {
             quiet: 512,
             aa: aa::MSAA_4,
             close: 0,
+            modal: 0,
         };
         let (back, stale) = settings::decode(&settings::encode(&prefs));
         assert_eq!(back, prefs);

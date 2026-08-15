@@ -133,19 +133,18 @@ impl Game {
     fn step(&mut self) {
         let mut axes = [0; boundary::MAX_AXES];
         axes[MOVE.index()] = self.stick;
-        let ctx = TickCtx {
-            tick: self.tick,
-            tick_hz: 60,
-            reserved: 0,
-            input: InputFrame {
+        let ctx = TickCtx::detached(
+            self.tick,
+            60,
+            InputFrame {
                 buttons: self.held,
                 axes,
             },
-            previous: InputFrame {
+            InputFrame {
                 buttons: self.previous,
                 axes: [0; boundary::MAX_AXES],
             },
-        };
+        );
         // SAFETY: the table is this binary's own, its entries live for the
         // process, and `ctx` outlives the call.
         unsafe { self.world.run_systems(&self.table, &ctx) }.expect("no system panicked");

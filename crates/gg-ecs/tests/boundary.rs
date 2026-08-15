@@ -231,13 +231,12 @@ impl Loaded {
     /// One tick, through the host driver the shell uses — not a loop written
     /// here, so what these tests exercise is what `gg-runtime` runs.
     fn tick(&self, world: &mut World, tick: u64) -> Result<(), gg_ecs::boundary::SystemPanic> {
-        let ctx = TickCtx {
+        let ctx = TickCtx::detached(
             tick,
-            tick_hz: 60,
-            reserved: 0,
-            input: gg_abi::InputFrame::default(),
-            previous: gg_abi::InputFrame::default(),
-        };
+            60,
+            gg_abi::InputFrame::default(),
+            gg_abi::InputFrame::default(),
+        );
         // SAFETY: the table is this binary's own and its entries live for the
         // process; `ctx` outlives the call.
         unsafe { world.run_systems(&self.table, &ctx) }
@@ -735,13 +734,12 @@ fn iteration_order_across_the_boundary_is_the_hosts_order() {
     let mut seen = Vec::new();
     {
         let handle = boundary::handle(&mut world);
-        let ctx = TickCtx {
-            tick: 0,
-            tick_hz: 60,
-            reserved: 0,
-            input: gg_abi::InputFrame::default(),
-            previous: gg_abi::InputFrame::default(),
-        };
+        let ctx = TickCtx::detached(
+            0,
+            60,
+            gg_abi::InputFrame::default(),
+            gg_abi::InputFrame::default(),
+        );
         // SAFETY: `handle` is this world's and `ctx` outlives the borrow; the
         // host table was installed by `load`.
         let mut game = unsafe { GameWorld::new(handle, &ctx) };
@@ -771,13 +769,7 @@ fn the_tick_context_answers_edges_without_the_system_keeping_state() {
     let mut input = gg_abi::InputFrame::default();
     input.buttons |= 1 << action.index();
 
-    let ctx = TickCtx {
-        tick: 12,
-        tick_hz: 60,
-        reserved: 0,
-        input,
-        previous: gg_abi::InputFrame::default(),
-    };
+    let ctx = TickCtx::detached(12, 60, input, gg_abi::InputFrame::default());
     // SAFETY: as the previous test.
     let game = unsafe { GameWorld::new(handle, &ctx) };
     assert!(game.pressed(action));

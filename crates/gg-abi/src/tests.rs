@@ -74,8 +74,32 @@ fn tick_ctx_has_no_implicit_padding() {
     // Two `InputFrame`s, so both numbers move with `MAX_AXES` — 16 bytes of
     // header, then this tick's frame and the one before it.
     assert_eq!(offset_of!(TickCtx, previous), 88);
-    assert_eq!(size_of::<TickCtx>(), 160);
+    // Then the binding table (§6 M45) — a pointer, which is what makes the
+    // trailing `reserved2` necessary rather than decorative.
+    assert_eq!(offset_of!(TickCtx, bindings), 160);
+    assert_eq!(offset_of!(TickCtx, bindings_len), 168);
+    assert_eq!(offset_of!(TickCtx, reserved2), 172);
+    assert_eq!(size_of::<TickCtx>(), 176);
     assert_eq!(align_of::<TickCtx>(), 8);
+}
+
+#[test]
+fn a_binding_name_is_a_fixed_cell_that_cuts_on_a_character_boundary() {
+    assert_eq!(size_of::<Binding>(), 8 + BINDING_NAME);
+    assert_eq!(align_of::<Binding>(), 4);
+    assert_eq!(offset_of!(Binding, name_len), 4);
+
+    let escape = Binding::new(ActionId::new(3), "Escape");
+    assert_eq!((escape.action, escape.name()), (3, "Escape"));
+    // Every spelling the key list can produce fits, so truncation is a property
+    // of the type rather than something a real map reaches.
+    let long = Binding::new(ActionId::new(0), &"é".repeat(BINDING_NAME));
+    assert_eq!(
+        long.name().len(),
+        BINDING_NAME,
+        "and cut between characters"
+    );
+    assert!(long.name().chars().all(|c| c == 'é'));
 }
 
 #[test]

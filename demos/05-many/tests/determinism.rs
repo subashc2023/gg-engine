@@ -75,13 +75,7 @@ fn sequence() -> Vec<u128> {
     let mut hashes = Vec::with_capacity(TICKS);
     for tick in 0..TICKS {
         let input = scripted(tick);
-        let ctx = TickCtx {
-            tick: tick as u64,
-            tick_hz: 60,
-            reserved: 0,
-            input,
-            previous,
-        };
+        let ctx = TickCtx::detached(tick as u64, 60, input, previous);
         // SAFETY: the table is this binary's own and `ctx` outlives the call.
         unsafe { world.run_systems(&table, &ctx) }.expect("no system panicked");
         // Before the hash, exactly where the shell runs it (§4.7) — which is
@@ -161,13 +155,7 @@ fn the_hierarchy_is_inside_what_the_hash_covers() {
     let mut without = Vec::with_capacity(TICKS);
     for tick in 0..TICKS {
         let input = scripted(tick);
-        let ctx = TickCtx {
-            tick: tick as u64,
-            tick_hz: 60,
-            reserved: 0,
-            input,
-            previous,
-        };
+        let ctx = TickCtx::detached(tick as u64, 60, input, previous);
         // SAFETY: as above.
         unsafe { world.run_systems(&table, &ctx) }.expect("no system panicked");
         without.push(world.canonical_hash().get());

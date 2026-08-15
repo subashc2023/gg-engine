@@ -71,13 +71,7 @@ impl Game {
     /// One tick with `frame` held. The previous frame is carried the way the
     /// shell carries it, so `just_pressed` means what it means in a real run.
     fn step(&mut self, frame: InputFrame) {
-        let ctx = TickCtx {
-            tick: self.tick,
-            tick_hz: 60,
-            reserved: 0,
-            input: frame,
-            previous: self.previous,
-        };
+        let ctx = TickCtx::detached(self.tick, 60, frame, self.previous);
         // SAFETY: the table is this binary's own, its entries live for the
         // process, and `ctx` outlives the call.
         unsafe { self.world.run_systems(&self.table, &ctx) }.expect("no system panicked");

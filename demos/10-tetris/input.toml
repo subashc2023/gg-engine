@@ -31,3 +31,16 @@ back = ["Escape"]
 [game.axes]
 ui_x = ["PointerX"]
 ui_y = ["PointerY"]
+
+# What still reaches the game while a menu is up (§6 M45). The game raises
+# `Prefs::modal`; the host then withholds every verb this list does not name, so
+# no system has to ask which screen it is on. The seven here are the ones a menu
+# *is*: the pointer that clicks it, the click, the focus key, the two verbs that
+# open and leave it, and `restart` — which is START on the title screen and so
+# the key that begins the game. Leaving `restart` out is what `xtask reload
+# --menu` caught, and it reads exactly like a misplaced click: the tour reached
+# six of ten milestones because PLAY on the keyboard did nothing. A `left`
+# delivered behind the pause plate, by contrast, would slide a piece nobody can
+# see moving, which is why it is not here.
+[game.modal]
+keep = ["pause", "back", "restart", "ui_click", "ui_focus", "ui_x", "ui_y"]

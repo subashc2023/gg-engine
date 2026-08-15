@@ -52,6 +52,13 @@ pub const fn gg_abi::input::ActionId::new(usize) -> Self
 impl gg_abi::input::AxisId
 pub const fn gg_abi::input::AxisId::index(self) -> usize
 pub const fn gg_abi::input::AxisId::new(usize) -> Self
+#[repr(C)] pub struct gg_abi::input::Binding
+pub gg_abi::input::Binding::action: u32
+pub gg_abi::input::Binding::name: [u8; 16]
+pub gg_abi::input::Binding::name_len: u32
+impl gg_abi::input::Binding
+pub fn gg_abi::input::Binding::name(&self) -> &str
+pub fn gg_abi::input::Binding::new(gg_abi::input::ActionId, &str) -> Self
 #[repr(C)] pub struct gg_abi::input::InputFrame
 pub gg_abi::input::InputFrame::axes: [i32; 16]
 pub gg_abi::input::InputFrame::buttons: u64
@@ -59,6 +66,7 @@ impl gg_abi::input::InputFrame
 pub fn gg_abi::input::InputFrame::axis(&self, gg_abi::input::AxisId) -> f32
 pub const fn gg_abi::input::InputFrame::pressed(&self, gg_abi::input::ActionId) -> bool
 pub const gg_abi::input::AXIS_SCALE: i32
+pub const gg_abi::input::BINDING_NAME: usize
 pub const gg_abi::input::MAX_ACTIONS: usize
 pub const gg_abi::input::MAX_AXES: usize
 pub mod gg_abi::layout
@@ -122,11 +130,16 @@ pub gg_abi::system::SystemsTable::entries: *const gg_abi::system::SystemEntry
 pub gg_abi::system::SystemsTable::len: u32
 pub gg_abi::system::SystemsTable::reserved: u32
 #[repr(C)] pub struct gg_abi::system::TickCtx
+pub gg_abi::system::TickCtx::bindings: *const gg_abi::input::Binding
+pub gg_abi::system::TickCtx::bindings_len: u32
 pub gg_abi::system::TickCtx::input: gg_abi::input::InputFrame
 pub gg_abi::system::TickCtx::previous: gg_abi::input::InputFrame
 pub gg_abi::system::TickCtx::reserved: u32
+pub gg_abi::system::TickCtx::reserved2: u32
 pub gg_abi::system::TickCtx::tick: u64
 pub gg_abi::system::TickCtx::tick_hz: u32
+impl gg_abi::system::TickCtx
+pub const fn gg_abi::system::TickCtx::detached(u64, u32, gg_abi::input::InputFrame, gg_abi::input::InputFrame) -> Self
 pub type gg_abi::system::SystemFn = fn(*mut gg_abi::host::WorldHandle, *const gg_abi::system::TickCtx) -> gg_abi::system::SystemStatus
 pub mod gg_abi::verb
 #[repr(C)] pub struct gg_abi::verb::VerbName
@@ -162,6 +175,13 @@ pub const gg_abi::query::ArchetypeMatch::EMPTY: Self
 impl gg_abi::input::AxisId
 pub const fn gg_abi::input::AxisId::index(self) -> usize
 pub const fn gg_abi::input::AxisId::new(usize) -> Self
+#[repr(C)] pub struct gg_abi::Binding
+pub gg_abi::Binding::action: u32
+pub gg_abi::Binding::name: [u8; 16]
+pub gg_abi::Binding::name_len: u32
+impl gg_abi::input::Binding
+pub fn gg_abi::input::Binding::name(&self) -> &str
+pub fn gg_abi::input::Binding::new(gg_abi::input::ActionId, &str) -> Self
 #[repr(C)] pub struct gg_abi::ColumnView
 pub gg_abi::ColumnView::len: usize
 pub gg_abi::ColumnView::ptr: *mut u8
@@ -243,11 +263,16 @@ pub gg_abi::SystemsTable::entries: *const gg_abi::system::SystemEntry
 pub gg_abi::SystemsTable::len: u32
 pub gg_abi::SystemsTable::reserved: u32
 #[repr(C)] pub struct gg_abi::TickCtx
+pub gg_abi::TickCtx::bindings: *const gg_abi::input::Binding
+pub gg_abi::TickCtx::bindings_len: u32
 pub gg_abi::TickCtx::input: gg_abi::input::InputFrame
 pub gg_abi::TickCtx::previous: gg_abi::input::InputFrame
 pub gg_abi::TickCtx::reserved: u32
+pub gg_abi::TickCtx::reserved2: u32
 pub gg_abi::TickCtx::tick: u64
 pub gg_abi::TickCtx::tick_hz: u32
+impl gg_abi::system::TickCtx
+pub const fn gg_abi::system::TickCtx::detached(u64, u32, gg_abi::input::InputFrame, gg_abi::input::InputFrame) -> Self
 #[repr(C)] pub struct gg_abi::VerbName
 pub gg_abi::VerbName::name: *const u8
 pub gg_abi::VerbName::name_len: u32
@@ -259,6 +284,7 @@ pub gg_abi::VerbsTable::axes: *const gg_abi::verb::VerbName
 pub gg_abi::VerbsTable::axis_len: u32
 #[repr(C)] pub struct gg_abi::WorldHandle
 pub const gg_abi::AXIS_SCALE: i32
+pub const gg_abi::BINDING_NAME: usize
 pub const gg_abi::BOUNDARY_FINGERPRINT: [u8; 32]
 pub const gg_abi::BOUNDARY_FINGERPRINT_HEX: &str
 pub const gg_abi::FINGERPRINT_BYTES: usize

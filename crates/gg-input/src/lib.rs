@@ -34,10 +34,21 @@ pub mod map;
 pub mod replay;
 pub mod state;
 
+/// The player's own bindings, in the game's data directory beside
+/// `settings.cfg` (§6 M45). The map's own format, and the rows in it replace
+/// the project's rather than adding to them — see [`ActionMap::overlay`].
+///
+/// Here rather than in the shell for [`settings::FILE`][sf]'s reason: the format
+/// is this crate's, so the name of the file that holds it is too.
+///
+/// [sf]: ../gg_ecs/boundary/settings/constant.FILE.html
+pub const BINDINGS_FILE: &str = "bindings.cfg";
+
 pub use drive::Drive;
 pub use key::{Key, MouseAxis, MouseButton, Wheel};
 pub use map::{
-    ActionId, ActionMap, AxisId, AxisSource, ContextId, MAX_ACTIONS, MAX_AXES, MapError, Source,
+    ActionId, ActionMap, AxisId, AxisSource, ContextId, Keep, MAX_ACTIONS, MAX_AXES, MapError,
+    Source,
 };
 pub use replay::{ENGINE_COMMIT, Recorder, Replay, ReplayError, ReplayMeta, Segment};
 pub use state::{AXIS_SCALE, Input, InputFrame};

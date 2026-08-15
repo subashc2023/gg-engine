@@ -440,8 +440,7 @@ mod tests {
                 Prefs {
                     cursor: cursor::SOFTWARE,
                     quiet: QUIET_MAX / 2,
-                    aa: 0,
-                    close: 0,
+                    ..Default::default()
                 },
             )
             .unwrap();

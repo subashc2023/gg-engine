@@ -1206,6 +1206,13 @@ pub fn aim(world: &mut GameWorld) {
         // Raw device motion arrives whether the host holds the pointer or not —
         // it is a *device* delta, not a position — so a paused game that did not
         // refuse it would spin the camera behind its own menu.
+        //
+        // Kept after §6 M45 gave the host `keep`, and the reason is the one
+        // thing the milestone measured: arbitration reads `Prefs::modal` as the
+        // *last* tick left it, so it is exact in the steady state and one tick
+        // late on the entering edge — and this file's whole point (`menu` before
+        // `aim` in the table) is that Escape stops the world on the tick it was
+        // pressed. Belt and braces, with the braces named.
         return;
     }
     let per_count = look_per_count(session.sens);
@@ -1579,6 +1586,11 @@ pub fn menu(world: &mut GameWorld) {
         _ => {}
     }
 
+    // What the host arbitrates on (§6 M45), and the same fact `lay_out` hides
+    // the widgets by: the menu is up, so the map's `keep` list decides what
+    // still reaches the game. It is written from the session *this* tick ends
+    // on and read on the next, which is the tick that menu is on the glass for.
+    prefs.modal = u32::from(session.paused != 0);
     world.visit::<&mut Session>(|_, held| *held = session);
     world.visit::<&mut Prefs>(|_, held| *held = prefs);
     if respawning {

@@ -52,13 +52,7 @@ impl Game {
     }
 
     fn step(&mut self) {
-        let ctx = TickCtx {
-            tick: self.tick,
-            tick_hz: 60,
-            reserved: 0,
-            input: InputFrame::default(),
-            previous: InputFrame::default(),
-        };
+        let ctx = TickCtx::detached(self.tick, 60, InputFrame::default(), InputFrame::default());
         // SAFETY: the table is this binary's own, its entries live for the
         // process, and `ctx` outlives the call.
         unsafe { self.world.run_systems(&self.table, &ctx) }.expect("no system panicked");

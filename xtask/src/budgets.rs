@@ -160,9 +160,23 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   two lines of `match` and a `keep_progress` flag, and there is nowhere below
 ///   the shell that knows a launch is at stake.
 ///
+/// - **The keys a player owns** (1545 -> 1585, §6 M45): three seams, and each is
+///   one the shell is the only place for. The player's `bindings.cfg` is read
+///   beside `settings.cfg` and through the same `player_file` rule, so it is
+///   where that rule already lives. The binding table reaches a game through
+///   `TickCtx`, which the shell is the only thing that builds. And arbitration
+///   is one `match` over the frame between the recorder and the systems table —
+///   the recorder holds what the operator did and the game must be handed what
+///   the map allows, and there is exactly one line where those two are both in
+///   scope. What did **not** stay here is the cost that could move: the
+///   spellings and the `keep` mask are `gg_input::Input`'s caches, rebuilt
+///   wherever the map or the context stack moves, because a shell that rebuilt
+///   them by hand is a shell that forgets to at the next reload.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
-/// (play mode), M18 item 2 (audio), M43 (clips) — each argued the same way.
-const SHELL_BUDGET: usize = 1545;
+/// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session) — each
+/// argued the same way.
+const SHELL_BUDGET: usize = 1585;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

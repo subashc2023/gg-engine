@@ -260,7 +260,15 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
         .as_ref()
         .map(|path| -> anyhow::Result<_> { Ok(Box::new(Replay::decode(&std::fs::read(path)?)?)) })
         .transpose()?;
-    let mut app = app::App::new(args, &staging, DEFAULT_TICK_HZ, bindings, replay)?;
+    // The player's own keys (§6 M45), read here beside the project's and applied
+    // over them. A live session only, like every other file a player owns: a
+    // recorded stream drives verb *ids*, so a rebind cannot reach one — but the
+    // legend a game draws from the map is world state, and a file the operator
+    // edited would otherwise diverge a blessed stream with nobody having played.
+    let rebinds = player_file(args, gg_input::BINDINGS_FILE)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    let mut app = app::App::new(args, &staging, DEFAULT_TICK_HZ, bindings, rebinds, replay)?;
     // Before the first frame: the loop's clock resumes at the tick this carries.
     if let Some(path) = &args.restore {
         app.restore(&gg_core::Handoff::take(path)?)?;

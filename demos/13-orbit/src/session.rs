@@ -586,13 +586,7 @@ fn drive<T>(
     let mut out = Vec::with_capacity(frames.len());
     let mut previous = idle();
     for (tick, frame) in frames.iter().enumerate() {
-        let ctx = TickCtx {
-            tick: tick as u64,
-            tick_hz: HZ,
-            reserved: 0,
-            input: *frame,
-            previous,
-        };
+        let ctx = TickCtx::detached(tick as u64, HZ, *frame, previous);
         // SAFETY: the table is the entry's own, its entries live for the
         // process, and `ctx` outlives the call.
         unsafe { world.run_systems(&table, &ctx) }.map_err(SessionError::System)?;
@@ -709,13 +703,7 @@ impl Pilot {
     /// throttles warp: at 1e6 the ship crosses the target's grip between two
     /// samples and this number would never see it.
     fn play(&mut self, frame: InputFrame) -> Result<(), SessionError> {
-        let ctx = TickCtx {
-            tick: self.tick,
-            tick_hz: HZ,
-            reserved: 0,
-            input: frame,
-            previous: self.previous,
-        };
+        let ctx = TickCtx::detached(self.tick, HZ, frame, self.previous);
         // SAFETY: as `drive` — the entry's own table, `ctx` outlives the call.
         unsafe { self.world.run_systems(&self.table, &ctx) }.map_err(SessionError::System)?;
         self.tick += 1;

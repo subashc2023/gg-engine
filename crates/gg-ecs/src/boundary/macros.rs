@@ -28,6 +28,12 @@
 /// The verb lists are string literals whose **order is the id space** a replay
 /// records (§4.7): appending is free, reordering is a replay-format change. Both
 /// may be omitted by a game that takes no input.
+///
+/// Either list may instead be an **expression** of type `&[&'static str]`, which
+/// is what a game does when something else in the crate needs the same names —
+/// demo 10's legend is built from its own `ACTIONS` since §6 M45, and a second
+/// copy here is a second copy to drift. The literal form forwards to this one,
+/// so both spellings produce the same table.
 #[macro_export]
 macro_rules! gg_game {
     (
@@ -45,6 +51,19 @@ macro_rules! gg_game {
         components: [$($component:ty),* $(,)?],
         actions: [$($action:literal),* $(,)?],
         axes: [$($axis:literal),* $(,)?],
+        systems: [$($system:ident),* $(,)?] $(,)?
+    ) => {
+        $crate::gg_game! {
+            components: [$($component),*],
+            actions: &[$($action),*],
+            axes: &[$($axis),*],
+            systems: [$($system),*],
+        }
+    };
+    (
+        components: [$($component:ty),* $(,)?],
+        actions: $actions:expr,
+        axes: $axes:expr,
         systems: [$($system:ident),* $(,)?] $(,)?
     ) => {
         // A `const` block so the game crate gets no new names, only new symbols:
@@ -71,11 +90,14 @@ macro_rules! gg_game {
 
             #[unsafe(no_mangle)]
             extern "C" fn gg_game_verbs() -> $crate::boundary::VerbsTable {
-                static ACTIONS: $crate::boundary::Table<$crate::boundary::VerbName> =
+                // Underscored because the verb lists may now be *expressions*
+                // naming the game's own consts, and a game calling one `ACTIONS`
+                // would otherwise resolve to this table instead (§6 M45).
+                static __GG_ACTIONS: $crate::boundary::Table<$crate::boundary::VerbName> =
                     $crate::boundary::Table::new();
-                static AXES: $crate::boundary::Table<$crate::boundary::VerbName> =
+                static __GG_AXES: $crate::boundary::Table<$crate::boundary::VerbName> =
                     $crate::boundary::Table::new();
-                $crate::boundary::verbs(&ACTIONS, &AXES, &[$($action),*], &[$($axis),*])
+                $crate::boundary::verbs(&__GG_ACTIONS, &__GG_AXES, $actions, $axes)
             }
 
             #[unsafe(no_mangle)]

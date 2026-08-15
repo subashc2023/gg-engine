@@ -113,6 +113,32 @@ pub const PAUSE: ActionId = ActionId::new(8);
 /// for the reason above — appended, so every recording keeps its ids.
 pub const BACK: ActionId = ActionId::new(11);
 
+/// The verb names, in id order — what `gg_game!` declares and what `input.toml`
+/// resolves against (§4.7).
+///
+/// A `const` rather than a literal list inside the macro because two things
+/// outside it need the same names: the golden harness, which parses this
+/// crate's own `input.toml` to draw the legend the shell would (§4.10), and the
+/// test below that pins each `ActionId` to its position here. Both would
+/// otherwise be a second copy, which is the failure §6 M45 exists to stop.
+pub const ACTIONS: [&str; 12] = [
+    "left",
+    "right",
+    "soft_drop",
+    "hard_drop",
+    "rotate_cw",
+    "rotate_ccw",
+    "hold",
+    "restart",
+    "pause",
+    "ui_click",
+    "ui_focus",
+    "back",
+];
+
+/// The axis names, in id order. [`ACTIONS`]'s reason.
+pub const AXES: [&str; 2] = ["ui_x", "ui_y"];
+
 // ---------------------------------------------------------------- the layout
 
 /// Side of a drawn cell, canvas units. The well is `WIDTH * CELL` wide, which is
@@ -245,21 +271,74 @@ const STATIC_TEXT: [(f32, f32, &str, u32); 8] = [
 /// Where each [`HudLine`] writes its number.
 const VALUE_AT: [(f32, f32); 4] = [(80.0, 165.0), (80.0, 197.0), (80.0, 229.0), (80.0, 261.0)];
 
-/// The legend, which is the only documentation a player reads. Keyed by
-/// *physical* position like `input.toml`, so this is honest on AZERTY too.
-pub const KEYS: [(&str, &str); 7] = [
-    ("A D", "MOVE"),
-    ("S", "SOFT DROP"),
-    ("W", "HARD DROP"),
-    ("Q E", "ROTATE"),
-    ("SPC", "HOLD"),
-    ("P", "PAUSE"),
-    ("R", "RESTART"),
+/// The legend, which is the only documentation a player reads: a row is the
+/// verbs it shows and this game's own word for them.
+///
+/// **The keys are not here, and that is the milestone** (§6 M45). Until then
+/// this table also spelled them — `("A D", "MOVE")` — beside an `input.toml`
+/// the host parsed, with nothing keeping the two in agreement; M44 added
+/// `back = ["Escape"]` and the legend went stale the same hour. Now [`legend`]
+/// asks the host what each verb is called, so the column is the map's answer and
+/// the player's own rebinding shows up in it.
+///
+/// The *description* stays the game's: what `hard_drop` is called on screen is
+/// not something the map has an opinion about.
+pub const LEGEND: [(&[ActionId], &str); 8] = [
+    (&[LEFT, RIGHT], "MOVE"),
+    (&[SOFT_DROP], "SOFT DROP"),
+    (&[HARD_DROP], "HARD DROP"),
+    (&[ROTATE_CCW, ROTATE_CW], "ROTATE"),
+    (&[HOLD], "HOLD"),
+    (&[PAUSE], "PAUSE"),
+    (&[RESTART], "RESTART"),
+    (&[BACK], "MENU"),
 ];
+
+/// Longest key column a legend row draws, in bytes — derived from the column's
+/// own width so the text can never be wider than the rect `gg-ui` clips it to.
+/// Truncation therefore happens in [`legend`], on a character boundary, rather
+/// than as a glyph cut in half at draw time.
+///
+/// Seven characters holds every pair this game's map produces (`D Right` is the
+/// longest); a player who rebinds to `BracketRight` gets it cut, which is a
+/// visible wrong answer and the one this budget can give.
+pub const KEY_TEXT: usize = (KEYS_COLUMN as usize - 2) / gg_ecs::boundary::CELL.0 as usize;
+
+/// One row's key column: each verb's *first* binding, space-separated.
+///
+/// `spell` is the host's answer for a verb — `None` where the player unbound it,
+/// which is a row that names its description and no key rather than a row that
+/// disappears. Writes into `out` and returns the used prefix, so a game that may
+/// not allocate in a system and a golden harness that may can share it.
+///
+/// Here rather than in `hud` because the reference renderer draws this column
+/// too, and a golden that restated the arithmetic would be guarding a lookalike
+/// (§4.10).
+pub fn legend<'s>(
+    row: usize,
+    out: &mut [u8; KEY_TEXT],
+    spell: impl Fn(ActionId) -> Option<&'s str>,
+) -> usize {
+    let mut len = 0;
+    for action in LEGEND[row].0 {
+        let Some(key) = spell(*action) else { continue };
+        if len > 0 && len < KEY_TEXT {
+            out[len] = b' ';
+            len += 1;
+        }
+        let mut take = key.len().min(KEY_TEXT - len);
+        while take > 0 && !key.is_char_boundary(take) {
+            take -= 1;
+        }
+        out[len..len + take].copy_from_slice(&key.as_bytes()[..take]);
+        len += take;
+    }
+    len
+}
 /// Top-left of the legend's first row, and the two column offsets within it.
 const KEYS_AT: (f32, f32) = (460.0, 169.0);
 const KEYS_STEP: f32 = 12.0;
-const KEYS_COLUMN: f32 = 42.0;
+const KEYS_COLUMN: f32 = 46.0;
 
 /// Height of a label's rectangle — the face's cell, plus one for a descender.
 /// [`gg_ecs::boundary::CELL`] and [`text_width`] are the host's own, on the
@@ -689,6 +768,20 @@ pub struct Bay {
 #[repr(C)]
 pub struct HudLine {
     /// 0 score, 1 lines, 2 level, 3 best — an index into [`VALUE_AT`].
+    pub which: u8,
+}
+
+/// Which legend row a [`Widget`] is the key column of, so [`keys`] can rewrite
+/// it in place — [`HudLine`]'s shape, for [`HudLine`]'s reason.
+///
+/// A component rather than text baked at bootstrap: a player who rebinds while a
+/// saved game is on disk would otherwise reopen it with the legend the *old*
+/// keys wrote, since a widget's text is world state and a save carries it.
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "tetris.keyline")]
+#[repr(C)]
+pub struct KeyLine {
+    /// An index into [`LEGEND`].
     pub which: u8,
 }
 
@@ -1275,15 +1368,7 @@ pub fn bootstrap(world: &mut GameWorld) {
             preset: 0,
         },
     );
-    world.put(
-        board,
-        Prefs {
-            cursor: 0,
-            quiet: 0,
-            aa: 0,
-            close: 0,
-        },
-    );
+    world.put(board, Prefs::default());
 
     declare(|part, widget| {
         let entity = world.spawn_with(widget);
@@ -1292,6 +1377,7 @@ pub fn bootstrap(world: &mut GameWorld) {
             Part::Cell(cell) => world.put(entity, cell),
             Part::Bay(bay) => world.put(entity, bay),
             Part::Value(line) => world.put(entity, line),
+            Part::Key(line) => world.put(entity, line),
             Part::Banner(banner) => world.put(entity, banner),
             Part::Menu(item) => world.put(entity, item),
         }
@@ -1321,6 +1407,8 @@ pub enum Part {
     Bay(Bay),
     /// A number, rewritten by [`hud`].
     Value(HudLine),
+    /// A legend row's key column, rewritten by [`keys`] from the map (§6 M45).
+    Key(KeyLine),
     /// Part of the top-out banner, shown or hidden by [`hud`].
     Banner(Banner),
     /// Part of the menu layer (§6 M19), shown, hidden and rewritten by [`hud`]
@@ -1390,10 +1478,17 @@ pub fn declare(mut emit: impl FnMut(Part, Widget)) {
     for (x, y, body, color) in STATIC_TEXT {
         emit(Part::Chrome, label(x, y, body, color));
     }
-    for (row, (key, action)) in KEYS.iter().enumerate() {
+    for (row, (_, what)) in LEGEND.iter().enumerate() {
         let y = KEYS_AT.1 + row as f32 * KEYS_STEP;
-        emit(Part::Chrome, label(KEYS_AT.0, y, key, INK));
-        emit(Part::Chrome, label(KEYS_AT.0 + KEYS_COLUMN, y, action, DIM));
+        // The key column is empty here and filled by `keys` from the host's own
+        // spellings; its rect is the column's width rather than the text's,
+        // because nothing at bootstrap knows what will land in it.
+        let key = Widget::label([KEYS_AT.0, y, KEYS_COLUMN - 2.0, LINE], INK, "");
+        let at = KEYS_AT.0 + KEYS_COLUMN;
+        let said = Widget::label([at, y, text_width(what), LINE], DIM, what);
+        emit(Part::Key(KeyLine { which: row as u8 }), ordered(key, order));
+        emit(Part::Chrome, ordered(said, order + 1));
+        order += 2;
     }
     for (which, (x, y)) in VALUE_AT.iter().enumerate() {
         // Sized for the widest number it will ever hold, not for the "0" it
@@ -1879,6 +1974,33 @@ pub fn menu(world: &mut GameWorld) {
         // where a fresh world already has a playable game sitting behind it.
         set_music(world, to == SCREEN_PLAYING);
     }
+
+    // What the host arbitrates on (§6 M45): every screen but the board is modal,
+    // so the shell withholds everything `input.toml`'s `keep` list does not name
+    // and no system below has to ask which screen it is on. Written from the
+    // screen this tick *ends* on, and read on the next one — the tick that
+    // screen's widgets are on the glass for.
+    let showing = next.map_or(at, |(to, _)| to) != SCREEN_PLAYING;
+    let _ = world.each::<&mut Prefs>(|_, p: &mut Prefs| p.modal = u32::from(showing));
+}
+
+/// The legend's key column, from the map rather than from a table in this file
+/// (§6 M45).
+///
+/// Every tick, not once at bootstrap: a widget's text is world state, so a save
+/// written before a rebind would otherwise reopen showing the old keys.
+pub fn keys(world: &mut GameWorld) {
+    let mut rows = [[0u8; KEY_TEXT]; LEGEND.len()];
+    let mut lens = [0usize; LEGEND.len()];
+    for row in 0..LEGEND.len() {
+        lens[row] = legend(row, &mut rows[row], |action| world.bindings(action).next());
+    }
+    let _ = world.each::<(&KeyLine, &mut Widget)>(|_, (line, widget)| {
+        let row = line.which as usize % LEGEND.len();
+        // Valid UTF-8 by construction: `legend` copies whole characters out of
+        // spellings the host already checked.
+        widget.set_text(core::str::from_utf8(&rows[row][..lens[row]]).unwrap_or(""));
+    });
 }
 
 /// The well with the ghost and the falling piece composited into it — what is
@@ -2043,12 +2165,7 @@ pub fn hud(world: &mut GameWorld) {
             theme: 0,
             preset: 0,
         },
-        Prefs {
-            cursor: 0,
-            quiet: 0,
-            aa: 0,
-            close: 0,
-        },
+        Prefs::default(),
     );
     let _ = world.each::<&Screen>(|_, s| screen = *s);
     let _ = world.each::<&Options>(|_, o| opts = *o);
@@ -2144,25 +2261,12 @@ pub fn theme_name(theme: u32) -> &'static str {
 #[cfg(feature = "game")]
 gg_ecs::gg_game! {
     components: [
-        Well, Piece, Rules, Play, Best, Cell, Bay, HudLine, Banner, Screen, Options, MenuItem,
-        Widget, Cue, Sound, Prefs
+        Well, Piece, Rules, Play, Best, Cell, Bay, HudLine, KeyLine, Banner, Screen, Options,
+        MenuItem, Widget, Cue, Sound, Prefs
     ],
-    actions: [
-        "left",
-        "right",
-        "soft_drop",
-        "hard_drop",
-        "rotate_cw",
-        "rotate_ccw",
-        "hold",
-        "restart",
-        "pause",
-        "ui_click",
-        "ui_focus",
-        "back"
-    ],
-    axes: ["ui_x", "ui_y"],
-    systems: [bootstrap, step, menu, present, hud],
+    actions: &ACTIONS,
+    axes: &AXES,
+    systems: [bootstrap, step, menu, present, hud, keys],
 }
 
 #[cfg(test)]
@@ -2269,6 +2373,62 @@ mod tests {
     /// A label is clipped to its own rectangle, so a rect narrower than its
     /// text is a silent truncation. Walked over the *declared* list rather than
     /// over the tables, because the rect a label gets is `declare`'s to compute.
+    /// The legend is the map's answer now (§6 M45), so what this file can still
+    /// check is the joining: first binding per verb, space-separated, cut on a
+    /// character boundary at the column's width. The keys themselves are
+    /// `xtask reload --keys`'s to prove, because only a shell has a map.
+    #[test]
+    fn a_legend_row_joins_the_first_binding_of_each_verb_it_names() {
+        let spell = |action: ActionId| match action {
+            LEFT => Some("A"),
+            RIGHT => Some("D"),
+            BACK => Some("Escape"),
+            HOLD => Some("BracketRight"),
+            _ => None,
+        };
+        let row = |which| {
+            let mut out = [0; KEY_TEXT];
+            let len = legend(which, &mut out, spell);
+            core::str::from_utf8(&out[..len]).unwrap().to_owned()
+        };
+        assert_eq!(row(0), "A D", "both verbs of a two-verb row");
+        assert_eq!(row(7), "Escape");
+        // A verb the player unbound leaves the row's other keys alone; a row
+        // with none left is empty rather than a stray space.
+        assert_eq!(row(3), "", "neither rotate is bound in this map");
+        assert_eq!(row(1), "");
+        // And a spelling past the column is cut, not wrapped and not a panic.
+        assert_eq!(row(4), "Bracket");
+    }
+
+    /// Every legend row names verbs this game declares, and the table covers
+    /// each verb a player has to be told about. `ui_click`/`ui_focus` are the
+    /// pointer's and are deliberately absent — nobody needs telling that a
+    /// mouse clicks.
+    #[test]
+    fn the_legend_names_every_verb_a_player_has_to_find() {
+        let named: Vec<usize> = LEGEND
+            .iter()
+            .flat_map(|(actions, _)| actions.iter().map(|a| a.index()))
+            .collect();
+        for id in [
+            LEFT, RIGHT, SOFT_DROP, HARD_DROP, ROTATE_CW, ROTATE_CCW, HOLD, RESTART, PAUSE, BACK,
+        ] {
+            assert!(
+                named.contains(&id.index()),
+                "{} is undocumented",
+                ACTIONS[id.index()]
+            );
+        }
+        assert_eq!(named.len(), 10, "and nothing is documented twice");
+        // The id space and the name list are one thing, which is what lets the
+        // golden parse this crate's `input.toml` without a second copy of it.
+        assert_eq!(ACTIONS.len(), 12);
+        assert_eq!(ACTIONS[BACK.index()], "back");
+        assert_eq!(ACTIONS[LEFT.index()], "left");
+        assert_eq!(AXES, ["ui_x", "ui_y"]);
+    }
+
     #[test]
     fn every_declared_label_is_wide_enough_for_its_text() {
         let mut checked = 0;
@@ -2293,11 +2453,12 @@ mod tests {
         });
         // The menu widgets carrying text at rest: the buttons and headings
         // whose labels never change — value rows arrive empty and are written
-        // by `hud`.
+        // by `hud`. `LEGEND` counts *once*, not twice: since M45 the key column
+        // arrives empty too and is written by `keys` from the map.
         let menu_text = MENU.iter().filter(|def| !def.text.is_empty()).count();
         assert_eq!(
             checked,
-            STATIC_TEXT.len() + KEYS.len() * 2 + VALUE_AT.len() + 2 + menu_text,
+            STATIC_TEXT.len() + LEGEND.len() + VALUE_AT.len() + 2 + menu_text,
             "a label stopped being declared"
         );
         // And the value rows fit their widest values once `hud` writes them.
@@ -2314,13 +2475,14 @@ mod tests {
             );
         }
 
-        for (key, action) in KEYS {
-            // The two columns must not collide either: the key column is
-            // `KEYS_COLUMN` wide and a longer key would run into the action.
-            assert!(text_width(key) <= KEYS_COLUMN, "key {key:?} is too wide");
+        // The two columns must not collide. The key column's *width* is fixed
+        // now that its text is the map's (§6 M45), so what is checked is the
+        // description beside it and the widest string the column can hold.
+        assert!(text_width(&"X".repeat(KEY_TEXT)) <= KEYS_COLUMN - 2.0);
+        for (_, what) in LEGEND {
             assert!(
-                KEYS_COLUMN + text_width(action) <= PANELS[3][2] - 20.0,
-                "action {action:?} runs off its panel"
+                KEYS_COLUMN + text_width(what) <= PANELS[3][2] - 20.0,
+                "action {what:?} runs off its panel"
             );
         }
     }

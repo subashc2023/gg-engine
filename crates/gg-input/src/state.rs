@@ -60,6 +60,10 @@ pub struct Input {
     covered: f32,
     current: InputFrame,
     previous: InputFrame,
+    /// Derived from `map` and `stack`, rebuilt by `reread` whenever either
+    /// moves — see [`Input::spellings`].
+    spellings: Vec<gg_abi::Binding>,
+    keep: crate::map::Keep,
 }
 
 impl Input {
@@ -68,7 +72,7 @@ impl Input {
     /// An input state over `map`, with no context active — until something is
     /// pushed, nothing is bound (§4.7: layering is explicit).
     pub fn new(map: ActionMap) -> Self {
-        Input {
+        let mut input = Input {
             map,
             stack: Vec::new(),
             keys_held: [0; Self::KEY_WORDS],
@@ -80,7 +84,11 @@ impl Input {
             covered: 1.0,
             current: InputFrame::default(),
             previous: InputFrame::default(),
-        }
+            spellings: Vec::new(),
+            keep: crate::map::Keep::default(),
+        };
+        input.reread();
+        input
     }
 
     /// The map this state polls through.
@@ -88,9 +96,40 @@ impl Input {
         &self.map
     }
 
+    /// Apply the player's own bindings over the map, reporting what it could not
+    /// use (§6 M45) — [`ActionMap::overlay`], plus the reread the caches need.
+    ///
+    /// Here rather than in the host because the caches below are this type's:
+    /// a shell that edited the map through a `&mut` would be a shell that has to
+    /// remember to rebuild them, which is one more thing to forget at a reload.
+    pub fn rebind(&mut self, text: &str) -> Vec<String> {
+        let stale = self.map.overlay(text);
+        self.reread();
+        stale
+    }
+
+    /// What survives a modal screen under the layers active right now.
+    pub fn keep(&self) -> crate::map::Keep {
+        self.keep
+    }
+
+    /// What the map calls each verb, as the boundary carries it (§6 M45). Built
+    /// per map rather than per tick: 64 verbs of it would be four kilobytes
+    /// copied every tick to say something that did not change.
+    pub fn spellings(&self) -> &[gg_abi::Binding] {
+        &self.spellings
+    }
+
+    /// Rebuild what is derived from the map and the stack.
+    fn reread(&mut self) {
+        self.spellings = self.map.spellings();
+        self.keep = self.map.keep(&self.stack);
+    }
+
     /// Activate a layer. The most recently pushed context sees a source first.
     pub fn push_context(&mut self, context: ContextId) {
         self.stack.push(context);
+        self.reread();
     }
 
     /// Activate the layer `name`, reporting whether the map declared one.
@@ -102,7 +141,7 @@ impl Input {
     pub fn push_named(&mut self, name: &str) -> bool {
         match self.map.context(name) {
             Some(context) => {
-                self.stack.push(context);
+                self.push_context(context);
                 true
             }
             None => false,
@@ -125,7 +164,9 @@ impl Input {
 
     /// Deactivate the topmost layer.
     pub fn pop_context(&mut self) -> Option<ContextId> {
-        self.stack.pop()
+        let popped = self.stack.pop();
+        self.reread();
+        popped
     }
 
     /// Record a key edge. Auto-repeat must already be filtered (gg-platform

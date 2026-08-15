@@ -58,9 +58,9 @@ pub use crate::hash::system_id;
 // fourth path in scope would be a pin held by hope.
 pub use gg_abi::host::log_level;
 pub use gg_abi::{
-    AXIS_SCALE, AbiInfo, AbiStatus, ActionId, AxisId, ComponentLayout, ComponentsTable, HostApiV1,
-    InputFrame, MAX_AXES, SystemEntry, SystemStatus, SystemsTable, TickCtx, VerbName, VerbsTable,
-    WorldHandle, asset_id,
+    AXIS_SCALE, AbiInfo, AbiStatus, ActionId, AxisId, BINDING_NAME, Binding, ComponentLayout,
+    ComponentsTable, HostApiV1, InputFrame, MAX_AXES, SystemEntry, SystemStatus, SystemsTable,
+    TickCtx, VerbName, VerbsTable, WorldHandle, asset_id,
 };
 
 /// What this build of the boundary says about itself — the value

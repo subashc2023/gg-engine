@@ -673,9 +673,7 @@ mod tests {
                 prefs,
                 Prefs {
                     cursor: cursor::HARDWARE,
-                    quiet: 0,
-                    aa: 0,
-                    close: 0,
+                    ..Default::default()
                 },
             )
             .expect("insert");

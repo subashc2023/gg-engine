@@ -16,6 +16,8 @@ pub use gg_ecs::boundary::AbiInfo
 pub use gg_ecs::boundary::AbiStatus
 pub use gg_ecs::boundary::ActionId
 pub use gg_ecs::boundary::AxisId
+pub use gg_ecs::boundary::BINDING_NAME
+pub use gg_ecs::boundary::Binding
 pub use gg_ecs::boundary::ComponentLayout
 pub use gg_ecs::boundary::ComponentsTable
 pub use gg_ecs::boundary::HostApiV1
@@ -107,6 +109,7 @@ pub fn gg_ecs::boundary::Eye::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 pub struct gg_ecs::boundary::GameWorld<'a>
 impl<'a> gg_ecs::GameWorld<'a>
 pub fn gg_ecs::GameWorld<'a>::axis(&self, gg_abi::input::AxisId) -> f32
+pub fn gg_ecs::GameWorld<'a>::bindings(&self, gg_abi::input::ActionId) -> impl core::iter::traits::iterator::Iterator<Item = &str>
 pub fn gg_ecs::GameWorld<'a>::despawn(&mut self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::GameWorld<'a>::dt(&self) -> f32
 pub fn gg_ecs::GameWorld<'a>::each<D: gg_ecs::boundary::BoundaryData>(&mut self, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::boundary::BoundaryData>::Item)) -> core::result::Result<(), gg_ecs::boundary::BoundaryError>
@@ -185,11 +188,13 @@ pub fn gg_ecs::boundary::Node::state_hash(&self, &mut gg_ecs::hash::StateHasher)
 pub gg_ecs::boundary::Prefs::aa: u32
 pub gg_ecs::boundary::Prefs::close: u32
 pub gg_ecs::boundary::Prefs::cursor: u32
+pub gg_ecs::boundary::Prefs::modal: u32
 pub gg_ecs::boundary::Prefs::quiet: u32
 impl gg_ecs::boundary::Prefs
 pub fn gg_ecs::boundary::Prefs::antialias(&self) -> core::option::Option<bool>
 pub fn gg_ecs::boundary::Prefs::closing(&self) -> bool
 pub fn gg_ecs::boundary::Prefs::hardware_cursor(&self) -> bool
+pub fn gg_ecs::boundary::Prefs::modal(&self) -> bool
 pub fn gg_ecs::boundary::Prefs::samples(&self) -> core::option::Option<u32>
 pub fn gg_ecs::boundary::Prefs::volume(&self) -> f32
 impl bytemuck::pod::Pod for gg_ecs::boundary::Prefs
@@ -1097,6 +1102,7 @@ pub gg_ecs::FieldDesc::ty: &'static str
 pub struct gg_ecs::GameWorld<'a>
 impl<'a> gg_ecs::GameWorld<'a>
 pub fn gg_ecs::GameWorld<'a>::axis(&self, gg_abi::input::AxisId) -> f32
+pub fn gg_ecs::GameWorld<'a>::bindings(&self, gg_abi::input::ActionId) -> impl core::iter::traits::iterator::Iterator<Item = &str>
 pub fn gg_ecs::GameWorld<'a>::despawn(&mut self, gg_abi::entity::Entity) -> bool
 pub fn gg_ecs::GameWorld<'a>::dt(&self) -> f32
 pub fn gg_ecs::GameWorld<'a>::each<D: gg_ecs::boundary::BoundaryData>(&mut self, impl core::ops::function::FnMut(gg_abi::entity::Entity, <D as gg_ecs::boundary::BoundaryData>::Item)) -> core::result::Result<(), gg_ecs::boundary::BoundaryError>

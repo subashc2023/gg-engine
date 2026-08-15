@@ -3009,6 +3009,31 @@ fn render_tetris_screen(at: u32, over: bool) -> Render {
     tetris_frame(&well, &play, &best, &piece, at)
 }
 
+/// Demo 10's bindings, parsed once out of the crate's own `input.toml` (§6 M45).
+///
+/// `include_str!` rather than a read: the file is checked in beside the demo, so
+/// the reference does not depend on which directory the harness was started
+/// from — and it is the *same bytes* the shell parses, through the same parser,
+/// which is what makes the legend in the reference the legend a player sees.
+fn tetris_keys() -> &'static [gg_ecs::boundary::Binding] {
+    use std::sync::OnceLock;
+    static KEYS: OnceLock<Vec<gg_ecs::boundary::Binding>> = OnceLock::new();
+    KEYS.get_or_init(|| {
+        const MAP: &str = include_str!("../../../demos/10-tetris/input.toml");
+        let actions: Vec<&str> = demo_10_tetris::ACTIONS.to_vec();
+        let axes: Vec<&str> = demo_10_tetris::AXES.to_vec();
+        match gg_input::ActionMap::parse(MAP, &actions, &axes) {
+            Ok(map) => map.spellings(),
+            // A map this demo's own build accepts cannot fail here; an empty
+            // legend in a reference is a visible answer rather than a panic.
+            Err(error) => {
+                tracing::error!(%error, "tetris: the demo's own bindings did not parse");
+                Vec::new()
+            }
+        }
+    })
+}
+
 /// Demo 10's widgets, dressed by the demo's own `declare`/`dress_menu`/`hud`
 /// arithmetic and run through the real `gg_ui::boundary::Ui`. Nothing about the
 /// layout is decided here (§4.10 — the golden guards the demo, not a lookalike).
@@ -3044,6 +3069,20 @@ fn tetris_frame(
             tetris::Part::Bay(bay) => widget.color = tetris::bay_color(&bays, &bay),
             tetris::Part::Value(line) => {
                 widget.set_text(&tetris::value_of(play, best, &line).to_string());
+            }
+            // What the shell's `keys` system writes, from the same file the
+            // shell reads and through the same parser (§6 M45). Restating the
+            // spellings here would guard a lookalike, and the whole point of
+            // the milestone is that there is one place they live.
+            tetris::Part::Key(line) => {
+                let mut out = [0; tetris::KEY_TEXT];
+                let len = tetris::legend(line.which as usize, &mut out, |action| {
+                    tetris_keys()
+                        .iter()
+                        .find(|b| b.action as usize == action.index())
+                        .map(gg_ecs::boundary::Binding::name)
+                });
+                widget.set_text(core::str::from_utf8(&out[..len]).unwrap_or(""));
             }
             // `hud`'s two rules, called rather than restated: the banner shows
             // on a dead board and only on the playing screen, and a menu row

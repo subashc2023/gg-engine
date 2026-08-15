@@ -27,6 +27,7 @@
 //! ```
 
 use crate::key::{Key, MouseAxis, MouseButton, Wheel};
+use gg_abi::InputFrame;
 
 /// The verb identities and the ceilings on them live in `gg-abi` (§4.2.2).
 ///
@@ -91,6 +92,8 @@ struct Context {
     name: String,
     buttons: Vec<ButtonBinding>,
     axes: Vec<AxisBinding>,
+    /// What survives a modal screen, as bitsets over the two id spaces.
+    keep: Keep,
 }
 
 impl Context {
@@ -103,6 +106,69 @@ impl Context {
                 .axes
                 .iter()
                 .any(|a| a.source == AxisSource::Held(source))
+    }
+}
+
+/// Which verbs reach the game while a modal screen is up (§6 M45) — the
+/// `keep` list of a `[<context>.modal]` table, as two bitsets.
+///
+/// **A property of the action, which is why it is in the map at all.** A pause
+/// screen has to keep hearing PAUSE and BACK while it refuses LEFT and
+/// HARD_DROP, so suppression cannot be all-or-nothing; and whether a verb is
+/// one a menu answers is a fact about the verb, not about the game's code. So
+/// it is resolved by name like every other row in the file.
+///
+/// **An empty one withholds nothing**, so arbitration is opt-in per map: a game
+/// that raises [`Prefs::modal`][m] under a map with no `[<context>.modal]` table
+/// behaves exactly as it did before M45, and so does a session given no map at
+/// all — which every replay-driven gate in the tree is, since a recorded stream
+/// carries verb ids and needs no bindings to mean anything. Withholding
+/// everything was the first spelling and `xtask reload --menu` refused it: the
+/// tour reached six of ten milestones because a mapless session silenced the
+/// keyboard the moment the title screen came up.
+///
+/// [m]: ../../gg_ecs/boundary/struct.Prefs.html#structfield.modal
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Keep {
+    actions: u64,
+    axes: u32,
+}
+
+impl Keep {
+    /// `frame`, with everything this does not name read as idle.
+    ///
+    /// Applied at *delivery* rather than at recording: the stream holds what the
+    /// operator did, so a replayed frame and a live one are suppressed by the
+    /// same world state on the same tick, and a recording made before a game
+    /// grew a menu still means what it meant.
+    #[must_use]
+    pub fn apply(self, frame: InputFrame) -> InputFrame {
+        // Nothing declared is nothing arbitrated — see the type's docs.
+        if self.actions == 0 && self.axes == 0 {
+            return frame;
+        }
+        let mut out = InputFrame {
+            buttons: frame.buttons & self.actions,
+            axes: [0; MAX_AXES],
+        };
+        for (at, value) in frame.axes.iter().enumerate() {
+            if self.axes & (1 << at) != 0 {
+                out.axes[at] = *value;
+            }
+        }
+        out
+    }
+
+    /// Whether this action survives.
+    #[must_use]
+    pub const fn action(self, action: ActionId) -> bool {
+        self.actions & (1 << action.index()) != 0
+    }
+
+    /// Whether this axis survives.
+    #[must_use]
+    pub const fn axis(self, axis: AxisId) -> bool {
+        self.axes & (1 << axis.index()) != 0
     }
 }
 
@@ -128,8 +194,8 @@ pub enum MapError {
         /// The offending line, trimmed.
         text: String,
     },
-    /// A table header was not `context.actions` or `context.axes`.
-    #[error("line {line}: `[{header}]` — expected `[<context>.actions]` or `[<context>.axes]`")]
+    /// A table header was not `context.actions`, `.axes` or `.modal`.
+    #[error("line {line}: `[{header}]` — expected `[<context>.actions|axes|modal]`")]
     Header {
         /// 1-based line number.
         line: usize,
@@ -169,6 +235,22 @@ pub enum MapError {
         line: usize,
         /// The binding as written.
         token: String,
+    },
+    /// A `[<context>.modal]` table held a key other than `keep`.
+    #[error("line {line}: `{name}` — a `.modal` table holds one key, `keep`")]
+    ModalKey {
+        /// 1-based line number.
+        line: usize,
+        /// The key as written.
+        name: String,
+    },
+    /// A `keep` entry named neither a declared action nor a declared axis.
+    #[error("line {line}: `{name}` is not a declared action or axis, so nothing can keep it")]
+    UnknownKept {
+        /// 1-based line number.
+        line: usize,
+        /// The verb as written.
+        name: String,
     },
     /// The game declared more verbs than a recorded frame can carry.
     #[error("{kind} list has {count} entries, past the {max} a replay frame carries")]
@@ -225,6 +307,7 @@ impl ActionMap {
                 let section = match section {
                     "actions" => Section::Actions,
                     "axes" => Section::Axes,
+                    "modal" => Section::Modal,
                     _ => {
                         return Err(MapError::Header {
                             line,
@@ -308,9 +391,176 @@ impl ActionMap {
                             .push(AxisBinding { source, axis, sign });
                     }
                 }
+                Section::Modal => {
+                    if name != "keep" {
+                        return Err(MapError::ModalKey {
+                            line,
+                            name: name.to_owned(),
+                        });
+                    }
+                    for token in tokens {
+                        // Actions first, then axes: the two id spaces are
+                        // separate, and a name in neither is the error — a
+                        // typo here silently withholds a verb the menu needs.
+                        let keep = &mut map.contexts[context].keep;
+                        match (find(actions, &token), find(axes, &token)) {
+                            (Some(at), _) => keep.actions |= 1 << at,
+                            (None, Some(at)) => keep.axes |= 1 << at,
+                            (None, None) => {
+                                return Err(MapError::UnknownKept { line, name: token });
+                            }
+                        }
+                    }
+                }
             }
         }
         Ok(map)
+    }
+
+    /// What survives a modal screen across the active layers.
+    ///
+    /// A union rather than the topmost layer's: a context is pushed to *add* a
+    /// way to reach the game (the editor appends four verbs of its own, §6 M15),
+    /// and a layer that kept nothing would otherwise silence the one below it.
+    #[must_use]
+    pub fn keep(&self, stack: &[ContextId]) -> Keep {
+        stack.iter().fold(Keep::default(), |acc, c| {
+            let keep = self.contexts[c.index()].keep;
+            Keep {
+                actions: acc.actions | keep.actions,
+                axes: acc.axes | keep.axes,
+            }
+        })
+    }
+
+    /// Apply the player's own bindings over the map, reporting what it could not
+    /// use (§6 M45).
+    ///
+    /// Same format as the map itself, because it *is* the map's format: a
+    /// `[<context>.actions]` table whose rows **replace** that verb's bindings in
+    /// that context wholesale rather than adding to them, so a player who
+    /// rebinds `left` gets the keys they named and not those plus `A`.
+    ///
+    /// **Nothing here is fatal**, which is `settings.cfg`'s policy (§6 M42) and
+    /// not `--load`'s: this is a file the player owns, editing it wrongly must
+    /// not stop the game starting, and a line that means nothing to this build is
+    /// named and dropped. A `.modal` table is refused among them — which verbs a
+    /// menu answers is the game's arbitration, not a preference (see [`Keep`]).
+    pub fn overlay(&mut self, text: &str) -> Vec<String> {
+        let mut stale = Vec::new();
+        let mut current: Option<(usize, Section)> = None;
+        for raw in text.lines() {
+            let content = strip_comment(raw).trim();
+            if content.is_empty() {
+                continue;
+            }
+            if let Some(header) = content.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+                current = match header.rsplit_once('.') {
+                    Some((name, "actions")) => {
+                        self.context(name).map(|c| (c.index(), Section::Actions))
+                    }
+                    Some((name, "axes")) => self.context(name).map(|c| (c.index(), Section::Axes)),
+                    _ => None,
+                };
+                if current.is_none() {
+                    stale.push(header.to_owned());
+                }
+                continue;
+            }
+            let Some((name, value)) = content.split_once('=') else {
+                stale.push(content.to_owned());
+                continue;
+            };
+            let name = name.trim();
+            let Some((context, section)) = current else {
+                stale.push(name.to_owned());
+                continue;
+            };
+            let Some(tokens) = parse_strings(value.trim()) else {
+                stale.push(name.to_owned());
+                continue;
+            };
+            if !self.replace(context, section, name, &tokens) {
+                stale.push(name.to_owned());
+            }
+        }
+        stale
+    }
+
+    /// One overlay row: resolve the verb and its sources, then swap them in.
+    /// All-or-nothing per row — a rebind half of whose keys are misspelled would
+    /// otherwise leave a verb reachable by an arbitrary subset of them.
+    fn replace(&mut self, context: usize, section: Section, name: &str, tokens: &[String]) -> bool {
+        match section {
+            Section::Actions => {
+                let Some(at) = find_owned(&self.action_names, name) else {
+                    return false;
+                };
+                let action = ActionId::new(at);
+                let Some(sources) = tokens
+                    .iter()
+                    .map(|t| button_source(t))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return false;
+                };
+                let context = &mut self.contexts[context];
+                context.buttons.retain(|b| b.action != action);
+                context.buttons.extend(
+                    sources
+                        .into_iter()
+                        .map(|source| ButtonBinding { source, action }),
+                );
+                true
+            }
+            Section::Axes => {
+                let Some(at) = find_owned(&self.axis_names, name) else {
+                    return false;
+                };
+                let axis = AxisId::new(at);
+                let mut bound = Vec::new();
+                for token in tokens {
+                    let (sign, bare) = match token.as_bytes().first() {
+                        Some(b'+') => (1, &token[1..]),
+                        Some(b'-') => (-1, &token[1..]),
+                        _ => (1, token.as_str()),
+                    };
+                    let source = match MouseAxis::from_name(bare) {
+                        Some(motion) => AxisSource::Motion(motion),
+                        None => match button_source(bare) {
+                            Some(source) => AxisSource::Held(source),
+                            None => return false,
+                        },
+                    };
+                    bound.push(AxisBinding { source, axis, sign });
+                }
+                let context = &mut self.contexts[context];
+                context.axes.retain(|a| a.axis != axis);
+                context.axes.extend(bound);
+                true
+            }
+            // Unreachable: `overlay` never enters this section. Refusing here
+            // rather than there keeps the policy in one place.
+            Section::Modal => false,
+        }
+    }
+
+    /// Every binding this map holds, as the boundary carries them (§6 M45) —
+    /// each action's spellings in the map's own order, so a legend reads left to
+    /// right the way the file does.
+    ///
+    /// The whole map rather than the active stack: a game asks what a verb is
+    /// called, and the answer must not change with which layer happens to be
+    /// pushed when the menu is built.
+    #[must_use]
+    pub fn spellings(&self) -> Vec<gg_abi::Binding> {
+        let mut out = Vec::new();
+        for context in &self.contexts {
+            for binding in &context.buttons {
+                out.push(gg_abi::Binding::new(binding.action, &spell(binding.source)));
+            }
+        }
+        out
     }
 
     /// The id of a context by name, if the map declares one.
@@ -421,6 +671,7 @@ impl ActionMap {
             name: name.to_owned(),
             buttons: Vec::new(),
             axes: Vec::new(),
+            keep: Keep::default(),
         });
         self.contexts.len() - 1
     }
@@ -430,10 +681,25 @@ impl ActionMap {
 enum Section {
     Actions,
     Axes,
+    Modal,
 }
 
 fn find(names: &[&str], name: &str) -> Option<usize> {
     names.iter().position(|n| *n == name)
+}
+
+fn find_owned(names: &[String], name: &str) -> Option<usize> {
+    names.iter().position(|n| n == name)
+}
+
+/// A source as the config spells it — the inverse of [`button_source`], and the
+/// only thing that turns a parsed map back into something a player can read.
+fn spell(source: Source) -> String {
+    match source {
+        Source::Key(key) => key.name().to_owned(),
+        Source::Wheel(wheel) => wheel.name().to_owned(),
+        Source::Button(button) => format!("Mouse{}", button.number()),
+    }
 }
 
 fn button_source(token: &str) -> Option<Source> {
@@ -603,6 +869,144 @@ mod tests {
         let err =
             ActionMap::parse("[game.actions]\nlook = [\"MouseX\"]", ACTIONS, AXES).unwrap_err();
         assert!(err.to_string().contains("only an axis"), "{err}");
+    }
+
+    /// The arbitration M45 exists for: a menu keeps the verbs that reach it and
+    /// nothing else, across both id spaces. Everything unnamed reads idle, which
+    /// is the early return five demo-12 systems used to write by hand.
+    #[test]
+    fn a_modal_screen_keeps_what_the_map_names_and_withholds_the_rest() {
+        const WITH_MENU: &str = r#"
+            [game.actions]
+            look = ["Tab"]
+            spawn = ["F"]
+            [game.axes]
+            move_right = ["+D"]
+            look_x = ["PointerX"]
+            [game.modal]
+            keep = ["look", "look_x"]
+        "#;
+        let menu = ActionMap::parse(WITH_MENU, ACTIONS, AXES).unwrap();
+        let game = menu.context("game").unwrap();
+        let keep = menu.keep(&[game]);
+        assert!(keep.action(ActionId::new(0)) && !keep.action(ActionId::new(1)));
+        assert!(keep.axis(AxisId::new(1)) && !keep.axis(AxisId::new(0)));
+
+        let mut axes = [0; MAX_AXES];
+        (axes[0], axes[1]) = (700, -300);
+        let live = InputFrame {
+            buttons: 0b11,
+            axes,
+        };
+        let held = keep.apply(live);
+        assert_eq!(held.buttons, 0b01, "only `look` crosses");
+        assert_eq!(held.axes[0], 0, "a gameplay axis reads still, not stale");
+        assert_eq!(held.axes[1], -300, "and the pointer keeps moving");
+        // A map with no `keep` list withholds *nothing*: arbitration is opt-in
+        // per map, so a game that raises the flag under one behaves as it did
+        // before M45, and so does a replay-driven session given no map at all.
+        assert_eq!(map().keep(&[game]).apply(live), live);
+        // And nothing is withheld unless a screen is up — the flag is the game's.
+        assert_eq!(keep.apply(InputFrame::default()), InputFrame::default());
+    }
+
+    #[test]
+    fn a_modal_table_names_its_own_mistakes() {
+        for (text, needle) in [
+            ("[game.modal]\ndrop = [\"look\"]", "one key, `keep`"),
+            ("[game.modal]\nkeep = [\"sneeze\"]", "nothing can keep it"),
+        ] {
+            let err = ActionMap::parse(text, ACTIONS, AXES).unwrap_err();
+            assert!(err.to_string().contains(needle), "{err}");
+        }
+    }
+
+    /// The player's own file (§6 M45): it *replaces* a verb's keys rather than
+    /// adding to them, it may not touch arbitration, and nothing in it is fatal.
+    #[test]
+    fn a_players_bindings_replace_a_verbs_keys_and_never_stop_the_game() {
+        let mut m = map();
+        let game = vec![m.context("game").unwrap()];
+        let stale = m.overlay("[game.actions]\nlook = [\"Escape\", \"Mouse2\"]\n");
+        assert!(stale.is_empty());
+        let at = |m: &ActionMap, key| m.actions_for(&game, Source::Key(key)).collect::<Vec<_>>();
+        assert_eq!(at(&m, Key::Escape), vec![ActionId::new(0)]);
+        assert!(at(&m, Key::Tab).is_empty(), "the old key is gone, not kept");
+        assert_eq!(
+            m.actions_for(&game, Source::Button(MouseButton::Right))
+                .count(),
+            1
+        );
+
+        // Every way a hand-edited file goes wrong, each named and each survived.
+        let mut m = map();
+        let stale = m.overlay(concat!(
+            "[nowhere.actions]\nlook = [\"Escape\"]\n",
+            "[game.actions]\njump = [\"Escape\"]\nlook = [\"Sneeze\"]\nspawn\n",
+            "[game.modal]\nkeep = [\"look\"]\n",
+            "[game.axes]\nlook_x = [\"MouseY\"]\n",
+        ));
+        // The unknown header and each row under it: every line that did
+        // nothing is named, so a player fixing the file is told all of it.
+        assert_eq!(
+            stale,
+            [
+                "nowhere.actions",
+                "look",
+                "jump",
+                "look",
+                "spawn",
+                "game.modal",
+                "keep"
+            ]
+        );
+        assert_eq!(
+            at(&m, Key::Tab),
+            vec![ActionId::new(0)],
+            "and nothing moved"
+        );
+        // The one good row still landed, which is what makes the rest droppable.
+        assert_eq!(
+            m.motion_axes(&game, MouseAxis::Y).collect::<Vec<_>>(),
+            vec![(AxisId::new(1), 1)]
+        );
+        // A row whose keys are half wrong changes nothing rather than binding
+        // the half that parsed.
+        let mut m = map();
+        assert_eq!(
+            m.overlay("[game.actions]\nspawn = [\"F\", \"Sneeze\"]\n"),
+            ["spawn"]
+        );
+        assert_eq!(
+            m.actions_for(&game, Source::Button(MouseButton::Left))
+                .count(),
+            1,
+            "`Mouse1` is still `spawn`'s"
+        );
+    }
+
+    /// What the boundary carries: every binding, by action, in the file's order.
+    #[test]
+    fn the_spellings_a_game_draws_its_legend_from_are_the_files_own() {
+        let m = map();
+        let of = |action: usize| {
+            m.spellings()
+                .into_iter()
+                .filter(|b| b.action as usize == action)
+                .map(|b| b.name().to_owned())
+                .collect::<Vec<_>>()
+        };
+        // `look` is Tab in `game` and nothing in `ui`; `spawn` is bound in both.
+        assert_eq!(of(0), ["Tab"]);
+        assert_eq!(of(1), ["F", "Mouse1", "Tab"]);
+        // A rebind is visible here, which is what makes the legend the player's.
+        let mut m = map();
+        m.overlay("[game.actions]\nlook = [\"Left\"]\n");
+        assert!(
+            m.spellings()
+                .iter()
+                .any(|b| b.action == 0 && b.name() == "Left")
+        );
     }
 
     #[test]

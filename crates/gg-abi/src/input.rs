@@ -77,6 +77,63 @@ impl AxisId {
     }
 }
 
+/// Longest config spelling a [`Binding`] carries, in bytes. `BracketRight` is
+/// the longest [`Key`](../gg_input/enum.Key.html) name at twelve; the slack is
+/// for a name a later key list adds, not for a sentence.
+pub const BINDING_NAME: usize = 16;
+
+/// What one binding of one verb is *called* — the host's answer to "which key
+/// is this", so a game can draw its own legend (§6 M45).
+///
+/// It crosses because the alternative is what demo 10 shipped until M45: a
+/// hand-written table of key names in the game, beside an `input.toml` the host
+/// parses, kept in agreement by nobody. The map is the host's — a game cannot
+/// link `gg-input` (§3) — so the spellings come back the way
+/// [`Widget::state`](../gg_ecs/boundary/struct.Widget.html) does.
+///
+/// **Not hashed and not recorded.** These ride in [`TickCtx`](crate::TickCtx)
+/// rather than in the world: a spelling is host configuration, and a session
+/// driven by a replay reads action *ids*, never keys. What a game does with one —
+/// putting it in a `Widget`'s text — is hashed like any other world write, which
+/// is why a rebind is a different picture and says so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct Binding {
+    /// Which verb, as an index into the game's declared action list.
+    pub action: u32,
+    /// Bytes of [`name`](Self::name) in use. Past [`BINDING_NAME`] is clamped.
+    pub name_len: u32,
+    /// The config spelling — `"A"`, `"Escape"`, `"Mouse1"` — UTF-8,
+    /// unterminated, zero past `name_len`.
+    pub name: [u8; BINDING_NAME],
+}
+
+impl Binding {
+    /// The spelling. Empty if the bytes are not UTF-8, which only a hand-built
+    /// value can manage.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        let len = (self.name_len as usize).min(BINDING_NAME);
+        core::str::from_utf8(&self.name[..len]).unwrap_or("")
+    }
+
+    /// One binding of `action`, spelled `name` and truncated to fit.
+    #[must_use]
+    pub fn new(action: ActionId, name: &str) -> Self {
+        let mut len = name.len().min(BINDING_NAME);
+        while len > 0 && !name.is_char_boundary(len) {
+            len -= 1;
+        }
+        let mut bytes = [0; BINDING_NAME];
+        bytes[..len].copy_from_slice(&name.as_bytes()[..len]);
+        Self {
+            action: action.index() as u32,
+            name_len: len as u32,
+            name: bytes,
+        }
+    }
+}
+
 /// One tick of input, as recorded and as replayed.
 ///
 /// This *is* the replay stream's element — the whole sim-visible input surface

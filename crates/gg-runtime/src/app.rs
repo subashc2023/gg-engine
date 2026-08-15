@@ -69,6 +69,10 @@ pub struct App {
     /// once at load and has no second build to parse against.
     #[cfg(feature = "hot-reload")]
     bindings: String,
+    /// The player's own bindings text, kept for `bindings`'s reason: a reload
+    /// reparses the map and the overlay has to go back on top of it (§6 M45).
+    #[cfg(feature = "hot-reload")]
+    rebinds: String,
     input: Input,
     drive: Drive,
     /// The recorded-CVar diff (§6 M40). The shell is the only place a replay and
@@ -164,6 +168,7 @@ impl App {
         staging: &Path,
         hz: u32,
         bindings: String,
+        rebinds: String,
         replay: Option<Box<Replay>>,
     ) -> anyhow::Result<Self> {
         let (game, _) = (args.game.as_path(), staging);
@@ -206,7 +211,7 @@ impl App {
         drive.open_segment(0, lib.code_hash());
         // SAFETY: `lib` is verified and never unloaded.
         let (verbs, extra) = unsafe { verbs_for(&lib, args.editor) };
-        let input = bind(&format!("{bindings}{extra}"), &drive, verbs)?;
+        let input = bind(&format!("{bindings}{extra}"), &rebinds, &drive, verbs)?;
         let ui_binding = binding(&verbs);
         // Before the struct literal takes `input`.
         let input_looks = input.looks();
@@ -242,6 +247,8 @@ impl App {
             watch,
             #[cfg(feature = "hot-reload")]
             bindings,
+            #[cfg(feature = "hot-reload")]
+            rebinds,
             input,
             drive,
             knobs: gg_core::cvar::Watch::new(),
@@ -290,6 +297,13 @@ impl App {
     /// stage walks for one already and two answers would be one too many.
     pub fn prefs(&self) -> Prefs {
         self.ui.prefs()
+    }
+
+    /// Whether the game has a modal screen up, from the same cache (§6 M45) —
+    /// so what suppresses this tick's input is the `Prefs` the *last* one left,
+    /// which is the tick whose widgets are on the glass.
+    fn modal(&self) -> bool {
+        self.prefs().modal()
     }
 
     /// Offer a key to the instruments before anything else sees it. `true` means
@@ -806,8 +820,13 @@ impl App {
         // replaced the running build's map.
         // SAFETY: `reloaded.lib` is verified and never unloaded.
         let (verbs, extra) = unsafe { verbs_for(&reloaded.lib, self.editing()) };
-        let input = bind(&format!("{}{extra}", self.bindings), &self.drive, verbs)
-            .map_err(|e| reloaded.lib.refuse(e))?;
+        let input = bind(
+            &format!("{}{extra}", self.bindings),
+            &self.rebinds,
+            &self.drive,
+            verbs,
+        )
+        .map_err(|e| reloaded.lib.refuse(e))?;
         // SAFETY: both dylibs are verified and never unloaded.
         let unchanged = unsafe {
             gg_ecs::boundary::same_schemas(self.lib.components(), reloaded.lib.components())
@@ -1441,13 +1460,30 @@ fn meta(lib: &GameLib, editor: bool, hz: u32) -> ReplayMeta {
 /// A replay is checked here too, and again at every swap: an edit that appends
 /// or reorders a verb moves the id space the file was recorded against, and
 /// carrying on would replay the wrong verbs rather than fail (§4.7).
-fn bind(bindings: &str, drive: &Drive, verbs: gg_ecs::boundary::Verbs) -> anyhow::Result<Input> {
+fn bind(
+    bindings: &str,
+    rebinds: &str,
+    drive: &Drive,
+    verbs: gg_ecs::boundary::Verbs,
+) -> anyhow::Result<Input> {
     if let Some(replay) = drive.replay() {
         replay.check_verbs(verbs.actions, verbs.axes)?;
     }
     let mut input = Input::new(ActionMap::parse(bindings, verbs.actions, verbs.axes)?);
     if !input.push_named(CONTEXT) && !bindings.trim().is_empty() {
         warn!("the bindings declare no `{CONTEXT}` context — nothing is bound");
+    }
+    // The player's own keys, over the project's (§6 M45), after the context is
+    // pushed so the caches `rebind` rebuilds see the layer that is up.
+    match input.rebind(rebinds) {
+        _ if rebinds.trim().is_empty() => {}
+        stale if stale.is_empty() => {
+            info!(file = %gg_input::BINDINGS_FILE, "the player's own bindings applied");
+        }
+        stale => warn!(
+            ?stale,
+            "bindings: lines this build does not answer to — ignored"
+        ),
     }
     Ok(input)
 }
@@ -1634,12 +1670,24 @@ impl Stages for App {
             self.cursor.held = true;
             info!(tick, "editor: pointer taken by the game");
         }
+        // Arbitration (§6 M45), at *delivery* and after the recorder: the game
+        // said last tick that a modal screen is up, which is the tick that
+        // screen reaches the glass on, so what is withheld and what is visible
+        // move together. `previous` takes the withheld frame too — an edge
+        // against the raw one would fire the moment a menu closed.
+        let input = match self.modal() {
+            true => self.input.keep().apply(input),
+            false => input,
+        };
         let ctx = TickCtx {
             tick,
             tick_hz: self.hz,
             reserved: 0,
             input,
             previous: self.previous,
+            bindings: self.input.spellings().as_ptr(),
+            bindings_len: self.input.spellings().len() as u32,
+            reserved2: 0,
         };
         self.previous = input;
         // Pause is the editor's, and it stops exactly the sim: the tick still
@@ -1688,9 +1736,14 @@ impl Stages for App {
         //
         // The file is the *complete* statement of what the player asked for, so
         // it is assigned rather than merged: a key they deleted is a preference
-        // they gave back. `close` alone survives — it is the quit button's edge
-        // and belongs to this session, and a file that carried it would end
-        // every session that opened one.
+        // they gave back. The fields that are **not** preferences survive it —
+        // `close` is the quit button's edge and `modal` is which screen is up
+        // (§6 M45), and both belong to this session rather than to the file.
+        // `settings::KEYS` refuses to persist either, and this is the same rule
+        // read from the other side: a file that carried them would end every
+        // session that opened one, or open one with its controls withheld.
+        // `--keys` is what found the second: it went red because a run with a
+        // settings file zeroed the title screen's `modal` on its first tick.
         if !std::mem::replace(&mut self.opened, true)
             && let Some(want) = self.settings.take()
         {
@@ -1699,6 +1752,7 @@ impl Stages for App {
                 .each(&gg_ecs::Query::<&mut Prefs>::new()?, |_, p: &mut Prefs| {
                     *p = Prefs {
                         close: p.close,
+                        modal: p.modal,
                         ..want
                     };
                     applied += 1;

@@ -56,7 +56,9 @@ pub mod verb;
 pub use asset::asset_id;
 pub use entity::Entity;
 pub use host::{AbiStatus, HostApiV1, WorldHandle};
-pub use input::{AXIS_SCALE, ActionId, AxisId, InputFrame, MAX_ACTIONS, MAX_AXES};
+pub use input::{
+    AXIS_SCALE, ActionId, AxisId, BINDING_NAME, Binding, InputFrame, MAX_ACTIONS, MAX_AXES,
+};
 pub use layout::{ComponentLayout, ComponentsTable, FieldLayout};
 pub use query::{ArchetypeMatch, ColumnView, MAX_QUERY_COLUMNS, QueryDesc};
 pub use system::{SystemEntry, SystemFn, SystemStatus, SystemsTable, TickCtx};
@@ -70,7 +72,9 @@ pub use verb::{VerbName, VerbsTable};
 /// a named error, before its tables are read.
 // v4: `MAX_AXES` 8 → 16 — proof the rule covers a widened constant, not only
 // a type. Earlier bumps were ordinary type/symbol changes; git carries them.
-pub const HOST_API_VERSION: u32 = 4;
+// v5: `TickCtx` gained the binding table (§6 M45) — a pointer field, so an
+// unbumped host would hand a v4 dylib a context whose tail it reads as garbage.
+pub const HOST_API_VERSION: u32 = 5;
 
 /// Bytes in a boundary fingerprint: a blake3 output, named here so the host and
 /// the dylib agree on the width without `gg-abi` depending on a hash.

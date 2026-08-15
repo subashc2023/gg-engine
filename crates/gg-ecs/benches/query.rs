@@ -173,13 +173,12 @@ fn main() {
     // SAFETY: `host_api()` is `&'static`, which is what `init` requires. It is
     // the same handshake `gg_game_init` performs, minus the dylib.
     unsafe { gg_ecs::boundary::init(gg_ecs::boundary::host_api()) };
-    let ctx = gg_ecs::boundary::TickCtx {
-        tick: 0,
-        tick_hz: 60,
-        reserved: 0,
-        input: gg_ecs::boundary::InputFrame::default(),
-        previous: gg_ecs::boundary::InputFrame::default(),
-    };
+    let ctx = gg_ecs::boundary::TickCtx::detached(
+        0,
+        60,
+        gg_ecs::boundary::InputFrame::default(),
+        gg_ecs::boundary::InputFrame::default(),
+    );
     let (mut native, mut views) = (Duration::MAX, Duration::MAX);
     let (mut typed, mut boundary) = (Duration::MAX, Duration::MAX);
     for rep in 0..WARMUP + REPS {
