@@ -343,6 +343,7 @@ pub fn interactive() -> anyhow::Result<()> {
     crate::dist::demo_runs()?;
     ship_run()?;
     refusal_run()?;
+    no_gpu_run()?;
     println!("xtask interactive: green (manual windowed suite — not part of any automated tier)");
     Ok(())
 }
@@ -375,6 +376,43 @@ fn refusal_run() -> anyhow::Result<()> {
         "the shipped folder started without its game and exited {status}"
     );
     println!("xtask interactive: the box was shown and dismissed (§6 M47)");
+    Ok(())
+}
+
+/// The same box for the machine that cannot draw (§6 M55), and the only leg in
+/// the tree where a *window* is part of what is being judged.
+///
+/// The words are gated where they are written (`gg-rhi`'s `refusal.rs`, both
+/// provocations, both hosts). What no gate reaches is the sequence: bring-up is
+/// asked for from `Event::WindowReady`, so the window exists before the renderer
+/// is attempted, and a player without a driver sees it appear and go before the
+/// box arrives. Whether that reads as a game failing to start or as a game
+/// crashing is a judgement, and this is the only place to make it.
+///
+/// `VK_DRIVER_FILES` naming nothing is the whole provocation — the loader honours
+/// it in place of its own lists, so this is a machine with no graphics driver and
+/// needs no privileges to be one.
+fn no_gpu_run() -> anyhow::Result<()> {
+    let folder = crate::util::workspace_root().join("target/ship/falling-blocks");
+    let exe = folder.join(if cfg!(windows) {
+        "falling-blocks.exe"
+    } else {
+        "falling-blocks"
+    });
+    println!(
+        "xtask interactive: a machine with no graphics driver is about to refuse — watch whether \
+         a window appears first, then dismiss the box"
+    );
+    let status = std::process::Command::new(&exe)
+        .current_dir(crate::util::workspace_root())
+        .env("VK_DRIVER_FILES", "no-such-icd-anywhere.json")
+        .env_remove("GG_HEADLESS")
+        .status()?;
+    anyhow::ensure!(
+        !status.success(),
+        "the shipped folder started with no graphics driver and exited {status}"
+    );
+    println!("xtask interactive: the bring-up refusal was shown and dismissed (§6 M55)");
     Ok(())
 }
 

@@ -181,6 +181,15 @@ pub enum RhiError {
     /// No physical device satisfies §4.3; the message is the per-device report.
     #[error("{0}")]
     NoSuitableDevice(String),
+    /// This machine cannot run Vulkan at all — no loader, or a loader with no
+    /// driver behind it (§6 M55). Separate from [`RhiError::Vk`] and
+    /// [`RhiError::Loader`] for the reason [`RhiError::DeviceLost`] is separate:
+    /// the code says nothing to the only person who ever sees it. Both causes
+    /// arrive before there is a device to name, so unlike
+    /// [`RhiError::NoSuitableDevice`] there is no per-device half — the message
+    /// is the whole report.
+    #[error("{0}")]
+    NoVulkan(String),
     /// GPU allocator failure.
     #[error("allocator: {0}")]
     Allocator(String),

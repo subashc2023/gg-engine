@@ -55,6 +55,35 @@ pub(crate) enum Presentation {
     None,
 }
 
+/// The two ways a machine says no before there is anything to choose between,
+/// written for the person holding the mouse (§6 M55).
+///
+/// Both arrive as codes only this crate can read — a `libloading` message about
+/// `vulkan-1.dll`, or `ERROR_INCOMPATIBLE_DRIVER` — and a message box is the
+/// only place either of them is ever going to be read. The head differs because
+/// the *action* does not quite: no loader is a machine that has never had a
+/// Vulkan driver, a loader with nothing behind it is one whose driver is gone or
+/// predates Vulkan, and telling those apart is what stops a player reinstalling
+/// something they already have.
+///
+/// `detail` is kept, parenthesized and last, because the other reader is a bug
+/// report — the same two-audience shape as the per-device report in
+/// [`Device::new`](crate::Device).
+fn no_vulkan(head: &str, detail: impl std::fmt::Display) -> RhiError {
+    RhiError::NoVulkan(format!(
+        "{head}\n\nThis game needs a graphics card with Vulkan 1.3 support and an up-to-date \
+         driver. Installing the newest driver from your graphics card's maker — NVIDIA, AMD or \
+         Intel — is what usually fixes this.\n\n({detail})"
+    ))
+}
+
+/// A result code as its spec name. `Debug` and not `Display`: ash's `Display`
+/// renders the unknown codes a driver may invent as bare integers, and the name
+/// is the half worth pasting.
+fn e_name(e: vk::Result) -> String {
+    format!("{e:?}")
+}
+
 impl Instance {
     /// Whether this machine's loader offers `VK_EXT_headless_surface`.
     ///
@@ -81,8 +110,12 @@ impl Instance {
     /// debug messenger — all lab equipment that unbolts in dist (§1.13).
     pub fn new(presentation: Presentation) -> Result<Self, RhiError> {
         // SAFETY: loading the system Vulkan loader; sound to call anytime.
+        // A machine that has never had a Vulkan driver has no `vulkan-1.dll` /
+        // `libvulkan.so.1` either — it is not part of either OS, it arrives with
+        // the driver — so this is the *first* thing a player without one hits
+        // (§6 M55). It said `Vulkan loader not found: <libloading>` until then.
         let entry = unsafe { ash::Entry::load() }
-            .map_err(|e| RhiError::Loader(format!("Vulkan loader not found: {e}")))?;
+            .map_err(|e| no_vulkan("Vulkan is not installed on this machine.", e))?;
 
         // `mut` feeds the colour-space push below and the validation-only
         // debug_utils one after it.
@@ -190,7 +223,23 @@ impl Instance {
         info = info.enabled_extension_names(&extensions);
 
         // SAFETY: create-info and all pointed-to arrays outlive the call.
-        let raw = unsafe { entry.create_instance(&info, None) }.map_err(RhiError::Vk)?;
+        let raw = unsafe { entry.create_instance(&info, None) }.map_err(|e| match e {
+            // The loader answered and had nothing behind it: every ICD it knows
+            // of is absent or refused. A *driver* problem and not a card one,
+            // which is the distinction the head draws — the loader being present
+            // means this machine had a Vulkan driver at some point (§6 M55).
+            vk::Result::ERROR_INCOMPATIBLE_DRIVER => no_vulkan(
+                "Vulkan is installed on this machine, but no graphics driver provides it.",
+                e_name(e),
+            ),
+            // Ambiguous by spec — a driver that failed to start, or a layer that
+            // did. Dist has no layer (§1.13), so for a player it is the former.
+            vk::Result::ERROR_INITIALIZATION_FAILED => no_vulkan(
+                "Vulkan is installed on this machine, but it could not be started.",
+                e_name(e),
+            ),
+            other => RhiError::Vk(other),
+        })?;
 
         #[cfg(feature = "validation")]
         let debug = {

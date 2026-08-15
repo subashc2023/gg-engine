@@ -123,3 +123,30 @@ fn with_nowhere_to_point_it_points_nowhere() {
         "the failure still arrives: {body}"
     );
 }
+
+/// Bring-up is the one refusal whose body is a *paragraph* rather than a phrase
+/// (§6 M55): `gg-rhi` writes several sentences and a parenthesized Vulkan code,
+/// because §3 bans the tokens everywhere else and nothing downstream can turn
+/// `ERROR_INCOMPATIBLE_DRIVER` into advice. This is the half that must not
+/// mangle it — the title, a blank line, then the body exactly as written, with
+/// no `caused by:` inserted into the middle of a sentence.
+///
+/// A stand-in error and not the real one: the words are graded where they are
+/// written (`gg-rhi`'s `refusal.rs`), and importing the renderer here to restate
+/// them would only prove that two copies of a string match.
+#[test]
+fn a_paragraph_from_below_reaches_the_box_unbroken() {
+    let paragraph = "Vulkan is not installed on this machine.\n\n\
+                     This game needs a graphics card with Vulkan 1.3 support.\n\n\
+                     (LoadLibraryExW failed)";
+    let body = gg_runtime::refusal("Falling Blocks", &anyhow::anyhow!(paragraph), None);
+    assert_eq!(
+        body,
+        format!("Falling Blocks could not start.\n\n{paragraph}"),
+        "a box is read standing up: nothing is added between the title and the advice"
+    );
+    // The `?` at `App::attach` makes an `anyhow` root and not a link, so a
+    // bring-up refusal has no chain — the day something adds context to it, this
+    // says so rather than the player finding the paragraph pushed down the box.
+    assert!(!body.contains("caused by:"), "{body}");
+}

@@ -83,6 +83,7 @@ pub gg_rhi::RhiError::DeviceLost(alloc::string::String)
 pub gg_rhi::RhiError::Loader(alloc::string::String)
 pub gg_rhi::RhiError::MissingLayer(alloc::string::String)
 pub gg_rhi::RhiError::NoSuitableDevice(alloc::string::String)
+pub gg_rhi::RhiError::NoVulkan(alloc::string::String)
 pub gg_rhi::RhiError::Vk(ash::vk::enums::Result)
 pub enum gg_rhi::Sampler
 pub gg_rhi::Sampler::LinearClamp

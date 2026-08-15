@@ -161,6 +161,53 @@ fn device_time_domain(
     domains.is_ok_and(|d| d.contains(&vk::TimeDomainEXT::DEVICE))
 }
 
+/// What a machine with nothing to select is told. Read by two people and
+/// written for both (§6 M47): a head a player can act on, then rows a bug report
+/// is pasted from. What is deliberately *not* here is a citation of PLAN.md — a
+/// section number is unactionable to the only person who ever sees this.
+///
+/// A function rather than the three-armed `match` it was, because the arm that
+/// matters most is the one no desk with a working GPU can execute (§6 M55): the
+/// caller can only reach this with devices in hand, so an empty `candidates` is
+/// checked by construction or not at all.
+fn refusal(want: Option<&str>, candidates: &[Candidate]) -> String {
+    let mut report = match (want, candidates.is_empty()) {
+        // Vulkan works and enumerated nothing — a different machine from the two
+        // below, wanting a different sentence: there is no card here whose
+        // driver could be "too old", and no rows are coming. Until M55 an empty
+        // list took the third head, which promised "the features listed below"
+        // and then "Per-device report:" with nothing after it — on what is the
+        // single most common way to arrive here at all.
+        (_, true) => String::from(
+            "Vulkan is working on this machine, but it reports no graphics device at all. If \
+             this machine has a graphics card, its driver is most likely not installed; if it \
+             is a virtual machine or a remote desktop session, it may have no graphics card to \
+             offer.",
+        ),
+        (Some(w), false) => format!(
+            "no graphics device matches GG_ADAPTER={w:?} and can also run this engine, which \
+             needs Vulkan 1.3 — per-device report:"
+        ),
+        (None, false) => String::from(
+            "no graphics device on this machine can run this engine. It needs Vulkan 1.3 and \
+             the features listed below; on a card that has them the usual cause is a graphics \
+             driver too old. Per-device report:",
+        ),
+    };
+    for c in candidates {
+        report.push_str(&format!(
+            "\n  {} ({}): missing {}",
+            c.name,
+            c.device_type,
+            match c.missing.is_empty() {
+                true => "nothing (outscored)".to_string(),
+                false => c.missing.join(", "),
+            }
+        ));
+    }
+    report
+}
+
 /// The §4.3 required-feature list. Names match `xtask probe`'s table so a
 /// bring-up failure and a probe failure read as the same fact.
 fn missing_features(
@@ -335,36 +382,10 @@ impl Device {
         }
 
         let Some((pd, _, chosen_idx)) = chosen else {
-            // Read by two people and written for both (§6 M47). The head is the
-            // one a player gets in a message box, so it says what is wanted and
-            // what to try; the per-device rows keep every Vulkan name, because
-            // that half is what gets pasted into a bug report. What is *not*
-            // here any more is a citation of this document — a section number
-            // is unactionable to the only person who ever sees this fail.
-            let mut report = match &want {
-                Some(w) => format!(
-                    "no graphics device matches GG_ADAPTER={w:?} and can also run this engine, \
-                     which needs Vulkan 1.3 — per-device report:"
-                ),
-                None => String::from(
-                    "no graphics device on this machine can run this engine. It needs Vulkan 1.3 \
-                     and the features listed below; on a card that has them the usual cause is a \
-                     graphics driver too old. Per-device report:",
-                ),
-            };
-            for c in &candidates {
-                report.push_str(&format!(
-                    "\n  {} ({}): missing {}",
-                    c.name,
-                    c.device_type,
-                    if c.missing.is_empty() {
-                        "nothing (outscored)".to_string()
-                    } else {
-                        c.missing.join(", ")
-                    }
-                ));
-            }
-            return Err(RhiError::NoSuitableDevice(report));
+            return Err(RhiError::NoSuitableDevice(refusal(
+                want.as_deref(),
+                &candidates,
+            )));
         };
 
         // SAFETY: pd from the live instance.
@@ -916,5 +937,70 @@ impl Device {
             self.raw.destroy_semaphore(self.transfer.timeline, None);
             self.raw.destroy_device(None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(name: &str, missing: &[&'static str]) -> Candidate {
+        Candidate {
+            name: name.to_owned(),
+            device_type: "discrete GPU",
+            score: 0,
+            missing: missing.to_vec(),
+        }
+    }
+
+    /// The arm this desk cannot reach and a player reaches most often (§6 M55):
+    /// a loader and a driver, and no device behind them — a GPU disabled in
+    /// Device Manager, a container with no passthrough, an RDP session. Two
+    /// claims and both are about what it must *not* do: promise a list nothing
+    /// follows, and blame a driver version on a machine with no card to have
+    /// one.
+    #[test]
+    fn a_machine_that_enumerated_nothing_is_not_promised_a_list() {
+        let body = refusal(None, &[]);
+        assert!(
+            !body.contains("listed below") && !body.contains("report:"),
+            "nothing follows this, so it may not announce that something does: {body}"
+        );
+        assert!(
+            !body.contains("too old"),
+            "there is no card here whose driver could be the wrong version: {body}"
+        );
+        assert!(
+            body.lines().count() == 1,
+            "and no rows are appended: {body}"
+        );
+    }
+
+    /// `GG_ADAPTER` is a developer's variable and this is the only head that
+    /// names it — a player has not set one, so a message about it would send
+    /// them looking for something they never touched.
+    #[test]
+    fn the_two_heads_that_have_rows_keep_them() {
+        let devices = [
+            candidate("Card A", &["shaderInt64"]),
+            candidate("Card B", &[]),
+        ];
+        let player = refusal(None, &devices);
+        assert!(player.contains("Vulkan 1.3"), "{player}");
+        assert!(
+            !player.contains("GG_ADAPTER"),
+            "not a player's word: {player}"
+        );
+        assert!(
+            player.contains("Card A (discrete GPU): missing shaderInt64"),
+            "{player}"
+        );
+        // The row that says a device was fine and simply lost, which is the one
+        // that stops a bug report blaming the wrong card.
+        assert!(
+            player.contains("Card B (discrete GPU): missing nothing (outscored)"),
+            "{player}"
+        );
+        assert!(refusal(Some("radeon"), &devices).contains("GG_ADAPTER=\"radeon\""));
     }
 }
