@@ -9,7 +9,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 /// How often a running session reaches the disk, in seconds of sim time —
 /// multiplied by the tick rate at the call site, so a game at another Hz keeps
@@ -108,8 +108,19 @@ impl Checkpoint {
             .spawn(move || {
                 while let Ok(bytes) = rx.recv() {
                     match replace(&path, &bytes) {
+                        // `debug`, not `info`, and the level is the whole point
+                        // (§6 M51). This fires every `CHECKPOINT_SECONDS` for as
+                        // long as a session lasts — twice, since prefs
+                        // checkpoint beside the save — so at `info` a twenty
+                        // minute game writes 480 lines saying nothing happened,
+                        // and an evening's writes megabytes. In a tier without
+                        // `debug-tools` that log is a *file* on the player's
+                        // disk (§6 M47) and nothing rotates it. What a bug
+                        // report needs from this path is the failure below,
+                        // which is still `warn`, and the cadence, which is
+                        // `xtask reload --crash`'s to ask for.
                         Ok(()) => {
-                            info!(path = %path.display(), bytes = bytes.len(), "checkpoint written")
+                            debug!(path = %path.display(), bytes = bytes.len(), "checkpoint written")
                         }
                         // Never fatal: the session is still playable and the
                         // exit write may still land. A disk that is full says

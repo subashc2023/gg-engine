@@ -1701,3 +1701,114 @@ fn only_the_title_screens_exit_closes_the_game_and_it_leaves_a_clean_board() {
         "escape did not end the session"
     );
 }
+
+/// §6 M51: **a session that does not end**, weighed rather than watched.
+///
+/// Every other gate over this game is bounded by a script that finishes — the
+/// blessed session is 602 ticks and the longest reload leg is 8,000. A player
+/// plays for twenty minutes, and nothing had ever run long enough for the
+/// answer to mean anything. This is eleven minutes of continuous play, and its
+/// length is not a round number: the defect it was written for went off at
+/// 35,624, so a shorter run would have reported a perfect result.
+///
+/// **Two halves that fail in opposite directions**, which is the whole reason
+/// [`Footprint`](demo_10_tetris::session::Footprint) is one struct. Growth
+/// catches a session that accumulates. Liveness catches the failure growth
+/// cannot see and cannot even be suspicious of — a game that stopped being
+/// played reports the flattest numbers a growth column can print, and that is
+/// exactly what `session::endless` did before M51: the mirror positioned every
+/// piece at its spawn row while the game's piece had already fallen, the two
+/// boards parted once the stack rose into that distance, the game topped out on
+/// a board the script did not have, and the script tapped into a dead world for
+/// the remaining hundred thousand ticks.
+#[test]
+fn a_session_that_does_not_end_neither_grows_nor_stops() {
+    // Eleven minutes at 60 Hz, past where the mirror used to part from the game.
+    const TICKS: usize = 40_000;
+    const STRIDE: usize = 4_000;
+
+    let frames = session::endless(TICKS);
+    assert_eq!(frames.len(), TICKS);
+    let samples = session::footprint(&frames, STRIDE).unwrap();
+    assert_eq!(samples.len(), TICKS / STRIDE, "one sample per window");
+
+    // Growth. Not a budget: the numbers are *equal* to the first window's,
+    // because a Tetris world is a fixed cast — a well, a play, a piece, the
+    // widgets and the cues — and nothing in it is allocated by playing longer.
+    // An equality is the strongest thing true here, so it is what is asserted;
+    // a tolerance would forgive the first entity that started leaking.
+    let first = samples[0];
+    for sample in &samples {
+        assert_eq!(
+            (sample.entities, sample.bytes, sample.side_tables),
+            (first.entities, first.bytes, first.side_tables),
+            "the world grew by tick {}: {} entities and {} bytes against {} and {}",
+            sample.tick,
+            sample.entities,
+            sample.bytes,
+            first.entities,
+            first.bytes
+        );
+    }
+
+    // Liveness. Nearly every tick of a played game changes the world — a piece
+    // falls, a clock advances — so the bar is deliberately far from the
+    // threshold: what it refuses is a *frozen* world, not a slow one.
+    for sample in &samples {
+        assert!(
+            sample.moved as usize > STRIDE * 9 / 10,
+            "only {} of {STRIDE} ticks changed anything by tick {} — the game stopped being \
+             played, which is the failure a growth column reports as a perfect result",
+            sample.moved,
+            sample.tick
+        );
+    }
+
+    // And it was played *well*, which is a different claim from moving: a bot
+    // wedged against a wall moves a fall clock every tick and clears nothing.
+    let last = samples[samples.len() - 1];
+    assert!(
+        last.cleared > 1_000,
+        "{} rows in {TICKS} ticks — the bot is moving without playing",
+        last.cleared
+    );
+}
+
+/// The regime the bot now refuses to leave, stated as a number (§6 M51).
+///
+/// `endless` restarts on a top-out, and before M51 that path had never once
+/// executed: every gate that drives it is short enough that the bot never dies.
+/// So the reseed it mirrors — `Play::rng`'s own next draw, which has to match
+/// `reset_game`'s — was unexercised code, and a mismatch would have gone
+/// unnoticed while producing a bot playing a game the world was not.
+///
+/// What grades it is *how long the game stays over*: the script taps RESTART on
+/// the tick after the top-out, so a game that comes back reads two ticks and a
+/// game that does not reads the rest of the session.
+#[test]
+fn every_game_the_endless_bot_loses_is_one_it_starts_again() {
+    const TICKS: usize = 40_000;
+    let progress = session::progress(&session::endless(TICKS)).unwrap();
+
+    let (mut games, mut run, mut worst) = (0u32, 0u32, 0u32);
+    for tick in &progress {
+        if tick.over {
+            run += 1;
+            games += u32::from(run == 1);
+            worst = worst.max(run);
+        } else {
+            run = 0;
+        }
+    }
+
+    assert!(
+        games > 0,
+        "the bot never lost a game, so nothing restarted one"
+    );
+    assert_eq!(
+        worst, 2,
+        "a game stayed over for {worst} ticks — RESTART lands the tick after the top-out, so \
+         anything longer is a restart the game refused and a mirror the script is now flying \
+         blind against"
+    );
+}

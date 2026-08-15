@@ -54,8 +54,9 @@ use gg_ecs::boundary::{AbiInfo, ComponentsTable, HostApiV1, SystemsTable, TickCt
 use gg_ecs::{Query, World};
 
 use crate::{
-    HARD_DROP, HEIGHT, HOLD, LEFT, Piece, Play, RESTART, RIGHT, ROTATE_CW, SEED, WIDTH, Well,
-    clear_rows, collides, draw, landing_row, lock_piece, new_play, rotate, spawn_piece,
+    HARD_DROP, HEIGHT, HOLD, LEFT, Piece, Play, RESTART, RIGHT, ROTATE_CW, Rules, SEED, WIDTH,
+    Well, clear_rows, collides, draw, gravity_for, landing_row, lock_piece, new_play, rotate,
+    spawn_piece,
 };
 
 /// What the shell's log must say, in order, when this session is replayed.
@@ -134,7 +135,14 @@ pub fn frames() -> Vec<InputFrame> {
         // Past `BUILD_LINES` the bot stops choosing: every piece is dropped
         // where it spawned, which stacks four columns and tops out quickly.
         let choosing = lines < BUILD_LINES;
-        match carry(&mut out, &mut well, &mut play, &mut piece, choosing) {
+        match carry(
+            &mut out,
+            &mut well,
+            &mut play,
+            &mut piece,
+            choosing,
+            level(lines),
+        ) {
             Some(cleared) => lines += cleared,
             None => break,
         }
@@ -168,16 +176,30 @@ pub fn endless(ticks: usize) -> Vec<InputFrame> {
     };
     let mut play = new_play(SEED);
     let mut piece = spawn_piece(draw(&mut play));
+    // The game's own, tracked here because the mirror runs no scoring: `carry`
+    // needs the level to know how far a piece falls while it is being placed.
+    let mut lines = 0;
 
     while out.len() < ticks {
-        if carry(&mut out, &mut well, &mut play, &mut piece, true).is_none() {
-            tap(&mut out, RESTART);
-            let seed = play.rng.next_u64();
-            well = Well {
-                cells: [[0; WIDTH]; HEIGHT],
-            };
-            play = new_play(seed);
-            piece = spawn_piece(draw(&mut play));
+        match carry(
+            &mut out,
+            &mut well,
+            &mut play,
+            &mut piece,
+            true,
+            level(lines),
+        ) {
+            Some(cleared) => lines += cleared,
+            None => {
+                tap(&mut out, RESTART);
+                let seed = play.rng.next_u64();
+                well = Well {
+                    cells: [[0; WIDTH]; HEIGHT],
+                };
+                play = new_play(seed);
+                piece = spawn_piece(draw(&mut play));
+                lines = 0;
+            }
         }
     }
     out.truncate(ticks);
@@ -196,11 +218,22 @@ fn carry(
     play: &mut Play,
     piece: &mut Piece,
     choosing: bool,
+    level: u32,
 ) -> Option<u32> {
-    let (rot, col) = if choosing {
-        place(well, piece)
-    } else {
-        (0, piece.col)
+    let (rot, col) = match choosing {
+        // A plan the row would change is not a plan this mirror can carry
+        // (§6 M51). Dropping where it spawned is the fallback because a hard
+        // drop is row-blind by construction: `landing_row` scans down from
+        // wherever the piece is and reaches the same cell either way.
+        true => {
+            let want = place(well, piece);
+            if row_blind(well, piece, want, level) {
+                want
+            } else {
+                (0, piece.col)
+            }
+        }
+        false => (0, piece.col),
     };
     for _ in 0..rot {
         tap(out, ROTATE_CW);
@@ -228,6 +261,62 @@ fn carry(
     play.next = draw(play);
     *piece = spawn_piece(kind);
     (!collides(well, piece)).then_some(cleared)
+}
+
+/// Whether the taps that carry `piece` to `(rot, col)` mean the same thing at
+/// the row the game's piece will actually be on (§6 M51).
+///
+/// **The one assumption the mirror makes, checked rather than assumed.** This
+/// bot positions at the spawn row: it never models the fall, which is what
+/// keeps [`carry`] free of the gravity and lock-delay rules. The game's piece is
+/// wherever gravity has taken it by the time each tap lands — the same cell
+/// while the piece is clear of the stack, and a *different* one once the stack
+/// has risen into the distance it falls while being positioned. Nothing said so,
+/// and the failure is silent in the worst way: the boards part, the game tops
+/// out on a board the script does not have, the script plays on into a dead
+/// world and every tick after that is input nobody read. It took a soak's
+/// liveness column to see it at all — 35,624 ticks of agreement and then a
+/// hundred thousand of a frozen game reading as the flattest possible result.
+///
+/// So the same taps are walked twice on copies, at the mirror's row and at the
+/// game's, and a placement is taken only if the two never disagree. What that
+/// buys is not a cleverer bot: it is a bot whose remaining choices narrow as the
+/// level rises, exactly as a player's do, until the only move left is to drop
+/// where the piece spawned and top out — which is a game ending, not a harness
+/// breaking, and [`endless`] answers it with the restart.
+fn row_blind(well: &Well, piece: &Piece, (rot, col): (u8, i32), level: u32) -> bool {
+    let gravity = gravity_for(&Rules::DEFAULT, level).max(1);
+    let (mut flat, mut real) = (*piece, *piece);
+    let mut ticks = 0u32;
+    // One tap is two ticks — a press and the release that makes the next one an
+    // edge — and the fall is charged against both.
+    let fall = |real: &mut Piece, ticks: &mut u32| {
+        *ticks += 2;
+        real.row = piece.row + (*ticks / gravity) as i32;
+    };
+    for _ in 0..rot {
+        let _ = rotate(well, &mut flat, true);
+        let _ = rotate(well, &mut real, true);
+        fall(&mut real, &mut ticks);
+        // A kick resolved against a different neighbourhood, or a piece the fall
+        // has already buried: either way the row mattered.
+        if flat.col != real.col || flat.rot != real.rot || collides(well, &real) {
+            return false;
+        }
+    }
+    while flat.col != col {
+        let step = if col < flat.col { -1 } else { 1 };
+        flat.col += step;
+        real.col += step;
+        fall(&mut real, &mut ticks);
+        if collides(well, &flat) != collides(well, &real) {
+            return false;
+        }
+        if collides(well, &flat) {
+            break;
+        }
+    }
+    true
 }
 
 /// Where to put `piece`: the `(rotation, column)` a scoring pass likes best,
@@ -277,6 +366,13 @@ fn score(well: &Well, cleared: u32) -> i32 {
     let aggregate: i32 = heights.iter().sum();
     let bumpiness: i32 = heights.windows(2).map(|w| (w[0] - w[1]).abs()).sum();
     100 * cleared as i32 - 5 * aggregate - 8 * holes - 3 * bumpiness
+}
+
+/// The level `lines` cleared puts a game on — `step`'s own rule, restated here
+/// because the mirror runs no scoring and [`row_blind`] needs the gravity that
+/// depends on it.
+fn level(lines: u32) -> u32 {
+    lines / Rules::DEFAULT.lines_per_level.max(1) + 1
 }
 
 /// Press for one tick, release for the next — one `just_pressed`, one cell.
@@ -611,6 +707,92 @@ pub fn progress(frames: &[InputFrame]) -> Result<Vec<Progress>, SessionError> {
         });
         Ok(out)
     })
+}
+
+/// What a long session costs, sampled rather than read every tick (§6 M51).
+///
+/// Two halves that fail in opposite directions, which is why they are one
+/// struct. The first three are **growth** — a session that accumulates. The
+/// last two are **liveness**, and they exist because a soak whose game quietly
+/// stopped playing reports the flattest numbers a growth column can produce:
+/// a bot wedged against a wall, a top-out nothing restarted, a world frozen by
+/// a system that stopped running would each read as a perfect result.
+#[cfg(feature = "game")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Footprint {
+    /// Ticks run when this sample was taken.
+    pub tick: u64,
+    /// Live entities.
+    pub entities: u32,
+    /// The whole world encoded — what a save of this session would weigh, and
+    /// the one number that sees a component growing a field's worth of rows
+    /// without spawning anything.
+    pub bytes: usize,
+    /// Side tables, which is where host-side state a component cannot hold
+    /// would accumulate.
+    pub side_tables: usize,
+    /// Ticks since the previous sample whose canonical hash differed from the
+    /// tick before them. Liveness: the world is still moving.
+    pub moved: u32,
+    /// Rows cleared since tick zero, summed **across restarts** — `Play::lines`
+    /// goes back to nothing when a game ends, and a soak's whole subject is the
+    /// sessions after the first. Liveness, and the one that distinguishes a bot
+    /// still playing well from one merely still moving.
+    pub cleared: u32,
+}
+
+/// [`Footprint`] every `stride` ticks, through the same table [`hash_sequence`]
+/// drives.
+///
+/// Sampled because the growth columns are not free — encoding the world is what
+/// a save costs, and a soak long enough to be worth running is long enough that
+/// paying it per tick would price the instrument out of the question it asks.
+/// The liveness columns are accumulated over every tick in between, so nothing
+/// between two samples goes unwatched; only the weighing is periodic.
+///
+/// # Errors
+///
+/// As [`hash_sequence`].
+///
+/// # Panics
+///
+/// If `stride` is zero.
+#[cfg(feature = "game")]
+pub fn footprint(frames: &[InputFrame], stride: usize) -> Result<Vec<Footprint>, SessionError> {
+    assert!(stride > 0, "a sample stride of zero samples nothing");
+    let query = Query::<&Play>::new().map_err(SessionError::Alias)?;
+    let mut tick = 0u64;
+    // `Option` rather than a zero sentinel: a hash is an opaque newtype with no
+    // reserved value, and inventing one would make tick 0 unobservable.
+    let mut previous: Option<CanonicalHash> = None;
+    let mut moved = 0;
+    // Carried across restarts by hand: `Play::lines` is the *current* game's,
+    // and a drop is a game that ended rather than rows un-clearing.
+    let (mut cleared, mut last_lines) = (0u32, 0u32);
+    let samples = drive(frames, |world| {
+        let hash = world.canonical_hash();
+        moved += u32::from(previous.is_some_and(|was| was.get() != hash.get()));
+        previous = Some(hash);
+        let mut lines = last_lines;
+        world.each_ref(&query, |_, play: &Play| lines = play.lines);
+        cleared += lines.saturating_sub(last_lines);
+        last_lines = lines;
+        tick += 1;
+        let due = tick.is_multiple_of(stride as u64) || tick as usize == frames.len();
+        Ok(due.then(|| {
+            let out = Footprint {
+                tick,
+                entities: world.len(),
+                bytes: world.snapshot().encode().len(),
+                side_tables: world.side_table_count(),
+                moved,
+                cleared,
+            };
+            moved = 0;
+            out
+        }))
+    })?;
+    Ok(samples.into_iter().flatten().collect())
 }
 
 /// Run `frames` through the declared table, reading something out of the world

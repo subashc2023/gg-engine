@@ -1587,6 +1587,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--away") {
         away()?;
     }
+    if only("--soak") {
+        soak()?;
+    }
     if only("--platformer") {
         platformer()?;
     }
@@ -5684,7 +5687,10 @@ fn crash() -> anyhow::Result<()> {
             .env("GG_HEADLESS", "1")
             .env("LOCALAPPDATA", &data)
             .env("XDG_DATA_HOME", &data)
-            .env("RUST_LOG", "info,gg::hash=debug")
+            // The checkpoint's own line is `debug` since §6 M51 — a periodic
+            // success is not news to a player's log file, and this is the one
+            // leg whose subject *is* the cadence, so it asks for it by target.
+            .env("RUST_LOG", "info,gg::hash=debug,gg_runtime::player=debug")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -6993,4 +6999,210 @@ pub fn dist_records() -> anyhow::Result<()> {
         recorded.meta().tier
     );
     Ok(())
+}
+
+// ------------------------------------------------------------------ the soak
+//
+// §6 M51. Every other leg in this file is bounded by a script that ends: the
+// longest is `--orbit`'s 3510 host ticks, and the shipping game's own is 602.
+// A stranger plays for twenty minutes. What that costs had never been asked, so
+// nothing in the tree had ever run a session long enough for an answer to mean
+// anything — and the first long run found that the *bot* stopped playing after
+// nine minutes, which is the defect a growth column cannot report because a
+// frozen world is the flattest result it can print.
+
+/// Ticks the soak runs: twenty minutes at 60 Hz, which is the session §9 asks
+/// about rather than a round number.
+const SOAK_TICKS: usize = 72_000;
+
+/// The short leg, run first. Its job is the *comparison*: what a session leaves
+/// behind must not scale with how long it was, and one length cannot say that.
+const SOAK_SHORT: usize = 6_000;
+
+/// A twenty-minute session, through the shell, graded on what it leaves behind
+/// (§6 M51).
+///
+/// **What only this leg can see.** `session::footprint` weighs the world, and
+/// the world is flat over an hour — but a player's session is a *process*, and
+/// what accumulates outside the ECS is exactly what no world snapshot contains:
+/// the log the shell writes, the checkpoint M48 offers every five seconds, the
+/// progress file M44 writes, the settings M42 reads. Each is correct at one
+/// tick, and none had ever been watched over a hundred thousand.
+///
+/// **Two runs, because a replay and a live session leave different things.** A
+/// replayed session writes no player file at all (§6 M44) — that is its
+/// contract, and asserting it *is* the first half, since a shell that had
+/// started writing into a replay's data directory would be writing into the
+/// operator's real one on every other gate in this file. The residue that can
+/// grow belongs to a live session, so the second half runs one.
+///
+/// **Graded as a ratio, not a threshold**, and that is what needs two lengths.
+/// A 40 KiB directory is either a fixed cost or a leak and no single run can
+/// say which; twelve times the session says it in one comparison. The bar is
+/// generous on purpose — what is refused is *scaling*, not a file that happens
+/// to be bigger.
+fn soak() -> anyhow::Result<()> {
+    let (host, game) = stage_game(&HASHED_TIERS[0], "demo-10-tetris", "demo_10_tetris")?;
+    let input = workspace_root().join(DEMO_10.dir).join("input.toml");
+    let input = input.display().to_string();
+    // Handed to *both* halves. Without a manifest the shell has no player
+    // directory to write into, and "the replay wrote nothing" would be a fact
+    // about the missing argument rather than about the replay (§6 M51 found
+    // this leg asserting exactly that, and it is the reason the live half
+    // exists to compare against).
+    let manifest = workspace_root().join(DEMO_10.dir).join("game.ggproj");
+    let manifest = manifest.display().to_string();
+
+    let mut left = Vec::new();
+    for ticks in [SOAK_SHORT, SOAK_TICKS] {
+        let dir = workspace_root().join("target/soak").join(ticks.to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let stream = dir.join("endless.ggrp");
+        let frames = demo_10_tetris::session::endless(ticks);
+        std::fs::write(&stream, tetris_stream(&frames).encode())?;
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data)?;
+        let (stream, data) = (stream.display().to_string(), data.display().to_string());
+        let env = [("LOCALAPPDATA", data.as_str()), ("XDG_DATA_HOME", &data)];
+
+        let started = std::time::Instant::now();
+        let args = [
+            "--replay",
+            &stream,
+            "--input",
+            &input,
+            "--project",
+            &manifest,
+        ];
+        let log = play_env(&host, &game, &args, true, &env)?;
+        let elapsed = started.elapsed();
+        let hashes = sequence(&log)?;
+
+        // Liveness first, and at the shell's own level: a run that ended early
+        // would make every byte below a measurement of a shorter session.
+        anyhow::ensure!(
+            hashes.len() == ticks,
+            "the shell produced {} of {ticks} ticks — a session that stopped is not a session \
+             this leg can weigh",
+            hashes.len()
+        );
+        // The world was *playing*, not merely ticking. The hash of a frozen game
+        // repeats, and 72,000 identical ticks would otherwise pass every
+        // assertion in this function.
+        let still = hashes.windows(2).filter(|w| w[0].1 == w[1].1).count();
+        anyhow::ensure!(
+            still * 20 < ticks,
+            "{still} of {ticks} ticks changed nothing — the game stopped being played, which is \
+             what §6 M51 found `session::endless` doing after nine minutes"
+        );
+
+        let bytes = dir_bytes(std::path::Path::new(&data))?;
+        println!(
+            "xtask: soak {ticks} ticks in {:.1}s, {} tick-shaped bytes left behind",
+            elapsed.as_secs_f32(),
+            bytes.iter().map(|(_, n)| n).sum::<u64>()
+        );
+        for (name, size) in &bytes {
+            println!("xtask:   {name} {size} B");
+        }
+        left.push((ticks, bytes));
+    }
+
+    // A replay's whole residue, at both lengths. Zero is the claim rather than a
+    // budget: the data directory belongs to the player, and a replayed run is
+    // not a player.
+    for (ticks, files) in &left {
+        anyhow::ensure!(
+            files.is_empty(),
+            "a replayed session left {} file(s) after {ticks} ticks — a replay writes no player \
+             file (§6 M44), and a shell that had started would be writing into whatever data \
+             directory every other gate in this file was pointed at:\n{files:?}",
+            files.len()
+        );
+    }
+    println!("xtask: soak — a replayed session leaves nothing, at both lengths");
+
+    // The live half. Nothing scripts a live run — a recording *is* the other
+    // arm — so this one sits on the title screen, which is exactly enough: the
+    // checkpoint, the exit write and the log are the shell's own machinery and
+    // are driven by ticks rather than by play.
+    let mut lived = Vec::new();
+    for ticks in [SOAK_SHORT, SOAK_TICKS] {
+        let dir = workspace_root()
+            .join("target/soak/live")
+            .join(ticks.to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data)?;
+        let data = data.display().to_string();
+        let env = [("LOCALAPPDATA", data.as_str()), ("XDG_DATA_HOME", &data)];
+        let frames = ticks.to_string();
+        let args = [
+            "--frames",
+            &frames,
+            "--project",
+            &manifest,
+            "--input",
+            &input,
+        ];
+        let log = play_env(&host, &game, &args, false, &env)?;
+        let mut files = dir_bytes(std::path::Path::new(&data))?;
+        // The log is a stream in this tier and a *file* in a shipping one (§6
+        // M47), so it is weighed as what it would have been on the player's disk
+        // rather than let off for arriving on a pipe here.
+        files.push(("log".to_owned(), log.len() as u64));
+        println!("xtask: soak {ticks} live ticks leave:");
+        for (name, size) in &files {
+            println!("xtask:   {name} {size} B");
+        }
+        lived.push(files);
+    }
+
+    let (short, long) = (&lived[0], &lived[1]);
+    for (name, big) in long {
+        let small = short
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, b)| *b)
+            .unwrap_or(0);
+        anyhow::ensure!(
+            *big <= small.max(4096) * 2,
+            "{name} is {small} B after {SOAK_SHORT} live ticks and {big} B after {SOAK_TICKS} — \
+             a session's residue that grows with its length is what a player's disk pays for \
+             playing longer, and nothing rotates it (§6 M51)"
+        );
+    }
+    println!(
+        "xtask: soak — a live {SOAK_TICKS}-tick session leaves what a {SOAK_SHORT}-tick one does"
+    );
+    Ok(())
+}
+
+/// Every file under `dir`, as `(path relative to dir, bytes)`, sorted. Named
+/// rather than summed because *which* file grew is the whole diagnosis.
+fn dir_bytes(dir: &Path) -> anyhow::Result<Vec<(String, u64)>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(meta) = entry.metadata() {
+                let name = path
+                    .strip_prefix(dir)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string()
+                    .replace('\\', "/");
+                out.push((name, meta.len()));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
