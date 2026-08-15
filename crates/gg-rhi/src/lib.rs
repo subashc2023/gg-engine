@@ -56,6 +56,7 @@ use gpu::Gpu;
 use graph::Bound;
 use instance::{Instance, Presentation};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::path::Path;
 use surface::Surface;
 use swapchain::{Acquired, Swapchain};
 
@@ -284,10 +285,16 @@ impl Rhi {
     /// caller must encode against and it may be [`Output::Sdr`] whatever was
     /// asked. Fixed for the swapchain's life — a colour space is a device-level
     /// decision, not a per-frame one.
+    /// `cache_dir` is where this game's warm pipeline cache belongs — the
+    /// player's own directory (§6 M42), or `None` for a run that has none and
+    /// keeps it under the dev tree's `target/`. It is a parameter rather than
+    /// something this crate works out because a cwd-relative default is a
+    /// decision about someone else's disk (§6 M52).
     pub fn new(
         window: &(impl HasWindowHandle + HasDisplayHandle),
         extent: (u32, u32),
         want: Output,
+        cache_dir: Option<&Path>,
     ) -> Result<Self, RhiError> {
         let display = window
             .display_handle()
@@ -300,7 +307,7 @@ impl Rhi {
                 return Err(e);
             }
         };
-        Self::bring_up(instance, surface, extent, want)
+        Self::bring_up(instance, surface, extent, want, cache_dir)
     }
 
     /// The output contract the swapchain actually got — never what was asked
@@ -350,7 +357,9 @@ impl Rhi {
                 return Err(e);
             }
         };
-        Self::bring_up(instance, surface, extent, Output::Sdr)
+        // No cache directory: this is a gate's context, and a gate's disk is
+        // the dev tree's (§6 M52).
+        Self::bring_up(instance, surface, extent, Output::Sdr, None)
     }
 
     /// Device, swapchain, frames and timings over a surface that is already
@@ -361,8 +370,14 @@ impl Rhi {
         mut surface: Surface,
         extent: (u32, u32),
         want: Output,
+        cache_dir: Option<&Path>,
     ) -> Result<Self, RhiError> {
-        let mut gpu = match Gpu::new(&instance, Some(&surface), FRAMES_IN_FLIGHT as usize) {
+        let mut gpu = match Gpu::new(
+            &instance,
+            Some(&surface),
+            FRAMES_IN_FLIGHT as usize,
+            cache_dir,
+        ) {
             Ok(g) => g,
             Err(e) => {
                 surface.destroy();
@@ -895,6 +910,17 @@ impl Rhi {
             device.end_command_buffer(cmd).map_err(RhiError::Vk)?;
         }
         Ok(())
+    }
+
+    /// Write the warm pipeline cache out now, if anything has been compiled
+    /// since it was last written (§6 M52).
+    ///
+    /// The caller is whoever knows that boot's pipelines are all built — this
+    /// crate does not, since the passes that create them live above it. Cheap
+    /// and idempotent when nothing is outstanding; teardown does it again for
+    /// whatever a mode switch created later.
+    pub fn persist_pipeline_cache(&mut self) {
+        self.gpu.pipelines.persist(&self.gpu.device);
     }
 
     /// Orderly teardown with the §4.3 accounting: wait, drain the deletion

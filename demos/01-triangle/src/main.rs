@@ -167,33 +167,35 @@ fn main() -> anyhow::Result<()> {
 
     let desc = WindowDesc::visible_unless_headless("golden — 01-triangle", (1280, 720));
     gg_platform::run(desc, |window, event| match event {
-        Event::WindowReady => match Rhi::new(window, window.inner_size(), gg_rhi::Output::Sdr) {
-            Ok(mut r) => {
-                let d = r.device_report();
-                tracing::info!(
-                    device = %d.chosen,
-                    api = ?d.api_version,
-                    "golden triangle"
-                );
-                match r.create_pipeline(&scene::pipeline_desc()) {
-                    Ok(p) => pipeline = Some(p),
-                    Err(e) => {
-                        failure = Some(e.into());
-                        return Control::Exit;
+        Event::WindowReady => {
+            match Rhi::new(window, window.inner_size(), gg_rhi::Output::Sdr, None) {
+                Ok(mut r) => {
+                    let d = r.device_report();
+                    tracing::info!(
+                        device = %d.chosen,
+                        api = ?d.api_version,
+                        "golden triangle"
+                    );
+                    match r.create_pipeline(&scene::pipeline_desc()) {
+                        Ok(p) => pipeline = Some(p),
+                        Err(e) => {
+                            failure = Some(e.into());
+                            return Control::Exit;
+                        }
                     }
+                    #[cfg(feature = "hot-reload")]
+                    {
+                        hot = HotReload::new();
+                    }
+                    rhi = Some(r);
+                    Control::Continue
                 }
-                #[cfg(feature = "hot-reload")]
-                {
-                    hot = HotReload::new();
+                Err(e) => {
+                    failure = Some(e.into());
+                    Control::Exit
                 }
-                rhi = Some(r);
-                Control::Continue
             }
-            Err(e) => {
-                failure = Some(e.into());
-                Control::Exit
-            }
-        },
+        }
         Event::Resized(w, h) => {
             if let Some(r) = rhi.as_mut() {
                 r.resize(w, h);

@@ -245,7 +245,7 @@ pub fn gg_render::Renderer::frame(&mut self, &gg_extract::Extracted, &gg_render:
 pub fn gg_render::Renderer::gpu_clock(&self) -> core::option::Option<gg_rhi::timing::GpuClock>
 pub fn gg_render::Renderer::luminance(&self) -> core::option::Option<&[u32; 64]>
 pub fn gg_render::Renderer::memory(&self) -> gg_rhi::resource::MemoryUse
-pub fn gg_render::Renderer::new(&impl raw_window_handle::borrowed::HasWindowHandle + raw_window_handle::borrowed::HasDisplayHandle, (u32, u32)) -> core::result::Result<Self, gg_rhi::RhiError>
+pub fn gg_render::Renderer::new(&impl raw_window_handle::borrowed::HasWindowHandle + raw_window_handle::borrowed::HasDisplayHandle, (u32, u32), core::option::Option<&std::path::Path>) -> core::result::Result<Self, gg_rhi::RhiError>
 pub fn gg_render::Renderer::open_pack(&mut self, &std::path::Path) -> core::result::Result<(), gg_render::content::ContentError>
 pub fn gg_render::Renderer::pack(&self) -> core::option::Option<&gg_render::content::Content>
 pub fn gg_render::Renderer::pass_timings(&self) -> &[gg_rhi::timing::PassTiming]

@@ -393,15 +393,59 @@ fn ship_run() -> anyhow::Result<()> {
     } else {
         "falling-blocks"
     });
+    // A directory that is neither the folder nor the tree, and empty: cwd
+    // decides nothing (§6 M41 pull 3), and "nothing is written beside the
+    // working directory" is a claim only an empty one can carry. Run from the
+    // workspace root — as this leg did until §6 M52 — a stray `target/gg-cache`
+    // lands in the tree's own `target/` and is invisible.
+    let cwd = std::env::temp_dir().join("gg-ship-run");
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd)?;
+    // The player's directory, redirected the way every §6 M42 gate redirects it:
+    // an operator's real one already holds a blob from the last run, and "this
+    // run wrote it" is the only version of the claim worth making.
+    let data = std::env::temp_dir().join("gg-ship-data");
+    let _ = std::fs::remove_dir_all(&data);
     let mut cmd = std::process::Command::new(&exe);
-    // From a directory that is not the folder: cwd decides nothing any more
-    // (§6 M41 pull 3), and a run started from a shortcut is the ordinary case.
-    cmd.current_dir(crate::util::workspace_root())
+    cmd.current_dir(&cwd)
+        .env("LOCALAPPDATA", &data)
+        .env("XDG_DATA_HOME", &data)
         .args(["--frames", "300"]);
     exec(
         &mut cmd,
         "the shipped folder, 300 windowed frames, no arguments a player would not have",
-    )
+    )?;
+
+    // §6 M52. Both halves are windowed-only by construction: under
+    // `GG_HEADLESS=1` the shell creates no device, so nothing in any automated
+    // tier has ever compiled a pipeline through the shell, and `data_dir`'s own
+    // contract — "saves, its log, and the warm pipeline cache" — went four
+    // milestones with its third clause unimplemented.
+    let strays: Vec<_> = std::fs::read_dir(&cwd)?
+        .filter_map(Result::ok)
+        .map(|e| e.file_name())
+        .collect();
+    anyhow::ensure!(
+        strays.is_empty(),
+        "the shipped game wrote {strays:?} beside its working directory (§6 M52)"
+    );
+    let slug = data.join("falling-blocks");
+    let warm = std::fs::read_dir(&slug)
+        .map(|dir| {
+            dir.filter_map(Result::ok).any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("pipeline-cache-")
+            })
+        })
+        .unwrap_or(false);
+    anyhow::ensure!(
+        warm,
+        "no warm pipeline cache in {} after a windowed run (§6 M52)",
+        slug.display()
+    );
+    println!("xtask interactive: the cache is the player's and the cwd is untouched (§6 M52)");
+    Ok(())
 }
 
 /// The legs that open a sound card (§1.5's audio analogue, §6 M18 item 2).

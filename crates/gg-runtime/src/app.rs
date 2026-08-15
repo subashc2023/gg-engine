@@ -140,6 +140,13 @@ pub struct App {
     /// a path rather than opened here because a headless run has no renderer to
     /// stream into and mapping a file for nobody would be work with no reader.
     pack: Option<std::path::PathBuf>,
+    /// Where the warm pipeline cache goes: the player's own directory (§6 M42),
+    /// or `None` for a dev run, which keeps it under `target/` like everything
+    /// else. **Not** `player_file`'s — that gates on the run being *live*,
+    /// because a preference is hashed world state (§6 M42). A pipeline cache is
+    /// a driver artifact no tick can observe, so a replayed session deserves a
+    /// warm one exactly as much as a live one does.
+    cache: Option<std::path::PathBuf>,
     /// Tracy's GPU zones, fed the same readings the overlay shows, so the two
     /// views of one frame cannot disagree (§4.8).
     #[cfg(feature = "debug-tools")]
@@ -309,6 +316,7 @@ impl App {
             gpu: None,
             dpi: 1.0,
             pack: args.pack.clone(),
+            cache: args.data.clone(),
             #[cfg(feature = "debug-tools")]
             zones: None,
             #[cfg(feature = "overlay")]
@@ -400,7 +408,7 @@ impl App {
         // window that laid its first frame out at `boundary::CANVAS` would
         // relayout on the very next event for no reason.
         self.extent = window.inner_size();
-        let mut renderer = Renderer::new(window, window.inner_size())?;
+        let mut renderer = Renderer::new(window, window.inner_size(), self.cache.as_deref())?;
         // The renderer never learns what a glyph is; it takes coverage texels
         // and a rectangle (§4.9). Unconditional since M13: the game's own UI
         // draws from this atlas in every tier, the overlay is a second caller.

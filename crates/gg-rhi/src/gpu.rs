@@ -46,12 +46,14 @@ pub(crate) struct Gpu {
 impl Gpu {
     /// Bring up the device and everything under it. `surface` is `None` for
     /// offscreen contexts (§4.10). `frame_slots` is the caller's frames in
-    /// flight, which the breadcrumb buffer is divided by. Every failure path
-    /// unwinds what it built.
+    /// flight, which the breadcrumb buffer is divided by. `cache_dir` is where
+    /// the warm pipeline cache belongs — `None` is the dev tree's `target/`
+    /// (§6 M52). Every failure path unwinds what it built.
     pub fn new(
         instance: &Instance,
         surface: Option<&Surface>,
         frame_slots: usize,
+        cache_dir: Option<&std::path::Path>,
     ) -> Result<Self, RhiError> {
         let mut device = Device::new(instance, surface)?;
 
@@ -79,7 +81,7 @@ impl Gpu {
                 return Err(e);
             }
         };
-        let mut pipelines = match PipelineStore::new(&device) {
+        let mut pipelines = match PipelineStore::new(&device, cache_dir) {
             Ok(p) => p,
             Err(e) => {
                 uploader.destroy(&mut device);

@@ -307,11 +307,15 @@ impl Renderer {
     ///
     /// The surface may not outlive the window it came from, so [`Renderer::shutdown`]
     /// must run while the window is still alive (§4.3).
+    ///
+    /// `cache_dir` is where the warm pipeline cache belongs — the player's own
+    /// directory (§6 M42), or `None` for a run that has none (§6 M52).
     pub fn new(
         window: &(impl HasWindowHandle + HasDisplayHandle),
         extent: (u32, u32),
+        cache_dir: Option<&Path>,
     ) -> Result<Self, RhiError> {
-        let mut rhi = Rhi::new(window, extent, wanted_output())?;
+        let mut rhi = Rhi::new(window, extent, wanted_output(), cache_dir)?;
         // The display had the last word (§6 M23). Written back rather than
         // remembered, so `r.hdr` reads as what a frame is *actually* encoded
         // into: an operator who asked for HDR10 and reads 0 has been told the
@@ -337,6 +341,11 @@ impl Renderer {
         let mut probes = probe::Probes::default();
         probes.open(&mut rhi)?;
         let integrate = probe::Integrate::new(&mut rhi)?;
+        // Every pipeline a launch compiles exists by now, so this is the moment
+        // the next launch's warm cache is worth writing (§6 M52). Before this it
+        // waited for teardown, and §6 M48 named what that costs: a session that
+        // was killed compiled them for nobody.
+        rhi.persist_pipeline_cache();
         Ok(Renderer {
             rhi,
             pass,
@@ -1064,6 +1073,10 @@ impl OffscreenRenderer {
         let mut probes = probe::Probes::default();
         probes.open(&mut rhi)?;
         let integrate = probe::Integrate::new(&mut rhi)?;
+        // As the windowed constructor, and for the same reason (§6 M52) — an
+        // instrument or a harness that is interrupted should not cost the next
+        // one its warm cache either.
+        rhi.persist_pipeline_cache();
         // One buffer for the renderer's life: a frame that allocated its own
         // readback would be measuring the allocator as much as the frame.
         let readback = rhi.create_buffer(&BufferDesc {

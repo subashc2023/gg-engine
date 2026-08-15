@@ -14,7 +14,21 @@ use crate::deletion::{Deferred, DeletionQueue};
 use crate::device::Device;
 use ash::vk;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Write `bytes` to `path` through a neighbour and a rename, so a reader never
+/// sees half of one (§6 M52). The sibling is `gg_runtime::player::replace`,
+/// which cannot be shared: nothing links both crates, and six lines of `std::fs`
+/// is a smaller cost than the dependency arrow that would.
+///
+/// No `sync_all`, unlike that sibling: what tears here costs a cold start, not a
+/// player's save, and the rename is already atomic against the failure this is
+/// for (§6 M48 — a process that dies, not a machine that loses power).
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temp = path.with_extension("new");
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(&temp, path)
+}
 
 /// What a pipeline writes color into. Dynamic rendering makes a pipeline agree
 /// with its pass on attachment formats, and a graph pass targets either where
@@ -119,6 +133,9 @@ pub(crate) struct PipelineStore {
     cache_path: PathBuf,
     next_id: u64,
     entries: BTreeMap<u64, PipelineEntry>,
+    // Pipelines created since the blob on disk was last written. The count
+    // rather than a bool so the log line says how much a persist was for.
+    unsaved: u32,
 }
 
 impl PipelineStore {
@@ -127,7 +144,14 @@ impl PipelineStore {
     /// device: the driver would reject a foreign blob anyway (header check),
     /// but rejecting it would also silently discard the *right* device's
     /// warm cache every time the driver under test changes.
-    pub fn new(device: &Device) -> Result<Self, RhiError> {
+    ///
+    /// `dir` is the caller's answer to *where a player's bytes live* (§6 M42) —
+    /// `None` means this process has none, and the dev tree's `target/` is the
+    /// right home for a run launched out of it. Reading that from the
+    /// environment here is what this took until §6 M52, and it put a `target/`
+    /// folder beside every shipped game: a cwd-relative default is a decision
+    /// about someone else's disk, made by the layer least able to make it.
+    pub fn new(device: &Device, dir: Option<&Path>) -> Result<Self, RhiError> {
         let device_key: String = device
             .report()
             .chosen
@@ -135,9 +159,8 @@ impl PipelineStore {
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .collect();
-        let cache_path = std::env::var_os("GG_PIPELINE_CACHE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("target/gg-cache"))
+        let cache_path = dir
+            .map_or_else(|| PathBuf::from("target/gg-cache"), PathBuf::from)
             .join(format!("pipeline-cache-{device_key}.bin"));
         let initial = std::fs::read(&cache_path).unwrap_or_default();
         let info = vk::PipelineCacheCreateInfo::default().initial_data(&initial);
@@ -157,7 +180,54 @@ impl PipelineStore {
             cache_path,
             next_id: 1,
             entries: BTreeMap::new(),
+            unsaved: 0,
         })
+    }
+
+    /// Write the driver's blob out, if anything has been compiled since the last
+    /// write. Idempotent and cheap when clean — `vkGetPipelineCacheData` is not
+    /// called at all.
+    ///
+    /// Called after bring-up as well as at teardown (§6 M52). Until then this
+    /// happened *only* in [`PipelineStore::destroy`], and §6 M48 established
+    /// what that means: a killed process runs no destructors, so a session that
+    /// crashed threw away every pipeline it had compiled and the next launch
+    /// paid for them again. Boot is where they are all created, so one write
+    /// there is the whole of the fix; a periodic writer would cost more disk
+    /// than the ~20 ms it protects (§6 M52's table).
+    pub fn persist(&mut self, device: &Device) {
+        if self.unsaved == 0 {
+            return;
+        }
+        // SAFETY: cache is live — destroyed only in `destroy`, after its own
+        // final persist.
+        let data = match unsafe { device.raw().get_pipeline_cache_data(self.cache) } {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::warn!("pipeline cache data unavailable: {e:?}");
+                return;
+            }
+        };
+        let write = self
+            .cache_path
+            .parent()
+            .map(std::fs::create_dir_all)
+            .transpose()
+            .and_then(|_| write_atomic(&self.cache_path, &data));
+        match write {
+            Ok(()) => {
+                tracing::info!(
+                    path = %self.cache_path.display(),
+                    bytes = data.len(),
+                    pipelines = self.unsaved,
+                    "pipeline cache saved"
+                );
+                self.unsaved = 0;
+            }
+            // Left dirty deliberately: a read-only install fails every attempt,
+            // and a full disk might not fail the next one.
+            Err(e) => tracing::warn!("pipeline cache not saved: {e}"),
+        }
     }
 
     /// Build a graphics pipeline via dynamic rendering. `backbuffer_format` is
@@ -340,6 +410,9 @@ impl PipelineStore {
 
         let id = self.next_id;
         self.next_id += 1;
+        // The driver put something new in the cache — counted here rather than
+        // inferred from `entries`, which a destroyed pipeline leaves.
+        self.unsaved += 1;
         self.entries.insert(
             id,
             PipelineEntry {
@@ -400,26 +473,10 @@ impl PipelineStore {
                 device.raw().destroy_pipeline_layout(entry.layout, None);
             }
         }
-        // SAFETY: cache is live until the destroy below.
-        match unsafe { device.raw().get_pipeline_cache_data(self.cache) } {
-            Ok(data) => {
-                let write = self
-                    .cache_path
-                    .parent()
-                    .map(std::fs::create_dir_all)
-                    .transpose()
-                    .and_then(|_| std::fs::write(&self.cache_path, &data).map(Some));
-                match write {
-                    Ok(_) => tracing::info!(
-                        path = %self.cache_path.display(),
-                        bytes = data.len(),
-                        "pipeline cache saved"
-                    ),
-                    Err(e) => tracing::warn!("pipeline cache not saved: {e}"),
-                }
-            }
-            Err(e) => tracing::warn!("pipeline cache data unavailable: {e:?}"),
-        }
+        // Still here as well as after bring-up: a mode switch creates pipelines
+        // long after boot (`create`'s sample-count refusal names the case), and
+        // this is where those reach the disk.
+        self.persist(device);
         // SAFETY: cache belongs to this device; no creation is in flight.
         unsafe { device.raw().destroy_pipeline_cache(self.cache, None) };
     }

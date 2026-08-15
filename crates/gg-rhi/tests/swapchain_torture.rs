@@ -107,6 +107,7 @@ fn recreation_survives_1000_synthetic_extents() {
         pump.window(),
         pump.window().inner_size(),
         gg_rhi::Output::Sdr,
+        None,
     )
     .expect("rhi");
     let start_generation = rhi.swapchain_generation();
@@ -149,6 +150,7 @@ fn interactive_resize_minimize_spam_1000() {
         pump.window(),
         pump.window().inner_size(),
         gg_rhi::Output::Sdr,
+        None,
     )
     .expect("rhi");
 

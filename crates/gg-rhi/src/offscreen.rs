@@ -18,6 +18,7 @@ use crate::resource::{
 };
 use crate::{Pass, RhiError, ShutdownReport, TextureIndex};
 use ash::vk;
+use std::path::Path;
 
 /// The offscreen target's format. Fixed: PNG-ready bytes are the point (§4.10).
 const TARGET_FORMAT: ImageFormat = ImageFormat::Rgba8Srgb;
@@ -43,13 +44,24 @@ pub struct OffscreenRhi {
 
 impl OffscreenRhi {
     /// Bring up a device with no display attached and an offscreen RGBA8-sRGB
-    /// target of `extent` pixels.
+    /// target of `extent` pixels. The warm pipeline cache lands under the dev
+    /// tree's `target/`, which is every offscreen caller's right answer — a
+    /// harness and an instrument have no player to keep bytes for.
     pub fn new(extent: (u32, u32)) -> Result<Self, RhiError> {
+        Self::with_cache(extent, None)
+    }
+
+    /// As [`OffscreenRhi::new`], naming where the pipeline cache goes.
+    ///
+    /// Exists for one caller: the gate that has to prove the directory is
+    /// *obeyed* (§6 M52), which cannot be written against a default without
+    /// asserting the defect it is checking for.
+    pub fn with_cache(extent: (u32, u32), cache_dir: Option<&Path>) -> Result<Self, RhiError> {
         if extent.0 == 0 || extent.1 == 0 {
             return Err(RhiError::Loader("offscreen extent must be nonzero".into()));
         }
         let mut instance = Instance::new(Presentation::None)?;
-        let mut gpu = match Gpu::new(&instance, None, 1) {
+        let mut gpu = match Gpu::new(&instance, None, 1, cache_dir) {
             Ok(g) => g,
             Err(e) => {
                 instance.destroy();
@@ -171,6 +183,12 @@ impl OffscreenRhi {
     /// and destruction is immediate.
     pub fn destroy_pipeline(&mut self, handle: PipelineHandle) -> Result<(), RhiError> {
         self.gpu.pipelines.remove_now(&self.gpu.device, handle)
+    }
+
+    /// Write the warm pipeline cache out now — see
+    /// [`Rhi::persist_pipeline_cache`](crate::Rhi::persist_pipeline_cache).
+    pub fn persist_pipeline_cache(&mut self) {
+        self.gpu.pipelines.persist(&self.gpu.device);
     }
 
     /// Allocate a buffer (§4.3: reached by device address).

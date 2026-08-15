@@ -31,7 +31,15 @@ fn clear_readback_is_exact() {
 }
 
 /// A full-target triangle drawn through a runtime-compiled pipeline covers
-/// every pixel; the pipeline cache lands on disk at shutdown (§4.4).
+/// every pixel; the pipeline cache lands **where it was told**, and before
+/// teardown (§4.4, §6 M52).
+///
+/// The cache half of this test used to read `target/gg-cache` and assert the
+/// directory was non-empty, which is two weaknesses in one line: it certified
+/// the cwd-relative default that put a `target/` folder beside every shipped
+/// game, and any other run in the workspace could satisfy it. Both halves are
+/// now this run's own — a directory nothing created in advance, and a file
+/// present while the device is still up.
 #[test]
 fn draw_covers_target_and_cache_persists() {
     init_tracing();
@@ -68,7 +76,10 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
     let vs = find(gg_shaders::Stage::Vertex);
     let fs = find(gg_shaders::Stage::Fragment);
 
-    let mut rhi = OffscreenRhi::new((64, 64)).unwrap();
+    // Deliberately not created here: a first launch finds no directory, and the
+    // store making its own is half of what a shipped game needs from it.
+    let cache_dir = dir.join("cache");
+    let mut rhi = OffscreenRhi::with_cache((64, 64), Some(&cache_dir)).unwrap();
     let pipeline = rhi
         .create_pipeline(&PipelineDesc {
             name: "test-fullscreen",
@@ -120,18 +131,43 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
     .unwrap_err();
     assert!(err.to_string().contains("not live"), "got: {err}");
 
+    // Before the shutdown, which is the whole point (§6 M52): until now this
+    // happened in `destroy` alone, and a process that is killed runs no
+    // destructor (§6 M48), so everything a session compiled died with it.
+    rhi.persist_pipeline_cache();
+    // One message for two defects, deliberately: nothing at this path is all
+    // the observation carries, and the two ways to get there are a `persist`
+    // that wrote nothing and a store that chose a different directory. Naming
+    // both beats a message that guesses.
+    let written: Vec<_> = cache_dir
+        .read_dir()
+        .expect(
+            "nothing at the directory the store was handed — either `persist` never reached \
+             the disk, or the path it picked is not this one (§6 M52)",
+        )
+        .map(|e| e.unwrap())
+        .collect();
+    assert_eq!(
+        written.len(),
+        1,
+        "one blob per device, and nothing else: {:?}",
+        written.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+    );
+    let blob = &written[0];
+    assert!(
+        blob.file_name()
+            .to_string_lossy()
+            .starts_with("pipeline-cache-"),
+        "unexpected name: {:?}",
+        blob.file_name()
+    );
+    // Nonzero rather than a size: lavapipe stores 32 bytes where the 4090
+    // stores 580 KB, and what is being asserted is that a blob crossed the seam
+    // at all. A `.new` neighbour surviving would mean the rename never ran.
+    assert!(blob.metadata().unwrap().len() > 0, "the blob is empty");
+
     let report = rhi.shutdown();
     assert!(report.clean(), "unclean: {report:?}");
-
-    // The disk-backed cache (§4.4): something was persisted for this device.
-    let cache_dir = std::path::Path::new("target/gg-cache");
-    assert!(
-        cache_dir
-            .read_dir()
-            .map(|mut d| d.next().is_some())
-            .unwrap_or(false),
-        "pipeline cache directory is empty after shutdown"
-    );
 }
 
 /// Wrong-size push constants fail precisely, before anything is recorded.

@@ -198,12 +198,14 @@ pub fn gg_rhi::OffscreenRhi::map_buffer(&self, gg_rhi::BufferHandle) -> core::re
 pub fn gg_rhi::OffscreenRhi::memory(&self) -> gg_rhi::MemoryUse
 pub fn gg_rhi::OffscreenRhi::new((u32, u32)) -> core::result::Result<Self, gg_rhi::RhiError>
 pub fn gg_rhi::OffscreenRhi::pass_timings(&self) -> &[gg_rhi::PassTiming]
+pub fn gg_rhi::OffscreenRhi::persist_pipeline_cache(&mut self)
 pub fn gg_rhi::OffscreenRhi::register_storage_image(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::StorageImageIndex, gg_rhi::RhiError>
 pub fn gg_rhi::OffscreenRhi::register_texture(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::TextureIndex, gg_rhi::RhiError>
 pub fn gg_rhi::OffscreenRhi::shutdown(self) -> gg_rhi::ShutdownReport
 pub fn gg_rhi::OffscreenRhi::transfer_crosses_queue_families(&self) -> bool
 pub fn gg_rhi::OffscreenRhi::upload_buffer(&mut self, gg_rhi::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_rhi::OffscreenRhi::upload_image(&mut self, gg_rhi::ImageHandle, u32, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_rhi::OffscreenRhi::with_cache((u32, u32), core::option::Option<&std::path::Path>) -> core::result::Result<Self, gg_rhi::RhiError>
 pub fn gg_rhi::OffscreenRhi::write_buffer(&mut self, gg_rhi::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
 impl core::ops::drop::Drop for gg_rhi::OffscreenRhi
 pub fn gg_rhi::OffscreenRhi::drop(&mut self)
@@ -255,9 +257,10 @@ pub fn gg_rhi::Rhi::headless((u32, u32)) -> core::result::Result<Self, gg_rhi::R
 pub fn gg_rhi::Rhi::headless_supported() -> bool
 pub fn gg_rhi::Rhi::map_buffer(&self, gg_rhi::BufferHandle) -> core::result::Result<&[u8], gg_rhi::RhiError>
 pub fn gg_rhi::Rhi::memory(&self) -> gg_rhi::MemoryUse
-pub fn gg_rhi::Rhi::new(&impl raw_window_handle::borrowed::HasWindowHandle + raw_window_handle::borrowed::HasDisplayHandle, (u32, u32), gg_rhi::Output) -> core::result::Result<Self, gg_rhi::RhiError>
+pub fn gg_rhi::Rhi::new(&impl raw_window_handle::borrowed::HasWindowHandle + raw_window_handle::borrowed::HasDisplayHandle, (u32, u32), gg_rhi::Output, core::option::Option<&std::path::Path>) -> core::result::Result<Self, gg_rhi::RhiError>
 pub fn gg_rhi::Rhi::output(&self) -> gg_rhi::Output
 pub fn gg_rhi::Rhi::pass_timings(&self) -> &[gg_rhi::PassTiming]
+pub fn gg_rhi::Rhi::persist_pipeline_cache(&mut self)
 pub fn gg_rhi::Rhi::present(&self) -> core::option::Option<gg_rhi::Present>
 pub fn gg_rhi::Rhi::register_texture(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::TextureIndex, gg_rhi::RhiError>
 pub fn gg_rhi::Rhi::resize(&mut self, u32, u32)

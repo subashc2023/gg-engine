@@ -56,23 +56,25 @@ fn main() -> anyhow::Result<()> {
 
     let desc = WindowDesc::visible_unless_headless("golden — 00-clear", (1280, 720));
     gg_platform::run(desc, |window, event| match event {
-        Event::WindowReady => match Rhi::new(window, window.inner_size(), gg_rhi::Output::Sdr) {
-            Ok(r) => {
-                let d = r.device_report();
-                tracing::info!(
-                    device = %d.chosen,
-                    api = ?d.api_version,
-                    transfer_dedicated = d.transfer_dedicated,
-                    "first light"
-                );
-                rhi = Some(r);
-                Control::Continue
+        Event::WindowReady => {
+            match Rhi::new(window, window.inner_size(), gg_rhi::Output::Sdr, None) {
+                Ok(r) => {
+                    let d = r.device_report();
+                    tracing::info!(
+                        device = %d.chosen,
+                        api = ?d.api_version,
+                        transfer_dedicated = d.transfer_dedicated,
+                        "first light"
+                    );
+                    rhi = Some(r);
+                    Control::Continue
+                }
+                Err(e) => {
+                    failure = Some(e.into());
+                    Control::Exit
+                }
             }
-            Err(e) => {
-                failure = Some(e.into());
-                Control::Exit
-            }
-        },
+        }
         Event::Resized(w, h) => {
             if let Some(r) = rhi.as_mut() {
                 r.resize(w, h);
