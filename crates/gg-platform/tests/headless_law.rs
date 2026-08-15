@@ -39,6 +39,21 @@ fn visible_window_under_gg_headless_panics() {
     );
 }
 
+/// The other half of the law, and it fails in the opposite direction (§6 M47):
+/// a message box is an OS window, so under `GG_HEADLESS=1` it must not be one —
+/// and it must not *panic* either, because every caller is already carrying a
+/// failure and a second one would bury it. Windowless: the point is that
+/// nothing is constructed.
+#[test]
+fn an_alert_under_the_law_shows_nothing_and_says_so() {
+    // SAFETY: process-per-test (nextest); no other thread reads the env yet.
+    unsafe { std::env::set_var("GG_HEADLESS", "1") };
+    assert!(
+        !gg_platform::alert("gg", "a refusal an automated tier must never see"),
+        "§1.5: an alert under the headless law is not shown"
+    );
+}
+
 /// An env var is a string: `GG_HEADLESS=0` spells headless-*off*, and a parse
 /// that read any set value as headless would silently skip the windowed path
 /// for a user who thought they had turned it back on.

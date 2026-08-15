@@ -335,13 +335,21 @@ impl Device {
         }
 
         let Some((pd, _, chosen_idx)) = chosen else {
+            // Read by two people and written for both (§6 M47). The head is the
+            // one a player gets in a message box, so it says what is wanted and
+            // what to try; the per-device rows keep every Vulkan name, because
+            // that half is what gets pasted into a bug report. What is *not*
+            // here any more is a citation of this document — a section number
+            // is unactionable to the only person who ever sees this fail.
             let mut report = match &want {
                 Some(w) => format!(
-                    "no Vulkan device satisfies the §4.3 requirements *and* matches \
-                     GG_ADAPTER={w:?} — per-device report:"
+                    "no graphics device matches GG_ADAPTER={w:?} and can also run this engine, \
+                     which needs Vulkan 1.3 — per-device report:"
                 ),
                 None => String::from(
-                    "no Vulkan device satisfies the §4.3 requirements — per-device report:",
+                    "no graphics device on this machine can run this engine. It needs Vulkan 1.3 \
+                     and the features listed below; on a card that has them the usual cause is a \
+                     graphics driver too old. Per-device report:",
                 ),
             };
             for c in &candidates {

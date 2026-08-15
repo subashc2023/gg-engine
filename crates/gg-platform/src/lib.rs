@@ -61,6 +61,79 @@ fn is_parked(pos: (i32, i32)) -> bool {
     pos.0 <= OFFSCREEN_POS.0 / 2 && pos.1 <= OFFSCREEN_POS.1 / 2
 }
 
+/// Tell the operator something went wrong, in a window they cannot miss (§6
+/// M47). Returns whether one was shown — the caller logs either way, and a
+/// `false` is information rather than a failure.
+///
+/// Here because a message box *is* an OS window, and windows are born in this
+/// crate so §1.5 has one place to watch. Under the headless law it shows
+/// nothing and says so, which is a refusal and deliberately **not**
+/// [`enforce_headless_law`]'s panic: a visible window under the law is a bug
+/// worth stopping for, while an alert that panicked would replace the failure
+/// being reported with one of its own.
+///
+/// Modal, and it blocks this thread until dismissed. Every caller is on its way
+/// out of the process, which is what makes that acceptable — never call it on a
+/// path that intends to continue.
+pub fn alert(title: &str, body: &str) -> bool {
+    if headless() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+        // Wide and NUL-terminated, which `MessageBoxW` requires and Rust's
+        // strings are neither of.
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let (title, body) = (wide(title), wide(body));
+        // SAFETY: both pointers are NUL-terminated UTF-16 owned by locals that
+        // outlive the call, and a null owner window is the documented spelling
+        // for a box with no parent.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                body.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            )
+        };
+        true
+    }
+    // No X11 or Wayland equivalent to declare, so this is the desktop's own
+    // dialog or nothing: §8 carries it as a named residual rather than as
+    // parity, and a bare WM with neither installed falls through to the log.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let candidates: [(&str, Vec<String>); 2] = [
+            (
+                "zenity",
+                vec![
+                    "--error".into(),
+                    format!("--title={title}"),
+                    format!("--text={body}"),
+                ],
+            ),
+            (
+                "kdialog",
+                vec![
+                    "--title".into(),
+                    title.into(),
+                    "--error".into(),
+                    body.into(),
+                ],
+            ),
+        ];
+        candidates.iter().any(|(tool, args)| {
+            std::process::Command::new(tool)
+                .args(args)
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    }
+    #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+    false
+}
+
 /// What kind of window to create.
 #[derive(Clone, Debug)]
 pub struct WindowDesc {

@@ -565,8 +565,63 @@ pub fn active_tier() -> &'static str {
 const LOG_FILTER: &str = "debug,gg::hash=off";
 
 /// Where a shipped run's log goes, in the game's own directory (§6 M41 item 4).
-#[cfg(not(feature = "debug-tools"))]
 const LOG_FILE: &str = "log.txt";
+
+/// The file a refusal may point someone at, or `None` when this run's log is a
+/// console they are already looking at (§6 M47) — naming a file that does not
+/// exist is worse than naming nothing. `cfg!` rather than two bodies so the
+/// constant above stays referenced in both tiers.
+fn log_path(data: Option<&Path>) -> Option<PathBuf> {
+    match cfg!(feature = "debug-tools") {
+        true => None,
+        false => data.map(|dir| dir.join(LOG_FILE)),
+    }
+}
+
+/// What a refusal says to whoever is holding the mouse (§6 M47): the title, so
+/// they know what failed; the chain, so they know what to say; the log's path,
+/// so a bug report can carry something. Nothing else — a message box is read
+/// standing up, and the device table and the stack are in the file it names.
+///
+/// Separate from — and public alongside — [`refuse`] because it is the only
+/// half a test can read: the box is the operator's and stderr is a stream.
+pub fn refusal(title: &str, error: &anyhow::Error, log: Option<&Path>) -> String {
+    let mut body = format!("{title} could not start.\n\n{error}");
+    for cause in error.chain().skip(1) {
+        body.push_str(&format!("\n\ncaused by: {cause}"));
+    }
+    if let Some(log) = log {
+        body.push_str(&format!("\n\nThe full log is at\n{}", log.display()));
+    }
+    body
+}
+
+/// The shell's last words (§6 M47). Returns the process's code, so `main` is an
+/// expression and the one thing it must not do — carry on — is unspellable.
+///
+/// Called from `main` and not from [`run`] because the earliest failures are
+/// `parse_args`'s, which happen before `run` is entered at all; the title and
+/// the data directory are arguments for the same reason, since the parse that
+/// would have found them is the thing that failed.
+///
+/// Three sinks, none redundant: the log is what a bug report carries, stderr is
+/// the dev tree's answer and every gate's, and the box is the only one a player
+/// standing in front of a shipped folder will ever see. The subscriber is a
+/// global and outlives `run`'s guard, so the log line lands for every failure
+/// that got as far as opening one — the ones that did not are exactly
+/// `parse_args`'s, which is what the other two are for.
+pub fn refuse(
+    title: Option<&str>,
+    data: Option<&Path>,
+    error: &anyhow::Error,
+) -> std::process::ExitCode {
+    tracing::error!(error = %format!("{error:#}"), "refused to start");
+    eprintln!("Error: {error:?}");
+    let title = title.unwrap_or(env!("CARGO_PKG_NAME"));
+    let log = log_path(data);
+    gg_platform::alert(title, &refusal(title, error, log.as_deref()));
+    std::process::ExitCode::FAILURE
+}
 
 /// The instruments (§4.8): Tracy, the log tail a crash report attaches, the
 /// console. `gg-debug` is absent from every dist graph by §3, so this is two

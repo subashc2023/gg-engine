@@ -342,7 +342,39 @@ pub fn interactive() -> anyhow::Result<()> {
     replay_run()?;
     crate::dist::demo_runs()?;
     ship_run()?;
+    refusal_run()?;
     println!("xtask interactive: green (manual windowed suite — not part of any automated tier)");
+    Ok(())
+}
+
+/// The half of §6 M47 no automated tier may run: the box itself.
+///
+/// Everything else about a refusal is gated (`xtask reload --refuse`), and none
+/// of it can be, because under `GG_HEADLESS=1` `gg_platform::alert` shows
+/// nothing by law (§1.5). What is left is the one question a machine cannot
+/// answer — whether the thing a player sees is *readable* — so this puts it on
+/// the screen and waits for it to be dismissed. Over the shipped folder for the
+/// same reason [`ship_run`] is: a console-less binary has nowhere else to speak,
+/// which is the whole premise.
+fn refusal_run() -> anyhow::Result<()> {
+    let folder = crate::util::workspace_root().join("target/ship/falling-blocks");
+    let exe = folder.join(if cfg!(windows) {
+        "falling-blocks.exe"
+    } else {
+        "falling-blocks"
+    });
+    println!("xtask interactive: a refusal is about to appear in a message box — dismiss it");
+    let status = std::process::Command::new(&exe)
+        .current_dir(crate::util::workspace_root())
+        .arg("--game")
+        .arg(folder.join("no-such-game.dll"))
+        .env_remove("GG_HEADLESS")
+        .status()?;
+    anyhow::ensure!(
+        !status.success(),
+        "the shipped folder started without its game and exited {status}"
+    );
+    println!("xtask interactive: the box was shown and dismissed (§6 M47)");
     Ok(())
 }
 

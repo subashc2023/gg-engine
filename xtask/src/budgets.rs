@@ -189,10 +189,23 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   and the write-back, and the icon's *format* is `gg-core`'s beside the
 ///   manifest that names it.
 ///
+/// - **The refusal a player never sees** (1640 -> 1680, §6 M47): the shell is
+///   the only thing that holds all three of the game's name, its data directory
+///   and the error, so it is the only place the sentence can be *composed* — and
+///   `main` is the only place it can be *said*, because a failure in
+///   `parse_args` happens before `run` is entered at all, which is why the title
+///   and the directory are arguments rather than fields read from somewhere.
+///   What did not stay here, and this is the load-bearing half: the decision
+///   whether to show anything is `gg-platform`'s, because a message box is an OS
+///   window and §1.5 gets one place to watch — an alert put in the shell would
+///   be a second window birth site the law does not enforce at. The text a
+///   *device* refusal carries stayed in `gg-rhi` for the same reason a milestone
+///   over: the crate that knows the fact writes the sentence.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session), M45 (the
-/// keys) — each argued the same way.
-const SHELL_BUDGET: usize = 1640;
+/// keys), M46 (the window) — each argued the same way.
+const SHELL_BUDGET: usize = 1680;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

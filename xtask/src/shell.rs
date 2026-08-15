@@ -1578,6 +1578,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--window") {
         window()?;
     }
+    if only("--refuse") {
+        refuse()?;
+    }
     if only("--platformer") {
         platformer()?;
     }
@@ -5547,6 +5550,91 @@ window = 1280x720
     );
 
     println!("xtask reload --window: a preference crosses the file and an icon crosses nothing");
+    Ok(())
+}
+
+/// §6 M47: a shell that cannot start says so somewhere a player can reach.
+///
+/// `dist-verify` and not dev, and that is the whole reason this leg can exist:
+/// the log is a *file* only in a tier without `debug-tools`, so a dev run would
+/// pass this on a console nobody shipped. The box itself is unreachable here by
+/// design — under `GG_HEADLESS=1` `gg_platform::alert` shows nothing (§1.5), and
+/// that half is the operator's like fullscreen.
+fn refuse() -> anyhow::Result<()> {
+    let tier = &HASHED_TIERS[2];
+    let (host, game) = stage_game(tier, "demo-10-tetris", "demo_10_tetris")?;
+    let dir = workspace_root().join("target/refuse");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let data = dir.join("data");
+    let log = data.join("m47-refusal").join("log.txt");
+    let data = data.display().to_string();
+    // A refusal is a nonzero exit, so `play_env`'s success check is the one
+    // thing this leg cannot borrow.
+    let run = |manifest: &Path, game: &Path| -> anyhow::Result<String> {
+        let out = Command::new(&host)
+            .arg("--project")
+            .arg(manifest)
+            .arg("--game")
+            .arg(game)
+            .arg("--frames")
+            .arg("10")
+            .env("GG_HEADLESS", "1")
+            .env("LOCALAPPDATA", &data)
+            .env("XDG_DATA_HOME", &data)
+            .env("RUST_LOG", "info")
+            .output()?;
+        let streams = format!("{}{}", plain(&out.stdout), plain(&out.stderr));
+        anyhow::ensure!(
+            !out.status.success(),
+            "a run that cannot start exited 0 — nothing downstream can tell it apart from a \
+             game that played:\n{streams}"
+        );
+        Ok(streams)
+    };
+    let manifest = dir.join("game.ggproj");
+    std::fs::write(&manifest, "title = M47 Refusal\n")?;
+
+    // 1. The failure a stranger actually hits: a folder short one file. What
+    //    this grades is *where* the refusal landed, not that it happened — the
+    //    shell has always exited nonzero, and until this milestone the reason
+    //    went to a stderr a shipped binary has nothing behind.
+    let missing = dir.join("not-a-game.dll");
+    let streams = run(&manifest, &missing)?;
+    let written = std::fs::read_to_string(&log)
+        .map_err(|e| anyhow::anyhow!("no log at {} ({e}):\n{streams}", log.display()))?;
+    anyhow::ensure!(
+        written.contains("refused to start"),
+        "the run failed and its own log does not say so — a bug report from this folder would \
+         carry a clean session (§6 M47):\n{written}"
+    );
+    anyhow::ensure!(
+        written.contains("not-a-game"),
+        "the log names no cause, so it names nothing anyone can act on:\n{written}"
+    );
+
+    // 2. The other side of the same seam, and it is a boundary rather than a
+    //    gap: a manifest is read by `parse_args`, which runs before there is a
+    //    subscriber to report to. The claim is that the shell knows it — it
+    //    leaves no half-made file behind and puts the reason on the stream it
+    //    does have.
+    std::fs::remove_file(&log)?;
+    std::fs::write(&manifest, "title = M47 Refusal\nnonesuch = 1\n")?;
+    let streams = run(&manifest, &game)?;
+    anyhow::ensure!(
+        streams.contains("nonesuch"),
+        "a manifest key no build declares was refused without being named:\n{streams}"
+    );
+    anyhow::ensure!(
+        !log.exists(),
+        "a failure before the log exists left one at {} anyway — an empty file where a bug \
+         report looks is worse than no file",
+        log.display()
+    );
+
+    println!(
+        "xtask reload --refuse: a shell that cannot start leaves the reason where it can be read"
+    );
     Ok(())
 }
 
