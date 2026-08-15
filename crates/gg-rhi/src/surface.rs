@@ -95,6 +95,18 @@ impl Surface {
         unsafe { self.fns.get_physical_device_surface_formats(pd, self.raw) }.map_err(RhiError::Vk)
     }
 
+    pub(crate) fn present_modes(
+        &self,
+        pd: vk::PhysicalDevice,
+    ) -> Result<Vec<vk::PresentModeKHR>, RhiError> {
+        // SAFETY: surface and pd are live.
+        unsafe {
+            self.fns
+                .get_physical_device_surface_present_modes(pd, self.raw)
+        }
+        .map_err(RhiError::Vk)
+    }
+
     pub(crate) fn destroy(&mut self) {
         // SAFETY: no swapchain refers to this surface anymore (teardown order).
         unsafe { self.fns.destroy_surface(self.raw, None) };

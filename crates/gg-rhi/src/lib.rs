@@ -47,7 +47,7 @@ pub use resource::{
     BufferDesc, BufferHandle, BufferKind, DeviceAddress, ImageDesc, ImageFormat, ImageHandle,
     ImageUse, MemoryUse, Sampler, Samples, full_mip_count, mip_extent,
 };
-pub use swapchain::Output;
+pub use swapchain::{Output, Present};
 pub use timing::{GpuClock, PassTiming};
 
 use ash::vk;
@@ -545,6 +545,29 @@ impl Rhi {
     pub fn resize(&mut self, width: u32, height: u32) {
         self.desired_extent = (width, height);
         self.pending_recreate = true;
+    }
+
+    /// Ask for a present mode (§6 M46); the swapchain recreates on the next
+    /// frame if this changed the request, and not at all if it did not.
+    ///
+    /// A request, like [`Output`] and unlike it: only [`Present::Vsync`] is
+    /// guaranteed to exist, so [`Rhi::present`] is what a caller reads back —
+    /// but a present mode says nothing about what the numbers in the backbuffer
+    /// mean, so unlike a colour space it may change mid-session.
+    pub fn want_present(&mut self, want: Present) {
+        self.pending_recreate |= self.swapchain.want_present(want);
+    }
+
+    /// The present mode the swapchain actually got — never what was asked for,
+    /// and `None` while a recreation is still pending.
+    ///
+    /// The `None` is load-bearing rather than pedantic: a caller that writes
+    /// this back over its own request (which is what `r.vsync` does) would, on
+    /// the one frame between asking and recreating, read the *outgoing* mode and
+    /// write it over the ask — cancelling the change it just made, every time.
+    #[must_use]
+    pub fn present(&self) -> Option<Present> {
+        (!self.pending_recreate).then(|| self.swapchain.present())
     }
 
     /// Swapchain recreations so far (tests assert the torture paths recreate).

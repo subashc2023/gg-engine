@@ -64,6 +64,12 @@ pub struct Project {
     pub slug: String,
     /// The window to open, when the game would rather not have the default.
     pub window: Option<(u32, u32)>,
+    /// The picture in the taskbar and the title bar (§6 M46), for a game that
+    /// has one. A [`icon`](super::icon) file — raw premultiplied-nothing RGBA
+    /// behind an eight-byte header — because `deny.toml` bans every image
+    /// decoder from the dist graph and a window icon is wanted before the pack
+    /// that would otherwise hold it is open.
+    pub icon: Option<PathBuf>,
     /// The folder the manifest was read from, and therefore the folder this
     /// project *is*. Empty from [`Project::parse`], which has no file to be
     /// beside.
@@ -132,6 +138,7 @@ impl Project {
         }
         project.input = project.input.map(|p| project.dir.join(p));
         project.pack = project.pack.map(|p| project.dir.join(p));
+        project.icon = project.icon.map(|p| project.dir.join(p));
         Ok(project)
     }
 
@@ -158,6 +165,7 @@ impl Project {
     pub fn parse(text: &str) -> Result<Project, ProjectError> {
         let (mut game, mut input, mut pack) = (None, None, None);
         let (mut title, mut slug, mut window) = (None, None, None);
+        let mut icon = None;
         for (n, line) in text.lines().enumerate() {
             let line = line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -175,6 +183,7 @@ impl Project {
                 "title" => title.replace(value).is_some(),
                 "slug" => slug.replace(value).is_some(),
                 "window" => window.replace(value).is_some(),
+                "icon" => icon.replace(value).is_some(),
                 _ => {
                     return Err(ProjectError::Unknown {
                         line: n + 1,
@@ -207,6 +216,7 @@ impl Project {
             title,
             slug,
             window: window.map(|text| parse_extent(&text)).transpose()?,
+            icon: icon.map(PathBuf::from),
             dir: PathBuf::new(),
         })
     }

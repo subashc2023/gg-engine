@@ -79,6 +79,15 @@ pub struct WindowDesc {
     /// system snap gestures ([`Window::begin_drag`], [`Window::begin_resize`]
     /// are what a client-side title bar rebuilds them out of).
     pub decorated: bool,
+    /// The taskbar and title-bar picture as `(side, rgba)` — square, row-major,
+    /// alpha last, not premultiplied (§6 M46). `None` leaves the platform's
+    /// default, which is what every window in this tree had before M46 and what
+    /// a game with no `icon` in its manifest still gets.
+    ///
+    /// Pixels rather than a path because this crate opens no files, and raw
+    /// rather than encoded because `deny.toml` bans image decoders from the dist
+    /// graph — `gg_core::config::icon` is what turns a file into this.
+    pub icon: Option<(u32, Vec<u8>)>,
 }
 
 impl WindowDesc {
@@ -94,7 +103,17 @@ impl WindowDesc {
             visible: false,
             resizable: true,
             decorated: true,
+            icon: None,
         }
+    }
+
+    /// The same window with a picture on it (§6 M46). Ignored where the OS has
+    /// no such concept and refused where the pixels do not match the side, in
+    /// both cases by leaving the default rather than by failing to open — a
+    /// game that cannot draw its icon is still a game.
+    #[must_use]
+    pub fn with_icon(self, icon: Option<(u32, Vec<u8>)>) -> Self {
+        Self { icon, ..self }
     }
 
     /// A visible window unless the process is headless, in which case the
@@ -238,6 +257,14 @@ impl Window {
             .with_resizable(desc.resizable)
             .with_decorations(desc.decorated)
             .with_active(desc.visible);
+        // Best effort by design: winit refuses pixels that do not match the
+        // side, and a `None` here is a window that opens with the platform's
+        // own icon. Nothing about a picture is worth failing to open over.
+        if let Some((side, rgba)) = &desc.icon
+            && let Ok(icon) = winit::window::Icon::from_rgba(rgba.clone(), *side, *side)
+        {
+            attrs = attrs.with_window_icon(Some(icon));
+        }
         // §1.5, learned the hard way — twice: Win32 SW_MINIMIZE/SW_RESTORE
         // *show* a window even created hidden, and on X11 (incl. WSLg's
         // XWayland) winit's un-minimize sends _NET_ACTIVE_WINDOW, which the
@@ -381,6 +408,33 @@ impl Window {
     /// Whether the OS considers the window maximized.
     pub fn is_maximized(&self) -> bool {
         self.inner.is_maximized()
+    }
+
+    /// Fill the monitor the window is on, or give it back (§6 M46).
+    ///
+    /// **Borderless**, and that is the whole of the offer: `Fullscreen::Exclusive`
+    /// wants a video mode enumerated and the display taken from the compositor,
+    /// which turns a crash into a black screen the operator has to alt-tab out
+    /// of blind. `None` for the monitor is winit's "the one this window is on",
+    /// which is the only answer that is right for a player who dragged the
+    /// window to their second screen first.
+    ///
+    /// §1.5's guard is [`Window::set_maximized`]'s and for the same reason,
+    /// doubled: an invisible window is *parked*, not off-monitor, and
+    /// fullscreening it would both map it and place it over the desk.
+    pub fn set_fullscreen(&self, fullscreen: bool) {
+        if self.parked {
+            return; // §1.5: an invisible window is never given the screen
+        }
+        self.inner
+            .set_fullscreen(fullscreen.then_some(winit::window::Fullscreen::Borderless(None)));
+    }
+
+    /// Whether the window is filling a monitor. The OS's answer rather than a
+    /// remembered one: a player can leave fullscreen by ways this code never
+    /// hears about, and a cached flag would then be wrong until they toggled.
+    pub fn is_fullscreen(&self) -> bool {
+        self.inner.fullscreen().is_some()
     }
 
     /// Hand the window to the system's own move loop — what pressing a title

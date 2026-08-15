@@ -93,6 +93,12 @@ pub fn run_cmd(args: &[&str]) -> Result<()> {
         ),
         (None, false) => {}
     }
+    // The taskbar picture (§6 M46), staged like the action map and unlike the
+    // pack: it is a checked-in file beside the manifest rather than build output,
+    // because a window icon is wanted before a pack is open.
+    if let Some(icon) = &project.icon {
+        stage(icon, &folder.join(file_name(icon)?))?;
+    }
     // The project's opening scene is found beside the action map (§6 M20 pull
     // 2), so a level that is data ships as data or the game opens empty.
     let scene = crate_dir.join("scene.ggsave");
@@ -138,7 +144,11 @@ fn render(project: &Project, dylib: &str) -> String {
          slug  = {}\n",
         project.title, project.slug
     );
-    for (key, path) in [("input", &project.input), ("pack", &project.pack)] {
+    for (key, path) in [
+        ("input", &project.input),
+        ("pack", &project.pack),
+        ("icon", &project.icon),
+    ] {
         if let Some(path) = path
             && let Some(name) = path.file_name()
         {
@@ -367,6 +377,16 @@ mod tests {
                 dir.join("assets").is_dir(),
                 "{demo}: a pack and an assets/ tree exist together or not at all"
             );
+            // The icon is a checked-in file rather than build output, so unlike
+            // the pack it is asserted to *exist* — and parsed, because an
+            // unreadable one is dropped at runtime with a warning and would
+            // otherwise ship as a game that silently has no picture (§6 M46).
+            if let Some(icon) = &project.icon {
+                let bytes = std::fs::read(icon)
+                    .unwrap_or_else(|e| panic!("{demo}: `icon` names {}: {e}", icon.display()));
+                gg_core::config::icon::parse(&bytes)
+                    .unwrap_or_else(|e| panic!("{demo}: {} is not an icon: {e}", icon.display()));
+            }
             checked += 1;
         }
         assert!(

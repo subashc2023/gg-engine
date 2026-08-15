@@ -152,6 +152,9 @@ pub struct App {
     /// tick spends it (§6 M42). `None` in every run that may not read one — see
     /// `player_file`.
     settings: Option<Prefs>,
+    /// What the OS last said about the window filling a monitor (§6 M46).
+    /// Always false in a windowless run, where there is nothing to fill.
+    window_is_fullscreen: bool,
     /// Whether a tick of this session has run. What [`settings`](Self::settings)
     /// is spent on, and a `bool` rather than a tick number because a resumed
     /// session's first tick is whatever the save carried (§6 M44).
@@ -282,6 +285,7 @@ impl App {
             #[cfg(feature = "overlay")]
             overlay: gg_debug::Overlay::default(),
             settings: None,
+            window_is_fullscreen: false,
             opened: false,
         })
     }
@@ -434,6 +438,53 @@ impl App {
     pub fn pointer(&self) -> (bool, bool) {
         let hidden = !self.cursor.held && !self.editing() && self.ui.cursor_drawn();
         (self.cursor.held, hidden)
+    }
+
+    /// Whether the window should be filling a monitor, or `None` where the game
+    /// declared no preference and the window it was launched with stands (§6
+    /// M46).
+    ///
+    /// Off the UI stage's cached `Prefs` like every other read of it, so what
+    /// this frame acts on is what last tick's menu said — the tick
+    /// [`Prefs::modal`] documents, and the same one the picture came from.
+    pub fn fullscreen(&self) -> Option<bool> {
+        self.prefs().fullscreen()
+    }
+
+    /// The player's own way in and out, for the window rather than for the game
+    /// (§6 M46): a toggle the *host* owns, spelled Alt+Enter.
+    ///
+    /// Escape's rule and Escape's reason. A game whose menu is the only way out
+    /// of fullscreen is a game that traps a player the first time that menu is
+    /// unreachable — and unlike Escape this cannot be claimed by a map, because
+    /// a chord has no spelling the action map can hold (§4.7: a binding is one
+    /// physical key). Writes the game's own `Prefs` so the choice is the one
+    /// thing it must be — the game's to persist — and so a menu drawn next tick
+    /// shows what the window actually is.
+    pub fn toggle_fullscreen(&mut self) -> anyhow::Result<()> {
+        let want = match self.fullscreen() {
+            // No preference yet: the toggle is against what the window *is*,
+            // which the caller knows and this side does not.
+            None => self.window_is_fullscreen,
+            Some(on) => on,
+        };
+        let display = match want {
+            true => gg_ecs::boundary::display::WINDOWED,
+            false => gg_ecs::boundary::display::FULLSCREEN,
+        };
+        self.world
+            .each(&gg_ecs::Query::<&mut Prefs>::new()?, |_, p: &mut Prefs| {
+                p.display = display
+            });
+        Ok(())
+    }
+
+    /// What the windowed loop last observed the OS saying (§6 M46) — needed
+    /// because a player can leave fullscreen by ways the shell never hears
+    /// about, and the first Alt+Enter after that must put them back in rather
+    /// than toggle a stale flag.
+    pub fn note_fullscreen(&mut self, is: bool) {
+        self.window_is_fullscreen = is;
     }
 
     /// Hand the pointer back, reporting where a system cursor should be warped
@@ -1850,6 +1901,14 @@ impl Stages for App {
         #[cfg(feature = "editor")]
         if let (Some(editing), Some(renderer)) = (self.editor.as_ref(), self.gpu.as_mut()) {
             renderer.set_viewport(Some(editing.ui.viewport_rect()));
+        }
+        // The player's ask beats `r.vsync`, and only where they made one — the
+        // `aa` rule below, one knob over (§6 M46). Restated every frame for the
+        // viewport's reason and at the viewport's price: the renderer compares
+        // it and recreates nothing on the frames it did not move.
+        let present = self.ui.prefs().present_mode();
+        if let Some(renderer) = self.gpu.as_mut() {
+            renderer.set_present(present);
         }
         let Some(renderer) = &self.gpu else {
             return Ok(());

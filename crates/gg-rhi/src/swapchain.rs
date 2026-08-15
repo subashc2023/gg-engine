@@ -25,6 +25,12 @@ pub(crate) struct Swapchain {
     want: Output,
     /// What it got. `want` when the surface offered it, else [`Output::Sdr`].
     output: Output,
+    /// The present mode asked for — settable, unlike [`Self::want`], and read
+    /// by the next recreation.
+    want_present: Present,
+    /// What it got. [`Present::Vsync`] wherever the driver offered nothing
+    /// nearer.
+    present: Present,
     /// True while the surface is zero-extent (minimized): no swapchain
     /// operations are legal, frames are skipped (§4.3).
     suspended: bool,
@@ -82,6 +88,79 @@ impl Output {
             )],
         }
     }
+}
+
+/// When a finished frame reaches the glass (§6 M46).
+///
+/// [`Output`]'s shape — a request, not a setting, because only [`Present::Vsync`]
+/// is guaranteed to exist and the rest are the driver's to offer. Unlike an
+/// output contract this one is **not** fixed for the swapchain's life: a colour
+/// space decides what the numbers in the backbuffer mean and a present mode does
+/// not, so changing it is an ordinary recreation.
+///
+/// Named for what the player gets rather than for the token behind it: the
+/// engine-shaped rule §4.3 states, and here it is load-bearing rather than
+/// stylistic, since `MAILBOX` and `IMMEDIATE` say nothing about tearing to
+/// anyone who has not read the spec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Present {
+    /// Wait for the vertical blank. No tearing, and the frame rate is the
+    /// refresh rate. `FIFO` — the one mode the spec requires of every surface,
+    /// which is what makes it the fallback for the other two.
+    Vsync,
+    /// A finished frame replaces the one already queued. No tearing and no
+    /// wait, at one more swapchain image and however many frames are drawn and
+    /// discarded. `MAILBOX`.
+    Fast,
+    /// Straight to the glass. The lowest latency there is, and the one mode that
+    /// tears. `IMMEDIATE`.
+    Immediate,
+}
+
+impl Present {
+    /// The present modes this asks for, nearest-first, always ending in `FIFO`.
+    ///
+    /// `Fast` falls back to `Immediate` before `Vsync` and not the other way
+    /// round: a player who turned vsync off asked for latency, and the nearest
+    /// thing to mailbox on a driver without it is the mode that also does not
+    /// wait. `Immediate` does *not* fall back to `Fast` — asking not to tear is
+    /// a preference, asking to tear is a latency floor, and quietly buffering it
+    /// would be answering a different question.
+    fn candidates(self) -> &'static [vk::PresentModeKHR] {
+        match self {
+            Present::Vsync => &[vk::PresentModeKHR::FIFO],
+            Present::Fast => &[
+                vk::PresentModeKHR::MAILBOX,
+                vk::PresentModeKHR::IMMEDIATE,
+                vk::PresentModeKHR::FIFO,
+            ],
+            Present::Immediate => &[vk::PresentModeKHR::IMMEDIATE, vk::PresentModeKHR::FIFO],
+        }
+    }
+
+    /// Which mode a granted `VkPresentModeKHR` is, as the caller asked about it.
+    /// `FIFO_RELAXED` is [`Present::Vsync`]: it waits like one, and the tear it
+    /// permits happens only on a frame that already missed its blank.
+    fn of(mode: vk::PresentModeKHR) -> Present {
+        match mode {
+            vk::PresentModeKHR::MAILBOX => Present::Fast,
+            vk::PresentModeKHR::IMMEDIATE => Present::Immediate,
+            _ => Present::Vsync,
+        }
+    }
+}
+
+/// The present mode the surface will actually take, nearest to `want`.
+///
+/// `FIFO` at the end of every candidate list is what makes the `unwrap_or` here
+/// a statement rather than a guess — the spec requires it of every surface, so
+/// a driver reporting none of the three is one that reported nothing at all.
+fn choose_present(modes: &[vk::PresentModeKHR], want: Present) -> vk::PresentModeKHR {
+    want.candidates()
+        .iter()
+        .find(|mode| modes.contains(mode))
+        .copied()
+        .unwrap_or(vk::PresentModeKHR::FIFO)
 }
 
 /// The surface format the swapchain uses (and pipelines must target), plus the
@@ -146,6 +225,8 @@ impl Swapchain {
             format: vk::Format::UNDEFINED,
             want,
             output: Output::Sdr,
+            want_present: Present::Vsync,
+            present: Present::Vsync,
             extent: vk::Extent2D::default(),
             views: Vec::new(),
             images: Vec::new(),
@@ -194,8 +275,20 @@ impl Swapchain {
 
         let (format, output) = preferred_format(device, surface, self.want)?;
         self.output = output;
+        let present = choose_present(
+            &surface.present_modes(device.physical())?,
+            self.want_present,
+        );
+        self.present = Present::of(present);
 
-        let mut min_images = caps.min_image_count + 1;
+        // Mailbox wants a third image to have somewhere to put the frame it is
+        // replacing; with two it degenerates into FIFO's wait with none of its
+        // ordering. `min_image_count` is the surface's floor and not the mode's,
+        // so this is the one place the mode moves the count.
+        let mut min_images = (caps.min_image_count + 1).max(match self.present {
+            Present::Fast => 3,
+            _ => 0,
+        });
         if caps.max_image_count > 0 {
             min_images = min_images.min(caps.max_image_count);
         }
@@ -222,9 +315,7 @@ impl Swapchain {
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(caps.current_transform)
             .composite_alpha(composite)
-            // FIFO: the one mode the spec guarantees; latency tuning is a
-            // later milestone's problem, correctness is this one's.
-            .present_mode(vk::PresentModeKHR::FIFO)
+            .present_mode(present)
             .clipped(true)
             .old_swapchain(self.raw);
 
@@ -333,6 +424,23 @@ impl Swapchain {
     /// encode into, and never assumed from what was asked for.
     pub fn output(&self) -> Output {
         self.output
+    }
+
+    pub fn present(&self) -> Present {
+        self.present
+    }
+
+    /// Ask for a present mode. Takes effect at the next recreation, which is
+    /// the caller's to trigger — the swapchain does not decide when it is safe
+    /// to retire itself.
+    ///
+    /// Returns whether this changed the request, so a caller can skip a
+    /// recreation nobody asked for: this is polled from a per-tick preference
+    /// and is the same value on all but one of those ticks.
+    pub fn want_present(&mut self, want: Present) -> bool {
+        let moved = self.want_present != want;
+        self.want_present = want;
+        moved
     }
 
     pub fn generation(&self) -> u64 {
@@ -450,5 +558,63 @@ mod tests {
         assert_eq!(mode, Output::Sdr);
         assert_eq!(got.format, vk::Format::R5G6B5_UNORM_PACK16);
         assert_eq!(choose(&[], Output::Sdr), None, "no formats is not a choice");
+    }
+
+    /// The present mode's half of the same contract, and gated for the same
+    /// reason: which mode a driver offers is its business, which of them we take
+    /// is ours, and taking the wrong one is a session that tears when the player
+    /// asked it not to.
+    ///
+    /// The asymmetry is the content. `Fast` degrades to `Immediate` because a
+    /// player who turned vsync off asked for latency; `Immediate` does **not**
+    /// degrade to `Fast`, because a request to tear is a floor and answering it
+    /// with a buffered mode is answering a different question.
+    #[test]
+    fn a_present_mode_degrades_toward_what_was_asked_for_and_never_past_fifo() {
+        use vk::PresentModeKHR as M;
+        let all = [M::FIFO, M::MAILBOX, M::IMMEDIATE];
+        for (want, offers, expect) in [
+            (Present::Vsync, &all[..], M::FIFO),
+            (Present::Fast, &all[..], M::MAILBOX),
+            (Present::Immediate, &all[..], M::IMMEDIATE),
+            // The pinned lavapipe's own shape, and the desk's second vendor:
+            // no mailbox, so `Fast` is the mode that also does not wait.
+            (Present::Fast, &[M::FIFO, M::IMMEDIATE][..], M::IMMEDIATE),
+            (Present::Fast, &[M::FIFO][..], M::FIFO),
+            (Present::Immediate, &[M::FIFO, M::MAILBOX][..], M::FIFO),
+            // A surface that reported nothing is one that reported no FIFO,
+            // which the spec does not permit; taking it is the only answer that
+            // is not a panic on a driver bug.
+            (Present::Fast, &[][..], M::FIFO),
+        ] {
+            assert_eq!(
+                choose_present(offers, want),
+                expect,
+                "{want:?} of {offers:?}"
+            );
+        }
+    }
+
+    /// What a granted mode is called on the way back out. The round trip has to
+    /// hold or `Rhi::present` reports a mode the swapchain is not in — and
+    /// `FIFO_RELAXED` is the one the driver may substitute without being asked.
+    #[test]
+    fn a_granted_mode_names_itself_and_relaxed_fifo_is_still_vsync() {
+        for want in [Present::Vsync, Present::Fast, Present::Immediate] {
+            let granted = choose_present(
+                &[
+                    vk::PresentModeKHR::FIFO,
+                    vk::PresentModeKHR::MAILBOX,
+                    vk::PresentModeKHR::IMMEDIATE,
+                ],
+                want,
+            );
+            assert_eq!(Present::of(granted), want, "{want:?} round-trips");
+        }
+        assert_eq!(
+            Present::of(vk::PresentModeKHR::FIFO_RELAXED),
+            Present::Vsync,
+            "it waits like one; the tear it allows is a frame that already missed"
+        );
     }
 }

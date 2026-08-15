@@ -15,3 +15,8 @@ title  = Falling Blocks
 # Twice the 640x360 canvas the game lays its board out in, so every widget lands
 # on a whole pixel.
 window = 1280x720
+# The taskbar picture (§6 M46), written by `cargo run -p gg-tools -- icon` out of
+# this game's own SHAPES and COLORS. Raw RGBA behind an eight-byte header, since
+# deny.toml keeps every image decoder out of the dist graph and a window wants
+# its icon before the pack is open.
+icon   = icon.ggicon

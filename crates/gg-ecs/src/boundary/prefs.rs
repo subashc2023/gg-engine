@@ -7,6 +7,15 @@
 //! settings (vsync, shadow quality, the overlay) live (§4.8) — so a silent
 //! headless replay and a loud windowed run hash alike (§5.6c).
 //!
+//! **What belongs here against what belongs in a CVar was restated at §6 M46**,
+//! because the line above is not machine-versus-game — [`Prefs::quiet`] is a
+//! machine setting and has sat here since M19. It is *who offers the choice*: a
+//! menu a player clicks is a preference, a console a developer types into is a
+//! CVar, and the two may name the same knob. [`display`] and [`frame`] are the
+//! second and third to do so, with [`aa`]'s answer to the overlap — a zero that
+//! means **leave the host's own knob alone**, so a host configured by `gg.cfg`
+//! and a game that draws no video menu never fight over it.
+//!
 //! `World::restore` zeroes a retyped field (§4.2.2), so every field's zero
 //! must mean "what the engine does anyway": [`cursor::SOFTWARE`] is 0, and a
 //! [`quiet`](Prefs::quiet) of 0 is full volume. A migration cannot flip a
@@ -78,6 +87,49 @@ pub mod aa {
     }
 }
 
+/// Which window the player asked for (§6 M46). Constants for [`cursor`]'s
+/// reason, and with [`aa`]'s extra: the zero is **not** a mode, it is *"whatever
+/// the session was launched as"* — the manifest's `window` key, or the shell's
+/// default — so a game that draws no video menu keeps the window it was given
+/// and a migration hands the choice back rather than making it.
+///
+/// Borderless only, and that is the whole list: exclusive fullscreen wants a
+/// video mode enumerated and a display taken from the compositor, which is the
+/// mode shipped games are leaving and the one that turns a crash into a black
+/// screen.
+pub mod display {
+    /// The window the session was launched with. Zero on purpose — see the
+    /// module docs.
+    pub const DEFAULT: u32 = 0;
+    /// A window with the OS frame on it, at the size the session started at.
+    pub const WINDOWED: u32 = 1;
+    /// Borderless, filling the monitor the window is on.
+    pub const FULLSCREEN: u32 = 2;
+}
+
+/// When a finished frame reaches the glass (§6 M46). [`display`]'s zero rule,
+/// for the same reason: `r.vsync` is the host's own knob and a game with no
+/// video menu must not overrule it.
+///
+/// Named for what the player gets rather than for the Vulkan token behind it —
+/// a present mode is a statement about tearing and latency, and the mode a
+/// device actually granted is the RHI's to report, since only `VSYNC` is
+/// guaranteed by the spec to exist.
+pub mod frame {
+    /// `r.vsync` decides. Zero on purpose — see the module docs.
+    pub const DEFAULT: u32 = 0;
+    /// Every frame waits for the vertical blank: no tearing, and the frame rate
+    /// is the refresh rate.
+    pub const VSYNC: u32 = 1;
+    /// A finished frame replaces the one already queued: no tearing and no
+    /// wait, at the cost of one more swapchain image and of drawing frames
+    /// nobody sees.
+    pub const FAST: u32 = 2;
+    /// Straight to the glass: the lowest latency there is, and the one mode
+    /// that tears.
+    pub const IMMEDIATE: u32 = 3;
+}
+
 /// Full attenuation, the [`Prefs::quiet`] that means silence. Fixed-point like
 /// an axis (§4.7): a menu steps an integer, and a float volume would put a
 /// rounding rule in hashed state.
@@ -109,6 +161,12 @@ pub struct Prefs {
     pub quiet: u32,
     /// One of [`aa`]'s constants. Unknown values are [`aa::DEFAULT`].
     pub aa: u32,
+    /// One of [`display`]'s constants. Unknown values are
+    /// [`display::DEFAULT`].
+    pub display: u32,
+    /// One of [`frame`]'s constants. Unknown values are
+    /// [`frame::DEFAULT`].
+    pub present: u32,
     /// Nonzero ends the session — the menu's quit button, and the only way a
     /// game has to close its own window.
     ///
@@ -177,6 +235,29 @@ impl Prefs {
         aa::samples(self.aa)
     }
 
+    /// Whether the window should fill the monitor, or `None` to leave the
+    /// window the session was launched with alone. An unknown constant is
+    /// `None` for [`antialias`](Self::antialias)'s reason.
+    #[must_use]
+    pub fn fullscreen(&self) -> Option<bool> {
+        match self.display {
+            display::WINDOWED => Some(false),
+            display::FULLSCREEN => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Which of [`frame`]'s constants the player asked for, or `None` to
+    /// leave `r.vsync` alone. The constant rather than a host type: the swapchain
+    /// is three crates away and the boundary may not name it (§3).
+    #[must_use]
+    pub fn present_mode(&self) -> Option<u32> {
+        match self.present {
+            m @ (frame::VSYNC | frame::FAST | frame::IMMEDIATE) => Some(m),
+            _ => None,
+        }
+    }
+
     /// Whether the player asked to end the session.
     #[must_use]
     pub fn closing(&self) -> bool {
@@ -218,10 +299,12 @@ pub mod settings {
     /// with its controls already withheld. A field added to [`Prefs`] is not
     /// persisted until it is added here, which is the review this table forces.
     #[allow(clippy::type_complexity)]
-    const KEYS: [(&str, fn(&Prefs) -> u32, fn(&mut Prefs, u32)); 3] = [
+    const KEYS: [(&str, fn(&Prefs) -> u32, fn(&mut Prefs, u32)); 5] = [
         ("cursor", |p| p.cursor, |p, v| p.cursor = v),
         ("quiet", |p| p.quiet, |p, v| p.quiet = v),
         ("aa", |p| p.aa, |p, v| p.aa = v),
+        ("display", |p| p.display, |p, v| p.display = v),
+        ("present", |p| p.present, |p, v| p.present = v),
     ];
 
     /// The preferences as the file's own text — `gg.cfg`'s format (§4.8), which
@@ -271,15 +354,15 @@ mod tests {
     fn the_protocol_type_is_flat_and_padding_free() {
         // `Pod` already refuses padding; this pins the number so a field added
         // is a visible edit rather than a silent layout move.
-        assert_eq!(size_of::<Prefs>(), 20);
+        assert_eq!(size_of::<Prefs>(), 28);
         assert_eq!(align_of::<Prefs>(), 4);
     }
 
     /// The property `World::restore` needs: zeroed is the default, in every
-    /// field, so a migration cannot flip a cursor, mute a game, un-antialias it
-    /// or close it.
+    /// field, so a migration cannot flip a cursor, mute a game, un-antialias it,
+    /// close it, take its controls away, seize a monitor or tear its frame.
     #[test]
-    fn a_zeroed_prefs_is_the_default_four_times_over() {
+    fn a_zeroed_prefs_is_the_default_in_every_field() {
         let zeroed: Prefs = bytemuck::Zeroable::zeroed();
         assert_eq!(zeroed.cursor, cursor::SOFTWARE);
         assert!(!zeroed.hardware_cursor());
@@ -290,6 +373,12 @@ mod tests {
         assert!(
             !zeroed.modal(),
             "a migrated game is not a game with no controls"
+        );
+        assert_eq!(zeroed.fullscreen(), None, "nor one that seized the monitor");
+        assert_eq!(
+            zeroed.present_mode(),
+            None,
+            "nor one that unlocked the frame"
         );
         assert_eq!(zeroed, Prefs::default(), "and `..Default::default()` is it");
     }
@@ -305,11 +394,8 @@ mod tests {
     fn a_mode_states_both_knobs_and_an_unknown_one_states_neither() {
         let at = |aa| {
             let prefs = Prefs {
-                cursor: 0,
-                quiet: 0,
                 aa,
-                close: 0,
-                modal: 0,
+                ..Default::default()
             };
             (prefs.antialias(), prefs.samples())
         };
@@ -328,23 +414,40 @@ mod tests {
     fn an_unknown_cursor_falls_back_to_software() {
         let prefs = Prefs {
             cursor: 9999,
-            quiet: 0,
-            aa: 0,
-            close: 0,
-            modal: 0,
+            ..Default::default()
         };
         assert!(!prefs.hardware_cursor());
+    }
+
+    /// The window and the frame, on the same rule and failing the same way: a
+    /// constant this host does not know leaves the launched window and `r.vsync`
+    /// alone rather than picking, because the game may be the newer half.
+    #[test]
+    fn an_unknown_window_or_frame_mode_leaves_the_hosts_own_alone() {
+        let at = |display, present| {
+            let prefs = Prefs {
+                display,
+                present,
+                ..Default::default()
+            };
+            (prefs.fullscreen(), prefs.present_mode())
+        };
+        assert_eq!(at(display::DEFAULT, frame::DEFAULT), (None, None));
+        assert_eq!(at(display::WINDOWED, frame::VSYNC), (Some(false), Some(1)));
+        assert_eq!(at(display::FULLSCREEN, frame::FAST), (Some(true), Some(2)));
+        assert_eq!(
+            at(display::DEFAULT, frame::IMMEDIATE),
+            (None, Some(frame::IMMEDIATE))
+        );
+        assert_eq!(at(9999, 9999), (None, None));
     }
 
     #[test]
     fn quiet_attenuates_linearly_and_clamps_at_silence() {
         let at = |quiet| {
             Prefs {
-                cursor: 0,
                 quiet,
-                aa: 0,
-                close: 0,
-                modal: 0,
+                ..Default::default()
             }
             .volume()
         };
@@ -356,10 +459,15 @@ mod tests {
 
     #[test]
     fn a_setting_survives_the_file_it_was_written_to() {
+        // Every *persisted* field, spelled out: this is the round trip
+        // `settings::KEYS` exists to make reviewable, so a field added to the
+        // table and forgotten here is a field nothing proves survives the file.
         let prefs = Prefs {
             cursor: cursor::HARDWARE,
             quiet: 512,
             aa: aa::MSAA_4,
+            display: display::FULLSCREEN,
+            present: frame::IMMEDIATE,
             close: 0,
             modal: 0,
         };

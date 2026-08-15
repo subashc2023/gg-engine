@@ -123,6 +123,7 @@ pub static gg_render::cvars::SHADOW_SPLIT_LAMBDA: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_TAPS: gg_core::cvar::CVar
 pub static gg_render::cvars::SUN_ANGLE: gg_core::cvar::CVar
 pub static gg_render::cvars::UPLOAD_BUDGET: gg_core::cvar::CVar
+pub static gg_render::cvars::VSYNC: gg_core::cvar::CVar
 pub fn gg_render::cvars::register() -> core::result::Result<(), gg_core::cvar::CVarError>
 pub mod gg_render::graph
 pub enum gg_render::graph::Body<'a>
@@ -252,6 +253,7 @@ pub fn gg_render::Renderer::reload_pack(&mut self) -> core::result::Result<bool,
 pub fn gg_render::Renderer::resize(&mut self, u32, u32)
 pub fn gg_render::Renderer::samples(&self) -> gg_rhi::resource::Samples
 pub fn gg_render::Renderer::scenes(&self) -> &dyn gg_extract::Scenes
+pub fn gg_render::Renderer::set_present(&mut self, core::option::Option<u32>)
 pub fn gg_render::Renderer::set_ui_atlas(&mut self, &gg_render::ui::Coverage<'_>) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_render::Renderer::set_viewport(&mut self, core::option::Option<gg_rhi::graph::Viewport>)
 pub fn gg_render::Renderer::shadow_cull(&self) -> gg_render::ShadowCull

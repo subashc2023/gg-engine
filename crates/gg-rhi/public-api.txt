@@ -73,6 +73,10 @@ pub gg_rhi::PassKind::Render::color: core::option::Option<gg_rhi::ColorAttachmen
 pub gg_rhi::PassKind::Render::depth: core::option::Option<gg_rhi::DepthAttachment>
 pub gg_rhi::PassKind::Render::draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_rhi::PassKind::Render::viewport: core::option::Option<gg_rhi::Viewport>
+pub enum gg_rhi::Present
+pub gg_rhi::Present::Fast
+pub gg_rhi::Present::Immediate
+pub gg_rhi::Present::Vsync
 pub enum gg_rhi::RhiError
 pub gg_rhi::RhiError::Allocator(alloc::string::String)
 pub gg_rhi::RhiError::DeviceLost(alloc::string::String)
@@ -254,6 +258,7 @@ pub fn gg_rhi::Rhi::memory(&self) -> gg_rhi::MemoryUse
 pub fn gg_rhi::Rhi::new(&impl raw_window_handle::borrowed::HasWindowHandle + raw_window_handle::borrowed::HasDisplayHandle, (u32, u32), gg_rhi::Output) -> core::result::Result<Self, gg_rhi::RhiError>
 pub fn gg_rhi::Rhi::output(&self) -> gg_rhi::Output
 pub fn gg_rhi::Rhi::pass_timings(&self) -> &[gg_rhi::PassTiming]
+pub fn gg_rhi::Rhi::present(&self) -> core::option::Option<gg_rhi::Present>
 pub fn gg_rhi::Rhi::register_texture(&mut self, gg_rhi::ImageHandle) -> core::result::Result<gg_rhi::TextureIndex, gg_rhi::RhiError>
 pub fn gg_rhi::Rhi::resize(&mut self, u32, u32)
 pub fn gg_rhi::Rhi::shutdown(self) -> gg_rhi::ShutdownReport
@@ -263,6 +268,7 @@ pub fn gg_rhi::Rhi::transfer_crosses_queue_families(&self) -> bool
 pub fn gg_rhi::Rhi::upload_buffer(&mut self, gg_rhi::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_rhi::Rhi::upload_image(&mut self, gg_rhi::ImageHandle, u32, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_rhi::Rhi::validation_messages(&self) -> u64
+pub fn gg_rhi::Rhi::want_present(&mut self, gg_rhi::Present)
 pub fn gg_rhi::Rhi::write_buffer(&mut self, gg_rhi::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
 impl core::ops::drop::Drop for gg_rhi::Rhi
 pub fn gg_rhi::Rhi::drop(&mut self)

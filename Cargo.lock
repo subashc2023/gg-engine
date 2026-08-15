@@ -1178,6 +1178,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "demo-05-many",
+ "demo-10-tetris",
  "demo-12-shooter",
  "demo-13-orbit",
  "gg-assets",

@@ -96,6 +96,13 @@ pub struct Args {
     pub title: Option<String>,
     /// The window to open, for a project that asked for one.
     pub window: Option<(u32, u32)>,
+    /// The taskbar picture the manifest named, for a project that shipped one
+    /// (§6 M46). A *path* rather than pixels: `parse_args` runs before the
+    /// tracing subscriber exists, so a file read here would drop its warning on
+    /// the floor — which is how the first version of this passed its own gate.
+    /// `session` reads it, on the settings file's policy: warned about and
+    /// dropped, because no picture is worth a refusal to run.
+    pub icon: Option<PathBuf>,
     /// The folder a manifest was found in, and therefore where this run's
     /// `gg.cfg` and its own files are. `None` is every run driven from a command
     /// line, where the working directory is the answer it has always been.
@@ -127,6 +134,27 @@ pub(crate) fn opening_scene(args: &Args) -> Option<PathBuf> {
     live.then(|| scene_path(args.input.as_deref()))
         .flatten()
         .filter(|scene| scene.is_file())
+}
+
+/// The manifest's icon as pixels, or `None` with the reason said out loud (§6
+/// M46).
+///
+/// Here rather than in `parse_args` because that runs before the subscriber
+/// does, and a warning nothing prints is the failure this function's whole
+/// policy is against. Read on every run, windowed or not: a headless run opens
+/// no window and still reports a folder that ships a picture it cannot draw,
+/// which is what makes the policy gateable at all (`xtask reload --window`).
+fn icon(args: &Args) -> Option<(u32, Vec<u8>)> {
+    let path = args.icon.as_ref()?;
+    let refused = match std::fs::read(path) {
+        Err(e) => e.to_string(),
+        Ok(bytes) => match gg_core::config::icon::parse(&bytes) {
+            Ok(icon) => return Some(icon),
+            Err(e) => e.to_string(),
+        },
+    };
+    warn!(path = %path.display(), refused, "icon: opening without one");
+    None
 }
 
 /// Whether this run may read or write the project's own files — its scene, its
@@ -268,6 +296,9 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     let rebinds = player_file(args, gg_input::BINDINGS_FILE)
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default();
+    // Read here rather than at the window, so a headless run reports a folder
+    // that ships a picture it cannot draw — the only tier a gate may run (§1.5).
+    let icon = icon(args);
     let mut app = app::App::new(args, &staging, DEFAULT_TICK_HZ, bindings, rebinds, replay)?;
     // Before the first frame: the loop's clock resumes at the tick this carries.
     if let Some(path) = &args.restore {
@@ -346,7 +377,7 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
             .run(&mut app, target)?
     } else {
         let title = args.title.clone().unwrap_or_else(|| app.title());
-        play::play(&mut app, &title, target, args.window)?
+        play::play(&mut app, &title, target, args.window, icon)?
     };
 
     // The window is down and the GPU is accounted for (§4.3), which is the only
@@ -471,6 +502,7 @@ pub fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
         args.dir = Some(found.dir);
         args.title = Some(found.title);
         args.window = found.window;
+        args.icon = found.icon;
         args.input = args.input.take().or(found.input);
         args.pack = args.pack.take().or(found.pack);
         // Field by field like the two above, which `game` was not until §6 M42

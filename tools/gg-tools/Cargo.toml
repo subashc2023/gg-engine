@@ -64,6 +64,11 @@ demo-05-many = { path = "../../demos/05-many", default-features = false }
 # table of axis-aligned boxes — shipped geometry that `gg_render::ao` represents
 # exactly, so the reference casts against the level rather than against a guess.
 demo-12-shooter = { path = "../../demos/12-shooter", default-features = false }
+# `icon` draws demo 10's picture out of demo 10's own `SHAPES` and `COLORS`, so
+# the taskbar and the well are the same palette by construction rather than by
+# somebody having matched them once. `timbre` already takes this crate for the
+# same reason a medium over.
+demo-10-tetris = { path = "../../demos/10-tetris", default-features = false }
 # `transfer` measures demo 13's own mission, so it drives demo 13's own pilot —
 # `session::fly` through the declared systems table. Taken as a crate for the
 # reason `cull` takes demo 05: a number about a mission has to come from the

@@ -20,6 +20,7 @@ pub fn play(
     title: &str,
     target: Option<u64>,
     window: Option<(u32, u32)>,
+    icon: Option<(u32, Vec<u8>)>,
 ) -> anyhow::Result<u64> {
     // Realtime, not locked: a windowed run is paced by the wall clock and the
     // catch-up guard is the clock's (§4.1).
@@ -47,7 +48,8 @@ pub fn play(
     // nobody can close.
     // A project says what it wants (§6 M41); everything else gets 1080p.
     let desc = WindowDesc::visible_unless_headless(title, window.unwrap_or((1920, 1080)));
-    gg_platform::run(desc.decorations(!app.editing()), |window, event| {
+    let desc = desc.with_icon(icon).decorations(!app.editing());
+    gg_platform::run(desc, |window, event| {
         let verdict = match event {
             // The monitor's scale factor at both edges that can change it: a
             // window that has just been made, and one that resized — which is
@@ -115,6 +117,18 @@ pub fn play(
             // has to be able to claim Escape from the arm below (§4.8).
             Event::Key { key, pressed, text } if app.debug_key(key, pressed, text) => {
                 Ok(Control::Continue)
+            }
+            // Alt+Enter is the app's too, and for Escape's reason rather than
+            // by convention: a game whose menu is the only way out of
+            // fullscreen traps a player the first time that menu is
+            // unreachable. Unclaimable, unlike Escape — a chord has no spelling
+            // an action map can hold, so `feed` never sees this one at all.
+            Event::Key {
+                key: Key::Enter,
+                pressed: true,
+                ..
+            } if app.input().held(Key::AltLeft) || app.input().held(Key::AltRight) => {
+                app.toggle_fullscreen().map(|()| Control::Continue)
             }
             // Escape is the *app's* key, not the sim's: quitting is not
             // simulated state and must work identically while a replay is
@@ -196,6 +210,18 @@ pub fn play(
                 if pointer_state != Some(app.pointer()) {
                     pointer_state = Some(app.pointer());
                     window.set_pointer(app.pointer().0, app.pointer().1);
+                }
+                // The window the player asked for (§6 M46), on the line above's
+                // rule: a tick decides, this closure is where a window exists.
+                // Read from the OS every frame rather than tracked, because a
+                // player can leave fullscreen by ways nothing here hears about
+                // — a compositor shortcut, a hotkey — and a cached flag would
+                // then fight them. `None` is a game that declared no
+                // preference, which must leave the launched window alone.
+                let is = window.is_fullscreen();
+                app.note_fullscreen(is);
+                if app.fullscreen().is_some_and(|want| want != is) {
+                    window.set_fullscreen(!is);
                 }
                 let now = Instant::now();
                 let elapsed = now.duration_since(last);

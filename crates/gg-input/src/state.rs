@@ -182,6 +182,19 @@ impl Input {
         }
     }
 
+    /// Whether a key is down right now, by physical position.
+    ///
+    /// Beside the action map and not in it, like [`Input::type_char`]'s text and
+    /// for the same reason: this answers about a *key*, and a key has no verb id
+    /// and reaches no [`InputFrame`], so nothing read through here is in a
+    /// replay. Its one caller is the host asking whether a modifier is down, a
+    /// chord being the one thing a map cannot spell (§6 M46).
+    #[must_use]
+    pub fn held(&self, key: Key) -> bool {
+        let (word, bit) = (key.index() / 64, key.index() % 64);
+        self.keys_held[word] & (1 << bit) != 0
+    }
+
     /// Record a mouse-button edge.
     pub fn mouse_button(&mut self, button: MouseButton, pressed: bool) {
         let number = button.number();

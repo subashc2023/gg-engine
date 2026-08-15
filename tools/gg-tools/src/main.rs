@@ -45,6 +45,7 @@
 //!                                   same body — the orbit's shape against its
 //!                                   phase, which fail in opposite directions
 //!   gg-tools panorama [--out P]   write the synthetic equirectangular `.hdr`
+//!   gg-tools icon [--out P]       write demo 10's taskbar picture
 //!   gg-tools timbre [--out D]     write demo 10's clips, and grade what a tone cannot reach
 //!                                   demo 06's environment is compiled from
 //!   gg-tools fp-isa [--target T]    which floating-point instructions the
@@ -60,6 +61,7 @@ mod cull;
 mod fp_isa;
 mod furnace;
 mod hash_scale;
+mod icon;
 mod lamps;
 mod lights;
 mod map;
@@ -113,6 +115,7 @@ fn main() -> anyhow::Result<()> {
         "orbit" => orbit::run(rest),
         "map" => map::run(rest),
         "panorama" => panorama::run(rest),
+        "icon" => icon::run(rest),
         "timbre" => timbre::run(rest),
         "transfer" => transfer::run(rest),
         "fp-isa" => fp_isa::run(rest),
@@ -121,7 +124,7 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
                  shadow-flat, shadow-sweep, shadow-edge, lights, lamps, cull, furnace, \
-                 split-sum, ao, bounce, banding, pace, hash-scale, orbit, map, panorama, \
+                 split-sum, ao, bounce, banding, pace, hash-scale, orbit, map, panorama, icon, \
                  fp-isa, mcp. A new instrument is a new subcommand here, not a new crate"
             )
         }

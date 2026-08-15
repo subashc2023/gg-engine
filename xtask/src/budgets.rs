@@ -173,10 +173,26 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   wherever the map or the context stack moves, because a shell that rebuilt
 ///   them by hand is a shell that forgets to at the next reload.
 ///
+/// - **The window a player owns** (1585 -> 1640, §6 M46): the shell took
+///   delivery of the window at M5 and of its *mode* here, which is the same
+///   argument a milestone later. Three seams and no fourth. `Prefs::display` is
+///   read where every other preference is read and applied in the one closure
+///   where a `Window` exists — and applied against what the OS says rather than
+///   against a remembered flag, because a player can leave fullscreen by ways
+///   nothing here hears about. Alt+Enter is an arm beside Escape's for Escape's
+///   stated reason, and it is *unclaimable* where Escape is not: a chord has no
+///   spelling an action map can hold, so there is nowhere below the shell for it
+///   to live. And the manifest's icon is read here rather than in `parse_args`
+///   because the subscriber does not exist yet there — a policy whose whole
+///   content is a warning has to be somewhere the warning prints. What did not
+///   stay: the present mode is one call into `gg-render`, which owns `r.vsync`
+///   and the write-back, and the icon's *format* is `gg-core`'s beside the
+///   manifest that names it.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
-/// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session) — each
-/// argued the same way.
-const SHELL_BUDGET: usize = 1585;
+/// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session), M45 (the
+/// keys) — each argued the same way.
+const SHELL_BUDGET: usize = 1640;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

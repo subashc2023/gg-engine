@@ -457,6 +457,23 @@ pub static SHADOW_BLEND: CVar = CVar::new_float(
 /// say "brighter than paper" at all.
 pub static HDR: CVar = CVar::new_int("r.hdr", 0, "output: 0 sdr, 1 hdr10, 2 scrgb");
 
+/// When a finished frame reaches the glass: `1` wait for the blank, `2` replace
+/// the queued frame, `3` straight to the glass (§6 M46). [`HDR`]'s write-back,
+/// for [`HDR`]'s reason — only vsync is guaranteed to exist, so an operator who
+/// set `2` and reads `3` has been told the driver has no mailbox.
+///
+/// Unlike [`HDR`] this is read **every frame**, because a present mode does not
+/// change what the numbers in the backbuffer mean and so is not a decision that
+/// has to be made before the pipelines are built. A player's own choice
+/// (`Prefs::present`) overrides it when the game offers one; a game that draws
+/// no video menu leaves it alone, which is what makes this the host's knob
+/// rather than a duplicate of the boundary's.
+///
+/// Default is vsync and stays vsync: tearing is a thing a player asks for, never
+/// a thing a default hands them, and every golden in the tree is rendered
+/// through a path that presents exactly once per frame.
+pub static VSYNC: CVar = CVar::new_int("r.vsync", 1, "present: 1 vsync, 2 fast, 3 immediate");
+
 /// What the display should call diffuse white, in nits — the anchor the whole
 /// HDR image hangs off, and meaningless under SDR.
 ///
@@ -612,6 +629,7 @@ pub fn register() -> Result<(), CVarError> {
         &EXPOSURE,
         &DITHER,
         &HDR,
+        &VSYNC,
         &PAPER_WHITE,
         &PEAK_NITS,
         &AMBIENT,

@@ -49,8 +49,8 @@
 
 use gg_ecs::Component;
 use gg_ecs::boundary::{
-    ActionId, GameWorld, Prefs, QUIET_MAX, Sound, TEXT, Widget, cursor, log_level, state,
-    text_width, wave, widget, widget_id,
+    ActionId, GameWorld, Prefs, QUIET_MAX, Sound, TEXT, Widget, cursor, display, frame, log_level,
+    state, text_width, wave, widget, widget_id,
 };
 use gg_math::sim;
 
@@ -415,6 +415,9 @@ pub const M_CURSOR: u8 = 18;
 pub const M_SPEED: u8 = 19;
 pub const M_THEME: u8 = 20;
 pub const M_DONE: u8 = 21;
+/// Appended for [`M_TITLE_EXIT`]'s reason, one milestone later (§6 M46).
+pub const M_DISPLAY: u8 = 23;
+pub const M_FRAME: u8 = 24;
 
 /// One widget of the menu layer, at rest: which screens show it, what it is,
 /// and where it goes when shown. Hidden is a zero rect, [`Item`]-in-demo-07's
@@ -445,7 +448,7 @@ const ON_SETTINGS: u32 = 1 << SCREEN_SETTINGS;
 ///
 /// Unformatted for [`LAYOUT`]-in-demo-07's reason: it is a table.
 #[rustfmt::skip]
-pub const MENU: [MenuDef; 23] = [
+pub const MENU: [MenuDef; 25] = [
     MenuDef { which: M_TITLE_PLATE,    kind: widget::PANEL,  id: widget_id("tetris.title.plate"),    rect: [247.0,  96.0, 146.0, 164.0], on: ON_TITLE,    text: "" },
     MenuDef { which: M_TITLE_PLAY,     kind: widget::BUTTON, id: widget_id("tetris.title.play"),     rect: [265.0, 110.0, 110.0,  18.0], on: ON_TITLE,    text: "PLAY" },
     MenuDef { which: M_TITLE_SETTINGS, kind: widget::BUTTON, id: widget_id("tetris.title.settings"), rect: [265.0, 134.0, 110.0,  18.0], on: ON_TITLE,    text: "SETTINGS" },
@@ -460,15 +463,17 @@ pub const MENU: [MenuDef; 23] = [
     MenuDef { which: M_RESUME,         kind: widget::BUTTON, id: widget_id("tetris.pause.resume"),   rect: [265.0, 122.0, 110.0,  18.0], on: ON_PAUSE,    text: "RESUME" },
     MenuDef { which: M_PAUSE_SETTINGS, kind: widget::BUTTON, id: widget_id("tetris.pause.settings"), rect: [265.0, 146.0, 110.0,  18.0], on: ON_PAUSE,    text: "SETTINGS" },
     MenuDef { which: M_QUIT,           kind: widget::BUTTON, id: widget_id("tetris.pause.quit"),     rect: [265.0, 170.0, 110.0,  18.0], on: ON_PAUSE,    text: "QUIT TO TITLE" },
-    MenuDef { which: M_SET_PLATE,      kind: widget::PANEL,  id: widget_id("tetris.set.plate"),      rect: [230.0,  78.0, 180.0, 182.0], on: ON_SETTINGS, text: "" },
-    MenuDef { which: M_SET_TITLE,      kind: widget::LABEL_CENTRE, id: widget_id("tetris.set.title"),      rect: [230.0,  88.0, 180.0,   9.0], on: ON_SETTINGS, text: "SETTINGS" },
-    MenuDef { which: M_GHOST,          kind: widget::BUTTON, id: widget_id("tetris.set.ghost"),      rect: [242.0, 104.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
-    MenuDef { which: M_VOLUME,         kind: widget::BUTTON, id: widget_id("tetris.set.volume"),     rect: [242.0, 128.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
-    MenuDef { which: M_CURSOR,         kind: widget::BUTTON, id: widget_id("tetris.set.cursor"),     rect: [242.0, 152.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
-    MenuDef { which: M_SPEED,          kind: widget::BUTTON, id: widget_id("tetris.set.speed"),      rect: [242.0, 176.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
-    MenuDef { which: M_THEME,          kind: widget::BUTTON, id: widget_id("tetris.set.theme"),      rect: [242.0, 200.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
-    MenuDef { which: M_DONE,           kind: widget::BUTTON, id: widget_id("tetris.set.done"),       rect: [242.0, 232.0, 156.0,  18.0], on: ON_SETTINGS, text: "DONE" },
+    MenuDef { which: M_SET_PLATE,      kind: widget::PANEL,  id: widget_id("tetris.set.plate"),      rect: [230.0,  62.0, 180.0, 230.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_SET_TITLE,      kind: widget::LABEL_CENTRE, id: widget_id("tetris.set.title"),      rect: [230.0,  72.0, 180.0,   9.0], on: ON_SETTINGS, text: "SETTINGS" },
+    MenuDef { which: M_GHOST,          kind: widget::BUTTON, id: widget_id("tetris.set.ghost"),      rect: [242.0,  88.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_VOLUME,         kind: widget::BUTTON, id: widget_id("tetris.set.volume"),     rect: [242.0, 112.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_CURSOR,         kind: widget::BUTTON, id: widget_id("tetris.set.cursor"),     rect: [242.0, 136.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_SPEED,          kind: widget::BUTTON, id: widget_id("tetris.set.speed"),      rect: [242.0, 160.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_THEME,          kind: widget::BUTTON, id: widget_id("tetris.set.theme"),      rect: [242.0, 184.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_DONE,           kind: widget::BUTTON, id: widget_id("tetris.set.done"),       rect: [242.0, 264.0, 156.0,  18.0], on: ON_SETTINGS, text: "DONE" },
     MenuDef { which: M_TITLE_EXIT,     kind: widget::BUTTON, id: widget_id("tetris.title.exit"),     rect: [265.0, 158.0, 110.0,  18.0], on: ON_TITLE,    text: "EXIT" },
+    MenuDef { which: M_DISPLAY,        kind: widget::BUTTON, id: widget_id("tetris.set.display"),    rect: [242.0, 208.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
+    MenuDef { which: M_FRAME,          kind: widget::BUTTON, id: widget_id("tetris.set.frame"),      rect: [242.0, 232.0, 156.0,  18.0], on: ON_SETTINGS, text: "" },
 ];
 
 /// Top-left of a visible cell.
@@ -1910,6 +1915,30 @@ pub fn menu(world: &mut GameWorld) {
                 };
                 said = Some("tetris: cursor changed");
             }
+            // Two states offered where the boundary has three (§6 M46): a
+            // player picks between a window and a filled screen, and `DEFAULT`
+            // is what a game that never drew this row leaves behind. Naming it
+            // in the cycle would offer "whatever I was launched as" as a third
+            // choice, which is not a thing anyone means to click.
+            if is(M_DISPLAY) {
+                p.display = match p.fullscreen() {
+                    Some(true) => display::WINDOWED,
+                    _ => display::FULLSCREEN,
+                };
+                said = Some("tetris: display changed");
+            }
+            // The same, and here the third state is worth *more* than the row:
+            // vsync and immediate are what a player understands, while `FAST`
+            // is a mode a great many drivers do not have — so it is reachable
+            // from `r.vsync` and from the settings file, and not from a cycle
+            // that would show a mode the session is not actually in.
+            if is(M_FRAME) {
+                p.present = match p.present_mode() {
+                    Some(frame::IMMEDIATE) => frame::VSYNC,
+                    _ => frame::IMMEDIATE,
+                };
+                said = Some("tetris: frame pacing changed");
+            }
         });
         if let Some(line) = said {
             world.log(log_level::INFO, line);
@@ -2225,6 +2254,21 @@ pub fn dress_menu(
             "CURSOR     SYSTEM"
         } else {
             "CURSOR     DRAWN"
+        }),
+        // What the *window* is, not what was clicked: `DEFAULT` is a real value
+        // here and reads as WINDOW, because that is what a session launched
+        // without a preference is looking at.
+        M_DISPLAY => widget.set_text(match prefs.fullscreen() {
+            Some(true) => "DISPLAY    FULLSCREEN",
+            _ => "DISPLAY    WINDOW",
+        }),
+        // Three states shown where the row cycles two — the third arrives from
+        // `r.vsync` or the settings file, and a label that could not say FAST
+        // would show a session lying about what it is doing (§6 M46).
+        M_FRAME => widget.set_text(match prefs.present_mode() {
+            Some(frame::IMMEDIATE) => "FRAME      IMMEDIATE",
+            Some(frame::FAST) => "FRAME      FAST",
+            _ => "FRAME      VSYNC",
         }),
         M_SPEED => {
             widget.set_text(Text::pair(b"SPEED      ", speed_name(opts.preset)).as_str());

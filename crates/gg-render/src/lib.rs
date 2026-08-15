@@ -544,6 +544,32 @@ impl Renderer {
         self.rhi.resize(width, height);
     }
 
+    /// Ask the swapchain for a present mode (§6 M46). `asked` is the player's
+    /// own choice — one of `gg_ecs::boundary::present`'s constants — or `None`
+    /// to leave `r.vsync` alone, which is what a game with no video menu passes.
+    ///
+    /// Called every frame and costs a comparison on all but the one that
+    /// changes it. The write-back is [`cvars::HDR`]'s, and here it earns itself
+    /// twice over: mailbox is absent from a great many drivers (both of the
+    /// desk's, and the pin), so "fast" silently meaning "immediate" is exactly
+    /// the kind of thing an operator should be able to read back rather than
+    /// infer from a tear.
+    pub fn set_present(&mut self, asked: Option<u32>) {
+        // Reconciled *before* the request, and only once the swapchain has
+        // settled: the ask has to survive the frame it was made on.
+        if let Some(granted) = self.rhi.present().map(present_index)
+            && granted != cvars::VSYNC.int()
+        {
+            tracing::info!(
+                asked = cvars::VSYNC.int(),
+                granted,
+                "the surface offered no such present mode"
+            );
+            cvars::VSYNC.set_int(granted);
+        }
+        self.rhi.want_present(wanted_present(asked));
+    }
+
     /// Per-pass GPU milliseconds from the last retired frame (§4.8) — the rows
     /// the debug overlay draws. Empty in a build without the timestamps, or
     /// before the first frame comes back.
@@ -3696,6 +3722,32 @@ fn wanted_output() -> gg_rhi::Output {
     }
 }
 
+/// A present request as a [`gg_rhi::Present`] — the player's own choice where
+/// they made one, `r.vsync` where they did not (§6 M46).
+///
+/// Anything unrecognized is vsync, on `wanted_output`'s reasoning inverted: a
+/// number nobody defined is not a present mode, and guessing that it means
+/// "tear" is the more damaging guess. The two sources share this one function so
+/// the boundary's constants and the CVar's numbers cannot drift into two
+/// meanings — they are deliberately the same numbers.
+fn wanted_present(asked: Option<u32>) -> gg_rhi::Present {
+    match asked.unwrap_or_else(|| cvars::VSYNC.int().clamp(0, u32::MAX as i64) as u32) {
+        2 => gg_rhi::Present::Fast,
+        3 => gg_rhi::Present::Immediate,
+        _ => gg_rhi::Present::Vsync,
+    }
+}
+
+/// The inverse of [`wanted_present`], held to it by
+/// `the_present_cvar_and_the_swapchain_agree_on_what_the_numbers_mean`.
+fn present_index(present: gg_rhi::Present) -> i64 {
+    match present {
+        gg_rhi::Present::Vsync => 1,
+        gg_rhi::Present::Fast => 2,
+        gg_rhi::Present::Immediate => 3,
+    }
+}
+
 /// The inverse — what the swapchain granted, as the number `r.hdr` and the post
 /// pass both speak. The two must stay each other's inverse, which is what
 /// `the_output_cvar_and_the_swapchain_agree_on_what_the_numbers_mean` holds.
@@ -3752,6 +3804,47 @@ mod tests {
             assert_eq!(wanted_output(), gg_rhi::Output::Sdr, "r.hdr {odd}");
         }
         cvars::HDR.set_int(0);
+    }
+
+    /// `r.hdr`'s test, for the knob that reads two sources. The drift this
+    /// catches is quieter than the colour one and worse to diagnose: a session
+    /// asking for immediate, being granted it, and writing back a number that
+    /// means mailbox would toggle between two modes forever, one recreation per
+    /// frame, and read as a stutter with no error anywhere.
+    ///
+    /// The boundary's constants are the CVar's numbers on purpose, so the last
+    /// two rows are the ones that matter: a player's choice and an operator's
+    /// are the same value passed through the same map.
+    #[test]
+    fn the_present_cvar_and_the_swapchain_agree_on_what_the_numbers_mean() {
+        for (index, present) in [
+            (1, gg_rhi::Present::Vsync),
+            (2, gg_rhi::Present::Fast),
+            (3, gg_rhi::Present::Immediate),
+        ] {
+            cvars::VSYNC.set_int(index);
+            assert_eq!(wanted_present(None), present, "r.vsync {index}");
+            assert_eq!(present_index(present), index, "{present:?}");
+            // The player's own choice reaches the same mode without consulting
+            // the knob at all — set here to the wrong answer to prove it.
+            cvars::VSYNC.set_int(1);
+            assert_eq!(
+                wanted_present(Some(index as u32)),
+                present,
+                "Prefs::present {index}"
+            );
+        }
+        // Zero is `present::DEFAULT` and never reaches here as an ask; every
+        // other number is vsync rather than a panic or a silent fourth mode.
+        for odd in [-1, 0, 4, 99] {
+            cvars::VSYNC.set_int(odd);
+            assert_eq!(
+                wanted_present(None),
+                gg_rhi::Present::Vsync,
+                "r.vsync {odd}"
+            );
+        }
+        cvars::VSYNC.set_int(1);
     }
 
     /// The tonemapper's shoulder, and the one number that decides whether HDR

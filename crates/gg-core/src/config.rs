@@ -28,6 +28,7 @@ use std::path::Path;
 
 use crate::cvar::{self, CVarSource};
 
+pub mod icon;
 pub mod project;
 
 /// The command-line form: `--set name=value`, repeatable.

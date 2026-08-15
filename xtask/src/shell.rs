@@ -1575,6 +1575,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--keys") {
         keys()?;
     }
+    if only("--window") {
+        window()?;
+    }
     if only("--platformer") {
         platformer()?;
     }
@@ -5425,6 +5428,125 @@ fn settings() -> anyhow::Result<()> {
     );
 
     println!("xtask reload --settings: a file moves a live run and not a replayed one");
+    Ok(())
+}
+
+/// §6 M46: the window a player owns, in the two claims only the shell can make.
+///
+/// What is *not* here, deliberately: fullscreen itself. A headless run opens no
+/// window (§1.5), so nothing this tier may do can toggle one — the picture-side
+/// claim is `gg-ui`'s `surface.rs`, which proves the surface reaches the picture
+/// and never the hit test, and the window call itself is the operator's under
+/// `cargo xtask interactive`. What is left is the half that crosses the shell:
+/// the two fields are persisted preferences, and the icon is not state at all.
+fn window() -> anyhow::Result<()> {
+    let (host, game) = stage_game(&HASHED_TIERS[0], "demo-10-tetris", "demo_10_tetris")?;
+    let dir = workspace_root().join("target/window");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let icon = dir.join("icon.ggicon");
+    let manifest = dir.join("game.ggproj");
+    std::fs::write(
+        &manifest,
+        "title = M46 Window
+icon = icon.ggicon
+window = 1280x720
+",
+    )?;
+    let data = dir.join("data");
+    let file = data
+        .join("m46-window")
+        .join(gg_ecs::boundary::settings::FILE);
+    let session = file.with_file_name("progress.ggsave");
+    let (manifest, data) = (manifest.display().to_string(), data.display().to_string());
+    let env = [("LOCALAPPDATA", data.as_str()), ("XDG_DATA_HOME", &data)];
+    let forget = || {
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_file(&session);
+    };
+    let run = |args: &[&str]| play_env(&host, &game, args, true, &env);
+    let live = ["--frames", "300", "--project", manifest.as_str()];
+
+    // 1. An icon is a picture and never state. The good one is the demo's own,
+    //    so what this drives is the file that actually ships.
+    std::fs::copy(workspace_root().join("demos/10-tetris/icon.ggicon"), &icon)?;
+    forget();
+    let drawn = sequence(&run(&live)?)?;
+    // Every way a folder can be wrong, and none of them may stop the game: an
+    // icon arrives from a directory a player unzipped, and refusing to launch
+    // over a picture is the worst possible trade.
+    for (what, bytes) in [
+        (
+            "a file that is not an icon",
+            b"PNG
+
+"
+            .to_vec(),
+        ),
+        (
+            "a truncated icon",
+            gg_core::config::icon::encode(2, &[0; 16])[..20].to_vec(),
+        ),
+        ("an empty file", Vec::new()),
+    ] {
+        std::fs::write(&icon, &bytes)?;
+        forget();
+        let log = run(&live)?;
+        anyhow::ensure!(
+            log.contains("icon: opening without one"),
+            "{what} passed unnamed — a folder that ships a broken picture must say so:
+{log}"
+        );
+        if let Some(found) = divergence(&("with its icon", drawn.clone()), &(what, sequence(&log)?))
+        {
+            anyhow::bail!("§6 M46: {found} — an icon is a picture and reaches no tick");
+        }
+    }
+    // And a manifest naming no icon at all is the case every other demo is in.
+    std::fs::remove_file(&icon)?;
+    forget();
+    let log = run(&live)?;
+    anyhow::ensure!(
+        log.contains("icon: opening without one"),
+        "a missing icon file passed unnamed:
+{log}"
+    );
+
+    // 2. The two new fields are *preferences*: they survive the file, and a live
+    //    session that reads them is not the run that did not. This is the leg
+    //    that refuses to pass on a shell whose settings codec dropped the keys —
+    //    which is M42's defect exactly, and the one `--keys` found last time.
+    forget();
+    let plain = sequence(&run(&live)?)?;
+    std::fs::create_dir_all(file.parent().unwrap_or(&file))?;
+    for (what, text) in [
+        (
+            "a filled screen",
+            "display = 2
+",
+        ),
+        (
+            "an unlocked frame",
+            "present = 3
+",
+        ),
+    ] {
+        std::fs::write(&file, text)?;
+        let _ = std::fs::remove_file(&session);
+        let seq = sequence(&run(&live)?)?;
+        anyhow::ensure!(
+            divergence(&("at defaults", plain.clone()), &(what, seq)).is_some(),
+            "a settings file asking for {what} hashed like one that did not — the key reached              nothing, and `Prefs` is hashed state precisely so that it cannot"
+        );
+    }
+    // The round trip the table forces: what a session read comes back out.
+    let written = std::fs::read_to_string(&file)?;
+    anyhow::ensure!(
+        written.contains("display = ") && written.contains("present = "),
+        "a preference this build reads is one it does not write back: {written:?}"
+    );
+
+    println!("xtask reload --window: a preference crosses the file and an icon crosses nothing");
     Ok(())
 }
 

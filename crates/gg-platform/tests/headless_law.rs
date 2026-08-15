@@ -24,6 +24,7 @@ fn visible_window_under_gg_headless_panics() {
             visible: true,
             resizable: true,
             decorated: true,
+            icon: None,
         });
     });
     let payload = result.expect_err("visible window under GG_HEADLESS must panic (§1.5)");
