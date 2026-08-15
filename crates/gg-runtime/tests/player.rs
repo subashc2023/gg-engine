@@ -71,15 +71,67 @@ fn a_write_that_fails_leaves_the_old_file_whole() {
 ///
 /// The join is `drop`'s, which is the same edge the shell uses before its exit
 /// write. Without it this test races the file it reads — and so would the shell.
+///
+/// **The promise is `false` until bytes land** (§6 M54). Until that milestone it
+/// was true as soon as the *thread* existed, so the sentence a player reads in
+/// the crash box — "your progress was saved up to about five seconds before
+/// this" — was a claim about a thread having spawned rather than about anything
+/// being on their disk.
 #[test]
 fn a_checkpoint_lands_and_says_a_session_is_being_kept() {
     let dir = scratch("checkpoint");
     let path = dir.join("progress.ggsave");
     let checkpoint = player::Checkpoint::new(path.clone());
-    assert!(player::checkpointing(), "the hook has nothing to promise");
+    assert!(
+        !player::checkpointing(),
+        "a writer that has written nothing is promising a player a file that does not exist"
+    );
     checkpoint.offer(b"the session as it stood".to_vec());
     drop(checkpoint);
     assert_eq!(std::fs::read(&path).unwrap(), b"the session as it stood");
+    assert!(
+        player::checkpointing(),
+        "the bytes landed and the hook still has nothing to promise"
+    );
+}
+
+/// What the shell knows about the player's disk when the session ends (§6 M54),
+/// and the one thing a single latch gets wrong.
+///
+/// Every claim in one test on purpose: the record is process-wide, so under a
+/// runner that shares a process between tests — which `nextest` is not — two of
+/// these would be one.
+#[test]
+fn a_verdict_is_per_file_and_not_the_last_write_to_happen() {
+    let refused = || Err(std::io::Error::other("the disk said no"));
+    let save = Path::new("progress.ggsave");
+    let prefs = Path::new("settings.cfg");
+
+    player::note(save, &refused());
+    assert!(
+        player::verdict().is_some(),
+        "a refused save is not something a session may exit quietly on"
+    );
+    // The ordering the shell actually has: preferences are written before the
+    // session at exit, so a latch cleared by the last write to land would call
+    // this run fine.
+    player::note(prefs, &Ok(()));
+    let verdict =
+        player::verdict().expect("a preference that landed vouched for a save that did not");
+    assert_eq!(verdict.failures, 1);
+    assert_eq!(verdict.writes, 1);
+    assert!(
+        verdict.reason.contains("the disk said no"),
+        "the verdict carries no reason to print: {}",
+        verdict.reason
+    );
+    // And a file that recovers takes its own failure back with it: a scanner
+    // holding one write is not a disk that refuses.
+    player::note(save, &Ok(()));
+    assert!(
+        player::verdict().is_none(),
+        "a write that eventually landed still reported a loss"
+    );
 }
 
 /// Offered faster than any disk will take them, which is the sim thread's real

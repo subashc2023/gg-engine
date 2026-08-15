@@ -236,11 +236,31 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   `PlayMode`'s own reason: a script that drives a shipping path has to live
 ///   where the path does, or the tier grades a second one.
 ///
+/// - **The disk that says no** (1870 -> 1945, §6 M54): the largest raise since
+///   §6 M16, and it buys one sentence the shell is the only thing in a position
+///   to say — *the player's files did not get written*. Every piece of judgement
+///   is again in the crate that owns it: `player::replace` decides what an
+///   atomic write is, `gg_platform::alert` decides what a box is and what
+///   headless means for one, and the game decides what it wanted saved. What is
+///   here is the *record* — which files were tried, which of them last failed,
+///   and the fact that a scanner holding one write is not a disk that refuses —
+///   and it has no other home for a reason with two halves. Downward, `gg-ecs`
+///   owns bytes and never files and `gg-platform`'s charter is windows, which is
+///   M48's line and unchanged. Upward, the answer must **not** be the world: a
+///   disk failure is host state, and a `Prefs` field or a component carrying it
+///   would make a replay diverge on exactly the machine a bug report comes
+///   from. That leaves the shell, which sees the session end, the directory it
+///   was writing to, and the title to put on the box, and is the one place all
+///   three are in scope at once. The other two thirds are the same argument
+///   about equipment: the log sink degrades instead of refusing (a `?` there had
+///   been a launch veto held by the file that exists to describe failures), and
+///   `log_path` stops naming a file nothing opened.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session), M45 (the
 /// keys), M46 (the window), M47 (the refusal), M48 (the crash) — each argued the
 /// same way.
-const SHELL_BUDGET: usize = 1870;
+const SHELL_BUDGET: usize = 1945;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

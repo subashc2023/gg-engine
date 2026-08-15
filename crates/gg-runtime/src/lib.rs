@@ -23,7 +23,7 @@ use anyhow::Context as _;
 use gg_core::config::project::Project;
 use gg_core::{DEFAULT_TICK_HZ, FrameLoop};
 use gg_input::Replay;
-use tracing::{info, info_span, warn};
+use tracing::{error, info, info_span, warn};
 
 mod app;
 mod play;
@@ -280,6 +280,22 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
     while let Some(next) = session(&args)? {
         args = next;
     }
+    // After every session and once per process (§6 M54). A game whose disk
+    // refused exits 0 — it played, and the exit code is about the session — so
+    // this is the only place the fact reaches anyone but a log reader. `alert`
+    // is a no-op under `GG_HEADLESS` that says so (§1.5), which is what lets a
+    // gate assert the sentence without an operator dismissing a box.
+    if let Some(verdict) = player::verdict() {
+        let title = args.title.as_deref().unwrap_or(env!("CARGO_PKG_NAME"));
+        let body = unsaved(title, args.data.as_deref(), &verdict);
+        error!(
+            failures = verdict.failures,
+            writes = verdict.writes,
+            reason = verdict.reason,
+            "the player's files were not written"
+        );
+        gg_platform::alert(title, &body);
+    }
     Ok(())
 }
 
@@ -426,14 +442,13 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     // and deals a fresh board before setting `Prefs::close`, so a deliberate
     // quit reopens on the title — and a window closed mid-game reopens on that
     // game, because the game got no tick in which to decide otherwise. A
-    // failure here is logged, never fatal: the process is already leaving.
+    // failure here is counted, never fatal: the process is already leaving, and
+    // what it says about the disk is `player::note`'s and is said once (§6 M54).
     // Ahead of the write and not after it: a checkpoint still in flight would
     // land on top of these bytes and roll the session back an interval (§6 M48).
     app.checkpoint_stop();
-    if let Some(path) = progress.filter(|_| keep_progress)
-        && let Err(error) = app.write_save(&path)
-    {
-        warn!(%error, "progress: not written");
+    if let Some(path) = progress.filter(|_| keep_progress) {
+        let _ = app.write_save(&path);
     }
     // Also before `finish`, and the reason is the same one: the pick is the
     // editor's and the editor goes with the app.
@@ -593,12 +608,20 @@ const LOG_FILTER: &str = "debug,gg::hash=off";
 /// Where a shipped run's log goes, in the game's own directory (§6 M41 item 4).
 const LOG_FILE: &str = "log.txt";
 
+/// Set when this run actually opened its log file — which is not the same
+/// question as whether it has a directory to put one in (§6 M54).
+static LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The file a refusal may point someone at, or `None` when this run's log is a
 /// console they are already looking at (§6 M47) — naming a file that does not
 /// exist is worse than naming nothing. `cfg!` rather than two bodies so the
 /// constant above stays referenced in both tiers.
+///
+/// The atomic is the second half of that same sentence: a data directory the
+/// run could not write is a path a box would otherwise print, sending whoever
+/// reads it to look for a file nothing ever created.
 fn log_path(data: Option<&Path>) -> Option<PathBuf> {
-    match cfg!(feature = "debug-tools") {
+    match cfg!(feature = "debug-tools") || !LOGGING.load(std::sync::atomic::Ordering::Relaxed) {
         true => None,
         false => data.map(|dir| dir.join(LOG_FILE)),
     }
@@ -644,6 +667,36 @@ pub fn crashed(title: &str, what: &str, log: Option<&Path>, saved: bool) -> Stri
     if let Some(log) = log {
         body.push_str(&format!("\n\nThe full log is at\n{}", log.display()));
     }
+    body
+}
+
+/// What a session whose disk refused says on the way out (§6 M54), on the shape
+/// [`refusal`] and [`crashed`] share.
+///
+/// The tense is the difference: those two describe something the player watched
+/// happen, and this describes something that did *not* — a game that played
+/// perfectly and saved none of it. Nothing here is a diagnosis, because the
+/// causes (a folder in Program Files, a full disk, a scanner holding the file,
+/// a directory that is a file) are indistinguishable from in here and the one
+/// the OS named is the only honest one to print.
+///
+/// The directory is the first thing said and the reason the second: a player who
+/// is told at exit can move the folder somewhere writable, and one who is told
+/// nothing finds out by losing the evening.
+#[must_use]
+pub fn unsaved(title: &str, dir: Option<&Path>, verdict: &player::Verdict) -> String {
+    let mut body = format!("{title} could not save your progress.");
+    if let Some(dir) = dir {
+        body.push_str(&format!("\n\nIt was writing to\n{}", dir.display()));
+    }
+    body.push_str(&format!("\n\n{}", verdict.reason));
+    // Some against none, because they are different evenings: a session that
+    // banked ten checkpoints and then lost the disk kept everything up to the
+    // last one, and saying "none of it" to that player would be its own lie.
+    body.push_str(match verdict.writes {
+        0 => "\n\nNothing from this session was saved.",
+        _ => "\n\nSome of this session was saved; the most recent part was not.",
+    });
     body
 }
 
@@ -704,14 +757,31 @@ fn init_observability(data: Option<&Path>, title: Option<&str>) -> anyhow::Resul
     // or it is nothing, and nothing is what an itch bug report otherwise holds.
     // Truncated per run rather than rolled — the interesting session is the one
     // that just went wrong, and a rolling appender is a dependency.
+    //
+    // **Degraded, never fatal (§6 M54).** Until that milestone this was a `?`,
+    // so a player whose `%LOCALAPPDATA%` could not be written did not get a game
+    // that failed to save — they got one that would not *start*, over a file
+    // that exists to describe failures. Diagnostic equipment does not get a veto
+    // on the session it is there to observe.
+    let mut degraded = None;
     let sink = data
-        .map(|dir| -> std::io::Result<_> {
-            std::fs::create_dir_all(dir)?;
-            Ok(BoxMakeWriter::new(std::sync::Arc::new(
-                std::fs::File::create(dir.join(LOG_FILE))?,
-            )))
+        .and_then(|dir| {
+            match (|| -> std::io::Result<_> {
+                std::fs::create_dir_all(dir)?;
+                std::fs::File::create(dir.join(LOG_FILE))
+            })() {
+                Ok(file) => {
+                    LOGGING.store(true, std::sync::atomic::Ordering::Relaxed);
+                    Some(BoxMakeWriter::new(std::sync::Arc::new(file)))
+                }
+                // Kept, not printed: there is no subscriber to print it to yet,
+                // and stderr behind a shipped binary is a handle nothing reads.
+                Err(e) => {
+                    degraded = Some((dir.to_path_buf(), e));
+                    None
+                }
+            }
         })
-        .transpose()?
         .unwrap_or_else(|| BoxMakeWriter::new(std::io::stdout));
     tracing_subscriber::fmt()
         .with_target(true)
@@ -720,6 +790,13 @@ fn init_observability(data: Option<&Path>, title: Option<&str>) -> anyhow::Resul
         .with_writer(sink)
         .try_init()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // The first thing this run says, now that there is somewhere to say it. It
+    // goes to a console nobody shipped, which is exactly the point: the sentence
+    // is for whoever later asks why the folder has no `log.txt` in it.
+    if let Some((dir, e)) = degraded {
+        warn!(dir = %dir.display(), error = %e,
+              "no log file - this session runs and reports nothing to disk");
+    }
     // §3 keeps `gg-debug` and its crash reporter out of the dist graph, so a
     // panic's last words are this hook's or a player watches a window vanish.
     // The words reached the log at M47 and the *window* still vanished (§6 M48):

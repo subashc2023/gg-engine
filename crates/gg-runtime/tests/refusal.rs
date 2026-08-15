@@ -68,6 +68,49 @@ fn a_crash_with_nothing_kept_promises_nothing() {
     assert!(body.contains("stopped unexpectedly"), "{body}");
 }
 
+/// The third box, and the only one whose subject is a session that went
+/// perfectly (§6 M54): the game played, and none of it reached the disk.
+///
+/// What it has to carry is the *directory*, because that is the only part a
+/// player can act on — moving the folder out of Program Files is a thing they
+/// can do, and diagnosing `os error 5` is not.
+#[test]
+fn a_session_that_saved_nothing_says_where_it_was_trying_to_write() {
+    let dir = std::path::Path::new("C:/Program Files/falling-blocks");
+    let verdict = gg_runtime::player::Verdict {
+        failures: 12,
+        writes: 0,
+        reason: "Access is denied. (os error 5)".to_owned(),
+    };
+    let body = gg_runtime::unsaved("Falling Blocks", Some(dir), &verdict);
+    assert!(
+        body.starts_with("Falling Blocks could not save your progress."),
+        "{body}"
+    );
+    assert!(body.contains("C:/Program Files/falling-blocks"), "{body}");
+    assert!(body.contains("os error 5"), "{body}");
+    assert!(
+        body.contains("Nothing from this session was saved"),
+        "{body}"
+    );
+}
+
+/// The same failure after a session that *had* been saving, which is a
+/// different evening and must not read like the one above: everything up to the
+/// last checkpoint is still on the disk and still worth reopening.
+#[test]
+fn a_session_that_saved_some_of_itself_says_so() {
+    let verdict = gg_runtime::player::Verdict {
+        failures: 3,
+        writes: 40,
+        reason: "There is not enough space on the disk. (os error 112)".to_owned(),
+    };
+    let body = gg_runtime::unsaved("Falling Blocks", None, &verdict);
+    assert!(body.contains("Some of this session was saved"), "{body}");
+    assert!(!body.contains("Nothing from this session"), "{body}");
+    assert!(!body.contains("It was writing to"), "{body}");
+}
+
 /// A dev run has a console somebody is already looking at and no log file, so
 /// the message must not point at one. The failure this refuses is worse than a
 /// missing line: a path that is not there reads as a file the player deleted.

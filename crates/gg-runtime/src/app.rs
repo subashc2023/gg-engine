@@ -713,7 +713,9 @@ impl App {
         // Atomically (§6 M48), and the directory is `replace`'s business now:
         // what a save replaces is a file somebody already has, and half of one
         // is worse than the last one.
-        crate::player::replace(path, &bytes)?;
+        let wrote = crate::player::replace(path, &bytes);
+        crate::player::note(path, &wrote);
+        wrote?;
         info!(
             path = %path.display(),
             tick = save.tick(),
@@ -728,16 +730,18 @@ impl App {
     ///
     /// Read out of the world, never echoed back from the file that seeded it —
     /// which is what makes a menu's edit outlive the process that took it, and
-    /// is the whole point of the round trip. A failure is logged and swallowed:
-    /// a game that cannot write a preference is a game that opens at defaults
-    /// next time, and refusing to exit over it would be worse than that.
+    /// is the whole point of the round trip. A failure is swallowed here and
+    /// counted in [`player::note`](crate::player::note): a game that cannot write
+    /// a preference is a game that opens at defaults next time, and refusing to
+    /// exit over it would be worse than that — but the *directory* it could not
+    /// write is the player's, and that is a sentence somebody owes them (§6 M54).
     pub fn write_settings(&self, path: &Path) {
         let prefs = self.prefs();
         let write =
             crate::player::replace(path, gg_ecs::boundary::settings::encode(&prefs).as_bytes());
-        match write {
-            Ok(()) => info!(path = %path.display(), quiet = prefs.quiet, "settings written"),
-            Err(e) => warn!(path = %path.display(), error = %e, "settings not written"),
+        crate::player::note(path, &write);
+        if write.is_ok() {
+            info!(path = %path.display(), quiet = prefs.quiet, "settings written");
         }
     }
 

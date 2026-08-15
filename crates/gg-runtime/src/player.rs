@@ -8,6 +8,8 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
 use tracing::{debug, warn};
 
@@ -19,6 +21,86 @@ use tracing::{debug, warn};
 /// player would agree to replay. A crash costs them the seconds since the last
 /// one, and a Tetris board five seconds stale is the same board.
 pub const CHECKPOINT_SECONDS: u64 = 5;
+
+/// What the player's disk has actually said, this process (§6 M54).
+///
+/// Counted rather than repeated, and the first reason kept: a disk that refuses
+/// refuses every interval, so a `warn` per attempt regrows exactly the log §6
+/// M51 cut out of the success path.
+static FAILURES: AtomicU64 = AtomicU64::new(0);
+static WRITES: AtomicU64 = AtomicU64::new(0);
+static REASON: OnceLock<String> = OnceLock::new();
+
+/// The last outcome of each player file, `true` meaning it failed. **Per path
+/// and not one flag**, which is the difference between a verdict and an
+/// accident of ordering: settings are written before the session at exit, so a
+/// single latch cleared by the last write would report a refused save as fine
+/// whenever the preferences beside it happened to land.
+///
+/// A `Vec` because there are three of these and a lookup is a memcmp — and a
+/// lock the sim thread never takes, since the writes are the checkpoint
+/// thread's and the exit path's.
+static OUTCOMES: std::sync::Mutex<Vec<(PathBuf, bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// A session's disk, as of its last write. Built only when there is something
+/// to say — see [`verdict`].
+pub struct Verdict {
+    /// Writes that failed. Every player file, not one of them: what a player
+    /// needs to hear is about the directory.
+    pub failures: u64,
+    /// Writes that landed. Zero and nonzero are different sentences — nothing
+    /// was saved, against some of it was.
+    pub writes: u64,
+    /// The first failure's own words, which name the cause the way the OS did.
+    pub reason: String,
+}
+
+/// Record one player-file write, whatever it was for.
+///
+/// **Every one of them goes through here.** How often a failing disk is allowed
+/// to speak, and whether the session's last words mention it, is one policy;
+/// three call sites each logging their own failure is three policies, and the
+/// one thing none of them can see is that the *directory* is the problem.
+pub fn note(path: &Path, result: &std::io::Result<()>) {
+    match result {
+        Ok(()) => WRITES.fetch_add(1, Relaxed),
+        Err(e) => {
+            if REASON.set(e.to_string()).is_ok() {
+                warn!(path = %path.display(), error = %e,
+                      "the player's disk refused a write - counted from here, said once");
+            }
+            FAILURES.fetch_add(1, Relaxed)
+        }
+    };
+    // Overwritten rather than latched: a scanner holding one file for one
+    // interval is not a disk that refuses, and telling a player their progress
+    // is gone when the next write landed is its own kind of wrong.
+    if let Ok(mut outcomes) = OUTCOMES.lock() {
+        let failed = result.is_err();
+        match outcomes.iter_mut().find(|(seen, _)| seen == path) {
+            Some((_, last)) => *last = failed,
+            None => outcomes.push((path.to_path_buf(), failed)),
+        }
+    }
+}
+
+/// What to tell the player on the way out, or `None` when the disk did its job.
+///
+/// `Some` when any player file's *last* write failed: a file that recovered
+/// lost nothing, and a box about a write that eventually landed teaches a
+/// player to ignore the next one.
+#[must_use]
+pub fn verdict() -> Option<Verdict> {
+    let failing = OUTCOMES
+        .lock()
+        .map(|outcomes| outcomes.iter().any(|(_, failed)| *failed))
+        .unwrap_or(false);
+    failing.then(|| Verdict {
+        failures: FAILURES.load(Relaxed),
+        writes: WRITES.load(Relaxed),
+        reason: REASON.get().cloned().unwrap_or_default(),
+    })
+}
 
 /// Replace `path` with `bytes`, atomically: a reader sees the old file or the
 /// new one, never a prefix of it.
@@ -88,12 +170,22 @@ pub struct Checkpoint {
 /// Set once a writer exists, read by the panic hook — which is installed before
 /// there is a session to ask and must not promise a player a file that this run
 /// was never going to write (§6 M48).
-static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Whether this session is checkpointing.
+/// Whether a checkpoint has actually reached the disk, and the last one still
+/// did. A thread that spawned is not a file that exists (§6 M54).
+static LANDED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this session is checkpointing — meaning bytes have landed, not that
+/// a writer exists.
+///
+/// The distinction is the one sentence in the crash box a player acts on
+/// ([`crate::crashed`]): on a disk that refuses, "your progress was saved up to
+/// about five seconds before this" is false, and it is false in the direction
+/// that stops them from doing anything about it.
 #[must_use]
 pub fn checkpointing() -> bool {
-    RUNNING.load(std::sync::atomic::Ordering::Relaxed)
+    RUNNING.load(Relaxed) && LANDED.load(Relaxed)
 }
 
 impl Checkpoint {
@@ -107,27 +199,21 @@ impl Checkpoint {
             .name("gg-checkpoint".to_owned())
             .spawn(move || {
                 while let Ok(bytes) = rx.recv() {
-                    match replace(&path, &bytes) {
-                        // `debug`, not `info`, and the level is the whole point
-                        // (§6 M51). This fires every `CHECKPOINT_SECONDS` for as
-                        // long as a session lasts — twice, since prefs
-                        // checkpoint beside the save — so at `info` a twenty
-                        // minute game writes 480 lines saying nothing happened,
-                        // and an evening's writes megabytes. In a tier without
-                        // `debug-tools` that log is a *file* on the player's
-                        // disk (§6 M47) and nothing rotates it. What a bug
-                        // report needs from this path is the failure below,
-                        // which is still `warn`, and the cadence, which is
-                        // `xtask reload --crash`'s to ask for.
-                        Ok(()) => {
-                            debug!(path = %path.display(), bytes = bytes.len(), "checkpoint written")
-                        }
-                        // Never fatal: the session is still playable and the
-                        // exit write may still land. A disk that is full says
-                        // so once per interval, which is the honest cadence.
-                        Err(e) => {
-                            warn!(path = %path.display(), error = %e, "checkpoint not written")
-                        }
+                    let wrote = replace(&path, &bytes);
+                    LANDED.store(wrote.is_ok(), Relaxed);
+                    note(&path, &wrote);
+                    // `debug`, not `info`, and the level is the whole point (§6
+                    // M51). This fires every `CHECKPOINT_SECONDS` for as long as
+                    // a session lasts — twice, since prefs checkpoint beside the
+                    // save — so at `info` a twenty minute game writes 480 lines
+                    // saying nothing happened, and an evening's writes megabytes.
+                    // In a tier without `debug-tools` that log is a *file* on the
+                    // player's disk (§6 M47) and nothing rotates it. The failure
+                    // is `note`'s and is said once for the same reason (§6 M54);
+                    // it is never fatal, since the session is still playable and
+                    // the exit write may still land.
+                    if wrote.is_ok() {
+                        debug!(path = %path.display(), bytes = bytes.len(), "checkpoint written");
                     }
                 }
             })

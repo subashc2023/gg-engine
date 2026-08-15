@@ -184,11 +184,24 @@ pub fn apply(path: &Path, args: &[String]) -> std::io::Result<Report> {
 /// they changed about it, and a flag is still someone at a keyboard right now.
 /// `None` is every run without one — a dev run, and any run the caller decided
 /// must not read it.
+///
+/// The two files fail differently on purpose (§6 M54). The one beside the game
+/// is the author's, so a directory or a permissions error is fatal by
+/// [`apply_file`]'s rule: a knob somebody wrote and did not get is worth
+/// stopping for. The player's is **optional by definition**, and their whole
+/// directory can be unreadable — that is what a game installed somewhere
+/// awkward looks like — so anything but a clean read is logged and treated as
+/// the absence it almost always is. Refusing to launch a game over a config
+/// file nobody has written is the same mistake as refusing over a log file.
 pub fn boot(path: &Path, player: Option<&Path>, args: &[String]) -> std::io::Result<Report> {
     let mut report = apply_file(path)?;
     report.log(CVarSource::Config.as_str());
     if let Some(path) = player {
-        let player = apply_file_from(path, CVarSource::Player)?;
+        let player = apply_file_from(path, CVarSource::Player).unwrap_or_else(|e| {
+            tracing::warn!(path = %path.display(), error = %e,
+                           "no player config could be read - continuing without one");
+            Report::default()
+        });
         player.log(CVarSource::Player.as_str());
         report.merge(player);
     }

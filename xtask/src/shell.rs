@@ -1590,6 +1590,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--soak") {
         soak()?;
     }
+    if only("--disk") {
+        disk()?;
+    }
     if only("--platformer") {
         platformer()?;
     }
@@ -5887,6 +5890,205 @@ fn away() -> anyhow::Result<()> {
         "xtask reload --away: 300 frames of an unfocused window cost {} ticks, and a file buys \
          them back",
         runs[0].1.len() - lengths[0]
+    );
+    Ok(())
+}
+
+/// §6 M54: **the player's disk is allowed to say no, and the session is not.**
+///
+/// Every other player-file gate in this file writes to a directory that works.
+/// This one is the same shell against a disk that refuses, which is the case no
+/// gate could see from a machine where every write lands — the same blind spot
+/// §6 M53 found one layer down, where the *build* host had a library the player
+/// would not.
+///
+/// The refusal is a **file where the data directory must be**. That fails
+/// `create_dir_all` with a real OS error on both hosts (`ERROR_ALREADY_EXISTS`,
+/// `ENOTDIR`), needs no privileges and no `chmod`, and is the one provocation
+/// that reaches every write in the session rather than a chosen one.
+///
+/// Under dist-verify for `refuse`'s reason and one of its own: the log is a
+/// *file* only in a tier without `debug-tools`, and half of what this grades is
+/// what happens when that file cannot be created.
+fn disk() -> anyhow::Result<()> {
+    let tier = &HASHED_TIERS[2];
+    let (host, game) = stage_game(tier, "demo-10-tetris", "demo_10_tetris")?;
+    let root = workspace_root().join("target/disk");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root)?;
+    // The leg's own title, so the slug below is this gate's directory and never
+    // the operator's real one (§6 M42's rule, as `away` applies it).
+    let manifest = root.join("game.ggproj");
+    std::fs::write(&manifest, "title = M54 Disk\n")?;
+    let slug = "m54-disk";
+
+    // A played board to start every session from. Live and not replayed, because
+    // a recording writes no player files at all (§6 M44) and would leave this
+    // leg grading a disk nothing ever asked to write to — but a *fresh* live
+    // session sits on the title screen and never moves its own hash, so the
+    // board comes out of the blessed stream and goes back in through `--load`.
+    let stream = tetris_path();
+    anyhow::ensure!(
+        stream.is_file(),
+        "no Tetris stream at {} — `cargo xtask replay --bless` authors it",
+        stream.display()
+    );
+    let board = root.join("played.ggsv");
+    let (stream, board_arg) = (stream.display().to_string(), board.display().to_string());
+    let seed = root.join("seed");
+    std::fs::create_dir_all(&seed)?;
+    play_env(
+        &host,
+        &game,
+        &[
+            "--replay",
+            &stream,
+            "--frames",
+            "400",
+            "--save",
+            &board_arg,
+            "--project",
+            &manifest.display().to_string(),
+        ],
+        false,
+        &[
+            ("LOCALAPPDATA", &seed.display().to_string()),
+            ("XDG_DATA_HOME", &seed.display().to_string()),
+        ],
+    )?;
+    anyhow::ensure!(board.is_file(), "no board to seed the sessions with");
+
+    let run = |data: &Path, frames: &str| -> anyhow::Result<String> {
+        let out = Command::new(&host)
+            .arg("--project")
+            .arg(&manifest)
+            .arg("--game")
+            .arg(&game)
+            .arg("--load")
+            .arg(&board)
+            .arg("--frames")
+            .arg(frames)
+            .env("GG_HEADLESS", "1")
+            .env("LOCALAPPDATA", data)
+            .env("XDG_DATA_HOME", data)
+            .env("RUST_LOG", "info,gg::hash=debug")
+            .output()?;
+        let streams = format!("{}{}", plain(&out.stdout), plain(&out.stderr));
+        anyhow::ensure!(
+            out.status.success(),
+            "a session exited {} because of the disk under it — a game that cannot save is still \
+             a game somebody is playing:\n{streams}",
+            out.status
+        );
+        // Wherever this run put its log, which is the point: a healthy run's is
+        // the file, and a run that could not create one is talking to a console
+        // no shipped folder has. Reading both the same way is what lets the two
+        // hash sequences below be compared at all.
+        let file = data.join(slug).join("log.txt");
+        Ok(match std::fs::read_to_string(&file) {
+            Ok(log) => log,
+            Err(_) => streams,
+        })
+    };
+
+    // 1. A directory that works, and the control for everything below.
+    let good = root.join("good");
+    std::fs::create_dir_all(&good)?;
+    let healthy = run(&good, "900")?;
+    anyhow::ensure!(
+        good.join(slug).join("log.txt").is_file(),
+        "the healthy run wrote no log file — this leg's other half would then be measuring \
+         nothing"
+    );
+    anyhow::ensure!(
+        !healthy.contains("were not written"),
+        "a session whose every write landed still told the player it had lost their \
+         progress:\n{healthy}"
+    );
+
+    // 2. The same session with a *file* where its directory belongs. Before M54
+    //    this did not reach a first tick: the log was opened with `?`, so a
+    //    player whose `%LOCALAPPDATA%` refused a directory got no game at all —
+    //    a refusal over the equipment that exists to describe refusals.
+    let blocked = root.join("blocked");
+    std::fs::write(&blocked, "a file, where a directory has to go")?;
+    let refused = run(&blocked, "900")?;
+    anyhow::ensure!(
+        refused.contains("no log file"),
+        "the run never said it had nowhere to write its log, so the folder's missing `log.txt` \
+         is a mystery rather than a reported fact:\n{refused}"
+    );
+
+    // 3. The claim the whole milestone rests on: **a disk failure does not
+    //    reach the world.** It is host state, and a `Prefs` field or a hashed
+    //    component carrying it would make a replay diverge on the one machine
+    //    whose disk refused — which is the machine a bug report comes from.
+    let (a, b) = (sequence(&healthy)?, sequence(&refused)?);
+    anyhow::ensure!(
+        a.iter().any(|(_, h)| h != &a[0].1),
+        "the session never moved its own hash — it proves nothing about the disk or anything else"
+    );
+    if let Some(found) = divergence(&("writable", a), &("refused", b)) {
+        anyhow::bail!(
+            "§6 M54: {found} — what the disk said reached the world, so a replay is now a \
+             property of the drive it ran on"
+        );
+    }
+
+    // 4. Said once, however long the session lasts (§6 M51's rule, in the path
+    //    that regrows it): a disk that refuses refuses every interval, and a
+    //    `warn` per attempt is the log that grew with the session all over
+    //    again — this time on the disk of the player least able to spare it.
+    let longer = run(&blocked, "3600")?;
+    let (said, failures) = (
+        longer.matches("refused a write").count(),
+        crate::util::field_u64(
+            longer
+                .lines()
+                .find(|line| line.contains("were not written"))
+                .unwrap_or_default(),
+            "failures",
+        )?,
+    );
+    anyhow::ensure!(
+        said == 1,
+        "a four-times-longer session said `refused a write` {said} times — the cadence is the \
+         session's length and not the disk's answer"
+    );
+    anyhow::ensure!(
+        failures > 2,
+        "only {failures} writes were refused in 3600 frames, so the count is not tracking the \
+         attempts and the line above proves nothing"
+    );
+    anyhow::ensure!(
+        longer.contains("writes=0"),
+        "the verdict claims something landed on a disk that took nothing:\n{longer}"
+    );
+
+    // 5. The path a player actually has. Nothing in this tree has ever run from
+    //    one with a space or a character outside ASCII in it, and
+    //    `%LOCALAPPDATA%` carries the account name — so the commonest real path
+    //    on Earth is the untested one.
+    let named = root.join("Müller Späth");
+    std::fs::create_dir_all(&named)?;
+    let ordinary = run(&named, "900")?;
+    anyhow::ensure!(
+        !ordinary.contains("were not written"),
+        "a directory whose name has a space and a diaeresis in it was treated as a disk \
+         failure:\n{ordinary}"
+    );
+    for name in [
+        "log.txt",
+        "progress.ggsave",
+        gg_ecs::boundary::settings::FILE,
+    ] {
+        let path = named.join(slug).join(name);
+        anyhow::ensure!(path.is_file(), "no {name} at {}", path.display());
+    }
+
+    println!(
+        "xtask reload --disk: a refused disk costs the session its files and not its ticks, \
+         says so once, and tells the player at exit"
     );
     Ok(())
 }
