@@ -106,6 +106,10 @@ pub fn run_cmd(args: &[&str]) -> Result<()> {
         stage(&scene, &folder.join("scene.ggsave"))?;
     }
 
+    // Before the zip, not after: what the folder demands of a stranger's machine
+    // is the one property a zip cannot carry and the operator cannot see (§6 M53).
+    crate::deps::check_folder(&folder)?;
+
     let files = walk(&folder)?;
     let bytes: u64 = files
         .iter()

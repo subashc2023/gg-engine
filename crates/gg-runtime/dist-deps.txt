@@ -1,0 +1,32 @@
+# What a shipped artifact demands of the machine it lands on (§6 M53).
+#
+# Every name here is either a component of the operating system itself or a file
+# `xtask ship` stages beside the game. Nothing else may appear: a library that is
+# merely *usually installed* fails in the loader, before our code runs, where no
+# message of ours can reach the player (§6 M47).
+#
+# A version is the floor that library's interface is asked for, and it decides which
+# releases can run the download at all.
+#
+# Rewritten by `cargo xtask deps --bless`; the diff belongs in the review.
+
+[x86_64-pc-windows-msvc]
+api-ms-win-core-synch-l1-2-0.dll
+bcryptprimitives.dll
+dwmapi.dll
+gdi32.dll
+imm32.dll
+kernel32.dll
+ntdll.dll
+ole32.dll
+oleaut32.dll
+shell32.dll
+user32.dll
+uxtheme.dll
+
+[x86_64-unknown-linux-gnu]
+ld-linux-x86-64.so.2 GLIBC_2.3
+libasound.so.2 ALSA_0.9
+libc.so.6 GLIBC_2.39
+libgcc_s.so.1 GCC_4.2.0
+libm.so.6 GLIBC_2.27

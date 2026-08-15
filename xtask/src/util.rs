@@ -61,8 +61,52 @@ pub fn cargo() -> Command {
     cmd
 }
 
+/// Attach a **static** CRT to every build of the shipping profile, on the one
+/// argument that makes a build a shipping one (§6 M53).
+///
+/// It is here rather than at the twelve call sites that spell `--profile dist`
+/// because forgetting it is silent and expensive: a shipped `.exe` linked
+/// against the dynamic CRT imports `VCRUNTIME140.dll`, which is not a component
+/// of Windows. The loader resolves that before the first instruction of ours
+/// runs, so §6 M47's message box never opens and no `log.txt` is written — the
+/// player reads an OS error naming a file they have never heard of.
+///
+/// **Windows only.** A statically linked glibc cannot `dlopen`, and the game
+/// arrives through `dlopen` in every tier (§4.2.2), so the Linux answer is a
+/// version floor held in `dist-deps.txt` instead.
+///
+/// Two consequences worth knowing rather than discovering. The flag is part of
+/// cargo's fingerprint, so a `cargo build --profile dist` typed by hand rebuilds
+/// against this one — go through `xtask` and it does not. And with no `--target`
+/// on the command line the flag reaches host artifacts too, so proc macros are
+/// built against the static CRT as well; rustc loads them regardless (measured,
+/// not assumed), and passing `--target` to avoid it would move every dist
+/// artifact under a triple directory that four other gates spell by hand.
+fn static_crt(cmd: &mut Command) {
+    if !cfg!(target_env = "msvc") {
+        return;
+    }
+    let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+    if !args
+        .windows(2)
+        .any(|w| w[0] == "--profile" && w[1] == "dist")
+    {
+        return;
+    }
+    // Appended rather than assigned: RUSTFLAGS in the environment replaces
+    // config's `rustflags` wholesale, so clobbering an operator's would silently
+    // drop whatever they were measuring.
+    let mut flags = std::env::var("RUSTFLAGS").unwrap_or_default();
+    if !flags.is_empty() {
+        flags.push(' ');
+    }
+    flags.push_str("-C target-feature=+crt-static");
+    cmd.env("RUSTFLAGS", flags);
+}
+
 pub fn run(cmd: &mut Command, what: &str) -> anyhow::Result<()> {
     println!("xtask: {what}");
+    static_crt(cmd);
     let status = cmd
         .status()
         .map_err(|e| anyhow::anyhow!("failed to spawn `{what}`: {e}"))?;
@@ -71,6 +115,7 @@ pub fn run(cmd: &mut Command, what: &str) -> anyhow::Result<()> {
 }
 
 pub fn run_capture(cmd: &mut Command, what: &str) -> anyhow::Result<String> {
+    static_crt(cmd);
     let out = cmd
         .output()
         .map_err(|e| anyhow::anyhow!("failed to spawn `{what}`: {e}"))?;

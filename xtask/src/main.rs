@@ -8,6 +8,7 @@ mod backlog;
 mod bench;
 mod budgets;
 mod ci;
+mod deps;
 mod dist;
 mod dx;
 mod fresh;
@@ -36,6 +37,7 @@ fn main() {
         Some("probe") => probe::run(rest.contains(&"--system")),
         Some("shaders") => shaders::build_all(rest.contains(&"--check")),
         Some("dist") => dist::gate(),
+        Some("deps") => deps::run(&rest),
         Some("ship") => ship::run_cmd(&rest),
         Some("public-api") => public_api::run(&rest),
         Some("replay") => replay::run(&rest),
@@ -77,6 +79,7 @@ fn usage() -> anyhow::Result<()> {
          fresh [--clone|--canary]                         the weekly repository gates on demand: pristine-clone rebuild, cargo update canary (§5, §9)\n\
          replay [--bless]                                 §5.6 determinism material: the curated replay's hashes vs its baseline; --bless re-authors both\n\
          public-api [--bless]                             §5.10 surface gate for the five frozen crates, on the pinned nightly\n\
+         deps [--check|--bless]                           what a shipped artifact demands of a player's machine, against its baseline (§6 M53)\n\
          timers [--status|--install|--uninstall]          the scheduled nightly/weekly tiers; --install changes the machine\n\
          bench [--record]                                 smoke on lavapipe; --record archives real numbers per machine (§4.11)\n\
          gpu [--adapter <name>]                           manual real-GPU leg: offscreen suites + golden on the desk's driver, windowless (§4.3, §8)\n\

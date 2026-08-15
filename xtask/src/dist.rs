@@ -222,6 +222,11 @@ pub fn gate() -> anyhow::Result<()> {
         );
     }
 
+    // What the artifact demands of a machine that did not build it (§6 M53).
+    // Every other check here reads bytes we put in; this one reads the bytes the
+    // *loader* will, on a machine that has none of this repository.
+    crate::deps::check()?;
+
     // Demos join the dist gate at their milestones (§5.8): the exact
     // tier-dist combination builds, and the binary passes the absence/presence
     // byte checks. Running it presents to a window, so the run itself is
