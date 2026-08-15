@@ -152,6 +152,20 @@ pub struct App {
     /// tick spends it (§6 M42). `None` in every run that may not read one — see
     /// `player_file`.
     settings: Option<Prefs>,
+    /// The writers that keep the player's two files current while the session
+    /// runs (§6 M48). Each is `None` on exactly the terms its exit write is
+    /// skipped on, which is the rule rather than a coincidence: a checkpoint is
+    /// the exit write happening sooner and more than once, so a run that may not
+    /// write a file at the end may not write it in the middle either.
+    ///
+    /// Two writers and not one queue: a queue of one is what keeps the sim
+    /// thread off the disk, and sharing it would let a settings offer evict the
+    /// session the interval just encoded.
+    checkpoint: Option<crate::player::Checkpoint>,
+    /// `settings.cfg`'s (§6 M42), on the same cadence. A crash cost a player
+    /// every preference they had touched that session — the same defect as the
+    /// board, one file over and cheaper to write.
+    prefs_checkpoint: Option<crate::player::Checkpoint>,
     /// What the OS last said about the window filling a monitor (§6 M46).
     /// Always false in a windowless run, where there is nothing to fill.
     window_is_fullscreen: bool,
@@ -285,6 +299,8 @@ impl App {
             #[cfg(feature = "overlay")]
             overlay: gg_debug::Overlay::default(),
             settings: None,
+            checkpoint: None,
+            prefs_checkpoint: None,
             window_is_fullscreen: false,
             opened: false,
         })
@@ -294,6 +310,29 @@ impl App {
     /// session runs (§6 M42, corrected at M44).
     pub fn want_settings(&mut self, prefs: Prefs) {
         self.settings = Some(prefs);
+    }
+
+    /// Keep the player's files current while this session runs (§6 M48). Each
+    /// argument is the path its *exit* write already targets, or `None` where
+    /// that write is skipped — the caller owns that decision and this must not
+    /// second-guess it. Idempotent by replacement: a second call retires the
+    /// first writers, which is what makes dropping them the only spelling of
+    /// "stop".
+    pub fn checkpoint_to(
+        &mut self,
+        session: Option<std::path::PathBuf>,
+        prefs: Option<std::path::PathBuf>,
+    ) {
+        self.checkpoint = session.map(crate::player::Checkpoint::new);
+        self.prefs_checkpoint = prefs.map(crate::player::Checkpoint::new);
+    }
+
+    /// Stop checkpointing and wait for the last one to land. **Before the exit
+    /// write and never after**: bytes still in flight would land on top of the
+    /// newer ones and roll the session back by up to an interval.
+    pub fn checkpoint_stop(&mut self) {
+        self.checkpoint = None;
+        self.prefs_checkpoint = None;
     }
 
     /// The preferences as the last tick left them — what a session writes back
@@ -639,10 +678,10 @@ impl App {
         // target is this shell's own invention (`Editing::new`), and a save
         // button that fails because nobody had run one before is not a missing
         // directory, it is a lost session.
-        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, &bytes)?;
+        // Atomically (§6 M48), and the directory is `replace`'s business now:
+        // what a save replaces is a file somebody already has, and half of one
+        // is worse than the last one.
+        crate::player::replace(path, &bytes)?;
         info!(
             path = %path.display(),
             tick = save.tick(),
@@ -662,11 +701,8 @@ impl App {
     /// next time, and refusing to exit over it would be worse than that.
     pub fn write_settings(&self, path: &Path) {
         let prefs = self.prefs();
-        let write = path
-            .parent()
-            .filter(|dir| !dir.as_os_str().is_empty())
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(path, gg_ecs::boundary::settings::encode(&prefs)));
+        let write =
+            crate::player::replace(path, gg_ecs::boundary::settings::encode(&prefs).as_bytes());
         match write {
             Ok(()) => info!(path = %path.display(), quiet = prefs.quiet, "settings written"),
             Err(e) => warn!(path = %path.display(), error = %e, "settings not written"),
@@ -1883,6 +1919,31 @@ impl Stages for App {
         // stdout is a thing every tier already captures.
         #[cfg(feature = "state-hash")]
         tracing::debug!(target: "gg::hash", tick, hash = %self.world.canonical_hash());
+        // The session, while it is still one (§6 M48). Last in the tick, so what
+        // crosses is the world every stage above has finished with — the same
+        // bytes the exit write would produce, which is what makes a resumed
+        // checkpoint indistinguishable from a resumed exit.
+        //
+        // Halted is skipped rather than written: a halt froze the world, so the
+        // interval would spend an encode to produce the file already on disk.
+        // Not while the editor hosts, either — that session's target is the save
+        // button's, and `run` is what withholds the path.
+        if !self.halted
+            && tick != 0
+            && tick.is_multiple_of(u64::from(self.hz.max(1)) * crate::player::CHECKPOINT_SECONDS)
+        {
+            if let Some(checkpoint) = &self.checkpoint {
+                checkpoint.offer(
+                    Save::new(self.world.snapshot(), self.next_tick, self.lib.code_hash()).encode(),
+                );
+            }
+            // Read off the same cache the exit write reads, so the two produce
+            // the same bytes from the same tick and a resumed session cannot
+            // tell which one it got.
+            if let Some(checkpoint) = &self.prefs_checkpoint {
+                checkpoint.offer(gg_ecs::boundary::settings::encode(&self.prefs()).into_bytes());
+            }
+        }
         Ok(())
     }
 

@@ -27,6 +27,7 @@ use tracing::{info, info_span, warn};
 
 mod app;
 mod play;
+pub mod player;
 
 /// `--set`, for a host with its own argv to consume it the same way (§4.8).
 pub use gg_core::config::SET_FLAG;
@@ -216,7 +217,7 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
     // Dist has no guard to hold, so the binding is a unit there and the lint is
     // right about that one tier and wrong about the shape.
     #[cfg_attr(not(feature = "debug-tools"), allow(clippy::let_unit_value))]
-    let _observability = init_observability(args.data.as_deref())?;
+    let _observability = init_observability(args.data.as_deref(), args.title.as_deref())?;
     // Hazard 5's startup call site (§4.2.1): before any dependency's initializer
     // has had a chance to vandalize MXCSR/FPCR unnoticed. Demos 00–02 do the
     // same; the shell is what every demo from 03 on actually runs under.
@@ -360,6 +361,14 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
         }
         app.want_settings(prefs);
     }
+    // From here the session is on the disk as it goes (§6 M48), not only at the
+    // exit it may never reach. Same path and same policy as the exit write —
+    // `keep_progress` included, because a file this build could not read is one
+    // it must not overwrite, and a checkpoint is the write that would.
+    app.checkpoint_to(
+        progress.as_ref().filter(|_| keep_progress).cloned(),
+        settings.clone(),
+    );
 
     // Headless is windowless, not invisible-windowed: §1.5 forbids an automated
     // tier from creating an OS window *at all*, and every `xtask ci` tier sets
@@ -405,6 +414,9 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     // quit reopens on the title — and a window closed mid-game reopens on that
     // game, because the game got no tick in which to decide otherwise. A
     // failure here is logged, never fatal: the process is already leaving.
+    // Ahead of the write and not after it: a checkpoint still in flight would
+    // land on top of these bytes and roll the session back an interval (§6 M48).
+    app.checkpoint_stop();
     if let Some(path) = progress.filter(|_| keep_progress)
         && let Err(error) = app.write_save(&path)
     {
@@ -596,6 +608,31 @@ pub fn refusal(title: &str, error: &anyhow::Error, log: Option<&Path>) -> String
     body
 }
 
+/// What a *crash* says, on [`refusal`]'s shape and with one word different (§6
+/// M48). The word is the whole difference a player cares about: a refusal never
+/// started and lost them nothing, while this had their session and the sentence
+/// after it is where they find out how much of it survived.
+///
+/// `what` is the panic's own message, already formatted — a `PanicHookInfo` is
+/// not constructible outside a hook, and the string is the part worth testing.
+/// `saved` is [`player::checkpointing`] and not an assumption: the sentence is
+/// the most valuable line in the box and a session that was never checkpointing
+/// — a replay, a recording, a run with no project — must not be told it.
+#[must_use]
+pub fn crashed(title: &str, what: &str, log: Option<&Path>, saved: bool) -> String {
+    let mut body = format!("{title} stopped unexpectedly.\n\n{what}");
+    if saved {
+        let seconds = player::CHECKPOINT_SECONDS;
+        body.push_str(&format!(
+            "\n\nYour progress was saved up to about {seconds} seconds before this."
+        ));
+    }
+    if let Some(log) = log {
+        body.push_str(&format!("\n\nThe full log is at\n{}", log.display()));
+    }
+    body
+}
+
 /// The shell's last words (§6 M47). Returns the process's code, so `main` is an
 /// expression and the one thing it must not do — carry on — is unspellable.
 ///
@@ -628,7 +665,10 @@ pub fn refuse(
 /// bodies rather than one with a flag in it — dist keeps the terminal and loses
 /// the rest, which is the whole difference.
 #[cfg(feature = "debug-tools")]
-fn init_observability(_data: Option<&Path>) -> anyhow::Result<gg_debug::Guard> {
+fn init_observability(
+    _data: Option<&Path>,
+    _title: Option<&str>,
+) -> anyhow::Result<gg_debug::Guard> {
     let guard = gg_debug::init(LOG_FILTER)?;
     // After the tail exists, never before: a report from a process whose logging
     // had not come up yet would attach nothing (§4.8).
@@ -641,7 +681,7 @@ fn init_observability(_data: Option<&Path>) -> anyhow::Result<gg_debug::Guard> {
 }
 
 #[cfg(not(feature = "debug-tools"))]
-fn init_observability(data: Option<&Path>) -> anyhow::Result<()> {
+fn init_observability(data: Option<&Path>, title: Option<&str>) -> anyhow::Result<()> {
     use tracing_subscriber::fmt::writer::BoxMakeWriter;
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(LOG_FILTER));
@@ -668,10 +708,30 @@ fn init_observability(data: Option<&Path>) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     // §3 keeps `gg-debug` and its crash reporter out of the dist graph, so a
     // panic's last words are this hook's or a player watches a window vanish.
+    // The words reached the log at M47 and the *window* still vanished (§6 M48):
+    // a shipped binary's stderr is a handle nothing is behind, so the box below
+    // is the only sink a player has for the failure that costs them a session
+    // rather than a launch.
     let previous = std::panic::take_hook();
+    let name = title.unwrap_or(env!("CARGO_PKG_NAME")).to_owned();
+    let log = log_path(data);
     std::panic::set_hook(Box::new(move |info| {
         tracing::error!(tier = active_tier(), "{info}");
         previous(info);
+        // Once per process. `alert` blocks until it is dismissed, so a second
+        // panic — on another thread, or inside the box's own event pump — would
+        // stack a modal window on top of the failure being reported and bury
+        // the first one behind it.
+        static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SHOWN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let body = crashed(
+                &name,
+                &info.to_string(),
+                log.as_deref(),
+                player::checkpointing(),
+            );
+            gg_platform::alert(&name, &body);
+        }
     }));
     Ok(())
 }

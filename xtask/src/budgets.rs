@@ -202,10 +202,28 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   *device* refusal carries stayed in `gg-rhi` for the same reason a milestone
 ///   over: the crate that knows the fact writes the sentence.
 ///
+/// - **The bytes a crash takes with it** (1680 -> 1820, §6 M48): the largest
+///   raise since M5 and the one with the least argument to make, because the
+///   responsibility was already here and only half-discharged. The shell owns
+///   *which* file, *when*, and *whether this run may* — `player_file`, the exit
+///   window, `keep_progress` — and until this milestone it exercised all three
+///   exactly once per session, at a line a killed process never reaches. What
+///   arrives is the rest of the same job: replacing a player's bytes without
+///   passing through a state where they have half of them, and doing it while
+///   the session is still running. Both are in `player.rs` rather than in the
+///   two functions that call them, which is why the module exists at all — a
+///   `replace` written inline at `write_save` is one `write_settings` would not
+///   have used. What did **not** stay here: nothing moved out, and that is the
+///   honest report. The candidates were real — a save's durability reads like
+///   `gg-ecs`'s and a temp-then-rename reads like an OS detail — and both were
+///   refused for the same reason, that `gg-ecs` owns bytes and never files and
+///   `gg-platform`'s charter is windows. The line is who owns the player's
+///   directory, and the answer has been the shell since M42.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session), M45 (the
-/// keys), M46 (the window) — each argued the same way.
-const SHELL_BUDGET: usize = 1680;
+/// keys), M46 (the window), M47 (the refusal) — each argued the same way.
+const SHELL_BUDGET: usize = 1820;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

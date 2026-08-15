@@ -1581,6 +1581,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--refuse") {
         refuse()?;
     }
+    if only("--crash") {
+        crash()?;
+    }
     if only("--platformer") {
         platformer()?;
     }
@@ -5636,6 +5639,172 @@ fn refuse() -> anyhow::Result<()> {
         "xtask reload --refuse: a shell that cannot start leaves the reason where it can be read"
     );
     Ok(())
+}
+
+/// §6 M48: **a session that is never given the chance to exit still survives.**
+///
+/// The one leg in this file whose subject is a process that does not end, and
+/// the only way to grade that is to end it from outside: `kill` is
+/// `TerminateProcess` on Windows and `SIGKILL` on Linux, so no destructor runs,
+/// no exit write happens, and the panic hook is not involved either. Whatever is
+/// on the disk afterwards was put there *during* the run or not at all — which
+/// is the entire claim, and one no run that reaches its own last line can make.
+///
+/// Under dist-verify for `refuse`'s reason: the log is a **file** only in a tier
+/// without `debug-tools`, and this leg has to read a log belonging to a process
+/// it is about to kill.
+///
+/// Falsified by deleting the `checkpoint.offer` in `App::sim_tick`: the killed
+/// run then leaves nothing, and the second session opens at tick 0 — which is
+/// exactly what every session did before this milestone.
+fn crash() -> anyhow::Result<()> {
+    let tier = &HASHED_TIERS[2];
+    let (host, game) = stage_game(tier, "demo-10-tetris", "demo_10_tetris")?;
+    let dir = workspace_root().join("target/crash");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let manifest = dir.join("game.ggproj");
+    std::fs::write(&manifest, "title = M48 Crash\n")?;
+    let data = dir.join("data");
+    let home = data.join("m48-crash");
+    let (log, file) = (home.join("log.txt"), home.join("progress.ggsave"));
+    let prefs = home.join("settings.cfg");
+    let data = data.display().to_string();
+    let launch = |frames: &str| -> std::io::Result<std::process::Child> {
+        Command::new(&host)
+            .arg("--project")
+            .arg(&manifest)
+            .arg("--game")
+            .arg(&game)
+            .arg("--frames")
+            .arg(frames)
+            .env("GG_HEADLESS", "1")
+            .env("LOCALAPPDATA", &data)
+            .env("XDG_DATA_HOME", &data)
+            .env("RUST_LOG", "info,gg::hash=debug")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    };
+
+    // A run long enough that it cannot finish on its own. The kill is the end of
+    // this session, so `--frames` is a ceiling nothing reaches rather than a
+    // length — a run that exited by itself would prove the opposite of this leg.
+    let mut child = launch("100000000")?;
+    let killed = (|| -> anyhow::Result<String> {
+        // Two, not one: a single write could be the shell doing something once
+        // at startup, and what is being graded is a *cadence*.
+        let written = wait_for(&log, "checkpoint written", 2, KILL_TIMEOUT)?;
+        child.kill()?;
+        child.wait()?;
+        Ok(written)
+    })();
+    // The child outlives a failure above — a leg that left one ticking would
+    // hold the staged dylib open and fail the next run for the wrong reason.
+    let killed = match killed {
+        Ok(written) => written,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
+    let reached = sequence(&killed)?
+        .last()
+        .map(|(tick, _)| *tick)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        file.is_file(),
+        "the killed session left no {} — everything since it started is gone, which is what a \
+         player got from every build before this one (§6 M48)",
+        file.display()
+    );
+
+    // The second file, and existence is the whole claim this stream can make:
+    // nothing in a demo-10 session with no input touches a preference, so what
+    // is asserted is that the file is *there* at all. Before M48 a killed run
+    // left none, and every slider a player had moved went with it.
+    anyhow::ensure!(
+        prefs.is_file(),
+        "the killed session left no {} — a preference is written at the same exit a crash \
+         never reaches (§6 M48)",
+        prefs.display()
+    );
+
+    // The second session, and what grades it is *which* tick it opens at. A
+    // checkpoint is written at a multiple of the interval and carries the tick
+    // after it, so the resumed run's first hash is `k * period + 1` — a number
+    // neither a fresh boot (0) nor an exit write (wherever the kill landed) can
+    // produce, which is what makes this the checkpoint's own signature.
+    let mut child = launch("60")?;
+    child.wait()?;
+    let reopened = std::fs::read_to_string(&log)?;
+    let resumed = sequence(&reopened)?
+        .first()
+        .map(|(tick, _)| *tick)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        reopened.contains("resuming the player's session"),
+        "the next session did not open what the killed one left:\n{reopened}"
+    );
+    let period = u64::from(gg_core::DEFAULT_TICK_HZ) * CHECKPOINT_SECONDS;
+    anyhow::ensure!(
+        resumed > 1 && (resumed - 1).is_multiple_of(period),
+        "the session resumed at tick {resumed}, which is not a checkpoint — the killed run \
+         reached {reached}, and a world that came back at 0 or at the kill is one this leg was \
+         written to tell apart"
+    );
+    anyhow::ensure!(
+        resumed <= reached,
+        "the session resumed at {resumed}, past the {reached} the killed run ever reached"
+    );
+    println!(
+        "xtask reload --crash: a session killed at tick {reached} came back at {resumed} (§6 M48)"
+    );
+    Ok(())
+}
+
+/// How long [`crash`] waits for a running session to reach the disk. Generous
+/// because it is not measuring anything — a headless tier ticks in milliseconds
+/// what this counts in seconds, and the number that matters is the one the leg
+/// prints.
+const KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Seconds of sim between checkpoints, restated from `gg_runtime::player` — the
+/// shell is not a dependency of `xtask` and this is one integer, so a drift
+/// shows up as the modulo in [`crash`] failing rather than as a silent pass.
+const CHECKPOINT_SECONDS: u64 = 5;
+
+/// Read `path` until it holds `needle` `count` times, and return it.
+///
+/// Polled rather than piped: under dist-verify the child's log *is* this file,
+/// and a pipe would need a reader thread to keep the child from blocking on a
+/// full one. Both hosts let a second process read a file open for writing.
+fn wait_for(
+    path: &Path,
+    needle: &str,
+    count: usize,
+    timeout: std::time::Duration,
+) -> anyhow::Result<String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        if text.matches(needle).count() >= count {
+            return Ok(text);
+        }
+        // The tail and not the file: this one is a hashed run's, so a minute of
+        // waiting is a million lines and the failure would be unreadable in the
+        // one place it has to be read.
+        let tail: Vec<&str> = text.lines().rev().take(12).collect();
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "waited {timeout:?} for {count} x {needle:?} in {} and saw {} — last lines:\n{}",
+            path.display(),
+            text.matches(needle).count(),
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 fn best() -> anyhow::Result<()> {
