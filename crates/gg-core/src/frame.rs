@@ -102,6 +102,30 @@ pub trait Stages {
         Ok(())
     }
 
+    /// Whether this frame must run **no sim tick at all** (§6 M49) — the window
+    /// is not focused and the session was told to wait.
+    ///
+    /// Asked before the clock is charged, and a `true` charges it nothing:
+    /// [`TickClock::hold`]. Every other stage still runs, which is the whole
+    /// design — the picture must repaint on an expose, events must pump so the
+    /// close button works, and `reload_check` must fire so a suspended game
+    /// still takes a rebuild.
+    ///
+    /// **`frame` is the loop's own count, and the unit is deliberate**: a
+    /// suspension cannot be measured in ticks, because ticks are exactly what it
+    /// stops. A stage scripting one (the shell's `--away`) has no other clock to
+    /// read, and giving it this one is cheaper than a shadow counter that can
+    /// drift from this loop's.
+    ///
+    /// `&mut self` where [`Stages::quitting`] is `&self`: this is the one place
+    /// the *edge* into and out of a suspension is known, and something has to
+    /// silence the mixer there — a device thread keeps looping music nobody
+    /// stopped feeding it.
+    fn suspended(&mut self, frame: u64) -> bool {
+        let _ = frame;
+        false
+    }
+
     /// Whether the app itself wants the loop to stop, asked at the end of every
     /// frame — the stage-side twin of [`AppEvent::CloseRequested`].
     ///
@@ -204,7 +228,10 @@ impl FrameLoop {
             }
         }
 
-        let due = self.clock.advance(elapsed);
+        let due = match stages.suspended(self.frame) {
+            true => self.clock.hold(),
+            false => self.clock.advance(elapsed),
+        };
         // Before the loop, not inside it: a stage spending a frame's accumulated
         // input has to know the denominator at the first tick, not the last.
         stages.ticks_due(due);

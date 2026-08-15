@@ -173,6 +173,23 @@ impl TickClock {
         }
     }
 
+    /// What a frame that must not tick reports, whatever the pace (§6 M49).
+    ///
+    /// Not `advance(Duration::ZERO)`: [`Pace::Locked`] ignores elapsed time and
+    /// would still owe its ticks, so the one spelling that works under every
+    /// pace is to not charge the clock at all. Nothing is spent and nothing is
+    /// dropped, so a realtime accumulator resumes exactly where it stopped
+    /// rather than owing a catch-up for time nobody was watching — which is the
+    /// difference between suspending a session and hitching it.
+    pub fn hold(&self) -> Due {
+        Due {
+            first: self.tick,
+            count: 0,
+            dropped: 0,
+            covered: self.alpha(),
+        }
+    }
+
     /// Resume at `tick` with an empty accumulator — what a restored snapshot
     /// (§4.8) does, since the tick count is captured state and the accumulator
     /// is not.

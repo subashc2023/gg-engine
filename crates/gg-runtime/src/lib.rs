@@ -68,6 +68,19 @@ pub struct Args {
     pub save: Option<PathBuf>,
     /// `<enter tick>:<stop tick>` — the editor's play/stop, on a script (§6 M14).
     pub play: Option<String>,
+    /// `<from frame>:<until frame>` — the window losing focus, on a script (§6
+    /// M49). [`Stages::suspended`](gg_core::Stages::suspended)'s unit, for its
+    /// reason: a suspension stops ticks, so it cannot be scripted in them.
+    ///
+    /// In every tier and not lab equipment, `--play`'s rule: what it drives is
+    /// the shipping path, and a suspension that existed only where a window does
+    /// could not be graded at all (§1.5).
+    ///
+    /// A replay bounds its run in *ticks*, so one driven by this and by nothing
+    /// else stops short by however many frames were away. Naming `--frames` is
+    /// the spelling that means "run this long and suspend inside it", which is
+    /// what a gate wants and what the leg uses.
+    pub away: Option<String>,
     /// Open the editor over the game (§6 M15). Lab equipment: the flag exists
     /// only in a tier that has the crate, and is refused elsewhere by name
     /// rather than ignored. With it, `--save` names where its save button
@@ -485,6 +498,7 @@ pub fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
             "--load" => args.load = Some(PathBuf::from(value()?)),
             "--save" => args.save = Some(PathBuf::from(value()?)),
             "--play" => args.play = Some(value()?),
+            "--away" => args.away = Some(value()?),
             "--editor" => {
                 anyhow::ensure!(
                     cfg!(feature = "editor"),

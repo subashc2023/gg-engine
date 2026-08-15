@@ -19,6 +19,8 @@ struct Trace {
     ticks: Vec<u64>,
     events: Vec<AppEvent>,
     fail_at_tick: Option<u64>,
+    /// Half-open frame range this stage says it is suspended over (§6 M49).
+    away: Option<(u64, u64)>,
 }
 
 impl Stages for Trace {
@@ -47,6 +49,11 @@ impl Stages for Trace {
             return Err("planted");
         }
         Ok(())
+    }
+
+    fn suspended(&mut self, frame: u64) -> bool {
+        self.away
+            .is_some_and(|(from, until)| (from..until).contains(&frame))
     }
 
     fn extract(&mut self, _alpha: f32) -> Result<(), Self::Error> {
@@ -283,6 +290,69 @@ fn covered_is_the_wall_time_the_clock_is_holding_unspent() {
         "covered was {}",
         due.covered
     );
+}
+
+/// §6 M49. The claim is *no tick*, not *a cheap tick*: the tick numbers a
+/// suspended run produces are the numbers it would have produced without the
+/// suspension, so nothing downstream — the hash line, the recording, a save's
+/// tick — can tell the two runs apart.
+///
+/// Under a **locked** pace, which is the case `advance(Duration::ZERO)` cannot
+/// express and therefore the reason [`TickClock::hold`] exists at all: a locked
+/// clock ignores elapsed time and would owe its tick regardless.
+#[test]
+fn a_suspended_frame_runs_no_tick_and_every_other_stage() {
+    let mut trace = Trace {
+        away: Some((2, 5)),
+        ..Default::default()
+    };
+    let mut app = FrameLoop::locked(60);
+    for _ in 0..7 {
+        app.frame(&mut trace, TICK).unwrap();
+    }
+    assert_eq!(trace.ticks, [0, 1, 2, 3], "frames 2..5 owed nothing");
+    assert_eq!(app.frame_count(), 7, "a suspended frame is still a frame");
+    assert_eq!(
+        trace.stages.iter().filter(|s| *s == "render").count(),
+        7,
+        "the picture must repaint on an expose while nobody is looking"
+    );
+    assert_eq!(
+        trace.stages.iter().filter(|s| *s == "reload_check").count(),
+        7,
+        "and a suspended game still takes a rebuild"
+    );
+}
+
+/// A suspension is not a hitch. The catch-up guard exists for wall time that
+/// *passed while the sim was trying*; this is wall time nobody was watching, so
+/// it is never owed, never dropped, and the accumulator resumes mid-tick exactly
+/// where it stopped.
+#[test]
+fn a_suspension_owes_no_catch_up_and_drops_nothing() {
+    let mut trace = Trace {
+        away: Some((1, 1_000)),
+        ..Default::default()
+    };
+    let mut app = FrameLoop::new(TickClock::new(60, Pace::Realtime));
+    // One frame with half a tick's travel in hand, so the resume has a residue
+    // to prove it kept.
+    app.frame(&mut trace, TICK / 2).unwrap();
+    for _ in 0..999 {
+        app.frame(&mut trace, Duration::from_secs(1)).unwrap();
+    }
+    assert!(trace.ticks.is_empty());
+    assert!(
+        (app.clock().alpha() - 0.5).abs() < 1e-3,
+        "alpha was {}",
+        app.clock().alpha()
+    );
+    // Sixteen minutes of wall time went by and the very next frame owes one
+    // tick, the same as any other — a `Duration::ZERO` charge would have read
+    // the same here and is what the locked test above rules out.
+    let ticks = app.frame(&mut trace, TICK).unwrap();
+    assert_eq!(ticks, Flow::Continue);
+    assert_eq!(trace.ticks, [0]);
 }
 
 #[test]

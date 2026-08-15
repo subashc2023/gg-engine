@@ -253,6 +253,25 @@ impl Audio {
         }
     }
 
+    /// Take the master volume to nothing without touching the world (§6 M49).
+    ///
+    /// The one thing a suspended session needs and [`Audio::tick`] cannot do,
+    /// because `tick` is a *tick's* and a suspension runs none: the device
+    /// thread keeps mixing whatever it last held, so a looping track outlives
+    /// the window it belongs to. Idempotent, so the caller states the level
+    /// every suspended frame rather than tracking an edge, and no resume path is
+    /// needed — `tick` sends the live volume every tick and the first one back
+    /// restores it.
+    ///
+    /// A one-shot already sounding plays out, and that is the contract rather
+    /// than a gap: its gain was baked when it fired (§6 M19), so this reaches
+    /// loops only. What a player hears is the note that was already in the air.
+    pub fn hush(&mut self) {
+        if let Some(device) = &self.out {
+            device.send(&[], 0.0);
+        }
+    }
+
     /// Install the clips this session can play (§6 M43).
     ///
     /// Handed the bank whole rather than a pack: this crate parses no audio

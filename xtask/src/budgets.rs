@@ -220,10 +220,27 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   `gg-platform`'s charter is windows. The line is who owns the player's
 ///   directory, and the answer has been the shell since M42.
 ///
+/// - **The seconds a player was not looking** (1820 -> 1870, §6 M49): a
+///   *conjunction* with one place it is in scope, which is the M21 bullet's
+///   shape exactly. Whether a frame runs a tick is "the window is not focused"
+///   **and** "the world asked to wait", and the two halves live on opposite
+///   sides of §3's dependency direction: `gg-platform` raises the focus event
+///   and cannot read a world — nor does it exist in a headless run, where every
+///   gate that grades this one runs — while `gg-core` owns the loop, the clock
+///   and `Stages::suspended` and sits *below* `gg-ecs`, so it cannot read a
+///   `Prefs` either. Every piece of judgement is in the crate that owns it, as
+///   before: `TickClock::hold` decides what a frame that must not tick reports,
+///   `Prefs::pauses_unfocused` decides what an unknown constant means, and
+///   `Audio::hush` decides what silence costs a sounding voice. What is left
+///   here is that sentence, once, plus `Away` — which is beside `PlayMode` for
+///   `PlayMode`'s own reason: a script that drives a shipping path has to live
+///   where the path does, or the tier grades a second one.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session), M45 (the
-/// keys), M46 (the window), M47 (the refusal) — each argued the same way.
-const SHELL_BUDGET: usize = 1820;
+/// keys), M46 (the window), M47 (the refusal), M48 (the crash) — each argued the
+/// same way.
+const SHELL_BUDGET: usize = 1870;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

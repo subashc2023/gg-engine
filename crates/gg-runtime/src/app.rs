@@ -173,6 +173,18 @@ pub struct App {
     /// is spent on, and a `bool` rather than a tick number because a resumed
     /// session's first tick is whatever the save carried (§6 M44).
     opened: bool,
+    /// Whether the window is the one being typed into (§6 M49). True in a
+    /// windowless run and true until a window says otherwise: a session nobody
+    /// told about focus is a session that runs, which is what keeps every gate
+    /// that predates M49 byte-unchanged.
+    focused: bool,
+    /// `--away`'s script, a window losing focus on frame numbers instead of on a
+    /// player's attention. Drives the same decision the event does rather than a
+    /// second one, so what a tier grades is the shipping path.
+    away: Option<Away>,
+    /// What [`Stages::suspended`] last answered, so the transition is logged once
+    /// rather than sixty times a second.
+    waiting: bool,
 }
 
 impl App {
@@ -289,6 +301,9 @@ impl App {
             ui_atlas_rev: 0,
             ui_geometry: Vec::new(),
             play: args.play.as_deref().map(PlayMode::parse).transpose()?,
+            focused: true,
+            away: args.away.as_deref().map(Away::parse).transpose()?,
+            waiting: false,
             #[cfg(feature = "editor")]
             editor: editing,
             gpu: None,
@@ -340,6 +355,15 @@ impl App {
     /// stage walks for one already and two answers would be one too many.
     pub fn prefs(&self) -> Prefs {
         self.ui.prefs()
+    }
+
+    /// The window gained or lost keyboard focus (§6 M49).
+    ///
+    /// A fact and not a decision: what it costs a session is
+    /// [`Stages::suspended`]'s to say, and only once the preference has been
+    /// read. Never called in a windowless run, where the field stays true.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
     }
 
     /// Whether the game has a modal screen up, from the same cache (§6 M45) —
@@ -1464,6 +1488,39 @@ impl PlayMode {
     }
 }
 
+/// A window losing focus on a script, so a tier can run it (§6 M49).
+///
+/// [`PlayMode`]'s shape one flag over, and with the one difference that is the
+/// milestone: **frames, not ticks.** A suspension is measured in the clock it
+/// does not stop, and a `<until tick>` would name a tick the suspension itself
+/// guarantees never arrives.
+///
+/// `Copy` and half-open, so `covers` is the whole of it — there is no state to
+/// keep, because a frame number is the only thing this has ever needed to know.
+#[derive(Clone, Copy)]
+struct Away {
+    from: u64,
+    until: u64,
+}
+
+impl Away {
+    fn parse(spec: &str) -> anyhow::Result<Away> {
+        let (from, until) = spec.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("--away wants `<from frame>:<until frame>`, got `{spec}`")
+        })?;
+        let (from, until) = (from.parse()?, until.parse()?);
+        anyhow::ensure!(
+            from < until,
+            "--away {spec}: nobody is away between {from} and {until}"
+        );
+        Ok(Away { from, until })
+    }
+
+    fn covers(self, frame: u64) -> bool {
+        (self.from..self.until).contains(&frame)
+    }
+}
+
 /// Register the host's own §4.5 protocol types, then everything the dylib
 /// declares. Returns the dylib's count.
 ///
@@ -1637,6 +1694,29 @@ impl Stages for App {
         // Read off the UI stage's cached `Prefs` rather than the world: this
         // takes `&self` and a query does not.
         self.rejuvenate.pending() || self.ui.prefs().closing()
+    }
+
+    fn suspended(&mut self, frame: u64) -> bool {
+        // The script and the event are one fact, not two: `--away` says the
+        // window is not focused on these frames, and everything downstream is
+        // the path a real alt-tab takes.
+        let focused = self.focused && !self.away.is_some_and(|away| away.covers(frame));
+        // Read off the same cache `quitting` uses, so what decides is the `Prefs`
+        // the last tick left. A suspended session runs no tick, so the value
+        // cannot move while it is waiting — the tick that resumes it is the
+        // earliest anything could have changed its mind, which is why this is
+        // safe to ask every frame.
+        let waiting = !focused && self.prefs().pauses_unfocused();
+        if waiting {
+            // Every suspended frame rather than on the edge: `hush` is a level,
+            // and one missed edge is a game that plays its music to an empty
+            // desk for as long as the player is gone.
+            self.audio.hush();
+        }
+        if std::mem::replace(&mut self.waiting, waiting) != waiting {
+            info!(frame, waiting, "window focus");
+        }
+        waiting
     }
 
     fn ticks_due(&mut self, due: gg_core::Due) {

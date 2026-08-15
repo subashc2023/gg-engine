@@ -161,15 +161,20 @@ pub fn play(
                 app.cursor_at(x, y);
                 Ok(Control::Continue)
             }
-            // Forget what the window was told, so the next frame tells it again
-            // (§6 M15.1). The OS drops a grab and a cursor-hide asked for while
-            // the window was unfocused, and Windows releases the clip on focus
-            // *loss* — so without this the first statement is a race against a
-            // focus that had not arrived, and alt-tabbing back is a game that
-            // silently stopped holding the mouse. Cheap: focus changes are rare,
-            // and the arm below still only calls through on a difference.
-            Event::Focused(true) => {
-                pointer_state = None;
+            Event::Focused(focused) => {
+                // The fact only (§6 M49): whether the session waits for the
+                // player is a tick's to decide, because the preference is in the
+                // world and this closure has no world.
+                app.set_focused(focused);
+                // Forget what the window was told, so the next frame tells it
+                // again (§6 M15.1). The OS drops a grab and a cursor-hide asked
+                // for while unfocused, and Windows releases the clip on focus
+                // *loss*, so without this alt-tabbing back is a game that
+                // silently stopped holding the mouse. Cheap: focus changes are
+                // rare, and `Frame` still only calls through on a difference.
+                if focused {
+                    pointer_state = None;
+                }
                 Ok(Control::Continue)
             }
             Event::Frame => {

@@ -27,6 +27,9 @@
 //! would end every session a migration touched. M45's
 //! [`modal`](Prefs::modal) keeps it too, and needed the same care: a
 //! `gameplay_live` flag would have suppressed every migrated game's controls.
+//! M49's [`unfocused`] is the first whose zero is behaviour the engine *gained*
+//! rather than behaviour it already had, and the law still picks the same
+//! spelling — see that module.
 
 use crate::Component;
 
@@ -130,6 +133,25 @@ pub mod frame {
     pub const IMMEDIATE: u32 = 3;
 }
 
+/// What a session does while the window is not the one being typed into (§6
+/// M49). Constants for [`cursor`]'s reason.
+///
+/// The zero is a **mode** and not a defer, [`cursor`]'s shape rather than
+/// [`aa`]'s, because there is no host knob underneath to hand the choice back
+/// to: suspending is what the shell does now. That makes this the first field
+/// whose zero states behaviour the engine *gained*, so the law is read forwards
+/// — zero is what a game that never heard of the field gets, and it has to be
+/// the half that cannot hurt. A run left going unattended tops out; a run
+/// suspended by a migration resumes.
+pub mod unfocused {
+    /// No tick runs and the mixer is quiet until the window is focused again.
+    /// Zero on purpose — see the module docs.
+    pub const PAUSE: u32 = 0;
+    /// The session goes on regardless. What every game got before M49, and what
+    /// a second monitor, a recording and an unattended demo want.
+    pub const RUN: u32 = 1;
+}
+
 /// Full attenuation, the [`Prefs::quiet`] that means silence. Fixed-point like
 /// an axis (§4.7): a menu steps an integer, and a float volume would put a
 /// rounding rule in hashed state.
@@ -167,6 +189,10 @@ pub struct Prefs {
     /// One of [`frame`]'s constants. Unknown values are
     /// [`frame::DEFAULT`].
     pub present: u32,
+    /// One of [`unfocused`]'s constants. Unknown values are
+    /// [`unfocused::PAUSE`] — the safe half, since a value this host does not
+    /// know must not be read as permission to keep playing unwatched.
+    pub unfocused: u32,
     /// Nonzero ends the session — the menu's quit button, and the only way a
     /// game has to close its own window.
     ///
@@ -258,6 +284,15 @@ impl Prefs {
         }
     }
 
+    /// Whether an unfocused window should stop the sim and the mixer (§6 M49).
+    ///
+    /// Written against [`unfocused::RUN`] rather than for [`unfocused::PAUSE`],
+    /// which is what puts an unknown constant on the pausing side.
+    #[must_use]
+    pub fn pauses_unfocused(&self) -> bool {
+        self.unfocused != unfocused::RUN
+    }
+
     /// Whether the player asked to end the session.
     #[must_use]
     pub fn closing(&self) -> bool {
@@ -299,12 +334,13 @@ pub mod settings {
     /// with its controls already withheld. A field added to [`Prefs`] is not
     /// persisted until it is added here, which is the review this table forces.
     #[allow(clippy::type_complexity)]
-    const KEYS: [(&str, fn(&Prefs) -> u32, fn(&mut Prefs, u32)); 5] = [
+    const KEYS: [(&str, fn(&Prefs) -> u32, fn(&mut Prefs, u32)); 6] = [
         ("cursor", |p| p.cursor, |p, v| p.cursor = v),
         ("quiet", |p| p.quiet, |p, v| p.quiet = v),
         ("aa", |p| p.aa, |p, v| p.aa = v),
         ("display", |p| p.display, |p, v| p.display = v),
         ("present", |p| p.present, |p, v| p.present = v),
+        ("unfocused", |p| p.unfocused, |p, v| p.unfocused = v),
     ];
 
     /// The preferences as the file's own text — `gg.cfg`'s format (§4.8), which
@@ -354,7 +390,7 @@ mod tests {
     fn the_protocol_type_is_flat_and_padding_free() {
         // `Pod` already refuses padding; this pins the number so a field added
         // is a visible edit rather than a silent layout move.
-        assert_eq!(size_of::<Prefs>(), 28);
+        assert_eq!(size_of::<Prefs>(), 32);
         assert_eq!(align_of::<Prefs>(), 4);
     }
 
@@ -379,6 +415,10 @@ mod tests {
             zeroed.present_mode(),
             None,
             "nor one that unlocked the frame"
+        );
+        assert!(
+            zeroed.pauses_unfocused(),
+            "and a migrated game is not one left playing while nobody watches"
         );
         assert_eq!(zeroed, Prefs::default(), "and `..Default::default()` is it");
     }
@@ -442,6 +482,24 @@ mod tests {
         assert_eq!(at(9999, 9999), (None, None));
     }
 
+    /// The one field whose unknown value must not fall to "leave it alone",
+    /// because there is nothing underneath to leave alone: an older host reading
+    /// a newer game's constant has to pick, and the half it picks is the one
+    /// that cannot cost a player a game they walked away from.
+    #[test]
+    fn an_unknown_focus_mode_pauses_rather_than_plays_on() {
+        let at = |unfocused| {
+            Prefs {
+                unfocused,
+                ..Default::default()
+            }
+            .pauses_unfocused()
+        };
+        assert!(at(unfocused::PAUSE));
+        assert!(!at(unfocused::RUN));
+        assert!(at(9999));
+    }
+
     #[test]
     fn quiet_attenuates_linearly_and_clamps_at_silence() {
         let at = |quiet| {
@@ -468,6 +526,7 @@ mod tests {
             aa: aa::MSAA_4,
             display: display::FULLSCREEN,
             present: frame::IMMEDIATE,
+            unfocused: unfocused::RUN,
             close: 0,
             modal: 0,
         };

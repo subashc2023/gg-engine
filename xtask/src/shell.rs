@@ -1584,6 +1584,9 @@ pub fn gates(args: &[&str]) -> anyhow::Result<()> {
     if only("--crash") {
         crash()?;
     }
+    if only("--away") {
+        away()?;
+    }
     if only("--platformer") {
         platformer()?;
     }
@@ -5762,6 +5765,139 @@ fn crash() -> anyhow::Result<()> {
         "xtask reload --crash: a session killed at tick {reached} came back at {resumed} (§6 M48)"
     );
     Ok(())
+}
+
+/// §6 M49: the seconds a player was not looking are worth exactly zero ticks.
+///
+/// The claim is an *equality between two runs of different lengths*, which is a
+/// shape no other leg in this file has: 600 frames with 300 of them suspended
+/// must produce the hash sequence of 300 frames that never were. A suspension
+/// that ran a cheap tick, or that dropped its accumulated time and resumed
+/// somewhere else, or that let one frame through at either edge fails this — and
+/// so does the shell that predates M49, which produces 600 ticks against 300 and
+/// is named by [`divergence`]'s length arm.
+///
+/// Driven over the *game* stream and not a live title screen, for the reason
+/// [`cross_tier`] states: a session that never moves its own hash would satisfy
+/// "identical" while proving nothing.
+fn away() -> anyhow::Result<()> {
+    let replay = tetris_path();
+    anyhow::ensure!(
+        replay.is_file(),
+        "no Tetris stream at {} — `cargo xtask replay --bless` authors it",
+        replay.display()
+    );
+    let replay = replay.display().to_string();
+
+    let mut runs: Vec<(&str, Vec<(u64, String)>)> = Vec::new();
+    for tier in HASHED_TIERS {
+        let (host, game) = stage_game(tier, "demo-10-tetris", "demo_10_tetris")?;
+        let straight = ["--replay", &replay, "--frames", "300"];
+        // The same 300 ticks, with 300 frames of nobody watching in the middle
+        // of them. `--away` is the window losing focus on a script, so what runs
+        // is the alt-tab path rather than a second one written for a gate.
+        let waited = ["--replay", &replay, "--frames", "600", "--away", "100:400"];
+        let (a, b) = (
+            play(&host, &game, &straight, true)?,
+            play(&host, &game, &waited, true)?,
+        );
+        // Both edges, in order, and the frames they landed on: a leg that only
+        // asserted the hashes would pass on a shell that suspended nothing and
+        // ran 300 frames short for an unrelated reason.
+        anyhow::ensure!(
+            logged_edges(&b) == vec![(100, true), (400, false)],
+            "{}: the window did not go away and come back on the scripted frames:\n{b}",
+            tier.name
+        );
+        let (a, b) = (sequence(&a)?, sequence(&b)?);
+        anyhow::ensure!(
+            a.iter().any(|(_, h)| h != &a[0].1),
+            "{}: the stream never moved the world's hash — it proves nothing",
+            tier.name
+        );
+        if let Some(found) = divergence(&("watched", a.clone()), &("away", b)) {
+            anyhow::bail!(
+                "§6 M49: {found} — 300 frames of an unfocused window have to cost a session \
+                 nothing at all"
+            );
+        }
+        runs.push((tier.name, a));
+    }
+    for pair in runs.windows(2) {
+        if let Some(found) = divergence(&pair[0], &pair[1]) {
+            anyhow::bail!("§6 M49: {found}");
+        }
+    }
+
+    // And the preference, which is the half the file carries. Live rather than
+    // replayed, because a replayed session may not read a player's file at all
+    // (§6 M42) — so this is also the one run here whose `Prefs` came off a disk.
+    let (host, game) = stage_game(&HASHED_TIERS[0], "demo-10-tetris", "demo_10_tetris")?;
+    let dir = workspace_root().join("target/away");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let manifest = dir.join("game.ggproj");
+    std::fs::write(&manifest, "title = M49 Away\n")?;
+    let data = dir.join("data");
+    let home = data.join("m49-away");
+    std::fs::create_dir_all(&home)?;
+    let file = home.join(gg_ecs::boundary::settings::FILE);
+    let (manifest, data) = (manifest.display().to_string(), data.display().to_string());
+    let env = [("LOCALAPPDATA", data.as_str()), ("XDG_DATA_HOME", &data)];
+    let live = [
+        "--frames",
+        "600",
+        "--away",
+        "100:400",
+        "--project",
+        manifest.as_str(),
+    ];
+    let mut lengths = Vec::new();
+    for want in [
+        gg_ecs::boundary::unfocused::PAUSE,
+        gg_ecs::boundary::unfocused::RUN,
+    ] {
+        // Both legs carry a file, and that is not a detail: an absent file
+        // applies nothing rather than applying defaults (§6 M42), so a run
+        // without one is not the control for a run with one.
+        std::fs::write(&file, format!("unfocused = {want}\n"))?;
+        let _ = std::fs::remove_file(home.join("progress.ggsave"));
+        lengths.push(sequence(&play_env(&host, &game, &live, true, &env)?)?.len());
+    }
+    anyhow::ensure!(
+        lengths == vec![300, 600],
+        "a settings file asking to keep playing while unfocused was worth {lengths:?} ticks \
+         against the 300 and 600 it has to be — the key reached nothing, which is the defect \
+         `--window` found in this codec the last time a field was added to it"
+    );
+    // The round trip the table forces: what a session read comes back out.
+    let written = std::fs::read_to_string(&file)?;
+    anyhow::ensure!(
+        written.contains("unfocused = "),
+        "a preference this build reads is one it does not write back: {written:?}"
+    );
+
+    println!(
+        "xtask reload --away: 300 frames of an unfocused window cost {} ticks, and a file buys \
+         them back",
+        runs[0].1.len() - lengths[0]
+    );
+    Ok(())
+}
+
+/// The `(frame, waiting)` edges a run logged, in order — `App::suspended`'s own
+/// line, which is the only witness a windowless tier has that focus was ever
+/// lost.
+fn logged_edges(log: &str) -> Vec<(u64, bool)> {
+    log.lines()
+        .filter(|line| line.contains("window focus"))
+        .filter_map(|line| {
+            Some((
+                crate::util::field_u64(line, "frame").ok()?,
+                crate::util::field(line, "waiting").ok()? == "true",
+            ))
+        })
+        .collect()
 }
 
 /// How long [`crash`] waits for a running session to reach the disk. Generous
