@@ -148,9 +148,12 @@ impl View<'_> {
 /// camera turned (`gg-tools shadow-sweep`).
 fn slab(cascade: &lighting::Cascade, basis: &Basis, centre: render::Vec3, radius: f32) -> Fit {
     let to = centre - cascade.centre;
-    // `radius * 2` each way: the eye sits two radii up-light of the centre and
-    // the far plane four, so that is exactly the depth the map records.
-    let depth = cascade.radius * 2.0;
+    // Half the recorded depth each way: the eye sits half of it up-light of the
+    // centre and the far plane half beyond, so this is exactly what the map holds.
+    // Read off the cascade rather than recomputed, because §6 M60 made the depth
+    // the *widest* cascade's rather than this one's and a second derivation here
+    // would have silently kept culling to the old, shorter one.
+    let depth = cascade.depth_world * 0.5;
     let signed = to.dot(basis.direction);
     let along = signed.abs();
     if along > depth + radius {
@@ -188,7 +191,10 @@ mod tests {
             radius,
             texel_world: 0.0,
             split_far: 0.0,
-            depth_world: 0.0,
+            // The pre-§6 M60 depth, kept so every case below still asks what it
+            // was written to ask: these are the *footprint's* tests, and a shared
+            // reach would make the along-light arm of each one vacuous.
+            depth_world: radius * 4.0,
         }
     }
 

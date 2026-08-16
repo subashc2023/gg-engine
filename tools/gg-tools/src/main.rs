@@ -17,6 +17,8 @@
 //!                                   in a room standing still around it
 //!   gg-tools shadow-edge            how straight a distant shadow's edge is,
 //!                                   against how soft the filter made it
+//!   gg-tools shadow-reach [--pack]  the blocker a cascade has no depth for
+//!                                   (§6 M60): dropped casters against reach
 //!   gg-tools lights                 what a light costs a frame, swept over
 //!                                   count and over `r.clusters` (§6 M30)
 //!   gg-tools lamps [--cost|--bias]  what a *casting* lamp costs, swept over
@@ -34,6 +36,9 @@
 //!   gg-tools bounce [--slow]        how much of a room's light got there by
 //!                                   bouncing, against the volume somebody drew
 //!                                   by hand (§6 M36)
+//!   gg-tools frame [--extent WxH]   where a frame's milliseconds go: the
+//!                                   per-pass device table against the host's
+//!                                   own zones (§6 M58)
 //!   gg-tools banding                what the 8-bit output does to a smooth
 //!                                   gradient, swept over `r.dither`
 //!   gg-tools pace                   what a display rate does to a turn the hand
@@ -58,7 +63,9 @@ mod ao;
 mod banding;
 mod bounce;
 mod cull;
+mod field;
 mod fp_isa;
+mod frame;
 mod furnace;
 mod hash_scale;
 mod icon;
@@ -74,10 +81,12 @@ mod shadow_edge;
 mod shadow_fit;
 mod shadow_flat;
 mod shadow_image;
+mod shadow_reach;
 mod shadow_sweep;
 mod split_sum;
 mod timbre;
 mod transfer;
+mod views;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -102,6 +111,7 @@ fn main() -> anyhow::Result<()> {
         "shadow-flat" => shadow_flat::run(rest),
         "shadow-sweep" => shadow_sweep::run(rest),
         "shadow-edge" => shadow_edge::run(rest),
+        "shadow-reach" => shadow_reach::run(rest),
         "lights" => lights::run(rest),
         "lamps" => lamps::run(rest),
         "cull" => cull::run(rest),
@@ -109,6 +119,9 @@ fn main() -> anyhow::Result<()> {
         "split-sum" => split_sum::run(rest),
         "ao" => ao::run(rest),
         "bounce" => bounce::run(rest),
+        "field" => field::run(rest),
+        "frame" => frame::run(rest),
+        "views" => views::run(rest),
         "banding" => banding::run(rest),
         "pace" => pace::run(rest),
         "hash-scale" => hash_scale::run(rest),
@@ -123,9 +136,10 @@ fn main() -> anyhow::Result<()> {
         other => {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
-                 shadow-flat, shadow-sweep, shadow-edge, lights, lamps, cull, furnace, \
-                 split-sum, ao, bounce, banding, pace, hash-scale, orbit, map, panorama, icon, \
-                 fp-isa, mcp. A new instrument is a new subcommand here, not a new crate"
+                 shadow-flat, shadow-sweep, shadow-edge, shadow-reach, lights, lamps, cull, furnace, \
+                 split-sum, ao, bounce, field, frame, views, banding, pace, hash-scale, orbit, map, \
+                 panorama, icon, timbre, transfer, fp-isa, mcp. A new instrument is a new \
+                 subcommand here, not a new crate"
             )
         }
     }

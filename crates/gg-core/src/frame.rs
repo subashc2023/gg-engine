@@ -147,6 +147,9 @@ pub struct FrameLoop {
     events: Events,
     frame: u64,
     quit: bool,
+    /// Where the frame's own zones go (§6 M58). Empty and free without
+    /// `cpu-timings`, since [`zone::take`] hands back nothing there.
+    profile: crate::zone::Profile,
 }
 
 impl Default for FrameLoop {
@@ -163,6 +166,7 @@ impl FrameLoop {
             events: Events::new(),
             frame: 0,
             quit: false,
+            profile: crate::zone::Profile::default(),
         }
     }
 
@@ -202,6 +206,14 @@ impl FrameLoop {
         self.frame
     }
 
+    /// This run's CPU zones, accumulated (§6 M58) — every stage below plus
+    /// whatever the renderer opened inside them. Empty without `cpu-timings`,
+    /// which a reader tells from [`zone::enabled`](crate::zone::enabled) rather
+    /// than from an empty table.
+    pub fn profile(&self) -> &crate::zone::Profile {
+        &self.profile
+    }
+
     /// Run one frame.
     ///
     /// Returns [`Flow::Exit`] once a [`AppEvent::CloseRequested`] has been
@@ -213,13 +225,17 @@ impl FrameLoop {
         stages: &mut S,
         elapsed: Duration,
     ) -> Result<Flow, S::Error> {
+        // `zone!` rather than `profiling::scope!` (§6 M58): the macro opens both
+        // sinks from one name, and until it did the frame's own stages reached
+        // Tracy and nothing a terminal could print — which is why "where did the
+        // frame go" had no answer for fifty milestones.
         {
-            profiling::scope!("poll_input");
+            crate::zone!("poll_input");
             stages.poll_input()?;
         }
 
         {
-            profiling::scope!("pump_events");
+            crate::zone!("pump_events");
             for event in self.events.take() {
                 if event == AppEvent::CloseRequested {
                     self.quit = true;
@@ -252,17 +268,17 @@ impl FrameLoop {
         }
         for i in 0..due.count {
             reload_check(stages)?;
-            profiling::scope!("sim_tick");
+            crate::zone!("sim_tick");
             stages.sim_tick(due.first + u64::from(i))?;
         }
 
         let alpha = self.clock.alpha();
         {
-            profiling::scope!("extract");
+            crate::zone!("extract");
             stages.extract(alpha)?;
         }
         {
-            profiling::scope!("render");
+            crate::zone!("render");
             stages.render(alpha)?;
         }
 
@@ -286,6 +302,12 @@ impl FrameLoop {
         // Closes the frame *after* every zone above it, so the Tracy timeline
         // shows frames rather than zones straddling them.
         profiling::finish_frame!();
+        // And drains the other sink at the same boundary, for the same reason:
+        // every zone this frame opened has closed by here, and one that had not
+        // would be charged to the next frame. Unconditional — `take` is an empty
+        // `Vec` without the feature, and a frame still counts, which keeps the
+        // denominator honest.
+        self.profile.absorb(&crate::zone::take());
         self.frame += 1;
         Ok(if self.quit || stages.quitting() {
             Flow::Exit
@@ -308,6 +330,9 @@ impl FrameLoop {
                 break;
             }
         }
+        // This form owns the loop end to end, so the profile is said here (§6
+        // M58) — the windowed path's loop belongs to winit and reports its own.
+        self.profile.report();
         Ok(frames)
     }
 }

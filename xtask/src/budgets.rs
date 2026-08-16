@@ -256,11 +256,28 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   been a launch veto held by the file that exists to describe failures), and
 ///   `log_path` stops naming a file nothing opened.
 ///
+/// - **The frame the hand already turned** (1945 -> 1955, §6 M56): nine lines, and
+///   they are the conjunction three crates are each forbidden from making. The
+///   game states the coupling (`gg_ecs::boundary::Look`) and does no polling;
+///   `gg-input` owns the accumulator and its pending/spent split and has never
+///   heard of an eye; `gg-extract` owns the rate multiply, the clamp and the
+///   blend it adds to, and §3 keeps `gg-input` out of its two dependencies
+///   entirely, so it cannot read a mouse even if it wanted to. Only the shell
+///   holds an `Input` and a `World` at once, so resolving a game's declared axis
+///   *number* into two readings and handing over an angle has no other home.
+///
+///   The other two lines are the pair no crate below can see: a **halted** sim
+///   returns before `Input::tick` and a **suspended** one runs none at all, and
+///   in both an accumulator nobody empties grows for as long as the operator is
+///   away — which the first tick after would otherwise spend whole, as a turn
+///   measured in minutes. Whether a session is in either state is the shell's
+///   fact and only the shell's.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session), M45 (the
 /// keys), M46 (the window), M47 (the refusal), M48 (the crash) — each argued the
 /// same way.
-const SHELL_BUDGET: usize = 1945;
+const SHELL_BUDGET: usize = 1955;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

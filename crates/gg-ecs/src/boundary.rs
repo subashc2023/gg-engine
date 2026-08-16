@@ -47,7 +47,7 @@ pub use game::{Access, BoundaryData, BoundaryError, Columns, GameWorld};
 pub use host::{SystemZone, host_api, set_logger, set_system_zone};
 pub use load::{SystemPanic, Verbs, read_verbs, same_schemas};
 pub use prefs::{Prefs, QUIET_MAX, aa, cursor, display, frame, settings, unfocused};
-pub use present::{DEFAULT_SMOOTHNESS, Eye, Light, Model, Renderable, Sky, light, shape};
+pub use present::{DEFAULT_SMOOTHNESS, Eye, Light, Look, Model, Renderable, Sky, light, shape};
 pub use scene::Node;
 pub use ui::{CANVAS, CELL, TEXT, Widget, state, text_width, widget, widget_id};
 

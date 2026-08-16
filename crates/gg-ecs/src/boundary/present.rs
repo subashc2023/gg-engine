@@ -552,6 +552,94 @@ impl Eye {
     }
 }
 
+/// How the hand's own travel reaches the view *this frame* instead of next tick
+/// (§6 M56) — the coupling between an axis and an angle, stated by the game.
+///
+/// [`Eye`] is where the camera *is*, and it moves on the sim's clock: at 60 Hz
+/// under a 240 Hz panel the newest pose a frame can show is up to a tick old,
+/// and the blend that smooths it shows an older one still. For translation that
+/// is latency nobody feels; for a rotation the hand is making right now it is
+/// the whole complaint. So the host adds the travel no tick has spent yet,
+/// which needs one fact it cannot possibly know — how many radians a device
+/// count is worth — and that fact is the game's.
+///
+/// Declared beside [`Eye`] on the same entity. A game that declares none is
+/// rendered exactly as it was before this existed, which is what makes this
+/// additive rather than a change of behaviour.
+///
+/// **Sim state like any other component, and read by the host render-side
+/// only.** Nothing the latch computes is written back: the angle it produces
+/// reaches [`crate::World`] nowhere, so the canonical hash, the replay and the
+/// save are identical with it and without it.
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "gg.look")]
+#[repr(C)]
+pub struct Look {
+    /// Radians per axis unit for yaw, **signed**, applied additively:
+    /// `yaw + pending(yaw_axis) * yaw_rate`. A game whose tick reads
+    /// `yaw -= x * per_count` declares `-per_count` and the host restates none
+    /// of its convention — which is the point, since sign is exactly the sort
+    /// of thing two copies of a formula disagree about.
+    pub yaw_rate: f32,
+    /// The same for pitch.
+    pub pitch_rate: f32,
+    /// Clamp on the latched pitch, radians; `0.0` leaves it unclamped. Here
+    /// because the game's tick clamps too, and a latch that did not would let
+    /// the picture roll past a limit the sim will refuse a tick later — a snap
+    /// back, which is worse than the lag this removes.
+    pub pitch_limit: f32,
+    /// Which action-map axis turns yaw — [`gg_input::AxisId`]'s index, as a
+    /// plain `u32` because this crate sits below `gg-input` (§3).
+    pub yaw_axis: u32,
+    /// The same for pitch.
+    pub pitch_axis: u32,
+    /// Padding, spelled out — [`Eye::reserved`]'s reasoning.
+    pub reserved: u32,
+}
+
+impl Look {
+    /// Yaw from `yaw_axis` and pitch from `pitch_axis`, both at `per_count`
+    /// radians a count with the sign a mouse-look tick uses (`-`), pitch held
+    /// inside `pitch_limit`.
+    ///
+    /// The one spelling every fly camera in this tree wants, so a game does not
+    /// repeat five fields to say the ordinary thing ([`Eye::at`]'s reasoning).
+    #[must_use]
+    pub fn fly(yaw_axis: u32, pitch_axis: u32, per_count: f32, pitch_limit: f32) -> Self {
+        Look {
+            yaw_rate: -per_count,
+            pitch_rate: -per_count,
+            pitch_limit,
+            yaw_axis,
+            pitch_axis,
+            reserved: 0,
+        }
+    }
+
+    /// The `Look` belonging to the eye [`Eye::of`] picked, if it carries one.
+    ///
+    /// Resolved through that eye's *entity* rather than by repeating the
+    /// lowest-index rule over `&Look`: a world with two cameras where only the
+    /// second declares a coupling would otherwise latch one eye's mouse onto
+    /// the other one's picture, and the two rules agreeing in every case anyone
+    /// tests is exactly how that survives to a player.
+    ///
+    /// # Errors
+    ///
+    /// If the world refuses the query, which one read alone cannot cause.
+    pub fn of(world: &crate::World) -> Result<Option<Look>, crate::AliasError> {
+        let query = crate::Query::<&Eye>::new()?;
+        let mut found: Option<(u32, crate::Entity)> = None;
+        world.each_ref(&query, |entity, _: &Eye| {
+            let index = entity.index();
+            if found.is_none_or(|(best, _)| index < best) {
+                found = Some((index, entity));
+            }
+        });
+        Ok(found.and_then(|(_, entity)| world.get::<Look>(entity).copied()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -578,6 +666,20 @@ mod tests {
         // alignment, so this is still a struct with no padding to name.
         assert_eq!(size_of::<Sky>(), 64);
         assert_eq!(align_of::<Sky>(), 8);
+        // Six 4-byte scalars, align 4 — the one protocol type with no `f64` in
+        // it, because a rate is a sensitivity and not a place (§6 M56).
+        assert_eq!(size_of::<Look>(), 24);
+        assert_eq!(align_of::<Look>(), 4);
+    }
+
+    /// A zeroed `Look` must be the engine that had none: rates of zero latch no
+    /// angle at all, so a world that lost the component on a reload renders the
+    /// tick exactly, which is where it was before M56.
+    #[test]
+    fn a_zeroed_look_latches_nothing() {
+        let look: Look = bytemuck::Zeroable::zeroed();
+        assert_eq!(look.yaw_rate, 0.0);
+        assert_eq!(look.pitch_rate, 0.0);
     }
 
     /// The migration law this protocol's zeros are chosen against (§4.2.2): a
@@ -764,5 +866,42 @@ mod tests {
     fn a_world_with_no_eye_renders_from_the_origin() {
         let world = crate::World::new();
         assert_eq!(Eye::of(&world).unwrap(), Eye::ORIGIN);
+    }
+
+    /// The case the two candidate rules disagree about, which is the only
+    /// reason [`Look::of`] resolves through the eye's entity: the rendered eye
+    /// declares no coupling and a *different* one does. A lowest-index scan
+    /// over `&Look` would find the second and latch a mouse onto a picture
+    /// taken from the first.
+    #[test]
+    fn a_look_belongs_to_the_eye_that_is_rendered_and_not_to_the_lowest_one() {
+        let mut world = crate::World::new();
+        let (shown, other) = (world.spawn(), world.spawn());
+        world
+            .insert(shown, Eye::at(sim::DVec3::ZERO, 0.0, 0.0))
+            .unwrap();
+        world
+            .insert(other, Eye::at(sim::DVec3::new(0.0, 0.0, 9.0), 0.0, 0.0))
+            .unwrap();
+        world.insert(other, Look::fly(0, 1, 0.0005, 1.55)).unwrap();
+
+        assert!(
+            Look::of(&world).unwrap().is_none(),
+            "the rendered eye declares no coupling, so nothing is latched"
+        );
+
+        // And it is found when it is on the right entity — otherwise the
+        // assertion above would also pass on a `Look::of` that always says no.
+        world.insert(shown, Look::fly(0, 1, 0.0005, 1.55)).unwrap();
+        assert_eq!(Look::of(&world).unwrap().unwrap().yaw_axis, 0);
+    }
+
+    #[test]
+    fn a_fly_look_carries_the_sign_a_mouse_look_tick_uses() {
+        // `yaw -= x * per_count` is what every fly camera in this tree writes,
+        // so the additive rate the host applies is the negative of it.
+        let look = Look::fly(0, 1, 0.0005, 1.55);
+        assert_eq!(look.yaw_rate, -0.0005);
+        assert_eq!(look.pitch_rate, -0.0005);
     }
 }

@@ -540,11 +540,17 @@ impl Sun {
             split_far: 0.0,
             depth_world: 0.0,
         }; MAX_CASCADES];
+        // One depth for every cascade (§6 M60), computed before the loop because
+        // it is the *widest* cascade's and a near one must not derive its own.
+        let reach = match cvars::SHADOW_REACH.bool() {
+            true => depth_reach(view, extent),
+            false => 0.0,
+        };
         let mut slice_near = near;
         for (index, cascade) in cascades.iter_mut().enumerate().take(count) {
             let slice_far = split(near, far, index + 1, count);
             *cascade = fit(
-                extracted, view, extent, direction, up, &basis, size, slice_near, slice_far,
+                extracted, view, extent, direction, up, &basis, size, slice_near, slice_far, reach,
             );
             // Butted, not overlapping: the band the shader cross-fades over
             // lives *inside* each cascade's extent, so widening the slices to
@@ -569,7 +575,9 @@ impl Sun {
 /// computed here: a shorter sweep drops a caster the map would have held, a
 /// longer one keeps instances [`crate::casts_into`] then rejects, and only this
 /// module knows the split scheme that decides which. The widest cascade is the
-/// last, so its slab contains every other's.
+/// last, so its slab contains every other's — which since §6 M60 is exact rather
+/// than conservative: [`depth_reach`] *is* this number, and every cascade records
+/// it.
 pub(crate) fn caster_reach(view: &View, extent: (u32, u32)) -> f32 {
     // `r.shadow_cull 0`'s half of the switch. Large and finite rather than
     // infinite: the sweep multiplies this by a plane normal, and `inf * 0` is the
@@ -577,15 +585,120 @@ pub(crate) fn caster_reach(view: &View, extent: (u32, u32)) -> f32 {
     if cvars::SHADOW_CULL.int() == 0 {
         return 1.0e6;
     }
+    depth_reach(view, extent)
+}
+
+/// The depth **every** cascade records, in metres — the widest one's slab, shared
+/// (§6 M60).
+///
+/// It was each cascade's own `radius * 4` until M60, and that is a correctness
+/// bug rather than a tightness one: absence of depth is absence of a blocker, so
+/// a caster further up-light than a cascade's light eye is not merely coarse in
+/// that map, it is *missing* from it and the shader reads the receiver as lit. A
+/// near cascade is small by construction — that is the whole point of splitting —
+/// so the reach it derived from its own width was the shortest exactly where the
+/// picture is largest. Sponza's gallery went from shadowed to sunlit as
+/// `r.shadow_distance` came *down*, which is the tuning move that improves every
+/// other number.
+///
+/// Shared rather than fitted per cascade to the casters actually present: a reach
+/// that follows content changes as content enters the view, and `depth_world`
+/// scales the blocker search, so a fitted one would wobble a penumbra's width
+/// with the contents of the frame. This is a function of the CVars and the
+/// projection alone.
+///
+/// What it costs the near cascade is depth precision, and the margin is wide
+/// enough not to be a knob: an orthographic reverse-Z map is linear, so
+/// `D32_SFLOAT`'s worst quantization is `reach * 2⁻²⁴` and the normal offset it
+/// has to stay under is `r.shadow_normal_bias` texels of the *near* cascade —
+/// a ratio of `2041 * radius₀ / radius₃`, which is 83x at the shipping split and
+/// degrades only with the spread between the first cascade and the last.
+fn depth_reach(view: &View, extent: (u32, u32)) -> f32 {
     let near = view.near.max(1e-3);
     let far = (cvars::SHADOW_DISTANCE.float() as f32).max(near * 2.0);
     let count = (cvars::SHADOW_CASCADES.int().max(1) as usize).min(MAX_CASCADES);
     let size = cvars::SHADOW_SIZE.int().clamp(256, 4096) as u32;
     let (_, radius) = slice_sphere(view, extent, split(near, far, count - 1, count), far);
-    // `fit`'s light eye sits two radii up-light of the centre and its far plane
-    // two beyond — four radii of depth — over the same `radius + texel` the cull
-    // widens the cascade by.
+    // The light eye sits half of this up-light of the centre and the far plane
+    // half beyond — over the same `radius + texel` the cull widens a cascade by.
     (radius + 2.0 * radius / size as f32) * 4.0
+}
+
+/// One cascade's up-light reach against the casters that need it (§6 M60).
+///
+/// Every field is metres or a count, and the two that matter fail in opposite
+/// directions: [`dropped`] is shadow the frame will not have, and [`reach`] is
+/// the depth range whose size costs blocker-search precision and cull work. A
+/// measurement rather than a gate — `gg-tools shadow-reach` prints it.
+///
+/// [`dropped`]: CascadeReach::dropped
+/// [`reach`]: CascadeReach::reach
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CascadeReach {
+    /// Half-width of the cascade's square footprint, metres.
+    pub radius: f32,
+    /// How far up-light of the centre this map records — the light eye's offset.
+    pub reach: f32,
+    /// How far up-light the furthest caster over the footprint actually sits.
+    /// A `needed` above `reach` is missing shadow, in metres of miss. Floored at
+    /// zero, which is a real reading rather than a failed one: the widest cascade
+    /// sits tens of metres ahead of the eye and every caster is *down*-light of
+    /// its centre, so it needs no up-light reach at all.
+    pub needed: f32,
+    /// Casters whose footprint overlaps this cascade's square at all.
+    pub over: u32,
+    /// How many of those sit further up-light than `reach` — each one a blocker
+    /// the map has no depth for, which the shader reads as no blocker.
+    pub dropped: u32,
+}
+
+/// [`CascadeReach`] per cascade, nearest first, for the frame `extracted`
+/// describes. Empty when nothing casts.
+///
+/// The caster set is both arrays whole rather than [`Extracted::visible`]: a
+/// caster off screen is exactly the case a cascade's depth range decides, and the
+/// prefix is the one that cannot show it.
+#[must_use]
+pub fn cascade_reach(extracted: &Extracted, view: &View, extent: (u32, u32)) -> Vec<CascadeReach> {
+    let Some(sun) = Sun::of(extracted, view, extent) else {
+        return Vec::new();
+    };
+    let (right, above) = (sun.right, sun.above);
+    sun.cascades()
+        .iter()
+        .map(|cascade| {
+            let reach = cascade.depth_world * 0.5;
+            let mut report = CascadeReach {
+                radius: cascade.radius,
+                reach,
+                ..CascadeReach::default()
+            };
+            let casters = extracted.instances.iter().chain(extracted.models.iter());
+            for instance in casters {
+                let to = instance.offset - cascade.centre;
+                let signed = to.dot(sun.direction);
+                let across = to - sun.direction * signed;
+                // The square footprint, per axis — `cull::slab`'s test, and the
+                // reason it is restated here rather than called is that `slab`
+                // answers with the depth test folded in and this needs the two
+                // apart.
+                let out = |d: f32| (d.abs() - cascade.radius).max(0.0);
+                let (x, y) = (out(across.dot(right)), out(across.dot(above)));
+                if x * x + y * y > instance.radius * instance.radius {
+                    continue;
+                }
+                report.over += 1;
+                // Up-light is against the direction of travel, and a sphere
+                // reaches `radius` further than its centre.
+                let up = -signed + instance.radius;
+                report.needed = report.needed.max(up);
+                if up > reach {
+                    report.dropped += 1;
+                }
+            }
+            report
+        })
+        .collect()
 }
 
 /// The far distance of split `index` of `count` over `[near, far]`.
@@ -648,6 +761,7 @@ fn fit(
     size: u32,
     slice_near: f32,
     slice_far: f32,
+    reach: f32,
 ) -> Cascade {
     let (centre_depth, radius) = slice_sphere(view, extent, slice_near, slice_far);
     // Down the camera's own forward axis, which is -Z before the view rotation.
@@ -666,12 +780,19 @@ fn fit(
     let shift = |axis: render::Vec3| extracted.grid_phase(axis, centre, texel_world) * texel_world;
     let snapped = centre - right * shift(right) - above * shift(above);
 
-    // The light's eye two radii up-light and the far plane four, which is what
-    // puts a caster behind the slab — a wall the sun is on the far side of —
-    // inside the map rather than outside it.
-    let eye = snapped - direction * radius * 2.0;
+    // The light's eye half the depth up-light and the far plane half beyond,
+    // which is what puts a caster behind the slab — a wall the sun is on the far
+    // side of — inside the map rather than outside it. `reach` is every
+    // cascade's, from the widest (§6 M60); `r.shadow_reach 0` is the pre-M60
+    // spelling, where a small cascade derived a short one from its own width and
+    // lost every blocker above it.
+    let depth = match reach > 0.0 {
+        true => reach,
+        false => radius * 4.0,
+    };
+    let eye = snapped - direction * depth * 0.5;
     let light = render::camera::rh::view::look_to_mat4(eye, direction, up);
-    let projection = render::orthographic_reverse_z(radius, radius, 0.0, radius * 4.0);
+    let projection = render::orthographic_reverse_z(radius, radius, 0.0, depth);
     Cascade {
         view_projection: projection * light,
         // The *unsnapped* centre bounds the geometry; the snap moves the grid by
@@ -681,11 +802,12 @@ fn fit(
         radius: radius + texel_world,
         texel_world,
         split_far: slice_far,
-        // The projection's own far plane, four radii up-light of the eye — the
-        // same `radius * 4.0` the line above builds it from, and the reason this
-        // is derived here rather than in the shader is that the shader is handed
-        // the finished matrix and cannot see the number that went into it.
-        depth_world: radius * 4.0,
+        // The projection's own far plane — the same `depth` the line above builds
+        // it from, and the reason this is derived here rather than in the shader
+        // is that the shader is handed the finished matrix and cannot see the
+        // number that went into it. Also the cull's depth extent (`cull::slab`),
+        // which is why the two cannot drift.
+        depth_world: depth,
     }
 }
 

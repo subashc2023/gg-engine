@@ -142,13 +142,21 @@ static const uint MAX_LIGHTS = 260;
 static const uint CLUSTER_BASE = FRAME_STRIDE + MAX_LIGHTS * LIGHT_STRIDE;
 static const uint INDEX_BASE = CLUSTER_BASE + CLUSTER_X * CLUSTER_Y * CLUSTER_Z * 8;
 
-// How far the receiver-plane extrapolation below is allowed to lean, in NDC
-// depth per unit of shadow uv. The slab `Sun::of` fits spans 2*radius across
-// the map and 4*radius through it, so this quantity is tan(incidence)/2 for any
-// radius — 4.0 is 83 degrees. Past that the receiver is nearly parallel to the
-// light and a tap's depth is not the plane's to predict; the normal offset
-// carries what this declines to.
-static const float SHADOW_PLANE_SLOPE_LIMIT = 4.0;
+// How far the receiver-plane extrapolation below is allowed to lean, as
+// **tan(incidence)**: 8.0 is 83 degrees. Past that the receiver is nearly
+// parallel to the light and a tap's depth is not the plane's to predict; the
+// normal offset carries what this declines to.
+//
+// A tangent since §6 M60, and the change is a unit rather than a value. The
+// quantity clamped is NDC depth per unit of shadow uv, which is only a geometry
+// once the slab's depth range and width are divided out — and until M60 they
+// cancelled by accident, the slab being 2*radius across and 4*radius through for
+// every cascade, so the clamp read `tan/2` and 4.0 meant the same 83 degrees.
+// Sharing one depth across the cascades ends that cancellation: without the
+// conversion in `receiver_plane_slope` this clamp silently stops binding on the
+// near cascade, and an unbound extrapolation punches lit holes through real
+// shadow — the atrium's coffered wall went flat.
+static const float SHADOW_PLANE_SLOPE_LIMIT = 8.0;
 
 // Dielectric reflectance at normal incidence — 4%, the value [Bur12] and every
 // engine since use for "not a metal". A metal has no single number here, which
@@ -1362,7 +1370,7 @@ float3 to_light_clip(Frame frame, Cascade cascade, float3 world, float3 normal)
 // normal into clip space is each row over its own squared length, no matrix
 // inverse anywhere. With that normal m: m . dclip = 0, and uv = clip.xy / 2 +
 // 1/2 makes the tap extrapolation dz/duv = -2 m.xy / m.z.
-float2 receiver_plane_slope(Cascade cascade, float3 normal)
+float2 receiver_plane_slope(Cascade cascade, float3 normal, float shadow_texel)
 {
     float3 r0 = cascade.view_projection[0].xyz;
     float3 r1 = cascade.view_projection[1].xyz;
@@ -1377,7 +1385,15 @@ float2 receiver_plane_slope(Cascade cascade, float3 normal)
     // Clamped, because a receiver nearly parallel to the light has more depth
     // per uv than any extrapolation should claim to know — unclamped, that is
     // a tap depth far enough off to punch a lit hole through a real shadow.
-    float magnitude = length(slope);
+    //
+    // The clamp is on the *tangent*, so the slab's own depth range and width
+    // have to come out first: `depth_world` is metres per unit of clip depth and
+    // `texel_world / shadow_texel` is metres across the whole map. Their ratio
+    // was 2 for every cascade until §6 M60 and is not any more. `slope` itself
+    // is returned unconverted — `pcss` compares it against `clip.z`, which is in
+    // the units it already has.
+    float per_metre = cascade.depth_world * shadow_texel / cascade.texel_world;
+    float magnitude = length(slope) * per_metre;
     return magnitude > SHADOW_PLANE_SLOPE_LIMIT ? slope * (SHADOW_PLANE_SLOPE_LIMIT / magnitude)
                                                 : slope;
 }
@@ -1656,7 +1672,7 @@ float sun_shadow(uint64_t frame_address, Frame frame, float3 world, float3 norma
         // of reading past the block.
         Cascade c = load_cascade(frame_address, min(i, frame.cascade_count - 1));
         clip[i] = to_light_clip(frame, c, world, normal);
-        slope[i] = receiver_plane_slope(c, plane);
+        slope[i] = receiver_plane_slope(c, plane, frame.shadow_texel);
         shape[i].texture = c.texture;
         shape[i].texel_world = c.texel_world;
         shape[i].depth_world = c.depth_world;

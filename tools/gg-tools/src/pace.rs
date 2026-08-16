@@ -31,21 +31,33 @@
 //! angle each *tick* turned — the sim's own unevenness, before any blend saw it.
 //! A leg with an even `tick` and an uneven frame-to-frame spread is the blend's
 //! fault; the reverse is the accumulator's.
+//!
+//! **age** (§6 M56) is the fourth, and it is the one an even pipeline can still
+//! fail: how far *behind* the hand the picture is, in milliseconds, taken
+//! against the travel the device has actually reported by the moment the frame
+//! landed. Smoothness and freshness are independent — a blend between two ticks
+//! is perfectly even and is up to two tick periods stale, which at 60 Hz is
+//! 33 ms of a turn the hand finished making. Both tables print it, and the
+//! second one is what a latched view does to it.
 
 use core::time::Duration;
 
 use gg_core::{Pace, TickClock};
-use gg_ecs::boundary::Eye;
-use gg_extract::blend_eye;
+use gg_ecs::World;
+use gg_ecs::boundary::{Eye, Look};
+use gg_extract::{Extracted, Latch};
 use gg_input::{ActionMap, AxisId, Input};
 use gg_math::sim;
 
-/// Demo 12's binding for the camera, and only it — `MouseX` is raw device
-/// counts, which is the axis the complaint is about (§4.9).
-const MAP: &str = "[game.axes]\naim_x = [\"MouseX\"]\n";
+/// Demo 12's bindings for the camera — `MouseX`/`MouseY` are raw device counts,
+/// which is the axis the complaint is about (§4.9). Both, though the hand here
+/// only turns in x: the latch reads whatever axes a `Look` names, and a map
+/// holding one of them would grade a protocol half-wired.
+const MAP: &str = "[game.axes]\naim_x = [\"MouseX\"]\naim_y = [\"MouseY\"]\n";
 
-/// The axis `MAP` declares, first and alone.
+/// The axes `MAP` declares, in its order.
 const AIM_X: AxisId = AxisId::new(0);
+const AIM_Y: AxisId = AxisId::new(1);
 
 /// The sim rate, which is not a variable here: every leg is the same 60 Hz sim
 /// under a different panel, because the panel is what changed.
@@ -66,6 +78,14 @@ const LOOK_PER_COUNT: f32 = 0.0005;
 /// matters only in that motion arrives *between* frame polls rather than on
 /// them, so a frame's share of the hand is set by when the frame landed.
 const MOUSE_HZ: f64 = 1000.0;
+
+/// The second rate the latched table is swept over (§6 M56). 8 kHz is what the
+/// current generation of the same hardware does, and it is here to **attribute**
+/// a residual rather than to recommend a mouse: latching shows the hand closely
+/// enough that the device's own polling becomes the frame-to-frame step, so a
+/// leg whose `stall`/`lurch` tightens when only this changes has named the
+/// quantizer as the mouse's and not the engine's.
+const FAST_MOUSE_HZ: f64 = 8000.0;
 
 /// Seconds each leg runs. Long enough that the frame and tick clocks drift
 /// through every phase relationship they have — the rare alignment is the whole
@@ -99,15 +119,20 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     println!("  stall/lurch: the smallest and largest angle a frame added, over what it owed");
     println!("  tick: the same spread over the angle each sim tick turned");
     println!("  whole: the same run with a tick spending the accumulator whole — the control");
+    println!("  age: how far behind the reported hand the picture is, mean and worst, ms");
     println!();
-    println!("  panel  noise  frames  ticks | stall  lurch | tick lo  tick hi | whole  whole");
 
+    println!("the tick, interpolated — where §6 M21 left it (`r.late_latch 0`)");
+    println!(
+        "  panel  noise  frames  ticks | stall  lurch | tick lo  tick hi | whole  whole |   age  worst"
+    );
     for noise in NOISE_US {
         for hz in PANELS {
-            let leg = measure(hz, noise, Spend::Covered);
-            let whole = measure(hz, noise, Spend::Whole);
+            let leg = measure(hz, noise, Spend::Covered, Latched::No, MOUSE_HZ)?;
+            let whole = measure(hz, noise, Spend::Whole, Latched::No, MOUSE_HZ)?;
             println!(
-                "  {hz:5.0}  {noise:4.0}us  {:6}  {:5} | {:5.2}  {:5.2} | {:7.2} {:8.2} | {:5.2}  {:5.2}",
+                "  {hz:5.0}  {noise:4.0}us  {:6}  {:5} | {:5.2}  {:5.2} | {:7.2} {:8.2} | \
+                 {:5.2}  {:5.2} | {:5.1}  {:5.1}",
                 leg.frames,
                 leg.ticks,
                 leg.stall,
@@ -115,7 +140,33 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 leg.tick_lo,
                 leg.tick_hi,
                 whole.stall,
-                whole.lurch
+                whole.lurch,
+                leg.age,
+                leg.worst
+            );
+        }
+        println!();
+    }
+
+    println!("the hand, latched — §6 M56 (`r.late_latch 1`, the default)");
+    println!("  the two poll rates are the attribution: a latched view steps by the device's");
+    println!("  own report, so a column that tightens on the mouse alone was never the engine's");
+    println!("                              |     1 kHz mouse     |     8 kHz mouse");
+    println!("  panel  noise  frames  ticks | stall  lurch    age | stall  lurch    age");
+    for noise in NOISE_US {
+        for hz in PANELS {
+            let leg = measure(hz, noise, Spend::Covered, Latched::Yes, MOUSE_HZ)?;
+            let fast = measure(hz, noise, Spend::Covered, Latched::Yes, FAST_MOUSE_HZ)?;
+            println!(
+                "  {hz:5.0}  {noise:4.0}us  {:6}  {:5} | {:5.2}  {:5.2}  {:5.1} | {:5.2}  {:5.2}  {:5.1}",
+                leg.frames,
+                leg.ticks,
+                leg.stall,
+                leg.lurch,
+                leg.age,
+                fast.stall,
+                fast.lurch,
+                fast.age
             );
         }
         println!();
@@ -134,6 +185,15 @@ enum Spend {
     Covered,
 }
 
+/// Whether the frame shows the hand's unspent travel (§6 M56) — the `Look` the
+/// world carries is the same either way, so what this switches is exactly what
+/// `r.late_latch` switches in the shell.
+#[derive(Clone, Copy, PartialEq)]
+enum Latched {
+    No,
+    Yes,
+}
+
 /// One panel's answer.
 struct Leg {
     frames: usize,
@@ -142,11 +202,26 @@ struct Leg {
     lurch: f64,
     tick_lo: f64,
     tick_hi: f64,
+    age: f64,
+    worst: f64,
 }
 
-/// Drive the real clock, the real accumulator and the real blend for `SECONDS`
-/// at `hz`, and reduce the picture to the four numbers above.
-fn measure(hz: f64, noise_us: f64, spend: Spend) -> Leg {
+/// Drive the real clock, the real accumulator and the real extract stage for
+/// `SECONDS` at `hz`, and reduce the picture to the numbers above.
+///
+/// The eye goes through a real `World` and a real [`Extracted`] rather than
+/// through [`gg_extract::blend_eye`] by hand, which is what lets the latched leg
+/// grade the shipped path: `capture_eye` at the top of a tick, `interpolate`
+/// once a frame, `eye(current, latch)` to compose — `gg_runtime::App`'s three
+/// calls in `App`'s order, with nothing restated here but the game's own look
+/// system.
+fn measure(
+    hz: f64,
+    noise_us: f64,
+    spend: Spend,
+    latched: Latched,
+    mouse_hz: f64,
+) -> anyhow::Result<Leg> {
     let mut clock = TickClock::new(SIM_HZ, Pace::Realtime);
     let mut input = Input::new(map());
     // A map's bindings only exist inside a context, and nothing is bound until
@@ -158,9 +233,20 @@ fn measure(hz: f64, noise_us: f64, spend: Spend) -> Leg {
     // Demo 12's look system, which is one line: `yaw = wrap(yaw - x *
     // per_count)`, and nothing else reads the clock.
     let mut yaw = 0.0f32;
-    // What the frames until the next tick blend away from — captured at the top
-    // of a tick, as `App::sim_tick` captures it.
-    let mut previous = Eye::at(sim::DVec3::ZERO, 0.0, 0.0);
+    // Demo 12's declaration of that one line, which is what the host latches
+    // through. No pitch limit: the hand here never leaves the horizon, and a
+    // clamp that never fires would be a column of zeros pretending to be a test.
+    let look = Look::fly(
+        AIM_X.index() as u32,
+        AIM_Y.index() as u32,
+        LOOK_PER_COUNT,
+        0.0,
+    );
+    let mut world = World::new();
+    let eye = world.spawn();
+    world.insert(eye, Eye::at(sim::DVec3::ZERO, 0.0, 0.0))?;
+    world.insert(eye, look)?;
+    let mut extracted = Extracted::default();
 
     // Wall time in nanoseconds, and the mouse report the run has delivered up to
     // it. Integer so a 20 s leg does not lose its last frame to a float's ulp.
@@ -170,6 +256,7 @@ fn measure(hz: f64, noise_us: f64, spend: Spend) -> Leg {
 
     let mut shown: Vec<f64> = Vec::new();
     let mut turned: Vec<f64> = Vec::new();
+    let mut ages: Vec<f64> = Vec::new();
     let mut last_shown = 0.0f64;
     let mut last_yaw = 0.0f64;
     let mut frames = 0usize;
@@ -182,10 +269,10 @@ fn measure(hz: f64, noise_us: f64, spend: Spend) -> Leg {
         // Every report whose timestamp has passed, delivered at the poll that
         // followed it — which is the one thing a frame rate changes about the
         // hand, and the reason this is not just `motion(rate * elapsed)`.
-        let due_reports = (wall as f64 * MOUSE_HZ / 1.0e9) as u64;
+        let due_reports = (wall as f64 * mouse_hz / 1.0e9) as u64;
         let arrived = due_reports.saturating_sub(reports);
         reports = due_reports;
-        input.motion((COUNTS_PER_SEC / MOUSE_HZ) as f32 * arrived as f32, 0.0);
+        input.motion((COUNTS_PER_SEC / mouse_hz) as f32 * arrived as f32, 0.0);
 
         let due = clock.advance(Duration::from_nanos(elapsed));
         // `Whole` never tells the accumulator anything, which leaves it at one
@@ -197,9 +284,11 @@ fn measure(hz: f64, noise_us: f64, spend: Spend) -> Leg {
             input.frame_covered(due.covered);
         }
         for _ in 0..due.count {
-            previous = Eye::at(sim::DVec3::ZERO, yaw, 0.0);
+            // At the top of the tick, before the tick writes — `App::sim_tick`.
+            extracted.capture_eye(&world)?;
             input.tick();
             yaw = wrap(yaw - input.axis(AIM_X) * LOOK_PER_COUNT);
+            world.insert(eye, Eye::at(sim::DVec3::ZERO, yaw, 0.0))?;
             ticks += 1;
             if frames >= WARMUP {
                 turned.push(step(f64::from(yaw), last_yaw));
@@ -207,10 +296,30 @@ fn measure(hz: f64, noise_us: f64, spend: Spend) -> Leg {
             last_yaw = f64::from(yaw);
         }
 
-        let current = Eye::at(sim::DVec3::ZERO, yaw, 0.0);
-        let rendered = f64::from(blend_eye(previous, current, clock.alpha()).yaw);
+        extracted.interpolate(clock.alpha());
+        let latch = match latched {
+            Latched::Yes => Some(Latch::of(
+                look,
+                (input.pending(AIM_X), input.pending(AIM_Y)),
+                (input.spent(AIM_X), input.spent(AIM_Y)),
+            )),
+            Latched::No => None,
+        };
+        let current = Eye::of(&world)?;
+        let composed = extracted.eye(current, latch);
+        let rendered = f64::from(composed.yaw);
         if frames >= WARMUP {
             shown.push(step(rendered, last_shown));
+            // Where the *reported* hand is: travel the device has delivered, not
+            // travel it has made. A frame cannot show a count that has not
+            // arrived, and charging it for one would price the mouse's own rate
+            // as engine lag.
+            let hand = -(reports as f64) * (COUNTS_PER_SEC / mouse_hz) * f64::from(LOOK_PER_COUNT);
+            // The short way, which needs no unwrapping to be exact: the lag
+            // being measured is tens of milliseconds of a turn — under 0.05 rad
+            // here — so the hand and the picture are never a revolution apart
+            // and `step` reduces both sides' wrapping away in one subtraction.
+            ages.push(step(hand, rendered) / RATE * 1.0e3);
         }
         last_shown = rendered;
         frames += 1;
@@ -219,18 +328,38 @@ fn measure(hz: f64, noise_us: f64, spend: Spend) -> Leg {
     // What each frame owed: the hand's rate over the panel's. Taken from the
     // hand rather than from the mean of what was shown, so a leg that lost or
     // invented angle overall cannot hide it by normalising against itself.
-    let rate = -COUNTS_PER_SEC * f64::from(LOOK_PER_COUNT);
-    let owed_frame = rate / hz;
-    let owed_tick = rate / f64::from(SIM_HZ);
+    let owed_frame = RATE / hz;
+    let owed_tick = RATE / f64::from(SIM_HZ);
     let (stall, lurch) = spread(&shown, owed_frame);
     let (tick_lo, tick_hi) = spread(&turned, owed_tick);
-    Leg {
+    let (age, worst) = mean_and_worst(&ages);
+    Ok(Leg {
         frames,
         ticks,
         stall,
         lurch,
         tick_lo,
         tick_hi,
+        age,
+        worst,
+    })
+}
+
+/// The hand's angular rate, radians a second, signed the way demo 12's look
+/// system turns: `yaw -= x * per_count`.
+const RATE: f64 = -COUNTS_PER_SEC * LOOK_PER_COUNT as f64;
+
+/// Mean and largest of `ages`, which are milliseconds behind the hand. Both,
+/// because a mean alone forgives a pipeline that is fresh three frames in four
+/// and a whole tick stale on the fourth — which is the shape of the thing being
+/// measured.
+fn mean_and_worst(ages: &[f64]) -> (f64, f64) {
+    match ages.is_empty() {
+        true => (0.0, 0.0),
+        false => (
+            ages.iter().sum::<f64>() / ages.len() as f64,
+            ages.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        ),
     }
 }
 
@@ -281,7 +410,7 @@ fn map() -> ActionMap {
     // A literal this file owns, parsed by the real parser — the alternative is
     // constructing an `ActionMap` by hand, which no caller outside the crate can
     // do and no caller should learn to.
-    match ActionMap::parse(MAP, &[], &["aim_x"]) {
+    match ActionMap::parse(MAP, &[], &["aim_x", "aim_y"]) {
         Ok(map) => map,
         Err(error) => panic!("the instrument's own map does not parse: {error}"),
     }

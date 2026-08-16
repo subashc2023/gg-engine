@@ -297,6 +297,10 @@ fn the_forward_pass_resolves_and_everything_after_it_reads_one_image() {
             post_draws: &[],
             samples: &samples,
             forward_samples: &[],
+            // Nor is §6 M59's debug view, on the same reasoning as the two
+            // above: an empty draw list declares no pass.
+            debug_samples: &[],
+            debug_draws: &[],
         });
         let compiled = frame.compile(&declared).unwrap();
         let dump = compiled.dump();

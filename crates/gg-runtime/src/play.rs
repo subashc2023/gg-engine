@@ -266,6 +266,9 @@ pub fn play(
         }
     })?;
 
+    // After the loop and before the error arm: a session that ended badly is
+    // exactly the one whose frame times are worth reading (§6 M58).
+    frames.profile().report();
     match failure {
         Some(refused) => Err(refused),
         None => Ok(frames.frame_count()),

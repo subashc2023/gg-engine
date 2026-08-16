@@ -1,0 +1,17 @@
+# Demo 14's bindings (§4.7). By *physical* key position, so this file means the
+# same thing on AZERTY as on QWERTY.
+#
+# No actions at all: a scene viewer has no verbs, only a camera. `boost` is an
+# axis rather than an action for the reason the crate's constant says — an
+# action is an edge, a held modifier is a state, and reading one as the other
+# moves the eye once and then stops.
+
+[game.actions]
+
+[game.axes]
+move_right = ["+D", "-A"]
+move_forward = ["+W", "-S"]
+move_up = ["+E", "-Q"]
+aim_x = ["MouseX"]
+aim_y = ["MouseY"]
+boost = ["+ShiftLeft"]

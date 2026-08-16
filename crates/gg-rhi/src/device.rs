@@ -772,15 +772,19 @@ impl Device {
     /// signature always exists; the call compiles to nothing without the
     /// `validation` feature, which is how names unbolt in dist (§2).
     pub(crate) fn set_name<T: vk::Handle>(&self, handle: T, name: &str) {
+        // Gated on the *runtime* answer as well as the feature (§6 M58):
+        // `VK_EXT_debug_utils` goes in with the layer, so under
+        // `GG_VALIDATION=0` these entry points are not loaded and calling one
+        // aborts the process inside `ash`'s loader stub.
         #[cfg(feature = "validation")]
+        if crate::instance::validation_requested()
+            && let Ok(name) = std::ffi::CString::new(name)
         {
-            if let Ok(name) = std::ffi::CString::new(name) {
-                let info = vk::DebugUtilsObjectNameInfoEXT::default()
-                    .object_handle(handle)
-                    .object_name(&name);
-                // SAFETY: device is live; handle belongs to it.
-                let _ = unsafe { self.debug_fns.set_debug_utils_object_name(&info) };
-            }
+            let info = vk::DebugUtilsObjectNameInfoEXT::default()
+                .object_handle(handle)
+                .object_name(&name);
+            // SAFETY: device is live; handle belongs to it.
+            let _ = unsafe { self.debug_fns.set_debug_utils_object_name(&info) };
         }
         #[cfg(not(feature = "validation"))]
         {
@@ -796,13 +800,14 @@ impl Device {
     /// `cmd` must be recording, and every label must be closed by
     /// [`Device::end_label`] on the same command buffer.
     pub(crate) unsafe fn begin_label(&self, cmd: vk::CommandBuffer, name: &str) {
+        // [`Device::set_name`]'s guard, for its reason.
         #[cfg(feature = "validation")]
+        if crate::instance::validation_requested()
+            && let Ok(name) = std::ffi::CString::new(name)
         {
-            if let Ok(name) = std::ffi::CString::new(name) {
-                let label = vk::DebugUtilsLabelEXT::default().label_name(&name);
-                // SAFETY: caller contract — cmd is recording on this device.
-                unsafe { self.debug_fns.cmd_begin_debug_utils_label(cmd, &label) };
-            }
+            let label = vk::DebugUtilsLabelEXT::default().label_name(&name);
+            // SAFETY: caller contract — cmd is recording on this device.
+            unsafe { self.debug_fns.cmd_begin_debug_utils_label(cmd, &label) };
         }
         #[cfg(not(feature = "validation"))]
         {
@@ -815,8 +820,10 @@ impl Device {
     /// # Safety
     /// `cmd` must be recording with a label open.
     pub(crate) unsafe fn end_label(&self, cmd: vk::CommandBuffer) {
+        // [`Device::set_name`]'s guard, for its reason. Paired with
+        // `begin_label`'s by the same condition, so a label is never left open.
         #[cfg(feature = "validation")]
-        {
+        if crate::instance::validation_requested() {
             // SAFETY: caller contract — a label is open on this command buffer.
             unsafe { self.debug_fns.cmd_end_debug_utils_label(cmd) };
         }

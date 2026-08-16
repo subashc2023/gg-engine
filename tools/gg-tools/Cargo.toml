@@ -17,6 +17,15 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# `frame`'s second reading (§6 M58). `tier-dev` runs the validation layer and
+# this binary does not, so the same table built twice is what the lab equipment
+# costs a frame — a number nobody had, and the first thing anyone should suspect
+# when a dev-tier window is slower than the passes say it should be. Off by
+# default: an instrument whose subject is the shipping path should measure the
+# shipping path unless asked otherwise.
+[features]
+validation = ["gg-render/validation"]
+
 [dependencies]
 anyhow.workspace = true
 tracing-subscriber.workspace = true
@@ -27,7 +36,11 @@ tracing-subscriber.workspace = true
 # `gpu-timings` because `cull` reports the *shadow passes'* own device time:
 # the frame is mostly the forward pass on any rasterizer, so a frame-level
 # number would report a 16% change as a 4% one and hide where it came from.
-gg-render = { path = "../../crates/gg-render", features = ["gpu-timings"] }
+# `cpu-timings` beside it because `frame` (§6 M58) reads the *other* half of the
+# same picture: `gg-render` has emitted `zone!` since §6 M25 and no tier turns
+# the collector on, so until this line the zones existed and nothing anywhere
+# could print one.
+gg-render = { path = "../../crates/gg-render", features = ["gpu-timings", "cpu-timings"] }
 gg-extract = { path = "../../crates/gg-extract" }
 # The instrument's scenes declare geometry the way a game does: ordinary
 # components in a World, read through the same typed query the shell uses.

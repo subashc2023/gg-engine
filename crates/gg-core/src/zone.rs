@@ -14,9 +14,14 @@
 //! would allocate inside the thing it is timing.
 //!
 //! Off unless `cpu-timings` is on, where "off" means the guard is a zero-sized
-//! struct with an empty `Drop` and [`take`] is an empty `Vec`. The feature rides
-//! the instrumented tier beside `gpu-timings`, for that feature's reason: the
-//! numbers are lab equipment and the shipping build pays nothing for them.
+//! struct with an empty `Drop` and [`take`] is an empty `Vec` — lab equipment,
+//! and the shipping build pays nothing for it.
+//!
+//! It rides **no tier** and did not until §6 M58 have a reader either, which is
+//! the shape of the defect that milestone found: the collector was built here at
+//! M25, `gg-render` emitted into it, and no build in the tree turned it on, so
+//! the frame's cost was unmeasurable by anything but a GUI profiler nobody had
+//! attached. [`Profile`] is the reader; `xtask run --profile` is the build.
 
 /// One closed zone. `depth` is how many zones were still open around it when it
 /// closed, so `0` is a frame's outermost.
@@ -56,6 +61,125 @@ pub const fn enabled() -> bool {
 }
 
 pub use imp::Guard;
+
+/// A run's zones, accumulated (§6 M58).
+///
+/// [`take`] hands back one frame and forgets it, which is what a timeline wants
+/// and useless to anyone asking where a *session's* milliseconds went. This is
+/// the other reader: one row per name, fed every frame, printed once at exit.
+/// Bounded by the number of distinct zone names — a session's cost here is a
+/// linear scan of a list with a dozen entries, not a buffer that grows with the
+/// run (§6 M51's lesson about a log that did).
+#[derive(Debug, Default)]
+pub struct Profile {
+    rows: Vec<Row>,
+    frames: u64,
+}
+
+/// One zone name's total across a run. `total` divided by [`Profile::frames`] is
+/// the per-frame cost — the number a frame budget is argued from — and `worst` is
+/// the single occurrence that would be felt as a hitch.
+#[derive(Clone, Copy, Debug)]
+pub struct Row {
+    /// The literal the zone was opened with.
+    pub name: &'static str,
+    /// The shallowest nesting this name was ever seen at — see
+    /// [`Profile::absorb`].
+    pub depth: u16,
+    /// How many times it opened over the run, which is *not* the frame count: a
+    /// frame owing three sim ticks opens `sim_tick` three times.
+    pub calls: u64,
+    /// Summed wall time, the numerator of the per-frame column.
+    pub total_nanos: u64,
+    /// The longest single occurrence — a hitch, where the mean is a budget.
+    pub worst_nanos: u64,
+}
+
+impl Profile {
+    /// Fold one frame's drained samples in. Call once a frame with [`take`]'s
+    /// result; an empty slice still counts a frame, so a build with no collector
+    /// reports zero rows over the right denominator rather than dividing by
+    /// nothing.
+    pub fn absorb(&mut self, samples: &[Sample]) {
+        self.frames += 1;
+        for s in samples {
+            match self.rows.iter_mut().find(|r| r.name == s.name) {
+                Some(row) => {
+                    row.calls += 1;
+                    row.total_nanos += s.nanos;
+                    row.worst_nanos = row.worst_nanos.max(s.nanos);
+                    // The shallowest sighting wins: a zone reached through two
+                    // paths is one row, and reporting it at the deeper one would
+                    // indent it under a parent it does not always have.
+                    row.depth = row.depth.min(s.depth);
+                }
+                None => self.rows.push(Row {
+                    name: s.name,
+                    depth: s.depth,
+                    calls: 1,
+                    total_nanos: s.nanos,
+                    worst_nanos: s.nanos,
+                }),
+            }
+        }
+    }
+
+    /// Frames absorbed — the denominator, and `0` before the first one.
+    #[must_use]
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// Say where the session's milliseconds went, at `info` and **once**.
+    ///
+    /// Here rather than in the shell because the shape of the table is this
+    /// type's business, and because §3's line budget for `gg-runtime` is a
+    /// budget on the *shell* — a formatter for someone else's struct was never
+    /// what those lines were for.
+    ///
+    /// At exit and never per frame: §6 M51's finding was a log that grew with
+    /// the session, and a table printed every second is that same defect with a
+    /// better excuse. Silent without `cpu-timings`, and silent before the first
+    /// frame — an empty table reads as "nothing costs anything".
+    pub fn report(&self) {
+        if !enabled() || self.frames == 0 {
+            return;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "nanoseconds and a frame count, printed to three decimals"
+        )]
+        let ms = |nanos: u64| nanos as f64 / 1e6;
+        let frames = self.frames as f64;
+        tracing::info!(frames = self.frames, "frame profile — ms per frame");
+        for row in self.rows() {
+            // Two columns that fail in opposite directions: the mean is a
+            // budget, and the worst single call is a hitch a mean forgives.
+            tracing::info!(
+                zone = row.name,
+                depth = row.depth,
+                per_frame = format!("{:.3}", ms(row.total_nanos) / frames),
+                worst = format!("{:.3}", ms(row.worst_nanos)),
+                calls = row.calls,
+                "zone"
+            );
+        }
+    }
+
+    /// The rows, deepest-cost first within each depth. Sorted on read rather
+    /// than kept sorted: this runs once at exit and [`Profile::absorb`] runs
+    /// every frame.
+    #[must_use]
+    pub fn rows(&self) -> Vec<Row> {
+        let mut rows = self.rows.clone();
+        rows.sort_by(|a, b| {
+            a.depth
+                .cmp(&b.depth)
+                .then(b.total_nanos.cmp(&a.total_nanos))
+        });
+        rows
+    }
+}
 
 /// Open a CPU zone for the rest of the enclosing block, in both sinks.
 ///
@@ -198,6 +322,54 @@ mod tests {
         // first sample, which is what a reader rebuilds the tree from.
         let shape: Vec<(&str, u16)> = samples.iter().map(|s| (s.name, s.depth)).collect();
         assert_eq!(shape, [("inner", 1), ("outer", 0)]);
+    }
+
+    #[test]
+    fn a_profile_divides_by_frames_and_not_by_calls() {
+        // The distinction the report is built on: a frame owing three sim ticks
+        // opens `sim_tick` three times, and a per-frame budget wants the sum
+        // over *frames*. Fed by hand rather than through the collector so the
+        // arithmetic is checked in a build without the feature too.
+        let sample = |name, depth, nanos| super::Sample { name, depth, nanos };
+        let mut profile = super::Profile::default();
+        profile.absorb(&[sample("sim_tick", 0, 1_000_000)]);
+        profile.absorb(&[
+            sample("sim_tick", 0, 2_000_000),
+            sample("sim_tick", 0, 3_000_000),
+            sample("render", 0, 500_000),
+        ]);
+        assert_eq!(profile.frames(), 2);
+        // Cost order within a depth, which is what makes the table readable —
+        // and it is what puts `sim_tick` first, so the row is reached by index
+        // rather than by a search this crate's lints would make an `expect`.
+        let rows = profile.rows();
+        let shape: Vec<(&str, u64, u64, u64)> = rows
+            .iter()
+            .map(|r| (r.name, r.calls, r.total_nanos, r.worst_nanos))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("sim_tick", 3, 6_000_000, 3_000_000),
+                ("render", 1, 500_000, 500_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_zone_seen_at_two_depths_is_reported_at_the_shallower_one() {
+        // `render.frame` is depth 1 under the loop's `render` and depth 0 to an
+        // instrument calling the renderer directly. One row either way, indented
+        // where it is always at least that shallow.
+        let sample = |depth, nanos| super::Sample {
+            name: "render.frame",
+            depth,
+            nanos,
+        };
+        let mut profile = super::Profile::default();
+        profile.absorb(&[sample(2, 10)]);
+        profile.absorb(&[sample(1, 10)]);
+        assert_eq!(profile.rows()[0].depth, 1);
     }
 
     #[test]

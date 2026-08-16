@@ -22,10 +22,12 @@ use std::path::Path;
 
 use gg_core::reload::rejuvenate::Rejuvenator;
 use gg_core::{GameLib, Stages};
-use gg_ecs::boundary::{Eye, Light, Model, Prefs, Renderable, TickCtx, Widget, host_api};
+use gg_ecs::boundary::{Eye, Light, Look, Model, Prefs, Renderable, TickCtx, Widget, host_api};
 use gg_ecs::{ComponentOutcome, Save, Snapshot, World};
-use gg_extract::Extracted;
-use gg_input::{ActionMap, Drive, Input, InputFrame, Recorder, Replay, ReplayMeta};
+use gg_extract::{Extracted, Latch};
+use gg_input::{
+    ActionMap, AxisId, Drive, Input, InputFrame, MAX_AXES, Recorder, Replay, ReplayMeta,
+};
 use gg_platform::Window;
 use gg_render::{Renderer, View, ui::UiVertex};
 use gg_scene::Hierarchy;
@@ -195,6 +197,58 @@ pub struct App {
 }
 
 impl App {
+    /// The turn the hand has made that no tick has spent yet (§6 M56), or `None`
+    /// for a frame that must render the tick as it stands.
+    ///
+    /// Four ways to get `None`, and only the first is a decision about quality:
+    /// the knob is off; the game declares no [`Look`], which is every game that
+    /// predates M56 and every game whose camera is not a hand's; the sim is
+    /// **halted**, where `sim_tick` returns before `Input::tick` and the
+    /// accumulator therefore grows without bound; or the session is
+    /// **suspended** (§6 M49), which runs no tick at all. The last two also
+    /// empty the accumulator where they set that state, so this is belt and
+    /// braces on a hazard that reads as the view swinging by however long the
+    /// operator was away.
+    ///
+    /// Nothing here is `None` for a locked pace, and nothing needs to be — the
+    /// two readings are zero there on two *different* structural grounds, and
+    /// both are worth stating separately because they cover different tiers.
+    /// `pending` is zero because a locked frame spends the accumulator down to
+    /// nothing across its own ticks (`covered == count` exactly). `spent` is
+    /// zero because a replay's frame carries no motion to attribute
+    /// (`Input::tick_from` clears it) and a windowless run has no device to
+    /// produce any. So every replay, golden and headless tier (§5.6) adds a
+    /// latch of zeros, which is the identity — **by construction** rather than
+    /// by a flag someone has to remember to clear.
+    fn latch(&self) -> anyhow::Result<Option<Latch>> {
+        if self.halted || self.waiting || !gg_render::cvars::LATE_LATCH.bool() {
+            return Ok(None);
+        }
+        let Some(look) = Look::of(&self.world)? else {
+            return Ok(None);
+        };
+        let (yaw, pitch) = (self.reading(look.yaw_axis), self.reading(look.pitch_axis));
+        Ok(Some(Latch::of(look, (yaw.0, pitch.0), (yaw.1, pitch.1))))
+    }
+
+    /// `Input::pending` and `Input::spent` for the axis number a game wrote into
+    /// its [`Look`].
+    ///
+    /// Checked rather than trusted: the index is game data — from a system, a
+    /// save or an older build's world — and `AxisId::new` *asserts*. An axis
+    /// this build's map does not have is a view that does not turn, which is the
+    /// same nothing a game declaring no `Look` gets, and never a panic in the
+    /// host on a number a game got wrong.
+    fn reading(&self, axis: u32) -> (f32, f32) {
+        match usize::try_from(axis) {
+            Ok(index) if index < MAX_AXES => {
+                let id = AxisId::new(index);
+                (self.input.pending(id), self.input.spent(id))
+            }
+            _ => (0.0, 0.0),
+        }
+    }
+
     /// Load `game`, register what it declares, and start a world over it. In dev
     /// load number one already goes through the staging copy: loading
     /// `target/debug/game.dll` in place would make the next `cargo build` fail
@@ -1724,6 +1778,11 @@ impl Stages for App {
             // and one missed edge is a game that plays its music to an empty
             // desk for as long as the player is gone.
             self.audio.hush();
+            // And on the same reasoning, for the accumulator no tick will empty
+            // (§6 M56): a pointer that kept reporting across a five-minute
+            // alt-tab would otherwise be spent whole by the tick that resumes,
+            // which is a turn measured in minutes on one frame.
+            self.input.forget_motion();
         }
         if std::mem::replace(&mut self.waiting, waiting) != waiting {
             info!(frame, waiting, "window focus");
@@ -1777,6 +1836,12 @@ impl Stages for App {
             self.audio.forget();
         }
         if self.halted {
+            // `Input::tick` is below this return, so nothing empties the motion
+            // accumulator while a panicked system keeps the sim stopped (§6
+            // M56). A halt is recoverable — a rebuild clears it — and the tick
+            // that recovers must not be handed every count the mouse produced in
+            // between.
+            self.input.forget_motion();
             return Ok(());
         }
         // Before anything reads a knob this tick — `ui_fit` below is already one
@@ -2070,7 +2135,7 @@ impl Stages for App {
         // Blended before the editor's substitution below, never after: what the
         // two ticks bracket is the *game's* eye, and the editor's camera is host
         // state moved by a tick of its own.
-        let eye = self.extracted.eye(Eye::of(&self.world)?);
+        let eye = self.extracted.eye(Eye::of(&self.world)?, self.latch()?);
         // The editor's own camera while the scene is stopped (§6 M15.2 item 2):
         // host state, in no archetype and in no save, so what the operator flies
         // moves nothing the canonical hash can see. `game` back in every other

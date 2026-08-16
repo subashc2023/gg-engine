@@ -762,10 +762,19 @@ unsafe fn render(
             // Unlike a resolved *color* attachment, a resolved depth one is
             // still stored: the forward pass tests against these samples after
             // the AO pass has read their reduction, so both images are output.
-            .store_op(if store {
-                vk::AttachmentStoreOp::STORE
-            } else {
-                vk::AttachmentStoreOp::DONT_CARE
+            //
+            // **`NONE` and not `DONT_CARE` when the attachment is read-only**
+            // (§6 M59), and the difference is a write. `DONT_CARE` licenses the
+            // implementation to put anything it likes in the image, so a pass
+            // that only *tests* against depth was nonetheless the last thing to
+            // write it — which is what sync validation calls a WRITE_AFTER_WRITE
+            // hazard the moment a later pass samples it, and what would leave a
+            // depth buffer undefined after the forward pass on a driver that
+            // takes the licence. Vulkan 1.3 core, which this instance requires.
+            .store_op(match (store, read_only) {
+                (true, _) => vk::AttachmentStoreOp::STORE,
+                (false, true) => vk::AttachmentStoreOp::NONE,
+                (false, false) => vk::AttachmentStoreOp::DONT_CARE,
             });
         let info = match resolve {
             Some(into) => info

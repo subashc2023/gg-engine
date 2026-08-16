@@ -91,6 +91,13 @@ debug-tools = ["dep:gg-debug"]
 gpu-timings = ["gg-render/gpu-timings"]
 state-hash = []
 nan-scan = []
+# Where a frame's milliseconds went, printed once at exit (§6 M58). Forwarded to
+# both halves so the frame's own stages and the renderer's insides land in one
+# table. Deliberately in **no tier**: the collector is a `Vec` push per zone and
+# the report is a log line, but neither is free and a play session should not pay
+# for a table nobody asked for. `xtask run --profile` is what turns it on, which
+# is also the only build whose numbers are a session's.
+cpu-timings = ["gg-core/cpu-timings", "gg-render/cpu-timings"]
 # Forwarded rather than local: the machinery is `gg-core`'s and the tier
 # meta-features below are the only place that decides it is present.
 fp-assert = ["gg-core/fp-assert"]

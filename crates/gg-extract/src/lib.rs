@@ -49,7 +49,7 @@ pub use frustum::Frustum;
 /// `gg-render` does not, and should not have to for two constants.
 pub use gg_ecs::boundary::light;
 
-use gg_ecs::boundary::Eye;
+use gg_ecs::boundary::{Eye, Look};
 use gg_ecs::{AliasError, Component, Entity, Query, World};
 use gg_math::{render, sim};
 use rayon::prelude::*;
@@ -555,16 +555,46 @@ impl Extracted {
     }
 
     /// The eye to render this frame through: `current`, blended back towards the
-    /// captured one by whatever [`Extracted::interpolate`] was told.
+    /// captured one by whatever [`Extracted::interpolate`] was told, and turned
+    /// by whatever travel `latch` says no tick has spent (§6 M56).
     ///
     /// Taken rather than read out of the world so a host may substitute its own
     /// camera afterwards — the editor's, which is not in any archetype — without
     /// this having an opinion about which one it got.
+    ///
+    /// **The latch adds to the blend rather than replacing it**, which is the
+    /// one shape that gets both halves right. Split the angle a tick produced
+    /// into the part the hand drove and the part the game did: the hand's part
+    /// must not be walked backwards at all — that walk *is* the lag — while the
+    /// game's part (a recoil kick, a cutscene, a turret) is sim motion like a
+    /// position and wants exactly the interpolation everything else gets.
+    ///
+    /// So the correction is the travel no tick has spent, plus the `1 - alpha`
+    /// of the last tick's *hand* travel that the blend is still holding back.
+    /// The two together put the hand's contribution at where the hand is now and
+    /// leave the game's contribution blended, and the algebra is exact rather
+    /// than approximate: the tick's own spend is what the host reports.
+    ///
+    /// A latch whose four angles are zero is therefore the identity, which is
+    /// what a frame with no mouse travel gets — every golden, every replay
+    /// (`Input::tick_from` spends no motion) and every headless tier. Position
+    /// keeps the blend regardless, because a body walks on the sim's clock and
+    /// extrapolating it puts the camera through walls the sim will not let it
+    /// reach.
     #[must_use]
-    pub fn eye(&self, current: Eye) -> Eye {
-        match self.previous_eye {
+    pub fn eye(&self, current: Eye, latch: Option<Latch>) -> Eye {
+        let blended = match self.previous_eye {
             Some(previous) => blend_eye(previous, current, self.alpha as f32),
             None => current,
+        };
+        let Some(latch) = latch else {
+            return blended;
+        };
+        let held = 1.0 - (self.alpha as f32).clamp(0.0, 1.0);
+        Eye {
+            yaw: wrap_angle(blended.yaw + latch.yaw + held * latch.yaw_spent),
+            pitch: latch.limit(blended.pitch + latch.pitch + held * latch.pitch_spent),
+            ..blended
         }
     }
 
@@ -1154,6 +1184,82 @@ pub fn blend_eye(previous: Eye, current: Eye, alpha: f32) -> Eye {
             false => current.ortho,
         },
         reserved: current.reserved,
+    }
+}
+
+/// The turn a frame owes the hand: travel no tick has spent, already in radians
+/// (§6 M56).
+///
+/// Radians and not axis units because this crate cannot see `gg-input` and must
+/// not learn to (§3) — the host reads the accumulator, [`Latch::of`] applies the
+/// game's own declared rate, and what crosses is an angle.
+///
+/// Render-side by construction, exactly as [`Extracted::interpolate`]'s alpha
+/// is: it is computed from an accumulator, consumed by [`Extracted::eye`], and
+/// written back nowhere. No canonical hash, replay or save can see it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Latch {
+    /// Radians the hand has turned that no tick has spent.
+    pub yaw: f32,
+    /// The same for pitch, before [`Latch::limit`].
+    pub pitch: f32,
+    /// Radians of the **last tick's** turn that came from the hand rather than
+    /// from the game — the part of the blend that must not be walked backwards.
+    /// Separate from [`Latch::yaw`] because it is scaled by `1 - alpha` and that
+    /// one is not.
+    pub yaw_spent: f32,
+    /// The same for pitch.
+    pub pitch_spent: f32,
+    /// The game's own pitch clamp, radians; `0.0` leaves the angle alone.
+    pub pitch_limit: f32,
+}
+
+impl Latch {
+    /// What `look` makes of the two axis readings that matter: what is pending
+    /// (`gg_input::Input::pending`) and what the last tick spent of the same
+    /// source (`gg_input::Input::spent`).
+    ///
+    /// The multiply lives here rather than in the host so the sign convention is
+    /// applied in one place: [`Look`] states a *signed* rate precisely so that
+    /// neither this crate nor the shell has to know which way a mouse turns a
+    /// camera, and two copies of that decision is one too many.
+    #[must_use]
+    pub fn of(look: Look, pending: (f32, f32), spent: (f32, f32)) -> Self {
+        Latch {
+            yaw: pending.0 * look.yaw_rate,
+            pitch: pending.1 * look.pitch_rate,
+            yaw_spent: spent.0 * look.yaw_rate,
+            pitch_spent: spent.1 * look.pitch_rate,
+            pitch_limit: look.pitch_limit,
+        }
+    }
+
+    /// `pitch` held inside the game's declared limit, or untouched if it
+    /// declared none.
+    ///
+    /// The latch clamps because the *tick* clamps: without this the picture
+    /// turns past a limit the next tick refuses, and the hand feels a snap back
+    /// — which is a worse artifact than the lag being removed.
+    #[must_use]
+    pub fn limit(&self, pitch: f32) -> f32 {
+        match self.pitch_limit > 0.0 {
+            true => pitch.clamp(-self.pitch_limit, self.pitch_limit),
+            false => pitch,
+        }
+    }
+}
+
+/// Keep an angle in ±π. An unbounded yaw loses the precision a 240 Hz frame's
+/// share of a turn is made of — the same wrap every fly camera in this tree
+/// applies, restated here because the latch adds to an angle after the sim
+/// stopped looking at it.
+fn wrap_angle(yaw: f32) -> f32 {
+    use core::f32::consts::{PI, TAU};
+    let yaw = yaw % TAU;
+    match yaw {
+        y if y > PI => y - TAU,
+        y if y < -PI => y + TAU,
+        y => y,
     }
 }
 
@@ -2491,6 +2597,111 @@ mod tests {
             ..Eye::ORIGIN
         };
         assert_eq!(blend_eye(flat, zoomed, 0.5).ortho, 6.0, "a zoom does blend");
+    }
+
+    /// An `Extracted` holding `previous` as its captured eye, `alpha` past it.
+    fn staged(previous: Eye, alpha: f32) -> Extracted {
+        let mut world = World::new();
+        let entity = world.spawn();
+        world.insert(entity, previous).unwrap();
+        let mut extracted = Extracted::default();
+        extracted.capture_eye(&world).unwrap();
+        extracted.interpolate(alpha);
+        extracted
+    }
+
+    /// The property every golden, replay and headless tier rests on (§6 M56):
+    /// a latch with nothing in it is the identity, so a frame with no mouse
+    /// travel renders bit-for-bit what it rendered before the latch existed.
+    ///
+    /// Asserted against a *nonzero* alpha and two different eyes, because at
+    /// alpha zero, or between two equal eyes, an `eye` that ignored its latch
+    /// entirely would also pass.
+    #[test]
+    fn a_latch_with_no_travel_in_it_renders_exactly_the_interpolated_tick() {
+        let previous = Eye::at(sim::DVec3::new(1.0, 2.0, 3.0), 0.4, -0.2);
+        let current = Eye::at(sim::DVec3::new(4.0, 2.0, 3.0), 0.9, 0.3);
+        let extracted = staged(previous, 0.37);
+        let blended = extracted.eye(current, None);
+        assert_ne!(blended, current, "alpha is doing something to blend past");
+        assert_eq!(
+            extracted.eye(current, Some(Latch::default())),
+            blended,
+            "an empty latch moves nothing"
+        );
+    }
+
+    /// The algebra the milestone is: a hand turning at a constant rate must land
+    /// on the angle the hand has actually reached, whatever the frame caught the
+    /// tick at. The blend alone cannot — that is the lag being removed.
+    #[test]
+    fn a_latched_view_lands_on_the_hand_and_the_blend_lands_behind_it() {
+        // One tick turned -0.10 rad, all of it the hand's; the frame sits 0.25
+        // of a tick past it with another -0.025 rad in hand unspent.
+        let look = Look::fly(0, 1, 1.0, 0.0);
+        let previous = Eye::at(sim::DVec3::ZERO, 0.0, 0.0);
+        let current = Eye::at(sim::DVec3::ZERO, -0.10, 0.0);
+        let extracted = staged(previous, 0.25);
+        let latch = Latch::of(look, (0.025, 0.0), (0.10, 0.0));
+
+        // Where the hand is: a tick's worth plus a quarter of one more.
+        let hand = -0.125;
+        let shown = extracted.eye(current, Some(latch)).yaw;
+        assert!((shown - hand).abs() < 1e-6, "{shown} is not {hand}");
+
+        // And the interpolated frame is a whole tick period behind it, which is
+        // the number `gg-tools pace` prints as `age`.
+        let blended = extracted.eye(current, None).yaw;
+        assert!((blended - -0.025).abs() < 1e-6, "{blended}");
+    }
+
+    /// The half the additive form exists for: a rotation the *game* drove — a
+    /// recoil kick, a cutscene — is sim motion and keeps its interpolation. A
+    /// latch that replaced the blend instead of adding to it would step it at
+    /// the tick rate, which is the judder this whole line of work removes.
+    #[test]
+    fn a_turn_the_game_drove_still_interpolates_under_a_latch() {
+        let look = Look::fly(0, 1, 1.0, 0.0);
+        let previous = Eye::at(sim::DVec3::ZERO, 0.0, 0.0);
+        let current = Eye::at(sim::DVec3::ZERO, 0.8, 0.0);
+        let extracted = staged(previous, 0.25);
+        // No hand at all: nothing pending, and the tick spent no motion.
+        let latch = Latch::of(look, (0.0, 0.0), (0.0, 0.0));
+        let shown = extracted.eye(current, Some(latch)).yaw;
+        assert!((shown - 0.2).abs() < 1e-6, "{shown} is not the blend");
+    }
+
+    /// A latch turns the angles and nothing else — position keeps the blend,
+    /// because extrapolating a body puts the camera through a wall the sim will
+    /// not let it reach.
+    #[test]
+    fn a_latch_moves_no_position() {
+        let look = Look::fly(0, 1, 1.0, 0.0);
+        let previous = Eye::at(sim::DVec3::ZERO, 0.0, 0.0);
+        let current = Eye::at(sim::DVec3::new(10.0, 0.0, 0.0), 0.0, 0.0);
+        let extracted = staged(previous, 0.5);
+        let latch = Latch::of(look, (1.0, 1.0), (1.0, 1.0));
+        assert_eq!(
+            extracted.eye(current, Some(latch)).position,
+            extracted.eye(current, None).position
+        );
+    }
+
+    /// The clamp is the game's, and the latch has to honour it: without this the
+    /// picture turns past a limit the next tick refuses and the hand feels the
+    /// snap back.
+    #[test]
+    fn a_latched_pitch_stops_where_the_game_said_it_would() {
+        let look = Look::fly(0, 1, 1.0, 1.55);
+        let previous = Eye::at(sim::DVec3::ZERO, 0.0, 1.5);
+        let current = Eye::at(sim::DVec3::ZERO, 0.0, 1.54);
+        let extracted = staged(previous, 1.0);
+        // A flick that would put the picture at 2.54 rad — past vertical.
+        let latch = Latch::of(look, (-1.0, -1.0), (0.0, 0.0));
+        assert_eq!(extracted.eye(current, Some(latch)).pitch, 1.55);
+        // And a game that declared no limit is left alone.
+        let free = Latch::of(Look::fly(0, 1, 1.0, 0.0), (-1.0, -1.0), (0.0, 0.0));
+        assert!(extracted.eye(current, Some(free)).pitch > 2.5);
     }
 
     #[test]

@@ -264,9 +264,14 @@ fn a_shot_that_leaves_the_room_refits_the_field_and_the_shadow_cull_absorbs_it()
          follows a transient out of the room, this is the good news and §6 M37 item 3's number \
          is stale"
     );
+    // `[8, 3, 8]` and not the `[8, 4, 8]` this recorded until §6 M57: the room's
+    // walls top out at exactly `y = 4.0` against a 4 m spacing, so two spacings
+    // and three probes bracket it exactly. The fourth layer was an `f32` ULP on
+    // a `ceil`'s riser, which is the wobble M57 steadied — this assertion had
+    // pinned the artefact.
     assert_eq!(
         (was, spacing, had, counts),
-        (4.0, 8.0, [8, 4, 8], [5, 8, 5]),
+        (4.0, 8.0, [8, 3, 8], [5, 8, 5]),
         "the room or the fit moved — §6 M37 item 3 quotes these two grids"
     );
     // Everything the old grid had gathered is gone: what is left to gather is

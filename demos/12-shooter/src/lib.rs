@@ -73,8 +73,8 @@ pub mod session;
 
 use gg_ecs::Component;
 use gg_ecs::boundary::{
-    ActionId, AxisId, Eye, GameWorld, Light, Prefs, QUIET_MAX, Renderable, Sky, Sound, Widget, aa,
-    log_level, wave, widget_id,
+    ActionId, AxisId, Eye, GameWorld, Light, Look, Prefs, QUIET_MAX, Renderable, Sky, Sound,
+    Widget, aa, log_level, wave, widget_id,
 };
 use gg_math::sim;
 
@@ -1647,12 +1647,35 @@ pub fn lay_out(world: &mut GameWorld, session: Session, prefs: Prefs) {
 /// Say what the tick looks like: where the eye is, and what the HUD reads. Last
 /// in the table, so it describes the tick that just happened (§4.5 v0).
 pub fn present(world: &mut GameWorld) {
+    let session = session_of(world);
     let mut seen = None;
     world.visit::<&Walker>(|entity, walker| seen = Some((entity, *walker)));
     let Some((entity, walker)) = seen else {
         return;
     };
     world.put(entity, Eye::at(eye_of(&walker), walker.yaw, walker.pitch));
+    // The coupling [`aim`] applies, restated as data so the host can show the
+    // travel this frame's mouse has already made rather than waiting for the
+    // next tick to spend it (§6 M56). The *same* `look_per_count`, so a
+    // sensitivity slider moves both halves at once and there is no second copy
+    // of the number to drift.
+    //
+    // Zero while paused, for exactly [`aim`]'s reason: raw device motion arrives
+    // whether the host holds the pointer or not, and a latch that did not refuse
+    // it would spin the camera behind the menu the sim is holding still.
+    let per_count = match session.paused {
+        0 => look_per_count(session.sens),
+        _ => 0.0,
+    };
+    world.put(
+        entity,
+        Look::fly(
+            AIM_X.index() as u32,
+            AIM_Y.index() as u32,
+            per_count,
+            PITCH_LIMIT,
+        ),
+    );
 
     // Ground speed in tenths of a metre per second: the tick rate is the
     // conversion, and it is an integer, so no float clock appears anywhere.
@@ -2269,7 +2292,7 @@ impl Line {
 gg_ecs::gg_game! {
     components: [
         Walker, Solid, Cue, Hud, Menu, Session, Gun, Range, Target, Spark,
-        Renderable, Light, Sky, Eye, Widget, Sound, Prefs
+        Renderable, Light, Sky, Eye, Look, Widget, Sound, Prefs
     ],
     actions: ["jump", "restart", "pause", "ui_click", "ui_focus", "fire"],
     axes: ["move_right", "move_forward", "aim_x", "aim_y", "ui_x", "ui_y"],

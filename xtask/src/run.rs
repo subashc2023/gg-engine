@@ -25,8 +25,8 @@ use crate::util;
 const CHILD_POLL: Duration = Duration::from_millis(250);
 
 /// Run `<demo>` under the shell. Extra flags after the demo name are forwarded
-/// to `gg-runtime` (`--frames`, `--record`, `--replay`), except `--tracy` and
-/// `--watch`, which are this command's own.
+/// to `gg-runtime` (`--frames`, `--record`, `--replay`), except `--tracy`,
+/// `--watch`, `--validate` and `--profile`, which are this command's own.
 pub fn run(args: &[&str]) -> anyhow::Result<()> {
     let demo = args
         .iter()
@@ -49,13 +49,19 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
     // static constructor, so a shell built with it prompts the firewall on
     // every fresh build path even when nobody attaches a profiler (§6 M9).
     // Consumed here, never forwarded — the shell has no such flag.
-    let features = if args.contains(&"--tracy") {
-        "tier-dev,tracy"
-    } else {
-        "tier-dev"
-    };
+    // §6 M58's reader. Its own flag rather than part of `tier-dev` for the
+    // reason the feature's declaration gives: a play session should not pay for
+    // a table nobody asked for. Composes with `--tracy`, which is the same
+    // measurement through a GUI instead of a terminal.
+    let mut features = String::from("tier-dev");
+    if args.contains(&"--tracy") {
+        features.push_str(",tracy");
+    }
+    if args.contains(&"--profile") {
+        features.push_str(",cpu-timings");
+    }
     util::run(
-        util::cargo().args(["build", "-p", "gg-runtime", "--features", features]),
+        util::cargo().args(["build", "-p", "gg-runtime", "--features", &features]),
         "cargo build (shell)",
     )?;
 
@@ -71,6 +77,21 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
     );
 
     let mut shell = std::process::Command::new(shell_binary(&root));
+    // §6 M58. The validation layer is a *frame* cost and a large one — 5.4 ms
+    // on demo 12 at 1080p on the desk's 4090, with the device's own time
+    // unchanged, which is the whole of a 240 Hz panel reporting 150. This is
+    // the one command whose subject is a human playing, and a play session has
+    // nothing to prove about API misuse that `ci --push`, `xtask gpu` and every
+    // nextest run do not already prove on the same code. Said out loud both
+    // ways: a quiet downgrade is what §1.10 forbids, and the operator has to
+    // know which build the number they are about to read came from.
+    match args.contains(&"--validate") {
+        true => println!("xtask: validation layer on (--validate) — expect a slower frame"),
+        false => {
+            shell.env("GG_VALIDATION", "0");
+            println!("xtask: validation layer off for play — `--validate` puts it back");
+        }
+    }
     shell.arg("--game").arg(&dylib);
     // The bindings are the game crate's, beside its source (§4.7). Passing them
     // rather than having the shell guess keeps "where does the map come from" a
@@ -90,10 +111,13 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
             .arg("--pack")
             .arg(root.join(format!("target/assets/{demo}.ggpack")));
     }
-    shell.args(
-        args.iter()
-            .filter(|a| *a != demo && **a != "--tracy" && **a != "--watch"),
-    );
+    shell.args(args.iter().filter(|a| {
+        *a != demo
+            && **a != "--tracy"
+            && **a != "--watch"
+            && **a != "--validate"
+            && **a != "--profile"
+    }));
     if !args.contains(&"--watch") {
         return util::run(&mut shell, "gg-runtime");
     }

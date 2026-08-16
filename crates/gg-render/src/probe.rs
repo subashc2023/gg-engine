@@ -101,6 +101,42 @@ const MAX_PER_AXIS: u32 = 8;
 /// Octahedral edge of a probe's distance tile, at most — see [`MAX_PER_AXIS`].
 const MAX_MOMENT_EDGE: u32 = 8;
 
+/// Relative headroom the roundings in [`Grid::fit`] give a bound that lands on
+/// one of their risers (§6 M57).
+///
+/// Every rounding there is a step function, and a bound sitting exactly on a
+/// step makes the fit a coin toss. The bounds arrive through §1.4's membrane —
+/// an absolute position narrowed to `f32` against the camera origin and widened
+/// back — so one that is *exactly* a whole spacing wobbles by an `f32` ULP of its
+/// distance as the eye moves, and that is enough. Demo 12's walls top out at
+/// exactly `y = 4.0` against a 4 m spacing: the vertical probe count alternated 3
+/// and 4, and [`Probes::update`] threw the whole field away on every flip.
+/// `gg-tools field` measured sixteen refits in a sixty-frame jump, each moving
+/// 6-10 % of the room's light, against zero for the same eye walking and turning.
+///
+/// **Relative and not absolute**, which the first version got wrong: a
+/// thousandth of a spacing is four millimetres at demo 12's, three orders above
+/// the noise it exists to absorb, and it moved a golden whose fit was never in
+/// doubt. `f32` carries about `6e-8` of relative precision, so `1e-5` is two
+/// orders of margin over the wobble and still narrower than any fit decision that
+/// means anything — it can only change an answer that was already a coin toss.
+const SLACK: f64 = 1e-5;
+
+/// `q` rounded down, counting a value within [`SLACK`] *below* an integer as that
+/// integer. `magnitude` is the scale the inputs were computed at, since a `q`
+/// that is a difference of large numbers has lost precision that `q` itself no
+/// longer shows.
+fn floor_steady(q: f64, magnitude: f64) -> f64 {
+    (q + SLACK * magnitude.abs().max(1.0)).floor()
+}
+
+/// `q` rounded up, counting a value within [`SLACK`] *above* an integer as that
+/// integer — [`floor_steady`]'s mirror, and it has to be the mirror: the two are
+/// applied to the same bound from opposite sides.
+fn ceil_steady(q: f64, magnitude: f64) -> f64 {
+    (q - SLACK * magnitude.abs().max(1.0)).ceil()
+}
+
 /// Metres the near plane of a probe's face sits at. `crate::lamp`'s reasoning
 /// and its value: inside anything a probe could be mounted in, and not so small
 /// that reverse-Z spends its precision on the first millimetre.
@@ -211,12 +247,17 @@ impl Grid {
         // `widest` may be non-finite; `max(1.0)` on a NaN takes the 1.0 branch,
         // and the count below clamps whatever survives that.
         let multiple = if widest.is_finite() {
-            (widest / (asked * reach)).ceil().clamp(1.0, 1e6)
+            let reached = widest / (asked * reach);
+            ceil_steady(reached, reached).clamp(1.0, 1e6)
         } else {
             1.0
         };
         let spacing = asked * multiple;
-        let snap = |v: f64| (v / spacing).floor() * spacing;
+        // Every rounding here is steadied, and a bound on a riser has to fall the
+        // *same* way in all of them: a `min` that snapped down a whole spacing
+        // while its span rounded up would grow the grid by a probe on one side
+        // and lose it on the other.
+        let snap = |v: f64| floor_steady(v / spacing, v / spacing) * spacing;
         let origin = sim::DVec3::new(snap(min.x), snap(min.y), snap(min.z));
         let count = |lo: f64, hi: f64| {
             // +1 because a span of one spacing needs two probes to bracket it,
@@ -225,8 +266,10 @@ impl Grid {
             // finite — an instance with an infinite radius, a scene bounded by
             // nothing — saturates a `u32` and the `+ 1` below overflows, which
             // is a panic in a renderer instead of a coarse grid.
-            let spans = ((hi - lo) / spacing)
-                .ceil()
+            // The magnitude is `|hi| + |lo|` and not the span: a span is a
+            // *difference*, and one metre between two points a kilometre out
+            // carries the precision of the kilometre, not of the metre.
+            let spans = ceil_steady((hi - lo) / spacing, (hi.abs() + lo.abs()) / spacing)
                 .clamp(0.0, f64::from(MAX_PER_AXIS)) as u32;
             (spans + 1).clamp(2, MAX_PER_AXIS)
         };
@@ -245,12 +288,25 @@ impl Grid {
     /// keeps a moving crate from refitting the field every frame.
     pub(crate) fn covers(&self, min: sim::DVec3, max: sim::DVec3) -> bool {
         let far = self.corner();
-        min.x >= self.origin.x
-            && min.y >= self.origin.y
-            && min.z >= self.origin.z
-            && max.x <= far.x
-            && max.y <= far.y
-            && max.z <= far.z
+        // Steadied for the same reason `fit` is, and to the same width: a bound
+        // sitting exactly on the far corner must not answer this one way and the
+        // fit the other. Scaled by the corner's own distance, since that is where
+        // the precision went.
+        let reach = far
+            .x
+            .abs()
+            .max(far.y.abs())
+            .max(far.z.abs())
+            .max(self.origin.x.abs())
+            .max(self.origin.y.abs())
+            .max(self.origin.z.abs());
+        let slack = SLACK * (self.spacing + reach);
+        min.x >= self.origin.x - slack
+            && min.y >= self.origin.y - slack
+            && min.z >= self.origin.z - slack
+            && max.x <= far.x + slack
+            && max.y <= far.y + slack
+            && max.z <= far.z + slack
     }
 
     /// The probe diagonally opposite the origin.
@@ -469,6 +525,19 @@ impl Probes {
             None => true,
         };
         if refit {
+            // A refit discards every probe, so it is an event and not a detail:
+            // §6 M57's flicker was sixteen of these in a sixty-frame jump and
+            // nothing named one. `debug` rather than `info` because a session
+            // legitimately refits while a level streams in.
+            tracing::debug!(
+                target: "gg::field",
+                spacing = fitted.spacing,
+                counts = ?fitted.counts,
+                origin = ?fitted.origin,
+                probes = fitted.probes(),
+                was = ?self.grid.map(|g| (g.spacing, g.counts)),
+                "probe field refitted"
+            );
             self.ungathered = vec![true; fitted.probes()];
             self.cursor = 0;
             self.grid = Some(fitted);
@@ -1039,6 +1108,70 @@ mod tests {
             grid.unwrap_or_else(|| Grid::fit(at(0.0, 0.0, 0.0), at(0.0, 0.0, 0.0), 2.0)),
             "the wobble crossed a snap boundary, so `covers` is what held the grid"
         );
+    }
+
+    /// A bound sitting exactly on a spacing multiple fits *one* grid, however the
+    /// membrane rounds it (§6 M57).
+    ///
+    /// Demo 12's own numbers, because they are what found this: a 25 m room whose
+    /// walls top out at exactly `y = 4.0` against the 4 m spacing `r.gi_spacing`
+    /// widens to. The bounds reach the renderer as `f32` offsets against the
+    /// camera origin (§1.4) and are widened back, so `max.y` arrives a ULP either
+    /// side of 4.0 depending on where the eye is — and the eye's *height* is what
+    /// moves it, which is why a player saw this while jumping and not while
+    /// walking. Without [`SLACK`] the vertical count alternates 3, 4, 3, 4 and
+    /// [`Probes::update`] discards the whole field on every flip.
+    ///
+    /// `covers` cannot be what saves this: a 25 m room does not fit eight probes
+    /// at 4 m from a snapped origin, so it is false every frame here and the
+    /// refit test is `grid != fitted` alone. The fit *is* the hysteresis.
+    #[test]
+    fn a_bound_on_a_spacing_multiple_fits_one_grid_however_the_membrane_rounds_it() {
+        let mut probes = Probes::default();
+        cvars::GI_RATE.set_int(0);
+        cvars::GI_SPACING.set_float(2.0);
+        // Well past an `f32` ULP at these magnitudes (~1e-6 m) and far under the
+        // 4 mm [`SLACK`] is worth, which is the band the claim is about.
+        let wobbles = [0.0, 1e-7, -1e-7, 4e-7, -4e-7, 2e-6, -2e-6];
+        let fitted: Vec<Grid> = wobbles
+            .iter()
+            .map(|w| {
+                Grid::fit(
+                    at(-12.5 + w, -0.5 - w, -12.5 - w),
+                    at(12.5, 4.0 + w, 12.5),
+                    2.0,
+                )
+            })
+            .collect();
+        assert!(
+            fitted.windows(2).all(|p| p[0] == p[1]),
+            "the fit moved under a rounding: {fitted:?}"
+        );
+        assert_eq!(fitted[0].spacing(), 4.0, "the room is wider than 8 x 2 m");
+        assert!(
+            !fitted[0].covers(at(-12.5, -0.5, -12.5), at(12.5, 4.0, 12.5)),
+            "if the clamped grid ever covers this room, the test below proves nothing"
+        );
+        // And the field survives the whole wobble, which is the observable half:
+        // one grid, and `pending` never climbing back off a refit.
+        let (min, max) = (at(-12.5, -0.5, -12.5), at(12.5, 4.0, 12.5));
+        probes.update(min, max, sim::DVec3::ZERO);
+        let grid = probes.grid();
+        // `r.gi_rate 0` is one *batch* and not one grid ([`MAX_BATCH`]), so a
+        // 192-probe field takes three passes however fast it is asked for.
+        for _ in 0..grid.map_or(0, |g| g.probes().div_ceil(MAX_BATCH)) {
+            probes.update(min, max, sim::DVec3::ZERO);
+        }
+        assert_eq!(probes.pending(), 0, "the field never converged");
+        for w in wobbles {
+            probes.update(
+                at(-12.5 + w, -0.5 - w, -12.5 - w),
+                at(12.5, 4.0 + w, 12.5),
+                sim::DVec3::ZERO,
+            );
+            assert_eq!(probes.grid(), grid, "refit on a wobble of {w}");
+            assert_eq!(probes.pending(), 0, "the field was thrown away at {w}");
+        }
     }
 
     /// The grid brackets what it was fitted to — every corner of the bounds is

@@ -47,6 +47,8 @@ const SPAWN: WidgetId = WidgetId::new("editor.tree.spawn");
 const COPY: WidgetId = WidgetId::new("editor.tree.duplicate");
 const KILL: WidgetId = WidgetId::new("editor.tree.delete");
 const TOOL: WidgetId = WidgetId::new("editor.gizmo.tool");
+/// §6 M59's view picker, in the perf pane beside the passes it picks among.
+const DEBUG: WidgetId = WidgetId::new("editor.debug.view");
 
 /// How far in front of the camera a spawned entity lands, in metres. Far enough
 /// to see whole at the default field of view, near enough that its gizmo arms
@@ -816,9 +818,18 @@ impl Editor {
     }
 
     /// The §4.8 registry, over the same globals `gg_debug`'s console edits — one
-    /// registry, so the two faces cannot disagree about a value. Booleans toggle
-    /// on click; the rest are shown and left to the console, because a numeric
-    /// CVar has no step this panel could guess.
+    /// registry, so the two faces cannot disagree about a value.
+    ///
+    /// Booleans toggle on click. Numbers **nudge** since §6 M59, where the note
+    /// here used to say a numeric CVar has no step this panel could guess. It
+    /// does not have to guess an absolute one: a float steps by a *ratio* and an
+    /// int by one, which is the pair that serves `r.ao_radius` (0.5 to 4 metres
+    /// in seven clicks) and `r.ao_slices` (two to three) out of one rule.
+    ///
+    /// What made it worth doing is that the editor could not previously set the
+    /// knobs the milestone's own findings are about — every `r.ao_*` in this
+    /// pane was a read-only label, so "look at the scene and tune it" meant
+    /// editing `gg.cfg` and restarting.
     pub(crate) fn cvars(&mut self, body: Rect) {
         let body = body.inset(3.0);
         let cvars = gg_core::cvar::all();
@@ -830,17 +841,42 @@ impl Editor {
             let Some(rect) = cell(&scroll, columns, rows, i) else {
                 continue;
             };
-            let toggle = matches!(cvar.kind(), gg_core::cvar::CVarKind::Bool);
-            let text = format!("{} {}", fit_text(cvar.name(), 20), cvar.to_text());
-            if toggle {
-                if self.button(KNOB.indexed(i as u64), rect, &text, cvar.bool()) {
+            let id = i as u64;
+            if matches!(cvar.kind(), gg_core::cvar::CVarKind::Bool) {
+                let text = format!("{} {}", fit_text(cvar.name(), 20), cvar.to_text());
+                if self.button(KNOB.indexed(id), rect, &text, cvar.bool()) {
                     cvar.set_bool(!cvar.bool());
                     self.edits += 1;
                     tracing::info!(cvar = cvar.name(), value = cvar.bool(), "editor: cvar set");
                 }
-            } else {
-                let color = if cvar.is_default() { DIM } else { INK };
-                self.label(rect, &text, color);
+                continue;
+            }
+            // Two nudges at the right end, the reading to the left of them.
+            // Narrow on purpose: the name and the value are what a reader scans
+            // and the buttons are what a tuner reaches for, so the row must not
+            // become two thirds chrome.
+            let step = ICON + 4.0;
+            let (down, up) = (
+                Rect::new(rect.right() - step * 2.0, rect.y, step, rect.h),
+                Rect::new(rect.right() - step, rect.y, step, rect.h),
+            );
+            let room = ((rect.w - step * 2.0) / EM) as usize;
+            let text = format!("{} {}", fit_text(cvar.name(), 17), cvar.to_text());
+            let color = if cvar.is_default() { DIM } else { INK };
+            self.label(rect, fit_text(&text, room), color);
+            for (button, up) in [(down, false), (up, true)] {
+                let glyph = if up { "+" } else { "-" };
+                let widget = if up { PLUS } else { MINUS };
+                if !self.button(widget.indexed(id), button, glyph, false) {
+                    continue;
+                }
+                nudge(cvar, up);
+                self.edits += 1;
+                tracing::info!(
+                    cvar = cvar.name(),
+                    value = cvar.to_text(),
+                    "editor: cvar set"
+                );
             }
         }
         self.list.pop_clip();
@@ -889,20 +925,53 @@ impl Editor {
 
     /// What M8's overlay shows when it has room (§4.8): the pass list with its
     /// GPU milliseconds, and the device's memory.
+    ///
+    /// **Every** pass since §6 M59, on a scroll bar, where it used to be the
+    /// first six of them. Six is what fits, and a frame with four cascades, a
+    /// lamp atlas and three probe passes had fourteen — so the list stopped
+    /// exactly where the passes an operator has a question about begin, and the
+    /// "gpu total" beside it was the total of the six that were shown.
     pub(crate) fn perf(&mut self, body: Rect, frame: &Frame) {
         let body = body.inset(3.0);
         let per = rows_in(body);
         let half = body.w * 0.5;
-        let mut y = body.y;
-        let mut total = 0.0;
-        for pass in frame.passes.iter().take(per.min(6)) {
-            let text = format!("{:<14}{:>7.3}ms", fit_text(&pass.name, 14), pass.gpu_ms);
-            self.label(Rect::new(body.x, y, half, 8.0), &text, INK);
-            total += pass.gpu_ms;
-            y += PITCH;
+        let total: f32 = frame.passes.iter().map(|pass| pass.gpu_ms).sum();
+        // The view picker sits above the list rather than in the CVar pane,
+        // because the CVar pane makes only *bools* clickable — an int there is a
+        // read-only label, so before this the editor could show `r.debug_view`
+        // and not set it (§6 M59).
+        let picker = Rect::new(body.x, body.y, half, ROW);
+        let view = gg_render::cvars::DEBUG_VIEW.int();
+        let names = gg_render::cvars::DEBUG_VIEWS;
+        let name = usize::try_from(view)
+            .ok()
+            .and_then(|i| names.get(i))
+            .copied()
+            .unwrap_or("off");
+        if self.button(DEBUG, picker, &format!("view: {name}"), view != 0) {
+            // Wrapping through the whole table, including back to off: one
+            // button, and a view the frame has nothing for shows the picture,
+            // so cycling past it is not a dead end (`debug_source`).
+            let next = usize::try_from(view).map_or(1, |i| (i + 1) % names.len());
+            gg_render::cvars::DEBUG_VIEW.set_int(next as i64);
+            self.edits += 1;
+            tracing::info!(view = names.get(next), "editor: debug view");
         }
+        let list = Rect::new(body.x, body.y + PITCH, half, body.h - PITCH - ROW);
+        let scroll = self.scrollable(Pane::Perf, list, frame.passes.len() as f32 * PITCH);
+        self.list.push_clip(scroll.view);
+        for (i, pass) in frame.passes.iter().enumerate() {
+            let text = format!("{:<14}{:>7.3}ms", fit_text(&pass.name, 14), pass.gpu_ms);
+            let y = scroll.view.y - scroll.offset + i as f32 * PITCH;
+            self.label(Rect::new(list.x, y, half, 8.0), &text, INK);
+        }
+        self.list.pop_clip();
         if frame.passes.is_empty() {
-            self.label(Rect::new(body.x, y, body.w, 8.0), "no gpu on this run", DIM);
+            self.label(
+                Rect::new(body.x, list.y, body.w, 8.0),
+                "no gpu on this run",
+                DIM,
+            );
         }
         let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
         // The session's own tallies live here rather than in the title bar: a
@@ -1395,6 +1464,42 @@ pub(crate) fn prompt_field(pane: Rect) -> (Rect, Rect) {
 /// nothing and does nothing, which reads as broken rather than as empty. `fix`
 /// additionally needs a refusal: sending an agent after a reload that worked is
 /// a way to spend money on a question with no answer.
+/// One click's worth of a numeric CVar (§6 M59).
+///
+/// A **ratio** for floats, because the knobs worth turning here span orders of
+/// magnitude — `r.ao_radius` lives around 0.5, `r.gi_spacing` around 4, and
+/// `r.peak_nits` around 1000, so one additive step cannot serve all three. The
+/// additive floor beside it is what lets a value reach and leave zero, which a
+/// pure ratio never can.
+///
+/// Clamped to nothing on purpose: the CVars clamp themselves where they must
+/// (`r.ao_slices` at read, `AO_RADIUS.max(1e-3)`), and a second opinion here
+/// would be a range this panel invented.
+fn nudge(cvar: &gg_core::cvar::CVar, up: bool) {
+    const RATIO: f64 = 1.25;
+    /// Below this a ratio moves nothing worth seeing, so the step goes additive.
+    const FLOOR: f64 = 0.01;
+    match cvar.kind() {
+        gg_core::cvar::CVarKind::Int => cvar.set_int(cvar.int() + if up { 1 } else { -1 }),
+        gg_core::cvar::CVarKind::Float => {
+            let value = cvar.float();
+            let stepped = match (up, value.abs() < FLOOR) {
+                (true, true) => FLOOR,
+                (true, false) => value * RATIO,
+                (false, true) => 0.0,
+                (false, false) => value / RATIO,
+            };
+            cvar.set_float(if stepped.abs() < FLOOR && up {
+                FLOOR
+            } else {
+                stepped
+            });
+        }
+        // Handled by the caller, which never reaches here.
+        gg_core::cvar::CVarKind::Bool => {}
+    }
+}
+
 fn buttons(reload: Option<&gg_agent::Seam>) -> (bool, bool) {
     match reload.map(|seam| &seam.outcome) {
         None => (false, false),

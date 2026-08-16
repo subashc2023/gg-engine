@@ -72,7 +72,7 @@ impl Game {
             let declared = world.adopt(&gg_game_components()).unwrap();
             (gg_game_systems(), declared)
         };
-        assert_eq!(declared, 17, "ten of ours and the protocol's seven");
+        assert_eq!(declared, 18, "ten of ours and the protocol's eight");
         Game {
             world,
             table,

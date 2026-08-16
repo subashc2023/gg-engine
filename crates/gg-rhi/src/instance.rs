@@ -32,6 +32,62 @@ fn gpuav_requested() -> bool {
     *ON.get_or_init(|| std::env::var("GG_GPUAV").is_ok_and(|v| v == "1"))
 }
 
+/// Whether the validation layer is loaded at all — on unless `GG_VALIDATION=0`
+/// (§6 M58).
+///
+/// The layer is a **frame** cost, not a call cost, and nothing in this tree could
+/// see that until `gg-tools frame` could print a frame's CPU zones: on demo 12 at
+/// 1080p it adds **5.4 ms** to `render.execute` and leaves the device's own time
+/// unchanged to three decimals. That is the whole of a `tier-dev` window running
+/// at 150 fps on a 240 Hz panel. Only 0.70 ms of it is synchronization
+/// validation, which is why this switch is the layer and not that feature — the
+/// expensive part is the core layer's per-command interception.
+///
+/// Default **on**: every test, every gate and `xtask gpu` keep the checks §4.3's
+/// barrier discipline exists to be graded by, and §1.10 forbids a silent
+/// downgrade. Off is for the one command whose subject is a human playing —
+/// `xtask run` sets it and says so, having nothing to prove about API misuse that
+/// the gates do not already prove on the same code. Read once and logged either
+/// way, for [`gpuav_requested`]'s reason.
+///
+/// `pub(crate)` because it also answers "is `VK_EXT_debug_utils` enabled" — the
+/// extension goes in exactly when the layer does, so object names and pass
+/// labels are gated on the same answer rather than on a second flag that could
+/// disagree with it.
+#[cfg(feature = "validation")]
+pub(crate) fn validation_requested() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| wants_validation(std::env::var("GG_VALIDATION").ok().as_deref()))
+}
+
+/// [`validation_requested`]'s policy, without the environment. Split out because
+/// the answer is cached in a `OnceLock` for a whole process, so a test that set
+/// the variable would decide it for every other test in the binary — the policy
+/// is what is worth checking, and it is only checkable apart from the cache.
+#[cfg(feature = "validation")]
+fn wants_validation(value: Option<&str>) -> bool {
+    // Exactly `0` turns it off. Not "anything falsy": this is a *downgrade* of a
+    // correctness check (§1.10), so a typo must fail toward the safe answer
+    // rather than silently disarm the layer for a run somebody trusted.
+    value != Some("0")
+}
+
+#[cfg(all(test, feature = "validation"))]
+mod tests {
+    use super::wants_validation;
+
+    #[test]
+    fn only_an_exact_zero_takes_the_validation_layer_off() {
+        assert!(wants_validation(None), "unset is the default, and on");
+        assert!(!wants_validation(Some("0")));
+        // Every other spelling stays on, including the ones that look like an
+        // off switch — a downgrade has to be asked for precisely.
+        for text in ["", "1", "false", "off", "no", "00", " 0", "0 "] {
+            assert!(wants_validation(Some(text)), "`{text}` should stay on");
+        }
+    }
+}
+
 /// The Vulkan instance plus the debug plumbing that rides with it.
 pub struct Instance {
     entry: ash::Entry,
@@ -172,7 +228,7 @@ impl Instance {
         #[cfg(feature = "validation")]
         let mut layer_settings;
         #[cfg(feature = "validation")]
-        {
+        if validation_requested() {
             // §1.10, no silent fallbacks: if the layer is absent the run is
             // not the run CI promised, so fail loudly instead of degrading.
             // SAFETY: entry is live.
@@ -241,8 +297,13 @@ impl Instance {
             other => RhiError::Vk(other),
         })?;
 
+        // No layer, no messenger: `VK_EXT_debug_utils` is only in `extensions`
+        // when the layer went in, and creating a messenger against an extension
+        // the instance never enabled is undefined rather than merely useless.
         #[cfg(feature = "validation")]
-        let debug = {
+        let debug = if !validation_requested() {
+            None
+        } else {
             let fns = ash::ext::debug_utils::Instance::new(&entry, &raw);
             let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
                 .message_severity(

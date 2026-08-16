@@ -49,6 +49,8 @@ pub mod ui;
 mod shaders_gen {
     /// The occlusion pass and its denoiser (§6 M35).
     pub mod ao;
+    /// The frame taken apart: one intermediate blitted over it (§6 M59).
+    pub mod debug;
     /// The fullscreen post pass.
     pub mod post;
     /// The irradiance field's integration (§6 M36).
@@ -73,6 +75,7 @@ use gg_extract::{Extracted, Frustum, Instance, Scenes};
 use gg_math::render;
 pub use gg_rhi::Viewport;
 use lighting::Radiance;
+pub use lighting::{CascadeReach, cascade_reach};
 // Re-exported because [`View::samples`] is spelled in it and the shell sets
 // that field: a host would otherwise have to depend on `gg-rhi` to name a
 // count, which §3 keeps to this crate's own dependents.
@@ -87,6 +90,7 @@ use graph::{Body, Declared, DepthUse, Load, Transients};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use scene::ScenePass;
 use shaders_gen::ao as ao_shader;
+use shaders_gen::debug as debug_shader;
 use shaders_gen::post as post_shader;
 use shaders_gen::skybox as skybox_shader;
 use shaders_gen::ugly as shader;
@@ -782,11 +786,16 @@ impl Renderer {
             .pass
             .post_push(&frame, att.scene, view_extent, view.aa)?;
         let ao_push = att
-            .ao_source
+            .ao_raw
+            .and(att.ao_source)
             .map(|source| {
                 self.pass
                     .ao_push(&frame, source, att.ao_raw, view, view_extent)
             })
+            .transpose()?;
+        let debug_push = att
+            .debug
+            .map(|source| self.pass.debug_push(&frame, source, view, view_extent))
             .transpose()?;
         let sky = sky_pushes(
             view.view_projection(att.view_extent),
@@ -803,6 +812,7 @@ impl Renderer {
                 Pushes {
                     post: &post_push,
                     ao: ao_push.as_ref(),
+                    debug: debug_push.as_ref(),
                 },
                 sky,
                 self.lighting.lamps(),
@@ -919,10 +929,18 @@ impl Renderer {
         // what a dump says about the occlusion pass is that it exists and what
         // it writes into — the push bytes are read by no GPU.
         let ao_push = att
-            .ao_source
+            .ao_raw
+            .and(att.ao_source)
             .map(|source| {
                 self.pass
                     .ao_push(&frame, source, att.ao_raw, &View::default(), view_extent)
+            })
+            .transpose()?;
+        let debug_push = att
+            .debug
+            .map(|source| {
+                self.pass
+                    .debug_push(&frame, source, &View::default(), view_extent)
             })
             .transpose()?;
         // The environments as the last frame was written with, for the sun's
@@ -943,6 +961,7 @@ impl Renderer {
             Pushes {
                 post: &post_push,
                 ao: ao_push.as_ref(),
+                debug: debug_push.as_ref(),
             },
             sky,
             self.lighting.lamps(),
@@ -1357,11 +1376,16 @@ impl OffscreenRenderer {
             .pass
             .post_push(&frame, att.scene, view_extent, view.aa)?;
         let ao_push = att
-            .ao_source
+            .ao_raw
+            .and(att.ao_source)
             .map(|source| {
                 self.pass
                     .ao_push(&frame, source, att.ao_raw, view, view_extent)
             })
+            .transpose()?;
+        let debug_push = att
+            .debug
+            .map(|source| self.pass.debug_push(&frame, source, view, view_extent))
             .transpose()?;
         let sky = sky_pushes(
             view.view_projection(att.view_extent),
@@ -1378,6 +1402,7 @@ impl OffscreenRenderer {
                 Pushes {
                     post: &post_push,
                     ao: ao_push.as_ref(),
+                    debug: debug_push.as_ref(),
                 },
                 sky,
                 self.lighting.lamps(),
@@ -1966,6 +1991,52 @@ struct SceneAttachments {
     probe_samples: Vec<graph::ResourceId>,
     /// What the two integration passes sample: the atlas their probe drew.
     record_samples: Vec<graph::ResourceId>,
+    /// What `r.debug_view` named, if this frame allocated it (§6 M59). `None`
+    /// is off, or a view of a pass that did not run — a third cascade in a scene
+    /// with two, the field with `r.gi` off.
+    debug: Option<DebugSource>,
+    /// The one image that pass samples, declared for the reason every other
+    /// bindless read here is: the graph sees no dependency otherwise.
+    debug_samples: Vec<graph::ResourceId>,
+}
+
+/// `debug.slang`'s `MODE_*`, mirrored. Two copies of five numbers, and the
+/// agreement is asserted by [`debug_source`] naming both the mode and the image
+/// it applies to — a swapped pair shows the wrong thing rather than nothing.
+mod debug_mode {
+    pub const SCENE: u32 = 0;
+    pub const DEPTH: u32 = 1;
+    pub const NORMAL: u32 = 2;
+    pub const RED: u32 = 3;
+    pub const RGB: u32 = 4;
+}
+
+/// What `r.debug_view` resolved to against this frame (§6 M59).
+#[derive(Clone, Copy)]
+struct DebugSource {
+    id: graph::ResourceId,
+    mode: u32,
+    /// What `r.debug_scale 0` means for this view — metres of white for a depth
+    /// buffer, a gain of one for anything already in 0..1.
+    scale: f32,
+}
+
+/// `r.debug_view` as an index into [`cvars::DEBUG_VIEWS`], or 0.
+///
+/// Out of range is **off** rather than clamped: a clamp would answer a question
+/// nobody asked with the last view in the table, and an index typed into a
+/// console is exactly where a wrong number comes from.
+fn debug_view() -> usize {
+    usize::try_from(cvars::DEBUG_VIEW.int())
+        .ok()
+        .filter(|index| *index < cvars::DEBUG_VIEWS.len())
+        .unwrap_or(0)
+}
+
+/// The two views that read the camera's depth, and therefore the only reason a
+/// frame with `r.ao` off would allocate a *sampleable* one.
+fn debug_wants_depth(view: usize) -> bool {
+    matches!(view, 2 | 3)
 }
 
 /// Acquire them, in the order the graph dump lists resources.
@@ -1993,7 +2064,14 @@ fn scene_attachments(
     // an unread prepass target keeps `ImageUse::Depth` and its compressed
     // layout, a read one at 1x is allocated `SAMPLED` directly, and a
     // multisampled one is resolved into a single-sample twin the pass can reach.
-    let (depth, depth_resolve) = match (ao, samples.multisampled()) {
+    //
+    // The occlusion pass is not the only reader since §6 M59: `r.debug_view`'s
+    // depth and normal views read the same image, and a frame with `r.ao` off
+    // has to allocate it for them or the view is blank on exactly the
+    // configuration somebody would be debugging.
+    let view = debug_view();
+    let sample_depth = ao || debug_wants_depth(view);
+    let (depth, depth_resolve) = match (sample_depth, samples.multisampled()) {
         (false, _) => (frame.depth_at("scene.depth", view_extent, samples)?, None),
         (true, false) => (frame.depth_sampled("scene.depth", view_extent)?, None),
         (true, true) => (
@@ -2001,7 +2079,7 @@ fn scene_attachments(
             Some(frame.depth_sampled("scene.depth.resolved", view_extent)?),
         ),
     };
-    let ao_source = ao.then(|| depth_resolve.unwrap_or(depth));
+    let ao_source = sample_depth.then(|| depth_resolve.unwrap_or(depth));
     let ao_raw = ao
         .then(|| frame.color_at("scene.ao.raw", view_extent, AO_FORMAT, Samples::X1))
         .transpose()?;
@@ -2044,6 +2122,23 @@ fn scene_attachments(
     let probe_depth = gathering
         .then(|| frame.depth_at("probe.depth", probes.atlas_extent(), Samples::X1))
         .transpose()?;
+    // Resolved here rather than at the pass, because it is a choice among the
+    // images this function just acquired and nowhere else has all of them.
+    // `shadow.2` in a two-cascade frame lands on `None` by the same `get` that
+    // makes a short `shadows` legal everywhere else.
+    let debug = match view {
+        1 => Some((scene, debug_mode::SCENE, 1.0)),
+        2 => ao_source.map(|id| (id, debug_mode::DEPTH, 50.0)),
+        3 => ao_source.map(|id| (id, debug_mode::NORMAL, 1.0)),
+        4 => ao_target.map(|id| (id, debug_mode::RED, 1.0)),
+        5 => ao_raw.map(|id| (id, debug_mode::RED, 1.0)),
+        6..=9 => shadows.get(view - 6).map(|id| (*id, debug_mode::RED, 1.0)),
+        10 => lamp_atlas.map(|id| (id, debug_mode::RED, 1.0)),
+        11 => field_sh.map(|id| (id, debug_mode::RGB, 1.0)),
+        12 => field_moments.map(|id| (id, debug_mode::RED, 0.02)),
+        _ => None,
+    }
+    .map(|(id, mode, scale)| DebugSource { id, mode, scale });
     Ok(SceneAttachments {
         view_extent,
         backbuffer,
@@ -2076,6 +2171,8 @@ fn scene_attachments(
             .chain(field_moments)
             .collect(),
         record_samples: probe_atlas.into_iter().collect(),
+        debug_samples: debug.map(|source| source.id).into_iter().collect(),
+        debug,
         probe_atlas,
         probe_depth,
         field_sh,
@@ -2103,6 +2200,8 @@ struct SceneDraws<'a> {
     ao: Vec<DrawSpec<'a>>,
     ao_blur: Vec<DrawSpec<'a>>,
     post: [DrawSpec<'a>; 1],
+    /// The one triangle §6 M59's view is (empty when `r.debug_view` is off).
+    debug: Vec<DrawSpec<'a>>,
     /// Every gathering probe face's draws, **flat** — `lamp`'s arrangement, and
     /// the same reason: one pass, one atlas, a rectangle per draw (§6 M36).
     probe: Vec<DrawSpec<'a>>,
@@ -2124,6 +2223,8 @@ struct Pushes<'a> {
     post: &'a post_shader::PostPush,
     /// `None` is `r.ao` off, which declares no occlusion pass at all.
     ao: Option<&'a ao_shader::AoPush>,
+    /// `None` is `r.debug_view` off, or naming an image this frame has not got.
+    debug: Option<&'a debug_shader::DebugPush>,
 }
 
 impl<'a> SceneDraws<'a> {
@@ -2141,6 +2242,10 @@ impl<'a> SceneDraws<'a> {
         let (post_push, ao_push) = (pushes.post, pushes.ao);
         let (integrate, probes) = field;
         SceneDraws {
+            debug: pushes
+                .debug
+                .map(|push| vec![pass.debug_draw(push)])
+                .unwrap_or_default(),
             probe: att
                 .probe_atlas
                 .map(|_| probe_draws(pass, scene, probes))
@@ -2234,6 +2339,8 @@ fn declare_frame<'a>(
         post_draws: &draws.post,
         samples: &draws.samples,
         forward_samples: &att.forward_samples,
+        debug_samples: &att.debug_samples,
+        debug_draws: &draws.debug,
     });
     if !plan.ui.is_empty() {
         declared.push(ui_pass(att.backbuffer, plan.ui));
@@ -2351,6 +2458,10 @@ struct BoxPass {
     /// so unlike the prepass/forward pair they need no variant per count.
     ao: PipelineHandle,
     ao_blur: PipelineHandle,
+    /// §6 M59's blit. Created always and used almost never: a pipeline is
+    /// cheap, and creating one the first time somebody typed `r.debug_view`
+    /// would put a device call on the frame that answers the question.
+    debug: PipelineHandle,
     /// The luminance resample: the post pass's vertex stage into a small float
     /// target, without the tonemap curve (§6 M11).
     downsample: PipelineHandle,
@@ -2544,6 +2655,7 @@ impl BoxPass {
             downsample: rhi.create_pipeline(&downsample_desc())?,
             ao: rhi.create_pipeline(&ao_desc())?,
             ao_blur: rhi.create_pipeline(&ao_blur_desc())?,
+            debug: rhi.create_pipeline(&debug_desc())?,
             geometry,
             pushes: Vec::new(),
             shadow_pushes: Vec::new(),
@@ -2887,6 +2999,57 @@ impl BoxPass {
         ))
     }
 
+    /// What §6 M59's view needs: which image, how to read a texel of it, and —
+    /// for the two depth-derived modes — the same reconstruction constants
+    /// [`BoxPass::ao_push`] builds, from the same `View`, so a normal shown here
+    /// is the normal the occlusion pass marched against and not a second guess
+    /// at it.
+    fn debug_push(
+        &self,
+        frame: &graph::Frame<'_>,
+        source: DebugSource,
+        view: &View,
+        extent: (u32, u32),
+    ) -> Result<debug_shader::DebugPush, RhiError> {
+        let texture = frame.texture(source.id).ok_or_else(|| {
+            RhiError::Loader("the debug view's source has no bindless slot".into())
+        })?;
+        let ao = self.ao_push(frame, source.id, None, view, extent)?;
+        // Zero means the view's own, so a knob left where the last view put it
+        // does not make the next one black.
+        let scale = match cvars::DEBUG_SCALE.float() as f32 {
+            gain if gain > 0.0 => gain,
+            _ => source.scale,
+        };
+        Ok(debug_shader::DebugPush::new(
+            texture.get(),
+            Sampler::NearestClamp.index(),
+            source.mode,
+            ao.projection,
+            // The view's texel, which is the source's for the only mode that
+            // reads it: the normal reconstruction differences neighbours of the
+            // camera depth buffer, and that one is the view's own size. An
+            // atlas view is a straight fetch and never touches this.
+            ao.texel,
+            ao.project,
+            ao.depth_params,
+            scale,
+            cvars::EXPOSURE.float() as f32,
+        ))
+    }
+
+    fn debug_draw<'a>(&self, push: &'a debug_shader::DebugPush) -> DrawSpec<'a> {
+        DrawSpec {
+            pipeline: self.debug,
+            push_constants: bytemuck::bytes_of(push),
+            count: FULLSCREEN_VERTICES,
+            index_buffer: None,
+            indirect: None,
+            depth_bias: None,
+            viewport: None,
+        }
+    }
+
     fn ao_draw<'a>(&self, push: &'a ao_shader::AoPush, blur: bool) -> DrawSpec<'a> {
         DrawSpec {
             pipeline: if blur { self.ao_blur } else { self.ao },
@@ -2929,6 +3092,7 @@ impl BoxPass {
     fn destroy(self, rhi: &mut impl GpuHost) -> Result<(), RhiError> {
         rhi.destroy_pipeline(self.ao)?;
         rhi.destroy_pipeline(self.ao_blur)?;
+        rhi.destroy_pipeline(self.debug)?;
         rhi.destroy_pipeline(self.downsample)?;
         self.variants.destroy(rhi)?;
         self.skyboxes.destroy(rhi)?;
@@ -3054,6 +3218,11 @@ pub struct SceneFrame<'a> {
     pub probe_samples: &'a [graph::ResourceId],
     /// What the two integration passes sample: the atlas their probe drew.
     pub record_samples: &'a [graph::ResourceId],
+    /// §6 M59's debug view: what it samples, and the one triangle that shows it.
+    /// Empty declares no such pass, which is what `r.debug_view 0` is.
+    pub debug_samples: &'a [graph::ResourceId],
+    /// See [`SceneFrame::debug_samples`].
+    pub debug_draws: &'a [DrawSpec<'a>],
     /// Probe-pass draws — every face of every gathering probe in one list, each
     /// carrying its own tile. Empty when `probe_atlas` is `None`.
     pub probe_draws: &'a [DrawSpec<'a>],
@@ -3304,6 +3473,25 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
             draws: frame.post_draws,
         },
     });
+    // Over the picture rather than instead of it (§6 M59): the post pass has
+    // already filled the letterbox, and a debug view that had to reproduce that
+    // would be a second post pass. `Keep` and the same viewport therefore paint
+    // exactly the rectangle the game occupies and leave the editor's chrome to
+    // the UI pass after it.
+    if !frame.debug_draws.is_empty() {
+        declared.push(Declared {
+            name: "debug-view",
+            body: Body::Draw {
+                color: Some((frame.backbuffer, Load::Keep)),
+                resolve: None,
+                depth: None,
+                depth_resolve: None,
+                viewport: frame.viewport,
+                samples: frame.debug_samples,
+                draws: frame.debug_draws,
+            },
+        });
+    }
     declared
 }
 
@@ -3484,6 +3672,24 @@ fn ao_desc() -> PipelineDesc<'static> {
         fs_entry: ao_shader::FS_MAIN_ENTRY,
         push_constant_size: core::mem::size_of::<ao_shader::AoPush>() as u32,
         color: ColorTarget::Format(AO_FORMAT),
+        blend: Blend::Off,
+        depth: DepthMode::Off,
+        samples: Samples::X1,
+        depth_bias: false,
+    }
+}
+
+/// §6 M59's view. Writes the backbuffer like the post pass and for the same
+/// reason — it is what a screen shows — and reads whatever the graph handed it.
+fn debug_desc() -> PipelineDesc<'static> {
+    PipelineDesc {
+        name: "debug-view",
+        vs_spirv: debug_shader::VS_MAIN_SPIRV,
+        vs_entry: debug_shader::VS_MAIN_ENTRY,
+        fs_spirv: debug_shader::FS_MAIN_SPIRV,
+        fs_entry: debug_shader::FS_MAIN_ENTRY,
+        push_constant_size: core::mem::size_of::<debug_shader::DebugPush>() as u32,
+        color: ColorTarget::Backbuffer,
         blend: Blend::Off,
         depth: DepthMode::Off,
         samples: Samples::X1,

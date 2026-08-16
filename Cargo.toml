@@ -39,6 +39,7 @@ members = [
     "demos/11-platformer",
     "demos/12-shooter",
     "demos/13-orbit",
+    "demos/14-sponza",
     "demos/99-template",
     "tools/gg-golden",
     "tools/gg-static-link",

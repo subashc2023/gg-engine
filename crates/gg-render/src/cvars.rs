@@ -62,6 +62,20 @@ pub static EXPOSURE: CVar = CVar::new_float("r.exposure", 0.0, "exposure, in sto
 /// operator who suspects the noise can turn it off and look.
 pub static DITHER: CVar = CVar::new_float("r.dither", 1.0, "output dither, in code values");
 
+/// Show the hand's travel this frame instead of next tick (§6 M56); `0` renders
+/// the interpolated tick, which is every frame this engine drew before M56.
+///
+/// A knob for `r.shadow_cull`'s reason rather than because the value is in
+/// doubt: what it changes is *feel*, and feel is the one thing no gate in this
+/// tree can grade. An operator with a 240 Hz panel toggling this mid-session is
+/// the measurement — `gg-tools pace` can say the displayed angle went from 25 ms
+/// behind the hand to under one, and cannot say whether that is the complaint.
+///
+/// Off costs nothing and changes nothing: a locked pace (`--frames`, every
+/// replay, every golden run, §5.6) leaves no travel unspent at extract time, so
+/// the latch is identically zero there whatever this says.
+pub static LATE_LATCH: CVar = CVar::new_bool("r.late_latch", true, "latch the view to the hand");
+
 /// A flat ambient term, linear, and what a world declaring no `Sky` still gets —
 /// a face pointing away from every light is dim rather than pure black.
 ///
@@ -214,6 +228,45 @@ pub static AO_FALLOFF: CVar = CVar::new_float("r.ao_falloff", 1.0, "occlusion fa
 /// instrument should answer with a number: `gg-tools ao` prints the error
 /// against the reference either way.
 pub static AO_BLUR: CVar = CVar::new_bool("r.ao_blur", true, "denoise the occlusion target");
+
+/// Which of the frame's intermediates is shown instead of the picture (§6 M59).
+///
+/// An index into [`DEBUG_VIEWS`], where 0 is off. An index rather than a name
+/// because a CVar carries a number, and the names are exported beside it so the
+/// editor's list and the shader's modes cannot drift apart.
+///
+/// **Off costs nothing**: no pass is declared, and the two views that need a
+/// *sampleable* depth are the only reason a frame with `r.ao` off would allocate
+/// one — see `scene_attachments`.
+///
+/// A view this frame has nothing for (the third cascade in a scene with two, the
+/// field with `r.gi` off) shows the picture rather than black. There is no
+/// failure to report: an intermediate that does not exist is a pass that did not
+/// run, and the graph dump beside it already says so.
+pub static DEBUG_VIEW: CVar = CVar::new_int(
+    "r.debug_view",
+    0,
+    "show a frame intermediate; see r.debug_views",
+);
+
+/// Multiplier on whatever [`DEBUG_VIEW`] is showing. Metres of white under the
+/// depth view, a plain gain everywhere else.
+///
+/// Zero means the view's own default, which is what makes one knob serve views
+/// whose natural range differs by two orders of magnitude — occlusion is already
+/// 0..1 and a depth buffer is metres.
+pub static DEBUG_SCALE: CVar =
+    CVar::new_float("r.debug_scale", 0.0, "debug view gain; 0 is the view's own");
+
+/// What [`DEBUG_VIEW`]'s index means, in order. Index 0 is off.
+///
+/// Public because the editor lists them and `gg-tools` names them, and a second
+/// copy of this table is a second copy that goes stale — `debug_source` in the
+/// renderer is what resolves an index against the frame, and it reads this one.
+pub const DEBUG_VIEWS: &[&str] = &[
+    "off", "scene", "depth", "normal", "ao", "ao-raw", "shadow.0", "shadow.1", "shadow.2",
+    "shadow.3", "lamps", "field", "moments",
+];
 
 /// Whether the irradiance nobody authored is gathered at all (§6 M36).
 ///
@@ -427,6 +480,21 @@ pub static SHADOW_SPLIT_LAMBDA: CVar = CVar::new_float(
     "cascade split blend, 0 uniform to 1 logarithmic",
 );
 
+/// Every cascade records the *widest* one's depth (§6 M60). Off is the older
+/// behaviour, where each derived its own from its own width.
+///
+/// A knob for `r.shadow_cull`'s reason: the value is not in question, and what
+/// makes it worth keeping is that the two sides of a correctness fix are then one
+/// binary a flag apart. Off, a caster further up-light than a small cascade's
+/// light eye is absent from that map, and absent depth is absent blocker — so the
+/// receiver renders **lit**. It is worst where the map is tightest, which is the
+/// near field, and it gets worse as `r.shadow_distance` comes *down*.
+pub static SHADOW_REACH: CVar = CVar::new_bool(
+    "r.shadow_reach",
+    true,
+    "every cascade records the widest one's depth (0 = its own, as before §6 M60)",
+);
+
 /// Fraction of a cascade's extent over which it cross-fades into the next.
 ///
 /// Without it the split is a visible line where texel density changes — most
@@ -628,6 +696,7 @@ pub fn register() -> Result<(), CVarError> {
         &UPLOAD_BUDGET,
         &EXPOSURE,
         &DITHER,
+        &LATE_LATCH,
         &HDR,
         &VSYNC,
         &PAPER_WHITE,
@@ -644,6 +713,8 @@ pub fn register() -> Result<(), CVarError> {
         &AO_FALLOFF,
         &AO_BIAS,
         &AO_BLUR,
+        &DEBUG_VIEW,
+        &DEBUG_SCALE,
         &GI,
         &GI_SPACING,
         &GI_RATE,
@@ -657,6 +728,7 @@ pub fn register() -> Result<(), CVarError> {
         &SHADOW_DISTANCE,
         &SHADOW_CASCADES,
         &SHADOW_CULL,
+        &SHADOW_REACH,
         &SHADOW_SPLIT_LAMBDA,
         &SHADOW_BLEND,
         &SHADOW_SOFTNESS,

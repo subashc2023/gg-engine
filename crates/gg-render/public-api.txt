@@ -75,6 +75,7 @@ pub gg_render::content::DrawMaterial::roughness: f32
 impl core::default::Default for gg_render::content::DrawMaterial
 pub fn gg_render::content::DrawMaterial::default() -> Self
 pub mod gg_render::cvars
+pub const gg_render::cvars::DEBUG_VIEWS: &[&str]
 pub static gg_render::cvars::AA: gg_core::cvar::CVar
 pub static gg_render::cvars::AMBIENT: gg_core::cvar::CVar
 pub static gg_render::cvars::AO: gg_core::cvar::CVar
@@ -86,6 +87,8 @@ pub static gg_render::cvars::AO_RADIUS: gg_core::cvar::CVar
 pub static gg_render::cvars::AO_SLICES: gg_core::cvar::CVar
 pub static gg_render::cvars::AO_STEPS: gg_core::cvar::CVar
 pub static gg_render::cvars::CLUSTERS: gg_core::cvar::CVar
+pub static gg_render::cvars::DEBUG_SCALE: gg_core::cvar::CVar
+pub static gg_render::cvars::DEBUG_VIEW: gg_core::cvar::CVar
 pub static gg_render::cvars::DITHER: gg_core::cvar::CVar
 pub static gg_render::cvars::EXPOSURE: gg_core::cvar::CVar
 pub static gg_render::cvars::FOV: gg_core::cvar::CVar
@@ -102,6 +105,7 @@ pub static gg_render::cvars::LAMP_NORMAL_BIAS: gg_core::cvar::CVar
 pub static gg_render::cvars::LAMP_SHADOWS: gg_core::cvar::CVar
 pub static gg_render::cvars::LAMP_SIZE: gg_core::cvar::CVar
 pub static gg_render::cvars::LAMP_TAPS: gg_core::cvar::CVar
+pub static gg_render::cvars::LATE_LATCH: gg_core::cvar::CVar
 pub static gg_render::cvars::LOBE: gg_core::cvar::CVar
 pub static gg_render::cvars::LUT: gg_core::cvar::CVar
 pub static gg_render::cvars::MSAA: gg_core::cvar::CVar
@@ -117,6 +121,7 @@ pub static gg_render::cvars::SHADOW_DEPTH_BIAS: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_DISTANCE: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_NORMAL_BIAS: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_PENUMBRA: gg_core::cvar::CVar
+pub static gg_render::cvars::SHADOW_REACH: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_SIZE: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_SOFTNESS: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_SPLIT_LAMBDA: gg_core::cvar::CVar
@@ -201,6 +206,12 @@ pub gg_render::ui::UiVertex::uv: [f32; 2]
 impl bytemuck::pod::Pod for gg_render::ui::UiVertex
 impl bytemuck::zeroable::Zeroable for gg_render::ui::UiVertex
 pub const gg_render::ui::MAX_VERTICES: usize
+pub struct gg_render::CascadeReach
+pub gg_render::CascadeReach::dropped: u32
+pub gg_render::CascadeReach::needed: f32
+pub gg_render::CascadeReach::over: u32
+pub gg_render::CascadeReach::radius: f32
+pub gg_render::CascadeReach::reach: f32
 pub struct gg_render::ClusterLoad
 pub gg_render::ClusterLoad::dropped: usize
 pub gg_render::ClusterLoad::froxels: usize
@@ -269,6 +280,8 @@ pub gg_render::SceneFrame::ao_samples: &'a [gg_render::graph::ResourceId]
 pub gg_render::SceneFrame::ao_source: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::SceneFrame::backbuffer: gg_render::graph::ResourceId
 pub gg_render::SceneFrame::clear: [f32; 4]
+pub gg_render::SceneFrame::debug_draws: &'a [gg_rhi::DrawSpec<'a>]
+pub gg_render::SceneFrame::debug_samples: &'a [gg_render::graph::ResourceId]
 pub gg_render::SceneFrame::depth: gg_render::graph::ResourceId
 pub gg_render::SceneFrame::depth_resolve: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::SceneFrame::field_moments: core::option::Option<gg_render::graph::ResourceId>
@@ -354,6 +367,7 @@ pub fn gg_rhi::offscreen::OffscreenRhi::register_texture(&mut self, gg_rhi::reso
 pub fn gg_rhi::offscreen::OffscreenRhi::upload_buffer(&mut self, gg_rhi::resource::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_rhi::offscreen::OffscreenRhi::upload_image(&mut self, gg_rhi::resource::ImageHandle, u32, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_rhi::offscreen::OffscreenRhi::write_buffer(&mut self, gg_rhi::resource::BufferHandle, u64, &[u8]) -> core::result::Result<(), gg_rhi::RhiError>
+pub fn gg_render::cascade_reach(&gg_extract::Extracted, &gg_render::View, (u32, u32)) -> alloc::vec::Vec<gg_render::CascadeReach>
 pub fn gg_render::scene_graph<'a>(&gg_render::SceneFrame<'a>) -> alloc::vec::Vec<gg_render::graph::Declared<'a>>
 pub fn gg_render::srgb_to_linear(u32) -> [f32; 4]
 pub fn gg_render::ui_pass<'a>(gg_render::graph::ResourceId, &'a [gg_rhi::DrawSpec<'a>]) -> gg_render::graph::Declared<'a>

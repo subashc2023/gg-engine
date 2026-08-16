@@ -18,6 +18,20 @@ use crate::util::workspace_root;
 /// the caller's directory and never chdirs, so every path here is rooted.
 const OUT: &str = "target/assets";
 
+/// Demos whose sources are **fetched** rather than checked in, and which this
+/// gate therefore skips (§6 M59).
+///
+/// The gate's subject is byte-reproducibility over sources this repository
+/// holds. Demo 14's are fifty-one megabytes downloaded by `cargo xtask sponza`,
+/// so on a clean clone there is nothing here to compile — and on a machine that
+/// *has* fetched them there are two clean 84 MiB builds, which is a minute of
+/// the push tier spent proving the same property four other demos already prove.
+/// `xtask sponza` builds that pack itself, so the demo is not left without one.
+///
+/// A list rather than a heuristic: "large" is not a property, and a gate that
+/// skipped a tree for being big would silently stop covering one that grew.
+const FETCHED: &[&str] = &["14-sponza"];
+
 pub fn run(args: &[&str]) -> Result<()> {
     let check = args.contains(&"--check");
     let sources = demo_sources()?;
@@ -132,6 +146,10 @@ fn demo_sources() -> Result<Vec<(String, PathBuf)>> {
             .and_then(|n| n.to_str())
             .context("a demo directory with no utf-8 name")?
             .to_owned();
+        if FETCHED.contains(&name.as_str()) {
+            println!("xtask assets: {name} — skipped, its sources are fetched (§6 M59)");
+            continue;
+        }
         found.push((name, assets));
     }
     found.sort();

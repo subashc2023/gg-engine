@@ -22,6 +22,7 @@ mod run;
 mod shaders;
 mod shell;
 mod ship;
+mod sponza;
 mod timers;
 mod util;
 
@@ -46,6 +47,7 @@ fn main() {
         Some("new") => new::run(&rest),
         Some("timers") => timers::run(&rest),
         Some("assets") => assets::run(&rest),
+        Some("sponza") => sponza::run(&rest),
         Some("bench") => bench::run(&rest),
         Some("dx") => dx::run(&rest),
         Some("gpu") => gpu::run(&rest),
@@ -86,6 +88,7 @@ fn usage() -> anyhow::Result<()> {
          gpuav [--adapter <name>]                         GPU-assisted validation: instrumented shaders, offscreen only (§5 gate 4)\n\
          dx [--record]                                    developer-experience benchmarks: steps, lines, rebuild latency (§8)\n\
          backlog                                          the P1/P2 items, found in the doc comments that defer them (§6 M12)\n\
-         assets [--check]                                 compile every demo's asset tree; --check proves two clean runs agree byte for byte (§4.6)"
+         assets [--check]                                 compile every demo's asset tree; --check proves two clean runs agree byte for byte (§4.6)
+\n         sponza                                           manual, reaches the network: fetch demo 14's glTF from Khronos and compile its pack (§6 M59)"
     )
 }

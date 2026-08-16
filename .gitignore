@@ -10,3 +10,7 @@ dist-symbols/
 # The CVar config file (§4.8) is one machine's knobs, never the repo's.
 gg.cfg
 *.actual.txt
+# Demo 14's sources (§6 M59). Fifty-one megabytes of glTF that `cargo xtask
+# sponza` fetches from Khronos — demo 06's header refused to check Sponza in at
+# §6 M11 and this is the same refusal, with the download written down.
+demos/14-sponza/assets/

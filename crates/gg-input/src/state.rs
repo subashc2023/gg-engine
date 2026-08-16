@@ -58,6 +58,12 @@ pub struct Input {
     /// period. One is the resting value, and it means "this tick takes
     /// everything".
     covered: f32,
+    /// The **motion-only** part of what the last tick folded into each axis, in
+    /// [`AXIS_SCALE`]ths — [`Input::spent`]. Kept separately because
+    /// [`InputFrame::axes`] has the digital deflection added on top and the two
+    /// cannot be told apart afterwards, and a late latch has to treat a travel
+    /// and a level differently (§6 M56).
+    spent: [i32; MAX_AXES],
     current: InputFrame,
     previous: InputFrame,
     /// Derived from `map` and `stack`, rebuilt by `reread` whenever either
@@ -82,6 +88,7 @@ impl Input {
             wheel: 0.0,
             typed: String::new(),
             covered: 1.0,
+            spent: [0; MAX_AXES],
             current: InputFrame::default(),
             previous: InputFrame::default(),
             spellings: Vec::new(),
@@ -402,6 +409,10 @@ impl Input {
             let digital = i32::from(positive[i]) - i32::from(negative[i]);
             frame.axes[i] = digital * AXIS_SCALE + motion[i];
         }
+        // The motion half alone, kept for `Input::spent`: `frame.axes` has the
+        // digital deflection added on top and the two cannot be separated back
+        // out of it (§6 M56).
+        self.spent = motion;
         self.motion = [self.motion[0] - share[0], self.motion[1] - share[1]];
         self.cursor = [self.cursor[0] - steps[0], self.cursor[1] - steps[1]];
         // Spent whole rather than decremented: a notch that pressed this tick
@@ -419,6 +430,9 @@ impl Input {
     pub fn tick_from(&mut self, frame: InputFrame) {
         self.motion = [0.0; 2];
         self.cursor = [0; 2];
+        // A recorded frame is one number an axis, with no motion to separate out
+        // of it — so a replayed session latches nothing (§6 M56).
+        self.spent = [0; MAX_AXES];
         // Spent whole rather than decremented: a notch that pressed this tick
         // must not press again next tick, and travel that never reached one is
         // a hand resting on the wheel rather than a scroll being saved up.
@@ -451,6 +465,75 @@ impl Input {
     /// The axis in units. Exact: [`AXIS_SCALE`] is a power of two.
     pub fn axis(&self, axis: AxisId) -> f32 {
         self.current.axes[axis.index()] as f32 / AXIS_SCALE as f32
+    }
+
+    /// Travel this axis has taken that no tick has spent yet, in [`Input::axis`]'
+    /// units (§6 M56) — what the picture is missing when a frame lands between
+    /// two ticks.
+    ///
+    /// Continuous sources only, because they are the only ones with a remainder:
+    /// [`Input::tick`] leaves a share of the motion accumulators behind and
+    /// spends every button, key and notch whole. A held key therefore reports
+    /// zero here and that is the right answer — what a late latch is missing is
+    /// the hand's motion since the last tick, never a button's state.
+    ///
+    /// **Un-quantized** where [`Input::tick`] rounds to [`AXIS_SCALE`]ths. The
+    /// difference is the point: this and the next tick's spend then differ by at
+    /// most that rounding, so a view built on it steps onto the sim's own angle
+    /// rather than drifting away from it by a residue that never resolves.
+    #[must_use]
+    pub fn pending(&self, axis: AxisId) -> f32 {
+        // `tick`'s four sources in `tick`'s order, in the two units they arrive
+        // in: raw device counts pass through, and the cursor arrived already
+        // quantized into `AXIS_SCALE`ths of a surface unit.
+        let deltas = [
+            self.motion[0],
+            self.motion[1],
+            self.cursor[0] as f32 / AXIS_SCALE as f32,
+            self.cursor[1] as f32 / AXIS_SCALE as f32,
+        ];
+        let mut total = 0.0;
+        for (delta, which) in deltas.into_iter().zip(MouseAxis::ALL) {
+            for (bound, sign) in self.map.motion_axes(&self.stack, which) {
+                if bound.index() == axis.index() {
+                    total += sign as f32 * delta;
+                }
+            }
+        }
+        total
+    }
+
+    /// What the last tick spent of this axis' **continuous** sources, in
+    /// [`Input::axis`]' units (§6 M56).
+    ///
+    /// [`Input::axis`] minus the digital deflection, and the split is the point:
+    /// a late latch has to know how much of the tick's turn came from the hand,
+    /// because that part must not be interpolated backwards while a key's
+    /// deflection — which is a level, not a travel — must. A game binding both
+    /// to one axis gets each half treated as what it is.
+    ///
+    /// Zero after [`Input::tick_from`]: a replayed frame arrives as one number
+    /// with no motion to separate out of it, so a replay latches nothing and
+    /// renders exactly the interpolated tick it did before M56.
+    #[must_use]
+    pub fn spent(&self, axis: AxisId) -> f32 {
+        self.spent[axis.index()] as f32 / AXIS_SCALE as f32
+    }
+
+    /// Drop the travel in hand (§6 M56).
+    ///
+    /// For the two states where nothing will ever spend it: a suspended session
+    /// (§6 M49) runs no tick at all, and a halted one returns before
+    /// [`Input::tick`]. An accumulator nobody empties grows for as long as the
+    /// operator is away, and both the latch that reads it and the first tick
+    /// after the pause would then be handed a turn measured in minutes.
+    ///
+    /// Motion only, on [`Input::pending`]'s reasoning: a key still held across a
+    /// pause is still held after it, and a notch that never reached a tick is a
+    /// hand resting on the wheel.
+    pub fn forget_motion(&mut self) {
+        self.motion = [0.0; 2];
+        self.cursor = [0; 2];
     }
 
     fn set_frame(&mut self, frame: InputFrame) {
@@ -559,6 +642,102 @@ mod tests {
         i.key(Key::F, true);
         i.tick();
         assert!(i.pressed(SPAWN), "still down, now by key");
+    }
+
+    /// The claim §6 M56's whole containment story rests on: under a locked pace
+    /// — every replay, golden run and headless tier (§5.6) — a frame's ticks
+    /// spend the accumulator down to nothing, so there is no travel left for a
+    /// latch to show and the picture is the interpolated tick whatever the knob
+    /// says. By construction, not by a flag.
+    ///
+    /// Both shapes a locked pace takes: one tick a frame, and `Locked(n)`, where
+    /// `covered == count` and the shares are thirds that must still sum whole.
+    #[test]
+    fn a_locked_frame_leaves_no_travel_for_a_latch_to_show() {
+        let mut i = input();
+        i.motion(0.75, -0.25);
+        i.frame_covered(1.0);
+        i.tick();
+        assert_eq!(i.pending(LOOK_X), 0.0);
+
+        let mut i = input();
+        i.motion(1.0, 0.0);
+        // `Locked(3)`: the clock reports its tick count exactly, alpha being
+        // zero throughout.
+        i.frame_covered(3.0);
+        for _ in 0..3 {
+            i.tick();
+        }
+        assert_eq!(i.pending(LOOK_X), 0.0, "three thirds is all of it");
+    }
+
+    /// The other half of the same story: a replayed frame arrives as one number
+    /// an axis with no motion inside it to separate out, so a replay latches
+    /// nothing and renders what it rendered before M56.
+    #[test]
+    fn a_replayed_tick_offers_a_latch_nothing() {
+        let mut i = input();
+        // A *live* tick first, so there is a spend on the books for the replayed
+        // one to have to clear. Without this the assertion below passes against
+        // a `tick_from` that clears nothing, which is what the first version of
+        // this test did.
+        i.motion(4.0, 0.0);
+        i.tick();
+        assert!(i.spent(LOOK_X) > 0.0, "the live tick attributed its travel");
+
+        i.motion(2.0, 1.0);
+        i.tick_from(InputFrame {
+            buttons: 0,
+            axes: [512; MAX_AXES],
+        });
+        assert_eq!(i.axis(LOOK_X), 0.5, "the recorded value, undisturbed");
+        assert_eq!(i.pending(LOOK_X), 0.0, "the live accumulator was dropped");
+        assert_eq!(i.spent(LOOK_X), 0.0, "and none of it is attributable");
+    }
+
+    /// Pending and spent are the two halves of one travel, and the split is what
+    /// makes the latch exact rather than approximate: what the tick took plus
+    /// what it left is what the hand delivered.
+    #[test]
+    fn what_a_tick_spent_and_what_it_left_are_the_travel_that_arrived() {
+        let mut i = input();
+        i.motion(1.0, 0.0);
+        i.frame_covered(4.0);
+        i.tick();
+        // A quarter taken, three quarters still in hand.
+        assert_eq!(i.spent(LOOK_X), 0.25);
+        assert_eq!(i.pending(LOOK_X), 0.75);
+    }
+
+    /// A key is a level, not a travel: it deflects its axis on the tick and has
+    /// nothing outstanding, so neither number a latch reads may include it. A
+    /// game binding a key and the mouse to one axis is the case that tells them
+    /// apart.
+    #[test]
+    fn a_held_key_deflects_an_axis_without_offering_a_latch_anything() {
+        let mut i = input();
+        i.key(Key::D, true);
+        i.motion(0.5, 0.0);
+        i.frame_covered(2.0);
+        i.tick();
+        assert_eq!(i.axis(MOVE_RIGHT), 1.0, "the key, whole");
+        assert_eq!(i.pending(MOVE_RIGHT), 0.0, "and nothing owed on it");
+        assert_eq!(i.spent(LOOK_X), 0.25, "the mouse's half is still separable");
+    }
+
+    #[test]
+    fn forgetting_motion_empties_what_a_latch_would_read() {
+        let mut i = input();
+        i.motion(3.0, 3.0);
+        i.cursor(64, 64);
+        assert!(i.pending(LOOK_X) > 0.0);
+        i.forget_motion();
+        assert_eq!(i.pending(LOOK_X), 0.0);
+        // And the tick that follows is not handed the dropped travel either,
+        // which is the point: a five-minute alt-tab must not resume with a turn
+        // measured in minutes.
+        i.tick();
+        assert_eq!(i.axis(LOOK_X), 0.0);
     }
 
     #[test]

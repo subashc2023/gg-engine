@@ -1,0 +1,34 @@
+# demo 14-sponza (§6 M59): the scene every renderer is read against, as
+# somewhere to stand while the debug views are looked at.
+#
+# Its `assets/` tree is **not checked in** and is not expected to be there —
+# `cargo xtask sponza` fetches it. Fifty-one megabytes of glTF is what demo 06's
+# module header refused to put in this repository at §6 M11, and the answer has
+# not changed; what changed is that the fetch is now one command instead of a
+# paragraph. With no assets the game runs and draws nothing, which is `Model`'s
+# documented behaviour for a name the pack does not hold.
+
+[package]
+name = "demo-14-sponza"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "demo_14_sponza"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["game"]
+game = []
+
+[dependencies]
+bytemuck.workspace = true
+gg-ecs = { path = "../../crates/gg-ecs" }
+gg-math = { path = "../../crates/gg-math" }
