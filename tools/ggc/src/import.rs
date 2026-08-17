@@ -426,8 +426,11 @@ fn primitive_geometry(
                 .unwrap_or([0.0; 4]),
         })
         .collect();
-    if normals.is_none() {
-        flat_normals(&mut vertices, &indices);
+    match normals.is_none() {
+        // Derived from the winding, so they agree with it by construction and
+        // there is nothing here to check.
+        true => flat_normals(&mut vertices, &indices),
+        false => check_winding(&vertices, &indices, name)?,
     }
     if tangents.is_none() {
         generate_tangents(&mut vertices, &indices);
@@ -458,6 +461,52 @@ fn optimize(vertices: Vec<Vertex>, indices: &mut [u32]) -> Vec<Vertex> {
         meshopt::optimize_overdraw_in_place(indices, &positions, 1.05);
     }
     meshopt::optimize_vertex_fetch(indices, &vertices)
+}
+
+/// Refuse a primitive whose triangles wind against their own authored normals.
+///
+/// A defect with no other witness (§6 M64), which is what earns it a gate:
+/// nothing downstream reads winding until something asks the rasterizer which
+/// side of a face it is on, so an inverted primitive imports clean, renders
+/// right for as long as every pass ignores facing, and then shades inside-out
+/// the day the forward pass starts honouring `SV_IsFrontFace`. Demo 06's ten
+/// spheres were exactly that, checked in at §6 M11 and found four milestones
+/// later by a golden that moved for what looked like an unrelated reason.
+///
+/// Graded per *primitive* and on a **majority**, not on one triangle: a smooth
+/// low-poly surface can legitimately carry a vertex normal on the far side of a
+/// sliver's geometric one, and a pole fan's degenerate triangles have no
+/// geometric normal to disagree with. What this catches is the shape a mistake
+/// has — every triangle in the primitive, because the whole index buffer was
+/// emitted the other way round.
+fn check_winding(vertices: &[Vertex], indices: &[u32], name: &str) -> Result<()> {
+    let (mut against, mut counted) = (0usize, 0usize);
+    for triangle in indices.chunks_exact(3) {
+        let corner = |i: usize| &vertices[triangle[i] as usize];
+        let at = |i: usize| DVec3::from(corner(i).position.map(f64::from));
+        // The three authored normals summed, against the winding's own normal.
+        // Summed rather than averaged: only the sign of the dot product is read.
+        let authored = (0..3).fold(DVec3::ZERO, |sum, i| {
+            sum + DVec3::from(corner(i).normal.map(f64::from))
+        });
+        let geometric = (at(1) - at(0)).cross(at(2) - at(0));
+        // Exactly zero is a degenerate triangle or an unset normal — neither is
+        // evidence either way, so it does not vote.
+        match geometric.dot(authored).partial_cmp(&0.0) {
+            Some(core::cmp::Ordering::Less) => (against, counted) = (against + 1, counted + 1),
+            Some(core::cmp::Ordering::Greater) => counted += 1,
+            _ => {}
+        }
+    }
+    if against * 2 > counted {
+        anyhow::bail!(
+            "{name} winds against its own normals in {against} of {counted} triangles — the \
+             source's index order is reversed. Nothing reads winding until a pass asks which \
+             side of a face it is on, so this renders correctly until one does and then shades \
+             inside-out (§6 M64)."
+        );
+    }
+    Ok(())
 }
 
 /// Give every vertex the normal of the last triangle that names it. Correct
@@ -809,6 +858,53 @@ mod tests {
             })
             .collect();
         (vertices, vec![0, 1, 2, 0, 2, 3])
+    }
+
+    /// The quad's corners run counter-clockwise seen from +Z and its normals are
+    /// +Z, so the winding agrees and nothing is refused (§6 M64).
+    #[test]
+    fn a_quad_wound_with_its_normals_imports() {
+        let (vertices, indices) = quad([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        assert!(check_winding(&vertices, &indices, "quad").is_ok());
+    }
+
+    /// Demo 06's ten spheres, in miniature: the same surface with its index
+    /// buffer emitted the other way round. Both triangles disagree, so the
+    /// majority is the whole primitive.
+    #[test]
+    fn a_quad_wound_against_its_normals_is_refused() {
+        let (vertices, indices) = quad([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        let flipped: Vec<u32> = indices
+            .chunks_exact(3)
+            .flat_map(|t| [t[0], t[2], t[1]])
+            .collect();
+        let Err(error) = check_winding(&vertices, &flipped, "sphere") else {
+            panic!("an inverted primitive imported clean");
+        };
+        let error = error.to_string();
+        assert!(error.contains("2 of 2 triangles"), "{error}");
+        assert!(error.contains("sphere"), "{error}");
+    }
+
+    /// A single disagreeing triangle is not a verdict: the gate is a majority,
+    /// because a smoothed surface may legitimately carry a vertex normal on the
+    /// far side of one sliver's geometric one.
+    #[test]
+    fn one_triangle_against_the_grain_is_not_a_refusal() {
+        let (vertices, indices) = quad([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        let mut one_bad = indices.clone();
+        one_bad.swap(1, 2);
+        assert!(check_winding(&vertices, &one_bad, "quad").is_ok());
+    }
+
+    /// A degenerate triangle has no geometric normal, so it votes neither way —
+    /// and a primitive made only of them is not evidence of anything. A pole fan
+    /// is where these come from, which is why demo 06's spheres counted 414 of
+    /// 432 rather than all of them.
+    #[test]
+    fn degenerate_triangles_do_not_vote() {
+        let (vertices, _) = quad([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        assert!(check_winding(&vertices, &[0, 1, 1], "sliver").is_ok());
     }
 
     #[test]

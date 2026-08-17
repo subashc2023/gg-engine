@@ -457,6 +457,8 @@ fn grade() -> Result<()> {
     projections(&mut renderer, &world)?;
     bias(&mut renderer, &world, &reference, &covered)?;
     slices_and_steps(&mut renderer, &world, &reference, &covered)?;
+    pattern(&mut renderer, &world, &covered)?;
+    direction(&mut renderer, &world, &covered)?;
     blur(&mut renderer, &world, &reference, &covered)?;
     cost(&mut renderer, &world, &reference, &covered)?;
     radii(&mut renderer, &world)?;
@@ -498,6 +500,183 @@ fn slices_and_steps(
     }
     cvars::AO_SLICES.set_int(2);
     cvars::AO_STEPS.set_int(8);
+    println!();
+    Ok(())
+}
+
+/// Lags in pixels, powers of two so a dip names a period directly.
+const LAGS: [usize; 4] = [1, 2, 4, 8];
+
+/// Mean absolute difference between covered pixels `lag` apart along one axis.
+///
+/// Both operands have to be covered: a difference taken against the background
+/// is a silhouette, which is the scene and not the pattern.
+fn lag_difference(field: &[f32], covered: &[bool], lag: usize, along_x: bool) -> f32 {
+    let (w, h) = (FRAME.0 as usize, FRAME.1 as usize);
+    let (mut total, mut n) = (0.0f64, 0u32);
+    for y in 0..h {
+        for x in 0..w {
+            let (bx, by) = if along_x { (x + lag, y) } else { (x, y + lag) };
+            if bx >= w || by >= h {
+                continue;
+            }
+            let (a, b) = (y * w + x, by * w + bx);
+            if !covered[a] || !covered[b] {
+                continue;
+            }
+            total += f64::from((field[a] - field[b]).abs());
+            n += 1;
+        }
+    }
+    (total / f64::from(n.max(1))) as f32
+}
+
+/// The smallest lag whose difference falls *below* a nearer one's, if any.
+fn period(d: &[f32; LAGS.len()]) -> Option<usize> {
+    (1..LAGS.len()).find(|i| d[*i] < d[i - 1]).map(|i| LAGS[i])
+}
+
+/// The four residue classes of one index family, and how far apart their means
+/// are — a spread in code values (§6 M66).
+///
+/// [`lag_difference`] walks x and y, so it can say a period is four pixels and
+/// cannot say **along what**. That gap is not academic: `ao.slang` keys its
+/// rotation on `(x + y) & 3`, which is *constant along every anti-diagonal*, so
+/// every pixel on one of those lines estimates visibility from the same pair of
+/// slice directions and carries the same directional bias. Four such lines repeat
+/// every four pixels — which is what the x and y lags report, from the one
+/// direction in which the structure is weakest.
+fn class_spread(field: &[f32], covered: &[bool], key: fn(usize, usize) -> usize) -> f32 {
+    let (w, h) = (FRAME.0 as usize, FRAME.1 as usize);
+    let mut total = [0.0f64; 4];
+    let mut n = [0u32; 4];
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if !covered[i] {
+                continue;
+            }
+            let k = key(x, y);
+            total[k] += f64::from(field[i]);
+            n[k] += 1;
+        }
+    }
+    let means: Vec<f64> = (0..4).map(|k| total[k] / f64::from(n[k].max(1))).collect();
+    let (lo, hi) = means
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), m| (lo.min(*m), hi.max(*m)));
+    (hi - lo) as f32
+}
+
+/// Index families, chosen so the one the shader keys on has a control beside it.
+/// The anti-diagonal is the rotation's own index and the main diagonal is its
+/// mirror, which is the comparison that means anything — a spread large on both
+/// is the scene's own gradient and not a tile.
+#[expect(clippy::type_complexity, reason = "a labelled table, read once below")]
+const FAMILIES: [(&str, fn(usize, usize) -> usize); 4] = [
+    ("x+y", |x, y| (x + y) & 3),
+    ("x-y", |x, y| x.wrapping_sub(y) & 3),
+    ("x", |x, _| x & 3),
+    ("y", |_, y| y & 3),
+];
+
+/// Which *direction* the pattern runs in (§6 M66).
+///
+/// [`pattern`]'s table says a period exists and how long it is; this says along
+/// what, and the two together are what let §6 M66 rule the occlusion pass out as
+/// the cause of a complaint about "very liney" shading under demo 12's shelter
+/// roof. The raw target is organized on the anti-diagonal by an order of
+/// magnitude over anything else, exactly as the rotation index is — and the 4x4
+/// box takes that to a hundredth of a code value, which is why the answer was
+/// that the lines were the *irradiance field's* and not this pass's.
+fn direction(renderer: &mut OffscreenRenderer, world: &World, covered: &[bool]) -> Result<()> {
+    println!("  slices | blur | spread of the four residue-class means, code values");
+    println!("         |      | {}", {
+        let mut header = String::new();
+        for (label, _) in FAMILIES {
+            header.push_str(&format!("{label:>8} "));
+        }
+        header
+    });
+    for (slices, blur) in [(2i64, false), (4, false), (2, true)] {
+        cvars::AO_SLICES.set_int(slices);
+        cvars::AO_BLUR.set_bool(blur);
+        let rendered = rendered_occlusion(renderer, world)?;
+        let mut row = String::new();
+        for (_, key) in FAMILIES {
+            row.push_str(&format!(
+                "{:>8.3} ",
+                class_spread(&rendered, covered, key) * 255.0
+            ));
+        }
+        println!("  {slices:>6} | {:>4} | {row}", u32::from(blur));
+    }
+    cvars::AO_SLICES.set_int(2);
+    cvars::AO_BLUR.set_bool(true);
+    println!();
+    Ok(())
+}
+
+/// Does the pass leave a *pattern* rather than noise (§6 M62)?
+///
+/// The one table here that needs no reference renderer, and the reason it exists
+/// is that the ones that do are blind to exactly this: mean absolute error is a
+/// scalar over a whole frame, so occlusion that is wrong in a repeating grid and
+/// occlusion that is wrong at random score the same — and only one of them is
+/// something a player sees. It is `gg-tools shadow-edge`'s jag argument in a
+/// second place: a quality no ground truth can express, measured against what
+/// the geometry alone says the answer must look like.
+///
+/// A field with no periodic structure decorrelates monotonically, so the mean
+/// difference at lag 1, 2, 4, 8 rises. **A dip is a period**, and there is no
+/// second reading of it. Four is the design — the rotation is a 4x4 tile and the
+/// denoiser's window is matched to it — so `4 px` is the pass working and
+/// anything *shorter* is phases landing on top of each other. A row reading `-`
+/// with a lag-1 difference near zero is the other failure and is why the
+/// amplitudes are printed beside the verdict: no period because no variety.
+///
+/// Both of those were live before §6 M62, and the slice sweep is what separates
+/// them: at two slices x read a **2 px** period, at four it read `-` with a
+/// lag-1 difference of 0.2 code values — the rotation inert — and only at one
+/// and three did it do what the comment in `ao.slang` claimed. The accuracy
+/// tables above are blind to all of it and moved by 0.001 when it was fixed.
+///
+/// Blur off, because the denoiser's whole job is to average one period away and
+/// a table measured through it would report on the filter rather than on the
+/// pass. The shipped configuration is printed through it at the foot, which is
+/// what says whether the filter is in fact doing that.
+fn pattern(renderer: &mut OffscreenRenderer, world: &World, covered: &[bool]) -> Result<()> {
+    println!("  slices | blur | axis | lag 1 | lag 2 | lag 4 | lag 8 | period");
+    cvars::AO_BLUR.set_bool(false);
+    for (slices, blur) in [(1i64, false), (2, false), (3, false), (4, false), (2, true)] {
+        cvars::AO_SLICES.set_int(slices);
+        cvars::AO_BLUR.set_bool(blur);
+        let rendered = rendered_occlusion(renderer, world)?;
+        for along_x in [true, false] {
+            let mut d = [0.0f32; LAGS.len()];
+            for (slot, lag) in d.iter_mut().zip(LAGS) {
+                *slot = lag_difference(&rendered, covered, lag, along_x);
+            }
+            println!(
+                "  {slices:>6} | {:>4} | {:>4} | {:>5.1} | {:>5.1} | {:>5.1} | {:>5.1} | {}",
+                u32::from(blur),
+                if along_x { "x" } else { "y" },
+                // Code values of 255, which is what an eye is looking at — the
+                // field is a ratio in 0..1 and four decimal places of it read as
+                // noise about noise.
+                d[0] * 255.0,
+                d[1] * 255.0,
+                d[2] * 255.0,
+                d[3] * 255.0,
+                match period(&d) {
+                    Some(p) => format!("{p} px"),
+                    None => "-".to_owned(),
+                }
+            );
+        }
+    }
+    cvars::AO_SLICES.set_int(2);
+    cvars::AO_BLUR.set_bool(true);
     println!();
     Ok(())
 }

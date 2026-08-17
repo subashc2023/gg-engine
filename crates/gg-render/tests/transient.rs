@@ -253,31 +253,39 @@ fn a_shot_that_leaves_the_room_refits_the_field_and_the_shadow_cull_absorbs_it()
         cull.views
     );
 
-    // And M36's half, which does not absorb it. Both halves of the cost are
-    // pinned: the grid is coarser than the one the room asked for, and the
-    // gathered field is *gone* rather than stale.
+    // And M36's half, whose shape §6 M68 changed and did not remove.
+    //
+    // **The spacing no longer follows the tracer.** This room is wider than the
+    // window `r.gi_spacing` buys, so its horizontal axes are anchored to the eye,
+    // and a bound 40 m up cannot reach them: the room keeps the cells it asked for
+    // whatever a transient does. What the tracer *can* still do is push the room's
+    // short vertical axis past a fitted window, which anchors it — a different
+    // count, so a refit and not a scroll. That is M37 item 3's residual restated at
+    // the price of one axis rather than of every cell in the level.
     let (_, spacing, counts) = grid.expect("the sky shot left the renderer with no grid at all");
     let (_, was, had) = settled.unwrap();
-    assert!(
-        spacing > was,
-        "the sky shot did not widen the grid ({was} -> {spacing}) — if `Grid::fit` no longer \
-         follows a transient out of the room, this is the good news and §6 M37 item 3's number \
-         is stale"
-    );
-    // `[8, 3, 8]` and not the `[8, 4, 8]` this recorded until §6 M57: the room's
-    // walls top out at exactly `y = 4.0` against a 4 m spacing, so two spacings
-    // and three probes bracket it exactly. The fourth layer was an `f32` ULP on
-    // a `ceil`'s riser, which is the wobble M57 steadied — this assertion had
-    // pinned the artefact.
     assert_eq!(
-        (was, spacing, had, counts),
-        (4.0, 8.0, [8, 3, 8], [5, 8, 5]),
-        "the room or the fit moved — §6 M37 item 3 quotes these two grids"
+        (was, spacing),
+        (2.0, 2.0),
+        "the sky shot moved the room's cell size — under §6 M68 an anchored axis is a function \
+         of the eye and the spacing, and a tracer is neither"
+    );
+    // `[15, 4, 15]` is the room **fitted on every axis** at the 2 m it asked for:
+    // its walls top out at exactly `y = 4.0` over a floor slab at `-0.5`, which four
+    // probes two metres apart bracket from `-2`. The sky shot takes that vertical
+    // span to 40 m, which no fitted window holds, so **only y** anchors and goes to
+    // `MAX_PER_AXIS` — the horizontal axes do not move at all, which is what doing
+    // the placement per axis buys. Before §6 M68 every axis changed, because the
+    // widening is driven by whichever one is widest.
+    assert_eq!(
+        (had, counts),
+        ([15, 4, 15], [15, 16, 15]),
+        "the room or the placement moved — §6 M68 quotes these two grids"
     );
     // Everything the old grid had gathered is gone: what is left to gather is
     // the *new* grid entire, less the one batch this same frame took off it.
     // `Probes::update` keeps nothing across a refit, and cannot — a probe at a
-    // new spacing is at a new place.
+    // new count is in a different slot.
     assert_eq!(
         left,
         (
@@ -286,21 +294,35 @@ fn a_shot_that_leaves_the_room_refits_the_field_and_the_shadow_cull_absorbs_it()
         ),
         "the refit kept part of the field it had gathered over {probes} probes"
     );
-
-    // The tracer dies after three ticks and the bounds shrink back. `covers`
-    // is the hysteresis that would keep the wide grid, and it does not fire:
-    // the fitted spacing is different, so this is a *second* refit, and one
-    // shot at the sky costs the field twice.
-    let (grid, _, left) = shoot(&mut renderer, Shot::None);
     assert_eq!(
-        grid, settled,
-        "the grid did not come back to the room's own fit once the tracer died"
+        renderer.field_events(),
+        (2, 0),
+        "one shot at the sky cost more than one refit — the first is the calm room's own"
+    );
+
+    // The tracer dies after three ticks and the bounds shrink back, and **this is
+    // where the second refit used to be**: the vertical axis would fit again, at a
+    // count it had before, and the field was paid for twice for one tracer. An axis
+    // that has had to anchor stays anchored (`Grid::place`'s `sticky`), so the grid
+    // is the one already in hand and the round robin carries on where it was.
+    let (calmed, _, left) = shoot(&mut renderer, Shot::None);
+    let (_, calm_spacing, calm_counts) =
+        calmed.expect("the calm room left the renderer with no grid at all");
+    assert_eq!(
+        (calm_spacing, calm_counts),
+        (spacing, counts),
+        "the vertical axis unanchored itself once the tracer died"
     );
     assert_eq!(
-        left,
-        (probes - batch, probes),
-        "the second refit kept part of the field — one shot at the sky costs two full regathers \
-         of {probes} probes, {batch} of them a frame"
+        renderer.field_events(),
+        (2, 0),
+        "one shot at the sky still costs the field twice — `sticky` did not hold"
+    );
+    assert!(
+        left.0 < counts.iter().product::<u32>() as usize - batch,
+        "the frame after the tracer died gathered nothing: {} of {} still ungathered",
+        left.0,
+        left.1
     );
 
     cvars::GI_RATE.set_int(16);

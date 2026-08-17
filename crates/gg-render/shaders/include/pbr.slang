@@ -78,11 +78,11 @@ static const uint LIGHT_POINT = 1;
 // Strides written here and asserted against the Rust records beside them, the
 // same agreement `VERTEX_STRIDE` and `INSTANCE_STRIDE` are half of. HLSL has no
 // `sizeof`, so a drift is a build error rather than a garbled read.
-static const uint FRAME_STRIDE = 4432;
+static const uint FRAME_STRIDE = 4440;
 static const uint LIGHT_STRIDE = 48;
 static const uint CASCADE_STRIDE = 80;
 // Where the cascade array starts inside the frame block.
-static const uint CASCADE_BASE = 1040;
+static const uint CASCADE_BASE = 1048;
 // Coefficients in the order-2 environment projection (§6 M24), and where they
 // start. Must equal `sky.rs`'s SH_COEFFICIENTS.
 static const uint SH_COEFFICIENTS = 9;
@@ -99,7 +99,7 @@ static const uint SAMPLER_LINEAR_CLAMP = 1;
 // Where the environment array starts, and therefore where the innermost
 // environment's coefficients start — `sh` is the first field of an environment
 // precisely so M24's read is still the read.
-static const uint ENV_BASE = 272;
+static const uint ENV_BASE = 280;
 // Must equal `lighting.rs`'s MAX_CASCADES: the loops below are unrolled over it
 // and a mismatch would read past the block.
 static const uint MAX_CASCADES = 4;
@@ -110,7 +110,7 @@ static const uint MAX_CASCADES = 4;
 static const uint MAX_LAMPS = 8;
 static const uint LAMP_FACES = 6;
 static const uint LAMP_STRIDE = 384;
-static const uint LAMP_BASE = 1360;
+static const uint LAMP_BASE = 1368;
 // A shadow draw's `shadow_view` index: cascades first, then lamp faces, then the
 // probe faces this frame is gathering (§6 M36). One number rather than a second
 // push field, so the shadow vertex shader takes one branch on a value that is
@@ -128,6 +128,12 @@ static const uint PROBE_SLOT_STRIDE = 400;
 // in it — `probe.rs`'s `SH_TEXELS` and `STATE_TEXEL`.
 static const uint PROBE_SH_TEXELS = 4;
 static const uint PROBE_STATE_TEXEL = 3;
+// Texels of border around each side of a probe's distance tile — `probe.rs`'s
+// `MOMENT_BORDER` (§6 M69). It exists so the tile can be *filtered*: a bilinear
+// tap at the tile's own edge needs a neighbour, and in an atlas the neighbour is
+// the next probe. See `probe_visibility` for what filtering is worth and
+// `octahedral_wrap` for what the border holds.
+static const uint PROBE_MOMENT_BORDER = 1;
 
 // The froxel grid (§6 M30). Must equal `cluster.rs`'s GRID, which is where the
 // dimensions are argued; here they are only the arithmetic that finds a list.
@@ -216,6 +222,8 @@ struct Frame
     uint3 gi_counts;           // probes along each axis
     float3 gi_origin;          // the corner probe, camera-relative
     float gi_bias;             // metres a shading point is pushed off its surface
+    float gi_burial;           // how fast a buried probe's weight falls, `r.gi_burial`
+    uint3 gi_wrap;             // grid coordinate -> storage slot, per axis (§6 M68)
     uint64_t probe_views;      // this frame's gather batch, PROBE_SLOT_STRIDE apart
 }
 
@@ -226,6 +234,22 @@ static const uint SHADING_LOBE = 2u;
 static const uint SHADING_LUT = 4u;
 static const uint SHADING_AO = 8u;
 static const uint SHADING_GI = 16u;
+static const uint SHADING_FACING = 32u;
+static const uint SHADING_FIELD = 64u;
+static const uint SHADING_TERM = 128u;
+// `r.gi_filter` (§6 M69) — a bit and not a `Frame` field, so the fix that made
+// the distance tile filterable did not move a single frame-block offset.
+static const uint SHADING_GI_FILTER = 256u;
+
+// `r.facing`'s picture (§6 M64): green where the rasterizer calls the fragment
+// front, red where it calls it back. Radiance rather than colour — this is
+// written into the same `Rgba16F` scene target the tonemapper reads, so the
+// values are chosen to land near full scale after the curve rather than to be
+// the sRGB triple they look like.
+float3 facing_paint(bool front)
+{
+    return front ? float3(0.05, 1.5, 0.05) : float3(1.5, 0.05, 0.05);
+}
 
 // The split-sum table's edge (§6 M34). Must equal `split_sum::EXTENT`; the read
 // below indexes by it and a mismatch is a wrong number rather than a crash.
@@ -267,11 +291,11 @@ struct Light
     float intensity;
 }
 
-// `Frame::probe_views` on its own — 264 bytes in, the one field of the block a
+// `Frame::probe_views` on its own — 272 bytes in, the one field of the block a
 // probe *vertex* needs and the one it would otherwise load sixty scalars for.
 uint64_t load_probe_views(uint64_t address)
 {
-    return ((uint64_t*)address)[33];
+    return ((uint64_t*)address)[34];
 }
 
 Frame load_frame(uint64_t address)
@@ -324,7 +348,12 @@ Frame load_frame(uint64_t address)
     frame.gi_counts = uint3(u[59], u[60], u[61]);
     frame.gi_origin = float3(f[62], f[63], f[64]);
     frame.gi_bias = f[65];
-    // 264, and 264 is a multiple of 8 — an address read at four would be a
+    frame.gi_burial = f[66];
+    // Three axes in one word, a byte each — 67 was this block's one declared pad
+    // and §6 M68 spent it rather than moving every base below here by twelve bits'
+    // worth of information. `probe::MAX_PER_AXIS` asserts the components fit.
+    frame.gi_wrap = uint3(u[67] & 0xffu, (u[67] >> 8u) & 0xffu, (u[67] >> 16u) & 0xffu);
+    // 272, and 272 is a multiple of 8 — an address read at four would be a
     // misaligned load rather than a wrong one, which is worse.
     frame.probe_views = load_probe_views(address);
     return frame;
@@ -786,6 +815,45 @@ float3 octahedral_direction(float2 uv)
     return normalize(float3(xz.x, y, xz.y));
 }
 
+// A uv one texel outside the octahedral square, folded back to the one inside it
+// standing for the same direction (§6 M69).
+//
+// **The square's edges are fold lines, not wraps.** In `octahedral_direction`'s
+// parameterisation `p = (1, t)` and `p = (1, -t)` name the same direction — the
+// right edge is folded onto itself about its own midpoint — so continuing past it
+// means reflecting *across* it and mirroring the other axis: `u > 1` becomes
+// `2 - u` with `v` becoming `1 - v`. Which makes the border texel this returns
+// bit-identical to the interior texel it mirrors onto, since a texel centre at
+// `-0.5/edge` reflects to `+0.5/edge` exactly and `1 - (y + 0.5)/edge` is
+// `((edge - 1 - y) + 0.5)/edge` exactly. `probe.rs`'s
+// `the_moment_tile_border_is_its_own_mirror` is that equality as a test.
+//
+// So the border is *computed* rather than copied: `fs_moments` runs the same
+// integral in the direction this hands it, which costs one extra ring of texels
+// and needs no second pass, no copy, and no table of edge cases to get subtly
+// wrong.
+float2 octahedral_wrap(float2 uv)
+{
+    float2 r = uv;
+    if (r.x < 0.0)
+    {
+        r = float2(-r.x, 1.0 - r.y);
+    }
+    else if (r.x > 1.0)
+    {
+        r = float2(2.0 - r.x, 1.0 - r.y);
+    }
+    if (r.y < 0.0)
+    {
+        r = float2(1.0 - r.x, -r.y);
+    }
+    else if (r.y > 1.0)
+    {
+        r = float2(1.0 - r.x, 2.0 - r.y);
+    }
+    return r;
+}
+
 // The six probe faces as (forward, up), and the third axis each implies.
 //
 // **The same table as `lamp.rs`'s `AXES`**, transcribed rather than derived —
@@ -1028,21 +1096,99 @@ float3 probe_irradiance(Texture2D<float4> sh_image, uint2 texel, float3 normal)
 // wall's own edge — the variance is large and the bound is soft, which is a
 // gradient instead of a stair.
 //
-// Point-sampled, and that is what lets the tiles have no border: an octahedral
-// seam is exactly where a bilinear tap would fetch the far side of the probe.
-float probe_visibility(Texture2D<float4> moments, uint2 tile, float edge, float3 to_point,
-                       float distance)
+// # Filtered, and that is the whole of §6 M69 (`r.gi_filter` for the other read)
+//
+// It was point-sampled until then, on the argument that a bordered tile is what
+// bilinear costs and an octahedral seam is exactly where a tap fetches the far
+// side of the probe. Both halves are true and the conclusion was wrong: a bound
+// point-sampled on `edge`-by-`edge` directions is a **discontinuous function of
+// direction**, and the octahedral map is piecewise linear, so those
+// discontinuities projected from a probe onto a flat surface are *straight lines*.
+// A report about "large geometric triangular shadows" on a wall above a roof was
+// that, at `edge` 4, one triangle per probe cell.
+//
+// **And raising the edge does not fix it, it subdivides it.** `gg-tools facets`
+// is what says so: 4 to 8 turns three big triangles into eight small ones and
+// moves the crease count by a tenth, because a finer tile has more boundaries
+// each carrying a smaller step. The knob's own doc had it as "does nearly
+// nothing" on the strength of `bounce`'s tile table reading flat to 0.3 % —
+// which it does, since a mean over a path-traced truth is blind to a defect that
+// is structure rather than level.
+//
+// Bilinear makes the bound C0 in direction, so the class of artifact is gone
+// rather than smaller, and the edge goes back to being a quality knob.
+//
+// # Why the taps are hand-written
+//
+// Four `Load`s and three `lerp`s rather than one `SampleLevel`, for a reason
+// specific to an atlas: hardware filtering takes normalised coordinates over the
+// *whole image* and clamps at the image's edge, not at a tile's, so a tap
+// footprint that walked off a tile would fetch the neighbouring probe's record.
+// With the border in place it cannot — `uv` in `[0, 1]` lands the footprint
+// inside `[0, stride - 1]` — but that is an invariant of this arithmetic, and
+// integer texel math is where it can be read. It also keeps the samplers out of
+// `gi_sample`'s signature, which every caller would then have to carry.
+float probe_visibility(Texture2D<float4> moments, uint2 tile, float edge, bool filtered,
+                       float3 to_point, float distance)
 {
+    float stride = edge + 2.0 * float(PROBE_MOMENT_BORDER);
     float2 uv = octahedral_uv(to_point);
-    uint2 at = tile + uint2(clamp(floor(uv * edge), 0.0, edge - 1.0));
-    float2 m = moments.Load(int3(int2(at), 0)).rg;
+    float2 m;
+    if (filtered)
+    {
+        // Texel *centres* of the interior run from `border + 0.5` to
+        // `border + edge - 0.5`, so `uv * edge + border` is the padded coordinate
+        // and `- 0.5` puts it in the frame the floor of a bilinear tap wants.
+        float2 at = uv * edge + float(PROBE_MOMENT_BORDER) - 0.5;
+        float2 base = clamp(floor(at), 0.0, stride - 2.0);
+        float2 t = saturate(at - base);
+        uint2 o = tile + uint2(base);
+        float2 m00 = moments.Load(int3(int2(o), 0)).rg;
+        float2 m10 = moments.Load(int3(int2(o) + int2(1, 0), 0)).rg;
+        float2 m01 = moments.Load(int3(int2(o) + int2(0, 1), 0)).rg;
+        float2 m11 = moments.Load(int3(int2(o) + int2(1, 1), 0)).rg;
+        m = lerp(lerp(m00, m10, t.x), lerp(m01, m11, t.x), t.y);
+    }
+    else
+    {
+        uint2 at = tile + uint2(PROBE_MOMENT_BORDER, PROBE_MOMENT_BORDER)
+                   + uint2(clamp(floor(uv * edge), 0.0, edge - 1.0));
+        m = moments.Load(int3(int2(at), 0)).rg;
+    }
     if (distance <= m.x)
     {
         return 1.0;
     }
+    // Interpolating the two moments and forming the variance from the result is
+    // not the same as interpolating the variance, and it is the right one: what a
+    // Chebyshev bound needs is the *statistics* of the distances a direction saw,
+    // and those are what the two channels are. The floor is what keeps a
+    // bilinear pair whose `E[d²]` fell a rounding below `E[d]²` from producing a
+    // negative one.
     float variance = max(m.y - m.x * m.x, 1e-4);
     float gap = distance - m.x;
     return saturate(variance / (variance + gap * gap));
+}
+
+// What the field decided about one point — the irradiance, and the two numbers
+// that produced it (§6 M66).
+//
+// A struct because the paint and the shading read the *same* walk: a second loop
+// that recomputed the weights would be a second thing to keep in step with this
+// one, and the defect the paint exists to find was a weight product falling under
+// a bar.
+struct FieldSample
+{
+    float3 irradiance;  // the field's answer, or `fallback` when it had none
+    float total;        // summed probe weight; a fully visible cell is about 0.5
+    float blend;        // the hull fade, 1 well inside the grid
+    float confidence;   // how much of `irradiance` is the field's, 0 all fallback
+    // The three *suppressing* terms as trilinear-weighted means over the eight
+    // corners, in the order they are applied: burial, cosine wrap, visibility
+    // (§6 M67). Trilinear itself is absent on purpose — it is the interpolation
+    // and never a defect, and it is the weight the other three are averaged by so
+    // that a corner the cell barely leans on cannot dominate the reading.
+    float3 terms;
 }
 
 // The irradiance field at `world`, or `fallback` where it does not reach
@@ -1058,12 +1204,21 @@ float probe_visibility(Texture2D<float4> moments, uint2 tile, float edge, float3
 // between "lit by the field" and "lit by the box" is a seam running through the
 // scene at a plane nothing in the world corresponds to; fading over the last
 // half-cell puts the change where the field's own confidence is already lowest.
-float3 gi_irradiance(Frame frame, float3 world, float3 normal, float3 fallback,
-                     Texture2D<float4> textures[])
+FieldSample gi_sample(Frame frame, float3 world, float3 normal, float3 fallback,
+                      Texture2D<float4> textures[])
 {
+    FieldSample result;
+    result.irradiance = fallback;
+    result.total = 0.0;
+    result.blend = 0.0;
+    result.confidence = 0.0;
+    // One, not zero: a fragment the field never walked took nothing away, and a
+    // paint that read the initialiser as "every term killed it" would be brightest
+    // exactly where there is nothing to see.
+    result.terms = float3(1.0, 1.0, 1.0);
     if ((frame.shading & SHADING_GI) == 0)
     {
-        return fallback;
+        return result;
     }
     // Off the surface first: a shading point sits exactly on geometry the probes
     // saw, so its own wall is at distance zero from it and every visibility
@@ -1073,24 +1228,41 @@ float3 gi_irradiance(Frame frame, float3 world, float3 normal, float3 fallback,
     float3 last = float3(frame.gi_counts) - 1.0;
     float3 outside = max(max(-local, local - last), 0.0);
     float blend = 1.0 - saturate(2.0 * length(outside));
+    result.blend = blend;
     if (blend <= 0.0)
     {
-        return fallback;
+        return result;
     }
     float3 cell = clamp(floor(local), 0.0, max(last - 1.0, 0.0));
     float3 t = saturate(local - cell);
     float edge = frame.gi_moment_edge;
+    // Tile pitch in the atlas: the octahedral edge plus its border either side
+    // (§6 M69). `Grid::moment_tile`'s stride, and the one place the two have to
+    // agree — `probe.rs`'s `the_moment_atlas_gives_every_probe_its_own_texels`
+    // walks the whole image and fails on an overlap.
+    float stride = edge + 2.0 * float(PROBE_MOMENT_BORDER);
 
     float3 sum = float3(0.0, 0.0, 0.0);
     float total = 0.0;
+    // The three suppressing terms and the trilinear weight they are averaged by —
+    // see [`FieldSample::terms`]. `share` is 1.0 by construction, and is summed
+    // rather than assumed because the corner clamp above can make it otherwise.
+    float3 terms = float3(0.0, 0.0, 0.0);
+    float share = 0.0;
     for (uint i = 0; i < 8; ++i)
     {
         float3 step = float3(float(i & 1u), float((i >> 1u) & 1u), float((i >> 2u) & 1u));
         float3 trilinear = lerp(1.0 - t, t, step);
-        float w = trilinear.x * trilinear.y * trilinear.z;
+        float lit = trilinear.x * trilinear.y * trilinear.z;
+        float w = lit;
+        // `c` is where the probe *is* and `s` is where its record is kept — the two
+        // part company on an anchored axis, whose window slides over a lattice while
+        // the images stay put (§6 M68). Everything geometric below reads `c`; only
+        // the two loads read `s`.
         uint3 c = uint3(cell + step);
-        uint row = c.z * frame.gi_counts.y + c.y;
-        uint2 texel = uint2(c.x * PROBE_SH_TEXELS, row);
+        uint3 s = (c + frame.gi_wrap) % max(frame.gi_counts, uint3(1u, 1u, 1u));
+        uint row = s.z * frame.gi_counts.y + s.y;
+        uint2 texel = uint2(s.x * PROBE_SH_TEXELS, row);
         // The state texel, and the two things it is read for.
         //
         // `a` is whether this probe has *ever* been gathered: `probe.slang`
@@ -1107,16 +1279,58 @@ float3 gi_irradiance(Frame frame, float3 world, float3 normal, float3 fallback,
         float2 state = textures[frame.gi_sh_texture]
                            .Load(int3(int2(texel) + int2(PROBE_STATE_TEXEL, 0), 0))
                            .ga;
-        w *= state.y >= 0.5 ? saturate(1.0 - 2.0 * state.x) : 0.0;
+        // **Weighted by how much of the probe's sphere was real, not rejected at
+        // half** (§6 M66). The factor was `2.0`, which zeroes a probe the moment
+        // more than half of what it saw was a back face — and a probe sitting
+        // *exactly on* a surface is exactly that probe. The lattice runs through the
+        // world origin (`Grid::fit`) and authored geometry is on round numbers, so
+        // whole planes of probes land on the floor and in the walls and every one of
+        // them was worth nothing: demo 12's shelter is 2.1 m tall with one probe
+        // plane inside it, at `y = 0`, and the entire space under that roof was lit
+        // by leakage from the plane *above* the roof — sky through its own ceiling —
+        // with a black band where even that fell under the bar.
+        //
+        // **`r.gi_burial` since §6 M67, defaulting to 1.5, and M66's 1.0 was read
+        // off a table measured through a stale field.** `gg-tools bounce`'s burial
+        // table — invented light is a probe seen through a wall, missed light is a
+        // crease shaded by the fallback, truth mean .6587:
+        //
+        //   slope | mean  | invented | missed | total  | worst
+        //    0.00 | .4841 |   0.5 %  | 27.1 % | .1818  | -.4378
+        //    0.50 | .5261 |   1.0 %  | 21.1 % | .1455  | +.3548
+        //    0.75 | .5583 |   1.4 %  | 16.6 % | .1186  | +.3770
+        //    1.00 | .6083 |   2.7 %  | 10.3 % | .0854  | +.4775   (M66's choice)
+        //    1.25 | .6280 |   3.5 %  |  8.2 % | .0766  | +.5041
+        //    1.50 | .6500 |   4.8 %  |  6.1 % | .0720  | +.5303   (shipped)
+        //    2.00 | .7436 |  16.4 %  |  3.5 % | .1312  | +.6499   (pre-M66)
+        //
+        // 1.5 is the minimum *and* where the two errors cross, which is what a
+        // two-sided plateau's answer looks like; it is also where the open half of
+        // the room stops being dark — that bucket reads -.0005 against the paths at
+        // 1.5 and -.0540 at 1.0. M66 chose the lower value as "the conservative end
+        // of a flat plateau", and the plateau was flat because two thirds of the
+        // field held the previous sweep row's records (§6 M67, `bounce`'s
+        // `rendered`). Corrected, it is not flat: 1.0 costs 19 % more total error
+        // than 1.5 and leaves the field 7.7 % too dark instead of 1.3 %.
+        float buried = state.y >= 0.5 ? saturate(1.0 - frame.gi_burial * state.x) : 0.0;
+        w *= buried;
         float3 offset = frame.gi_origin + (cell + step) * frame.gi_spacing - at;
         float distance = length(offset);
         float3 to_probe = distance > 1e-5 ? offset / distance : normal;
         // Wrapped rather than clamped: a probe a little behind the shading plane
         // still knows what is beside it, and a hard cosine gate leaves a seam
         // wherever the grid's own planes cross the geometry.
-        w *= max(0.05, 0.5 * (dot(normal, to_probe) + 1.0));
-        w *= probe_visibility(textures[frame.gi_moment_texture], uint2(c.x, row) * uint(edge),
-                              edge, -to_probe, distance);
+        float cosine = max(0.05, 0.5 * (dot(normal, to_probe) + 1.0));
+        w *= cosine;
+        float visible = probe_visibility(
+            textures[frame.gi_moment_texture], uint2(s.x, row) * uint(stride), edge,
+            (frame.shading & SHADING_GI_FILTER) != 0, -to_probe, distance);
+        w *= visible;
+        // Before the reject, so `terms` describes all eight corners and not only
+        // the ones that survived — a corner killed outright is exactly the one the
+        // paint has to be able to name.
+        terms += lit * float3(buried, cosine, visible);
+        share += lit;
         if (w <= 1e-6)
         {
             continue;
@@ -1127,16 +1341,122 @@ float3 gi_irradiance(Frame frame, float3 world, float3 normal, float3 fallback,
     // Almost every corner rejected is a point the field has nothing to say about
     // — a crevice every probe is walled off from, or a cell the round robin has
     // not reached — and the fallback is the honest answer there rather than
-    // black. The bar is a thousandth rather than an epsilon because the weights
-    // are a *product*: a fully visible cell comes to about a half, so anything
-    // this far under it is eight probes agreeing they cannot see the point.
-    if (total <= 1e-3)
+    // black.
+    result.total = total;
+    if (share > 0.0)
     {
-        return fallback;
+        result.terms = terms / share;
     }
+    if (total <= 1e-6)
+    {
+        // Nothing at all, and the only reason this bar is still here: the
+        // normalization below divides by it.
+        return result;
+    }
+    // **Faded by confidence and not switched at a bar** (§6 M66).
+    //
+    // The weights are a *product* over four terms, so a point a crease away from
+    // a healthy one can carry a thousandth of the weight its neighbour does — and
+    // the value is *normalized* by that weight, so it does not approach the
+    // fallback as the weight falls, it approaches whatever the one surviving probe
+    // says. Switching to the fallback at a threshold therefore puts a hard edge
+    // through the picture at a contour of a weight product, which is nothing
+    // anybody can see in the geometry.
+    //
+    // What that cost: `1e-3` against a fully visible cell's ~0.5 put the edge two
+    // thousandths of the way up, and in demo 12's shelter — where the field is not
+    // *a* light but the only one, three times the fallback — it drew a black line
+    // along the bottom 60 mm of every wall. The report that found it called it "a
+    // weird pure black that isn't anywhere else", which is exactly what a
+    // discontinuity in a term looks like when nothing in the scene has that shape.
+    //
+    // A tenth of a healthy cell is where the fade completes, so a fragment held up
+    // by one grazing probe reads as mostly fallback and a fragment with a cell
+    // behind it is untouched. Continuous in `total`, which is the whole point: the
+    // field can now run out of confidence without the picture reporting an edge.
+    result.confidence = saturate(total / 0.05) * blend;
     // `/ PI` here and not in `probe_irradiance`, so that function stays the twin
     // of `sh_irradiance` and this is the one place the convention is applied.
-    return lerp(fallback, sum / (total * PI), blend);
+    result.irradiance = lerp(fallback, sum / (total * PI), result.confidence);
+    return result;
+}
+
+float3 gi_irradiance(Frame frame, float3 world, float3 normal, float3 fallback,
+                     Texture2D<float4> textures[])
+{
+    return gi_sample(frame, world, normal, fallback, textures).irradiance;
+}
+
+// What the field made of this fragment, as a colour (§6 M66) — `r.gi_paint`.
+//
+// Red is a fragment the field gave up on and shaded with the fallback instead;
+// green is one it answered, scaled by the weight it mustered so a cell held up by
+// a single grazing probe reads dim rather than lit; blue is the hull fade, which
+// is the one place a *weak* answer is by design.
+//
+// A paint and not a [`DEBUG_VIEW`] entry for `r.facing`'s reason: this exists
+// only inside the forward pass, and the fallback is not an image anything
+// downstream could sample. What it is for is the failure it was built to find —
+// the field's fallback is "the honest answer" only while the fallback is close to
+// what the field would have said, and in a room lit *by* the field it is a hard
+// black band at every crease. That looks like a shadow bug or a wrong material,
+// and either way it looks like something in the picture rather than a threshold
+// in a weight product.
+float3 field_paint(FieldSample f)
+{
+    // Red to green by confidence, so the *fade* is visible and not only its ends:
+    // a hard boundary between the two colours would be a threshold this paint
+    // exists to say is no longer there. Blue carries the hull separately, since a
+    // weak answer at the grid's edge is by design and a weak one in the middle of
+    // a room is the defect.
+    // Green carries *two* things and has to: confidence is what reaches the
+    // picture, and the weight behind it is what says how much headroom there was —
+    // a fragment at full confidence on the strength of one grazing probe is one
+    // crease away from not being, and a paint that showed only the verdict would
+    // read as healthy right up to the frame where it is not.
+    float lit = f.confidence;
+    float held = saturate(f.total / 0.5);
+    return float3(1.5 * (1.0 - lit), 0.06 + 0.5 * lit + 0.8 * held,
+                  0.05 + 1.0 * (1.0 - f.blend));
+}
+
+// **Which of the three suppressing terms is holding this fragment back** (§6 M67)
+// — `r.gi_term`, and the one question `field_paint` above cannot answer.
+//
+// That paint reads the *verdict*: how much weight the eight corners mustered and
+// how much of the answer is therefore the field's. It is what finds a fragment the
+// field failed on. What it never says is *why*, and the four candidates want
+// four different repairs — a probe inside a wall is grid placement, a probe the
+// Chebyshev bound rejected is the distance record's resolution, a probe behind the
+// shading plane is the cosine wrap's floor, and a probe the round robin has not
+// reached yet is nothing at all and will fix itself. §6 M66 diagnosed its black
+// band by subtracting two renders and reading a shader by hand, which is the
+// method this replaces.
+//
+// **Discrete, not additive.** Three loss channels mixed into one colour reads as
+// mud, and worse, the cosine wrap is legitimately 0.5 at a perpendicular probe —
+// so an additive paint would be half blue over every flat surface in the scene and
+// the reader would learn to ignore the channel that matters. So: the *binding*
+// term picks the hue and how much it took picks the brightness. Red is burial,
+// green is visibility, blue is the cosine wrap, white is a fragment no corner
+// survived at all, and **black is healthy** — nothing took anything away.
+//
+// Radiance rather than colour, `facing_paint`'s reason: this is written into the
+// `Rgba16F` scene target the tonemapper reads.
+float3 term_paint(FieldSample f)
+{
+    if (f.total <= 1e-6)
+    {
+        return float3(1.2, 1.2, 1.2);
+    }
+    float worst = min(f.terms.x, min(f.terms.y, f.terms.z));
+    // Ordered burial, then visibility, then the wrap: a tie goes to the term whose
+    // repair is the more structural, so a probe that is both buried and invisible
+    // reads as buried.
+    float3 hue = f.terms.x <= worst
+                     ? float3(1.0, 0.04, 0.04)
+                     : (f.terms.z <= worst ? float3(0.04, 1.0, 0.04) : float3(0.1, 0.2, 1.0));
+    return hue * 1.5 * (1.0 - worst);
 }
 
 // Everything the environments contribute, or the flat ambient term when there
@@ -1928,6 +2248,31 @@ float3 shade_all_from(uint64_t frame_address, Frame frame, Surface s, float3 wor
                        compensation);
     }
     return total;
+}
+
+// The shading normal a back face gets — glTF 3.9.4, and not an approximation of
+// it: a two-sided surface seen from behind is the same surface, facing the
+// other way.
+//
+// What skipping it costs is not a subtle error in the shading. `n_dot_l` is
+// then <= 0 for every light, so a back face takes no direct light at all; and
+// the `max(dot(n, to_eye), 1e-4)` both specular paths clamp to reads the
+// split-sum's *grazing* row, where `a + b` is 1 for any F0. The surface loses
+// its albedo and returns the environment at full strength — a leaf lit from
+// behind comes back white (§6 M64), which is a defect that gets *brighter* the
+// more carefully the environment is integrated.
+//
+// `front` is the caller's conjunction rather than the rasterizer's bit alone,
+// because the rule is glTF's and glTF states it for `doubleSided` materials
+// only. A single-sided material's back faces are ones the spec expects to be
+// culled; this engine rasterizes `CullModeFlags::NONE` and draws them anyway,
+// but they are the inside of a solid rather than a surface — the two pixels a
+// box corner leaks when no front face covers the centre. Flipping those turns
+// an invisible sliver into a dark speck, so the caller passes `true` for them
+// and they shade as they always have.
+float3 facing_normal(float3 normal, bool front)
+{
+    return front ? normal : -normal;
 }
 
 // A tangent-space normal-map sample, brought into world space.

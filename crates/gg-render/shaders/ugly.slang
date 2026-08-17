@@ -100,13 +100,33 @@ VOut vs_main(uint vid: SV_VertexID)
 }
 
 [shader("fragment")]
-float4 fs_main(VOut i) : SV_Target
+float4 fs_main(VOut i, bool front: SV_IsFrontFace) : SV_Target
 {
     Frame frame = load_frame(push.frame);
+    // `front` reaches the picture and never the shading here — see below.
+    if ((frame.shading & SHADING_FACING) != 0)
+    {
+        return float4(facing_paint(front), 1.0);
+    }
+    // A zero fallback (§6 M66): `field_paint` reads the walk's verdict and its
+    // weight, neither of which the fallback enters, so the value that would cost
+    // a whole `ambient_light` to compute is not fetched to be thrown away.
+    if ((frame.shading & (SHADING_FIELD | SHADING_TERM)) != 0)
+    {
+        FieldSample f = gi_sample(frame, i.world, normalize(i.normal), float3(0.0), g_textures);
+        bool term = (frame.shading & SHADING_TERM) != 0;
+        return float4(term ? term_paint(f) : field_paint(f), 1.0);
+    }
     // No normal map and no occlusion map: a box has neither, so the tangent
     // frame this pass would need does not exist and is not invented.
     // Smoothness inverts to roughness here and nowhere else — see
     // `Renderable::smoothness` for why the boundary carries the other one.
+    //
+    // No `facing_normal` (§6 M64): a box is a closed solid and single-sided by
+    // construction, so glTF's two-sided rule does not reach it. The back faces
+    // that survive here are not surfaces — they are the two pixels a corner
+    // leaks when no front face covers the centre, and flipping their normal
+    // turns an invisible sliver into a dark speck.
     Surface s = make_surface(normalize(i.normal), push.tint.rgb, push.material.y,
                              1.0 - push.material.x, 1.0);
     // The footprint before anything else touches it: `pixel_footprint` takes

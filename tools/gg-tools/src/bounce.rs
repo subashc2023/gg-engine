@@ -70,6 +70,12 @@ const BOUNCES: u32 = 4;
 
 pub fn run(args: &[String]) -> Result<()> {
     let slow = args.iter().any(|a| a == "--slow");
+    // `--energy` alone, because that leg needs no path tracer and the rest of this
+    // command spends about a minute on one: it is the leg an experiment on the
+    // field's own constants is run against, over and over.
+    if args.iter().any(|a| a == "--energy") {
+        return only_energy();
+    }
     let scene = room();
     let suns = [sun()];
     let lamps = lamps();
@@ -361,6 +367,10 @@ const AMBIENT: f64 = 0.25;
 /// argument for a harness that renders one scene.
 const FIELD_FRAMES: usize = 32;
 
+/// Frames past which an unconverged field is a defect rather than a transient —
+/// the largest grid `probe::MAX_PER_AXIS` allows at `r.gi_rate 1`, and margin.
+const FIELD_CEILING: usize = 8192;
+
 /// The shipped field against the paths, in the two failures that fail in
 /// opposite directions (§6 M36).
 ///
@@ -418,8 +428,12 @@ fn field(solids: &[ao::Occluder], points: &[Sample]) -> Result<()> {
     report(&shipped, &reference, &inside, points);
     buckets(&shipped, &reference, &inside);
 
-    spacings(&mut renderer, &world, points, &reference)?;
-    tiles(&mut renderer, &world, points, &reference)?;
+    spacings(&world, points, &reference)?;
+    burials(&world, points, &reference)?;
+    biases(&world, points, &reference)?;
+    offsets(&world, points, &reference)?;
+    tiles(&world, points, &reference)?;
+    energy()?;
 
     cvars::DITHER.set_float(1.0);
     cvars::AO.set_bool(true);
@@ -466,18 +480,37 @@ fn rendered(
     points: &[Sample],
 ) -> Result<Vec<f32>> {
     cvars::GI.set_bool(true);
+    // **Every frame of the budget, and no early break on `pending`** (§6 M67).
+    //
+    // `pending` counts probes never gathered *since the grid was fitted*, which is
+    // not the question a sweep asks: a leg that changes the world, or the moment
+    // tile's edge, or anything else the records depend on but the grid does not,
+    // leaves `covers` satisfied — so no refit, so `pending` is already zero, so the
+    // loop used to stop after **one** frame with two thirds of the field still
+    // holding the previous leg's records.
+    //
+    // What that cost is worth writing down: the slab leg read 0.73 against a truth
+    // of 1.0 when it ran after the room, and 0.96 on its own device — the whole
+    // 27 % was the room's walls, still in the field, lighting a world with no walls
+    // in it. The tile table is the other one it reached: `r.gi_moments` re-lays out
+    // the moment image without moving the grid, so rows 4 and 8 were graded on tiles
+    // two thirds written at the *previous* edge, which is where "8 nearly triples the
+    // leak" (§6 M36) came from.
+    // A floor and then a *condition*, because how many frames a grid needs is a
+    // property of the grid: `probes / r.gi_rate`, which a constant can only be
+    // right about for one axis cap. It was 32 against a 512-probe ceiling, and §6
+    // M68 raised that ceiling.
     let mut lit = frame(renderer, world)?;
-    for _ in 0..FIELD_FRAMES {
-        if renderer.field_pending().0 == 0 {
-            break;
-        }
+    let mut frames = 1;
+    while frames < FIELD_FRAMES || renderer.field_pending().0 > 0 {
         lit = frame(renderer, world)?;
+        frames += 1;
+        let (pending, probes) = renderer.field_pending();
+        anyhow::ensure!(
+            frames <= FIELD_CEILING,
+            "the field did not converge in {frames} frames: {pending} of {probes} ungathered"
+        );
     }
-    let (pending, probes) = renderer.field_pending();
-    anyhow::ensure!(
-        pending == 0,
-        "the field did not converge in {FIELD_FRAMES} frames: {pending} of {probes} ungathered"
-    );
     cvars::GI.set_bool(false);
     let flat = frame(renderer, world)?;
     cvars::GI.set_bool(true);
@@ -668,30 +701,285 @@ fn buckets(shipped: &[f32], reference: &[f32], inside: &[bool]) {
 /// Denser is not monotonically better either, and the two columns are what shows
 /// it: a coarse grid puts probes further inside walls, which leaks, while a fine
 /// one at this clamp is the same grid with a different label on it.
-fn spacings(
-    renderer: &mut OffscreenRenderer,
-    world: &World,
-    points: &[Sample],
-    reference: &[f32],
-) -> Result<()> {
+fn spacings(world: &World, points: &[Sample], reference: &[f32]) -> Result<()> {
     println!(
-        "   asked | effective | probes | inside | invented |   missed |     mean |    field | worst"
+        "   asked | effective | probes | inside | invented |   missed |     mean |    field | worst |    whole |   level |   grain"
     );
-    for spacing in [2.0f64, 4.0, 4.5, 5.0, 6.0, 8.0] {
+    // **This sweep is the extent/spacing trade and not only a cell size** (§6 M68).
+    // Demo 12's room is 24 m across, so anything under 24/7 anchors and buys finer
+    // cells over a window smaller than the level, while 4 m and up still fit the
+    // whole room the way every grid did before M68 — the 4.00 row *is* the shipped
+    // pre-M68 grid, which is what makes `whole` a before-and-after rather than a
+    // curve with no zero on it.
+    let was = cvars::GI_SPACING.float();
+    for spacing in [1.0f64, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0] {
         cvars::GI_SPACING.set_float(spacing);
-        let shipped = rendered(renderer, world, points)?;
-        let inside = covered(renderer, points);
-        let (_, probes) = renderer.field_pending();
-        let effective = renderer.field_grid().map_or(0.0, |(_, s, _)| s);
-        let n = inside.iter().filter(|c| **c).count();
-        row(
-            &format!("{spacing:>8.2} | {effective:>9.2} | {probes:>6} | {n:>6}"),
-            &shipped,
-            reference,
-            &inside,
-        );
+        graded(&format!("{spacing:>8.2}"), world, points, reference)?;
     }
-    cvars::GI_SPACING.set_float(2.0);
+    cvars::GI_SPACING.set_float(was);
+    println!();
+    Ok(())
+}
+
+/// The field's own energy, in the one case whose answer needs no reference at all
+/// (§6 M67) — `furnace`'s standard, one term along.
+///
+/// **One slab under a uniform sky, sampled on its own top face.** A point there
+/// with an up normal receives the whole sky hemisphere and nothing else: the slab
+/// takes none of that hemisphere away, and its own bounce is coplanar with the
+/// point and so reaches it at grazing incidence with zero measure. So the truth is
+/// `pi * L` over `pi * L`, which is **1.0 exactly**, at every sampled pixel, with
+/// no path tracer and no tolerance to argue about.
+///
+/// It is also the case that puts the *whole* answer in the L1 record's first band:
+/// the surrounding radiance is a hemispherical step, sky above and a dim floor
+/// below, and `probe.rs`'s header claims that exact case is reconstructed exactly —
+/// band 1 and the constant cancelling against the cosine kernel. So a number below
+/// 1.0 here is not a sampling error and not a placement error. It is the record
+/// itself, and it is the one reading that separates *the field is approximate* from
+/// *the field is short of energy*.
+///
+/// Which matters because §6 M67 found the graded room to be propped up by a leak:
+/// every change that removed invented light — a physically correct back face, a
+/// lattice off the level's own numbers, a stricter burial slope — made the total
+/// error worse, because the field is under-lit and the leak was paying for it. This
+/// leg is where that claim stops being an inference across three sweeps.
+/// [`energy`] and its sweep alone, for `--energy` — both bring their own devices.
+fn only_energy() -> Result<()> {
+    cvars::AMBIENT.set_float(AMBIENT);
+    cvars::DITHER.set_float(0.0);
+    cvars::AO.set_bool(false);
+    cvars::GI_RATE.set_int(0);
+    energy()?;
+    scales()?;
+    cvars::DITHER.set_float(1.0);
+    cvars::AO.set_bool(true);
+    cvars::GI_RATE.set_int(16);
+    Ok(())
+}
+
+/// **The one measurement in this file with no reference implementation and no
+/// scene dependence at all**, swept over the probe spacing (§6 M68).
+///
+/// [`energy`]'s slab, whose truth is `1.0` at every point by construction, at every
+/// spacing worth shipping. The truth does not depend on the spacing, so **any**
+/// dependence the reading has is a defect and not a trade: a finer grid resolves a
+/// flat slab under a uniform sky no better and no worse than a coarse one, because
+/// there is nothing there to resolve.
+///
+/// It is the leg that answers the question §6 M68's room tables could not. Those say
+/// a finer field is darker and cannot say whether that is the resolution buying
+/// accuracy somewhere a path tracer disagrees about, or the weighting failing at
+/// short probe distances. Here there is no somewhere: one plane, one answer, and a
+/// spacing column that ought to be constant.
+fn scales() -> Result<()> {
+    let world = slab()?;
+    let solids = vec![room()[0]];
+    let points = &surfaces(&solids);
+    let (was_spacing, was_bias) = (cvars::GI_SPACING.float(), cvars::GI_BIAS.float());
+    println!("\nthe same slab over the spacing — every row's truth is still 1.0\n");
+    println!("  spacing |    bias | probes | inside |    field |  short | worst");
+    for spacing in [1.0f64, 1.5, 2.0, 3.0, 4.0, 6.0] {
+        for bias in [was_bias, 0.15 * spacing] {
+            cvars::GI_SPACING.set_float(spacing);
+            cvars::GI_BIAS.set_float(bias);
+            let mut renderer = OffscreenRenderer::new(EXTENT)?;
+            let shipped = rendered(&mut renderer, &world, points)?;
+            let inside = covered(&renderer, points);
+            let (_, probes) = renderer.field_pending();
+            let n = inside.iter().filter(|c| **c).count();
+            let (mut field, mut worst) = (0.0f64, 0.0f32);
+            for (s, on) in shipped.iter().zip(&inside) {
+                if *on {
+                    field += f64::from(*s);
+                    if (s - 1.0).abs() > worst.abs() {
+                        worst = s - 1.0;
+                    }
+                }
+            }
+            let field = field / n.max(1) as f64;
+            println!(
+                "  {spacing:>7.2} | {bias:>7.2} | {probes:>6} | {n:>6} | {field:>8.4} | \
+                 {:>5.1} % | {worst:>+7.4}",
+                (1.0 - field) * 100.0
+            );
+            let report = renderer.shutdown();
+            anyhow::ensure!(report.clean(), "unclean render: {report:?}");
+        }
+    }
+    cvars::GI_SPACING.set_float(was_spacing);
+    cvars::GI_BIAS.set_float(was_bias);
+    println!();
+    Ok(())
+}
+
+fn energy() -> Result<()> {
+    let world = slab()?;
+    // The slab's own surfaces, not the room's: a pixel that used to find a wall
+    // finds sky here, and grading it against 1.0 would grade the background.
+    let solids = vec![room()[0]];
+    let points = &surfaces(&solids);
+    // **Its own device, and this leg is the one that needed it most** (§6 M69).
+    // It took the caller's renderer until then, which is the renderer that had just
+    // rendered the *room* — and `Grid::covers` is satisfied by a grid that still
+    // reaches the scene, so a 28 m room's grid covers a slab and no refit happens.
+    // The leg read 1.0072 that way, 0.7 % *over* a truth of 1.0, against 0.9526 on
+    // a device of its own. Which is the honest number is not a close call: a leg is
+    // graded on the grid *its own world* produces, or the reference-free claim
+    // ("the truth here is exactly 1.0, at every point") is about a different scene
+    // than the one on screen. §6 M67 found this class twice and §6 M68 twice more;
+    // this is the fourth site.
+    let mut renderer = OffscreenRenderer::new(EXTENT)?;
+    let shipped = rendered(&mut renderer, &world, points)?;
+    let inside = covered(&renderer, points);
+    let open = vec![1.0f32; points.len()];
+    let (_, probes) = renderer.field_pending();
+    println!("one slab under the same uniform sky — every point's truth is 1.0\n");
+    println!(
+        "  {probes} probes at {:.2} m effective, {} of {} points on the slab and inside the grid",
+        renderer.field_grid().map_or(0.0, |(_, s, _)| s),
+        inside.iter().filter(|c| **c).count(),
+        points.len()
+    );
+    report(&shipped, &open, &inside, points);
+    let report = renderer.shutdown();
+    anyhow::ensure!(report.clean(), "unclean render: {report:?}");
+    Ok(())
+}
+
+/// Demo 12's floor and nothing else — [`energy`]'s world.
+///
+/// The room's own first box, so the slab's size, thickness and albedo are the ones
+/// every other table here was measured against rather than a second set of numbers
+/// to keep in step.
+fn slab() -> Result<World> {
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    let (center, half_extent, color) = demo::ROOM[0];
+    let entity = world.spawn();
+    world.insert(
+        entity,
+        Renderable::boxed(center, half_extent, color).surfaced(0.0, 0.0),
+    )?;
+    Ok(world)
+}
+
+/// Where the probe lattice sits between the multiples of its own spacing (§6 M67)
+/// — `r.gi_offset`, as a fraction of a cell.
+///
+/// **The one knob here whose subject is the level rather than the renderer.** A
+/// lattice through the world origin lands on whatever an author rounded to, and a
+/// probe on a surface is worth a fraction of one: half its sphere is the inside of
+/// that surface, so the burial term discounts it and the cosine wrap halves it
+/// again for being coplanar with everything it should be lighting. Demo 12's room
+/// is the worst case and got there by being ordinary — floor top at `y = 0`, wall
+/// faces at `x, z = ±12`, wall tops at `y = 4`, all divisible by the 4 m spacing
+/// the clamp widens to.
+///
+/// So the sweep is over *coincidence*, and the two ends are what say so: 0 is every
+/// plane on a round number and 0.5 is every plane on a half — both authorable, and
+/// the values between them are not. What it costs is in the probe column, since an
+/// axis whose span is a whole multiple of the spacing spends one more plane to
+/// reach its far bound.
+/// `r.gi_burial`'s plateau: how fast a probe's weight falls with the fraction of its
+/// own sphere that came back a back face (§6 M67).
+///
+/// The two columns fail in opposite directions and this is the knob that trades them
+/// most directly — a probe inside a wall recorded the wall's inside, so trusting it
+/// leaks light through the wall, and discounting it leaves the crease beside it lit by
+/// the fallback. **Read the mean beside them**: the weights are *normalized*, so
+/// discounting a buried probe does not remove its light, it hands its share to the
+/// unburied probes in the cell — which are the brighter ones. That is why a higher
+/// slope makes the room *brighter*, which is the opposite of what the name suggests.
+///
+/// One device, unlike [`offsets`]: the slope never moves the grid.
+fn burials(world: &World, points: &[Sample], reference: &[f32]) -> Result<()> {
+    println!(
+        "  burial | effective | probes | inside | invented |   missed |     mean |    field | worst |    whole |   level |   grain"
+    );
+    let was = cvars::GI_BURIAL.float();
+    for slope in [0.0f64, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0] {
+        cvars::GI_BURIAL.set_float(slope);
+        graded(&format!("{slope:>8.2}"), world, points, reference)?;
+    }
+    // The value on entry and not a literal: this reset read `1.0` while the
+    // shipped default was 1.5, so every table below it in one run was measured at
+    // a burial slope nobody chose (§6 M68).
+    cvars::GI_BURIAL.set_float(was);
+    println!();
+    Ok(())
+}
+
+/// **A device per row, and that is not a detail** — [`Grid::covers`] is hysteresis
+/// by design, so a renderer that already holds a grid reaching the scene refuses to
+/// refit, and a knob that only moves the *lattice* would never take effect. Five of
+/// this table's six rows read identically to four decimal places before that was
+/// understood, because they were one grid graded five times.
+/// `r.gi_bias`'s plateau, **and its unit** (§6 M68).
+///
+/// Two questions in one table, which is why it sweeps the offset at three
+/// spacings rather than at the shipped one. The plateau itself is the ordinary
+/// question — too small a push and a surface occludes itself, so the field misses
+/// light in exactly the creases it exists for; too large and the shading point is
+/// located a cell away from where it is, so the field invents light from the far
+/// side of thin geometry.
+///
+/// The unit is the interesting half. This term was `0.15 * spacing` from §6 M36 to
+/// M68, so it was **0.60 m at the 4 m grid the axis cap forced** and halved every
+/// time somebody made the cells finer. If its plateau is at a fixed fraction the
+/// old unit was right and the three curves agree; if it is at a fixed *distance*
+/// they agree only after multiplying, and the coupling was hiding a defect that
+/// looks exactly like "a finer field is worse".
+///
+/// A renderer per row, and per spacing: `Grid::covers`'s hysteresis refuses to
+/// refit a grid that still reaches the scene (§6 M67).
+fn biases(world: &World, points: &[Sample], reference: &[f32]) -> Result<()> {
+    let (was_bias, was_spacing) = (cvars::GI_BIAS.float(), cvars::GI_SPACING.float());
+    for spacing in [2.0f64, 3.0, 4.0] {
+        cvars::GI_SPACING.set_float(spacing);
+        println!(
+            "    bias | in cells | probes | inside | invented |   missed |     mean |    field | \
+             worst |    whole |   level |   grain"
+        );
+        for bias in [0.05f64, 0.15, 0.3, 0.45, 0.6, 0.9, 1.2] {
+            cvars::GI_BIAS.set_float(bias);
+            let mut renderer = OffscreenRenderer::new(EXTENT)?;
+            let shipped = rendered(&mut renderer, world, points)?;
+            let inside = covered(&renderer, points);
+            let (_, probes) = renderer.field_pending();
+            let effective = renderer.field_grid().map_or(1.0, |(_, s, _)| f64::from(s));
+            let n = inside.iter().filter(|c| **c).count();
+            // The fraction beside the metres, because the old unit is the column
+            // the reader is being asked to compare against.
+            row(
+                &format!(
+                    "{bias:>8.2} | {:>8.3} | {probes:>6} | {n:>6}",
+                    bias / effective.max(1e-6)
+                ),
+                &shipped,
+                reference,
+                &inside,
+                points,
+            );
+            let report = renderer.shutdown();
+            anyhow::ensure!(report.clean(), "unclean render at bias {bias}: {report:?}");
+        }
+        println!("    ^ at {spacing:.2} m spacing\n");
+    }
+    cvars::GI_BIAS.set_float(was_bias);
+    cvars::GI_SPACING.set_float(was_spacing);
+    Ok(())
+}
+
+fn offsets(world: &World, points: &[Sample], reference: &[f32]) -> Result<()> {
+    println!(
+        "  offset | effective | probes | inside | invented |   missed |     mean |    field | worst |    whole |   level |   grain"
+    );
+    for offset in [0.0f64, 0.125, 0.25, 1.0 / 3.0, 0.4, 0.5] {
+        cvars::GI_OFFSET.set_float(offset);
+        graded(&format!("{offset:>8.3}"), world, points, reference)?;
+    }
+    cvars::GI_OFFSET.set_float(gg_render::cvars::LATTICE_OFFSET);
     println!();
     Ok(())
 }
@@ -701,38 +989,152 @@ fn spacings(
 /// visibility test and not merely a finer one. Two texels is one moment per
 /// octant and cannot represent a doorway; eight is where a wall's own edge stops
 /// being blurred across the probe's whole sphere.
-fn tiles(
-    renderer: &mut OffscreenRenderer,
-    world: &World,
-    points: &[Sample],
-    reference: &[f32],
-) -> Result<()> {
+fn tiles(world: &World, points: &[Sample], reference: &[f32]) -> Result<()> {
     println!(
-        "    tile | effective | probes | inside | invented |   missed |     mean |    field | worst"
+        "    tile | effective | probes | inside | invented |   missed |     mean |    field | worst |    whole |   level |   grain"
     );
-    for tile in [2i64, 4, 8] {
-        cvars::GI_MOMENTS.set_int(tile);
-        let shipped = rendered(renderer, world, points)?;
-        let inside = covered(renderer, points);
-        let (_, probes) = renderer.field_pending();
-        let n = inside.iter().filter(|c| **c).count();
-        let effective = renderer.field_grid().map_or(0.0, |(_, s, _)| s);
-        row(
-            &format!("{tile:>8} | {effective:>9.2} | {probes:>6} | {n:>6}"),
-            &shipped,
-            reference,
-            &inside,
-        );
+    let was = (cvars::GI_MOMENTS.int(), cvars::GI_FILTER.bool());
+    // **Both reads of the tile, because this table is where the *accuracy* half of
+    // §6 M69 is settled.** `gg-tools facets` says filtering removes the facets; what
+    // it cannot say is whether a softer bound leaks — a bilinear read is a blur of
+    // the blocker distance, and a blurred blocker is a blocker in slightly the
+    // wrong place. `invented` against `missed` is the pair that would show it.
+    for filter in [false, true] {
+        cvars::GI_FILTER.set_bool(filter);
+        for tile in [2i64, 4, 8] {
+            cvars::GI_MOMENTS.set_int(tile);
+            let read = if filter { "filt" } else { "pt  " };
+            graded(&format!("{tile:>3} {read}"), world, points, reference)?;
+        }
     }
-    cvars::GI_MOMENTS.set_int(4);
+    cvars::GI_MOMENTS.set_int(was.0);
+    cvars::GI_FILTER.set_bool(was.1);
     println!();
     Ok(())
 }
 
 /// One sweep row: the two columns that disagree, then the ones that hide it.
-fn row(label: &str, shipped: &[f32], reference: &[f32], inside: &[bool]) {
+/// One sweep row on **its own device**, which is not an optimisation detail but the
+/// only way the rows mean the same thing (§6 M68).
+///
+/// Three separate pieces of deliberate state make a shared renderer carry one row's
+/// answer into the next: `Grid::covers`'s hysteresis holds a grid that still reaches
+/// the scene (§6 M67 found this), `Grid::place`'s `sticky` holds an axis that has
+/// once had to anchor, and the records themselves survive anything that is not a
+/// refit. On one device the spacing sweep read 680 of 786 points inside the grid at
+/// 2 m while a fresh renderer at the same spacing read 786 — the sweep had anchored
+/// at 1 m three rows earlier and never let go.
+fn graded(
+    label: &str,
+    world: &World,
+    points: &[Sample],
+    reference: &[f32],
+) -> Result<(f64, usize)> {
+    let mut renderer = OffscreenRenderer::new(EXTENT)?;
+    let shipped = rendered(&mut renderer, world, points)?;
+    let inside = covered(&renderer, points);
+    let (_, probes) = renderer.field_pending();
+    let effective = renderer.field_grid().map_or(0.0, |(_, s, _)| s);
+    let n = inside.iter().filter(|c| **c).count();
+    row(
+        &format!("{label} | {effective:>9.2} | {probes:>6} | {n:>6}"),
+        &shipped,
+        reference,
+        &inside,
+        points,
+    );
+    let report = renderer.shutdown();
+    anyhow::ensure!(report.clean(), "unclean render at {label}: {report:?}");
+    Ok((f64::from(effective), n))
+}
+
+/// The error's **level** against its **grain** — a mean and a roughness, and the
+/// pair that finally lets this command answer the question it was asked (§6 M68).
+///
+/// Every other column here is a mean absolute error, and a mean cannot see
+/// structure. It therefore prefers a coarse field at every spacing, because the
+/// field's error is dominated by *systematic darkness* and probes further from
+/// surfaces are buried and rejected less often. That ranking is real and it is also
+/// useless for the defect this milestone exists to fix: what was reported is a
+/// chevron on a flat wall, which is a bilinear cell's iso-contours — the saddle a
+/// trilinear interpolation makes when its eight corners disagree — and a room a
+/// uniform 6 % dark scores worse on every column above while looking *correct*.
+///
+/// So: **level** is the signed mean of the error, the part a player reads as "this
+/// room is a bit dim" and forgives, and **grain** is the mean absolute step in that
+/// error between neighbouring sample points on the *same surface*, which is the part
+/// they read as a stain on the wall and report. They fail in opposite directions —
+/// a field can be exactly right on average and hideous, or uniformly wrong and
+/// invisible — and the spacing is read off the second.
+///
+/// Neighbours are the decimated frame's own: [`STRIDE`] to the right and one row
+/// down, taken only when both samples exist, share a normal, and are close enough
+/// together to be the same surface rather than two sides of a silhouette. No
+/// reference is needed for the grain beyond the truth already in hand, and none at
+/// all for the claim that a smooth truth should not produce a rough error.
+fn grain(shipped: &[f32], reference: &[f32], inside: &[bool], points: &[Sample]) -> (f64, f64) {
+    let mut level = 0.0f64;
+    let mut counted = 0usize;
+    for ((s, t), on) in shipped.iter().zip(reference).zip(inside) {
+        if *on {
+            level += f64::from(s - t);
+            counted += 1;
+        }
+    }
+    // Pixel -> sample, so a neighbour is a lookup rather than a search.
+    let mut at = vec![usize::MAX; (EXTENT.0 * EXTENT.1) as usize];
+    for (i, p) in points.iter().enumerate() {
+        if let Some(slot) = at.get_mut(p.pixel) {
+            *slot = i;
+        }
+    }
+    let error = |i: usize| f64::from(shipped[i] - reference[i]);
+    let mut rough = 0.0f64;
+    let mut pairs = 0usize;
+    for (i, p) in points.iter().enumerate() {
+        if !inside[i] {
+            continue;
+        }
+        for step in [STRIDE as usize, (STRIDE * EXTENT.0) as usize] {
+            let Some(&j) = at.get(p.pixel + step) else {
+                continue;
+            };
+            if j == usize::MAX || !inside[j] {
+                continue;
+            }
+            let other = &points[j];
+            // Same plane, and adjacent on it: a silhouette edge puts two unrelated
+            // surfaces one pixel apart, and the step across it is geometry rather
+            // than a defect in the field.
+            if p.normal.dot(other.normal) < 0.99 {
+                continue;
+            }
+            let apart = (p.point - other.point).length();
+            if !(apart > 1e-4 && apart < 1.0) {
+                continue;
+            }
+            rough += (error(i) - error(j)).abs();
+            pairs += 1;
+        }
+    }
+    (level / counted.max(1) as f64, rough / pairs.max(1) as f64)
+}
+
+fn row(label: &str, shipped: &[f32], reference: &[f32], inside: &[bool], points: &[Sample]) {
     let (invented, missed, _, field) = totals(shipped, reference, inside);
     let n = inside.iter().filter(|c| **c).count().max(1) as f64;
+    // **The whole scene, and the only column comparable across rows whose coverage
+    // differs** (§6 M68). Every column beside it is normalised by the points the
+    // field *reached*, which was one population while a grid always spanned the
+    // scene and is a different one per row now that a window can be smaller than
+    // the level. A placement that covers a third of the room perfectly reads
+    // beautifully there and is not better; what a player sees is this, because a
+    // point outside the field is shaded by the fallback rather than skipped.
+    let whole = {
+        let every = vec![true; inside.len()];
+        let (invented, missed, _, _) = totals(shipped, reference, &every);
+        (invented + missed) / inside.len().max(1) as f64
+    };
     let mut worst = 0.0f32;
     for ((s, t), on) in shipped.iter().zip(reference).zip(inside) {
         if *on && (s - t).abs() > worst.abs() {
@@ -742,8 +1144,9 @@ fn row(label: &str, shipped: &[f32], reference: &[f32], inside: &[bool]) {
     // The mean is beside them because it is the number a single-figure error
     // would have reported, and watching it stand still while the two columns
     // trade is the whole argument for printing two.
+    let (level, rough) = grain(shipped, reference, inside, points);
     println!(
-        "  {label} | {:>8.4} | {:>8.4} | {:>8.4} | {:>8.4} | {worst:>+7.4}",
+        "  {label} | {:>8.4} | {:>8.4} | {:>8.4} | {:>8.4} | {worst:>+7.4} | {whole:>8.4} |          {level:>+7.4} | {rough:>7.4}",
         invented / n,
         missed / n,
         (invented + missed) / n,

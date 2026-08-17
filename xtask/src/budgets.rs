@@ -273,11 +273,35 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   measured in minutes. Whether a session is in either state is the shell's
 ///   fact and only the shell's.
 ///
+/// - **One arrow, two cameras** (1955 -> 2025, §6 M63): fifty lines, and every
+///   one of them puts an *editor* decision onto a *window* — which is the shell's
+///   whole job description and, here, provably nobody else's.
+///
+///   `gg-editor` decides when its camera has the pointer, and must: the decision
+///   is read off the recorded frame, so a replayed session captures and releases
+///   on the ticks the operator did with no window in the process. It cannot act
+///   on it — §3 keeps it below `gg-platform`, which is where windows are born
+///   (§1.5), and a `set_cursor_grab` in the editor would be the editor growing a
+///   display. `gg-platform` owns the grab and has never heard of a camera. So
+///   `pointer` gaining a second reason, the release edge that puts the arrow back
+///   where the press was, and the warp the loop consumes are the conjunction, and
+///   the conjunction is the thing with no other home — the same sentence M21's
+///   nine lines made about a released cursor's warp, now with a second claimant
+///   on one mouse.
+///
+///   `editor_eye` is the other half and is §6 M56's argument a second time: the
+///   game's eye is in the world and the editor's is not, so `Extracted` cannot
+///   hold its previous pose and does not try. What the shell adds is two calls —
+///   the blend and the latch — onto arithmetic that stayed where it was, and
+///   `Extracted::eye`'s own tail moved *out* to `gg_extract::latched` in the same
+///   change rather than being copied here, which is the part that makes this a
+///   raise of fifty lines instead of sixty.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session), M45 (the
-/// keys), M46 (the window), M47 (the refusal), M48 (the crash) — each argued the
-/// same way.
-const SHELL_BUDGET: usize = 1955;
+/// keys), M46 (the window), M47 (the refusal), M48 (the crash), M63 (the
+/// viewport's pointer) — each argued the same way.
+const SHELL_BUDGET: usize = 2025;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

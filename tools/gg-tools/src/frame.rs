@@ -38,7 +38,7 @@ use gg_extract::Extracted;
 use gg_math::sim;
 use gg_render::{OffscreenRenderer, View};
 
-use crate::field;
+use crate::{field, views};
 
 /// A play resolution, because the question is about a session. Overridable —
 /// half the cost of a fragment-bound pass is the pixel count, and a reader
@@ -57,6 +57,10 @@ const TIMED: usize = 60;
 const PITCH: f32 = -0.22;
 
 pub fn run(args: &[String]) -> Result<()> {
+    // `--set r.gi_filter=0` and its like, `views`' own flag: the per-pass table is
+    // where a change to what a pass *does* gets priced, and pricing two of them
+    // needs one binary rather than two builds (§6 M32, M69).
+    views::apply_sets(args)?;
     let extent = match args.iter().position(|a| a == "--extent") {
         Some(i) => parse_extent(args.get(i + 1).map_or("", String::as_str))?,
         None => EXTENT,

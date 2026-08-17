@@ -128,6 +128,9 @@ pub struct App {
     editor: Option<Editing>,
     /// The OS cursor, and who has the pointer (§6 M15.1).
     cursor: Cursor,
+    /// Where a windowed loop should warp the arrow, once (§6 M63). See
+    /// [`App::take_warp`].
+    warp: Option<(f32, f32)>,
     /// `gg_editor::Editor::font_revision` as last uploaded. Zero is "the
     /// fallback band, from `attach`" — no editor ever reports it.
     #[cfg(feature = "editor")]
@@ -227,8 +230,44 @@ impl App {
         let Some(look) = Look::of(&self.world)? else {
             return Ok(None);
         };
+        Ok(Some(self.latch_of(look)))
+    }
+
+    /// [`App::latch`] for a `Look` already in hand — the editor camera declares
+    /// its own rather than putting one in the world (§6 M63).
+    fn latch_of(&self, look: Look) -> Latch {
         let (yaw, pitch) = (self.reading(look.yaw_axis), self.reading(look.pitch_axis));
-        Ok(Some(Latch::of(look, (yaw.0, pitch.0), (yaw.1, pitch.1))))
+        Latch::of(look, (yaw.0, pitch.0), (yaw.1, pitch.1))
+    }
+
+    /// The editor camera's eye for a frame `alpha` of a tick past the last one,
+    /// or `game` when that camera is not the one being rendered from (§6 M63).
+    ///
+    /// The same two corrections the game's eye gets and in the same order: blend
+    /// the two ticks, then add the turn no tick has spent. `r.late_latch` gates
+    /// the second half here as it does there — one knob, both cameras, because
+    /// an operator turning it off to see what it was doing wants to see that in
+    /// the viewport they are looking through.
+    ///
+    /// Every reading is zero for a windowless or replayed session by
+    /// construction (`App::latch`'s note): `alpha` is zero under a locked pace,
+    /// and a replay's frame carries no device motion to latch. So this is the
+    /// identity in every tier a gate runs, and no golden or hash moves for it.
+    #[cfg(feature = "editor")]
+    fn editor_eye(&self, game: Eye, alpha: f32) -> Eye {
+        let Some(editing) = self.editor.as_ref() else {
+            return game;
+        };
+        let (previous, current) = editing.ui.eyes(game);
+        let blended = gg_extract::blend_eye(previous, current, alpha);
+        match gg_render::cvars::LATE_LATCH
+            .bool()
+            .then(|| editing.ui.look(&self.input))
+            .flatten()
+        {
+            Some(look) => gg_extract::latched(blended, self.latch_of(look), alpha),
+            None => blended,
+        }
     }
 
     /// `Input::pending` and `Input::spent` for the axis number a game wrote into
@@ -356,6 +395,7 @@ impl App {
                 audio
             },
             cursor: Cursor::new(args.editor || ui_binding.is_some()),
+            warp: None,
             looks: input_looks,
             ui_binding,
             #[cfg(feature = "editor")]
@@ -561,8 +601,68 @@ impl App {
     /// its arrow lives inside the game pane, and the editor draws none of its
     /// own — so obeying it would leave the panels with no cursor at all.
     pub fn pointer(&self) -> (bool, bool) {
-        let hidden = !self.cursor.held && !self.editing() && self.ui.cursor_drawn();
-        (self.cursor.held, hidden)
+        let hidden = !self.held() && !self.editing() && self.ui.cursor_drawn();
+        (self.held(), hidden)
+    }
+
+    /// The OS pointer should be grabbed and hidden: the game took it, **or** the
+    /// editor's camera is mid-drag (§6 M63).
+    ///
+    /// Two very different facts behind one window call, and they stay separate
+    /// everywhere else: `cursor.held` also decides who is *fed* — a held pointer
+    /// is the game's input and a dead frame for the editor — while a flying
+    /// camera changes nothing about routing at all. Only the arrow is shared,
+    /// because a window has one.
+    fn held(&self) -> bool {
+        self.cursor.held || self.flying()
+    }
+
+    /// The editor's camera has the pointer this tick. Always false without the
+    /// editor compiled in, which is the tier that ships.
+    fn flying(&self) -> bool {
+        #[cfg(feature = "editor")]
+        return self.editor.as_ref().is_some_and(|e| e.ui.flying());
+        #[cfg(not(feature = "editor"))]
+        false
+    }
+
+    /// Where a host should warp the OS cursor now that a grab has ended, once
+    /// (§6 M63).
+    ///
+    /// Consumed rather than read: the warp is an *edge*, and a windowed loop that
+    /// polls this every frame would otherwise pin the arrow to one spot for the
+    /// rest of the session. `None` on every frame but the one a drag ended on.
+    ///
+    /// It exists because releasing a grab does not put the arrow back. Windows
+    /// and X11 get `Confined` rather than `Locked` (`gg_platform::Window::
+    /// set_pointer`), so the pointer really moves during the drag and reappears
+    /// wherever the turn left it — which for a long turn is against a window
+    /// edge, nowhere near the button the operator pressed.
+    pub fn take_warp(&mut self) -> Option<(f32, f32)> {
+        self.warp.take()
+    }
+
+    /// Follow the editor camera's grab, and put the arrow back where the
+    /// operator left it when the drag ends (§6 M63).
+    ///
+    /// The release is the interesting half. `Cursor::steer` is frozen for the
+    /// length of the grab, so the editor's own pointer has not moved and is
+    /// exactly where the press happened; warping the OS cursor onto it — and
+    /// telling this side that is where it now is — makes the next steer's delta
+    /// zero, which is what "the arrow came back" means. Without both halves the
+    /// software and system cursors part company on the first motion after.
+    #[cfg(feature = "editor")]
+    fn note_flying(&mut self) {
+        let flying = self.flying();
+        if self.cursor.flying
+            && !flying
+            && let Some((x, y)) = self.editor_pointer()
+        {
+            let at = self.ui_fit().to_surface(x, y);
+            self.cursor.at = Some(at);
+            self.warp = Some(at);
+        }
+        self.cursor.flying = flying;
     }
 
     /// Whether the window should be filling a monitor, or `None` where the game
@@ -858,6 +958,7 @@ impl App {
                 extent,
                 dpi: self.dpi,
                 tick,
+                hz: self.hz,
                 play: editing.play(),
                 input: Some(&self.input),
                 typed: &typed,
@@ -1295,6 +1396,11 @@ struct Cursor {
     steered: (i32, i32),
     /// The game holds the pointer.
     held: bool,
+    /// The editor's camera holds it instead (§6 M63) — a drag is turning or
+    /// sliding the view. Frozen for [`Cursor::steer`]'s purposes exactly as
+    /// `held` is, and for a different reason: the OS pointer is grabbed, so the
+    /// positions still arriving are the grab's rather than the hand's.
+    flying: bool,
 }
 
 impl Cursor {
@@ -1308,6 +1414,7 @@ impl Cursor {
             at: None,
             steered: (0, 0),
             held: !free,
+            flying: false,
         }
     }
 
@@ -1317,7 +1424,7 @@ impl Cursor {
     /// and the editor's pointer parks where it was — and `None` before the OS
     /// has reported a position at all.
     fn steer(&mut self, fit: gg_ui::Fit) -> Option<(i32, i32)> {
-        let (x, y) = self.at.filter(|_| !self.held)?;
+        let (x, y) = self.at.filter(|_| !self.held && !self.flying)?;
         let delta = fit.steer(self.steered, x, y);
         self.steered = fit.to_canvas_fixed(x, y);
         (delta != (0, 0)).then_some(delta)
@@ -2058,6 +2165,10 @@ impl Stages for App {
         if let Some(path) = self.editor_tick(tick, &ui_tick, self.editor_surface())? {
             self.write_save(&path)?;
         }
+        // Immediately after, because the camera decided it in there and the
+        // steer above reads it at the top of the *next* tick (§6 M63).
+        #[cfg(feature = "editor")]
+        self.note_flying();
         // §1.13 hazard 6's per-tick call site. The canonical hash absorbs raw
         // bits and NaN payloads differ by architecture, so a NaN in hashed state
         // is a §5.6 divergence with a math bug as its cause — banned, not
@@ -2140,8 +2251,16 @@ impl Stages for App {
         // host state, in no archetype and in no save, so what the operator flies
         // moves nothing the canonical hash can see. `game` back in every other
         // state, which is why this is unconditional.
+        //
+        // Blended and latched here rather than substituted whole (§6 M63): the
+        // editor's camera steps once a tick like the game's, so on a 240 Hz
+        // panel it presented each of its poses for four refreshes and turned in
+        // visible stairs. Both corrections are §4.1's and §6 M56's, applied to a
+        // second eye — `blend_eye` for where it *was*, the latch for the counts
+        // the hand has produced since the tick that moved it. Neither is written
+        // back anywhere; the picture leads the tick and the tick is unaware.
         #[cfg(feature = "editor")]
-        let eye = self.editor.as_ref().map_or(eye, |e| e.ui.eye(eye));
+        let eye = self.editor_eye(eye, alpha);
         // Rebuilt, not mutated: `View::default()` is where the render CVars are
         // read, so a console edit lands on the next frame (§4.8).
         self.view = View {

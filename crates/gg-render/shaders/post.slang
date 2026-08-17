@@ -6,9 +6,13 @@
 //
 // The target is sRGB and Vulkan encodes on write, so everything here is linear
 // and nothing applies a gamma by hand. A second encode is the classic washed-out
-// frame. `dither` is the one exception and it round-trips: it has to perturb the
-// value the *quantizer* sees, so it encodes, adds, and decodes straight back for
-// the hardware to encode again.
+// frame. `dither_linear` is the one exception and it is *not* a round trip: the
+// perturbation is sized in code values of the quantizer the hardware will apply,
+// then spent through the decode's slope, which leaves the signal itself
+// untouched. It lives in the include because the debug blit meets the same
+// quantizer (§6 M62).
+
+#include "include/dither.slang"
 
 // The global set (§4.3). Binding 1 (storage images) has no consumer here.
 [[vk::binding(0, 0)]] Texture2D<float4> g_textures[];
@@ -194,102 +198,6 @@ float3 fxaa(float2 uv, float3 centre)
     return (outer_luma < lo || outer_luma > hi) ? inner : outer;
 }
 
-// The sRGB transfer pair, IEC 61966-2-1. Present here for one reason: the
-// quantizer this pass feeds sits on the *other* side of it — the attachment is
-// `_SRGB` and the hardware encodes on write — so a perturbation applied to a
-// linear value is a different number of code values at every brightness, and at
-// the dark end where banding is worst it is a fraction of one.
-float3 linear_to_srgb(float3 c)
-{
-    c = max(c, 0.0);
-    return select(c <= 0.0031308, c * 12.92, 1.055 * pow(c, 1.0 / 2.4) - 0.055);
-}
-
-// Linear value one *code value* is worth at this brightness — the derivative of
-// the decode, evaluated where the colour already sits. Above the toe
-// `linear = ((e + 0.055) / 1.055)^2.4`, so `dlinear/de = 2.4 * linear / (e +
-// 0.055)` and the value we already have does the work of the second power.
-float3 code_value(float3 colour, float3 encoded)
-{
-    return select(encoded <= 0.04045, (1.0 / 12.92).xxx,
-                  2.4 * colour / (encoded + 0.055));
-}
-
-// A 32-bit integer hash — exact on every device by construction, which is what
-// makes a dithered frame reproducible enough to bless (§4.10). A `frac(sin(...))`
-// noise would not be: the transcendental is the driver's to round.
-// (Jenkins-style mix, the `lowbias32` constants.)
-uint hash(uint x)
-{
-    x ^= x >> 16;
-    x *= 0x7feb352du;
-    x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return x;
-}
-
-// Uniform noise in (-0.5, 0.5).
-//
-// **Uniform and not triangular**, which is a deliberate trade against the
-// classical result (Lipshitz, Wannamaker & Vanderkooy, JAES 1992: a triangular
-// PDF two LSBs wide makes the quantization error's variance independent of the
-// signal as well as its mean; a uniform one leaves the variance modulating, so
-// the noise faintly breathes across a gradient). Half a code value is what the
-// window below can scale to zero at a code; an LSB could not, and a flat region
-// that is exact on one driver and not another is worse than a variance term
-// nobody can see at one part in 255.
-float noise(uint seed)
-{
-    return float(hash(seed) >> 8) * (1.0 / 16777216.0) - 0.5;
-}
-
-// Code-value distance from a code over which the dither ramps back up to full.
-// See `dither` — it is a bound on the *driver's* encode error, not a taste knob.
-static const float DITHER_DEADZONE = 0.25;
-
-// Half a code value of the *output* is what a smooth gradient has to be broken
-// up by — scaled by how far the value sits from a code, and applied through the
-// decode's slope rather than by a round trip. Both of those are load-bearing.
-//
-// **The window.** A contour is where the round *changes*, which is where the
-// value sits halfway between two codes; a value sitting *on* a code is already
-// exactly representable and has no error to spread. So the amplitude ramps to
-// zero over the last quarter of a code either side, and is full over the middle
-// half where every contour is. That is what makes the dither safe rather than
-// merely tidy: the hardware's own encode is an approximation — llvmpipe's is
-// good to about a tenth of a code value, not to the ULP — so no fixed margin
-// under half a step survives it, while a perturbation of exactly zero does. The
-// deadzone has to be wider than that disagreement, which is what a quarter buys
-// and an eighth would not.
-//
-// **The slope.** Encoding, adding and decoding back is the obvious spelling and
-// is wrong for the same family of reason: `pow` is the driver's to round, so a
-// colour that arrived on a code would come back a part in 10^7 off it. Scaling
-// the noise into linear and adding leaves the signal itself untouched.
-//
-// Per channel and not per pixel: three independent draws read as fine chroma
-// noise, one shared draw reads as luminance grain — the same amplitude, and the
-// eye is far more sensitive to the second. The seed is the pixel alone, so a
-// still frame is still: this adds no shimmer to a static camera and nothing here
-// is a function of time.
-float3 dither(float3 colour, float2 pixel)
-{
-    if (push.dither <= 0.0)
-    {
-        return colour;
-    }
-    uint2 p = uint2(pixel);
-    uint seed = p.x * 73856093u ^ p.y * 19349663u;
-    float3 n = float3(noise(seed), noise(seed + 1u), noise(seed + 2u));
-    float3 encoded = linear_to_srgb(colour);
-    float3 f = frac(encoded * 255.0);
-    float3 window = saturate(min(f, 1.0 - f) * (1.0 / DITHER_DEADZONE));
-    return colour +
-           n * window * push.dither * (1.0 / 255.0) * code_value(colour, encoded);
-}
-
-
 // The three output contracts, mirroring `gg_rhi::Output`. Which one is live is
 // the *swapchain's* answer and not a preference: `r.hdr` is written back to
 // whatever the display granted before this ever reads it.
@@ -331,32 +239,6 @@ float3 pq_encode(float3 nits)
     return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
 }
 
-// Dither in the *encoded* domain, for a quantizer that takes `levels` steps.
-//
-// The SDR path cannot use this and does not: there the shader writes linear
-// values into an sRGB-format attachment and the *hardware* encodes, so the noise
-// has to be spent through the decode's slope before the write (`dither` above).
-// Here the shader owns the encode, so the noise goes in where the quantizer is
-// and the whole slope argument evaporates. Two dithers because there are
-// genuinely two quantizers in two places, not because one of them is wrong.
-//
-// The deadzone is the same idea and is here for a sharper reason: PQ is
-// absolute, so pure black is an exact code on every display, and a half-step of
-// noise on it is a grey floor in a dark room.
-float3 dither_code(float3 encoded, float2 pixel, float levels)
-{
-    if (push.dither <= 0.0)
-    {
-        return encoded;
-    }
-    uint2 p = uint2(pixel);
-    uint seed = p.x * 73856093u ^ p.y * 19349663u;
-    float3 n = float3(noise(seed), noise(seed + 1u), noise(seed + 2u));
-    float3 f = frac(encoded * levels);
-    float3 window = saturate(min(f, 1.0 - f) * (1.0 / DITHER_DEADZONE));
-    return encoded + n * window * push.dither * (1.0 / levels);
-}
-
 // The finished picture in whatever the swapchain agreed to take.
 //
 // Ten-bit is where the dither goes on the HDR path: scRGB is `Rgba16F` and has
@@ -373,12 +255,12 @@ float4 encode(float3 colour, float2 pixel)
     if (push.output == OUTPUT_HDR10)
     {
         float3 wide = mul(REC709_TO_REC2020, colour * push.paper_white);
-        return float4(dither_code(pq_encode(wide), pixel, 1023.0), 1.0);
+        return float4(dither_code(pq_encode(wide), pixel, 1023.0, push.dither), 1.0);
     }
     // SDR: linear out, and the attachment's own sRGB format does the OETF on
     // write. Untouched by this milestone on purpose — it is the path every
     // blessed golden (§4.10) holds.
-    return float4(dither(colour, pixel), 1.0);
+    return float4(dither_linear(colour, pixel, push.dither), 1.0);
 }
 
 [shader("fragment")]

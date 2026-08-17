@@ -49,6 +49,90 @@ const KILL: WidgetId = WidgetId::new("editor.tree.delete");
 const TOOL: WidgetId = WidgetId::new("editor.gizmo.tool");
 /// §6 M59's view picker, in the perf pane beside the passes it picks among.
 const DEBUG: WidgetId = WidgetId::new("editor.debug.view");
+/// §6 M61's render pane: the same picker as a *list*, and its own knob ids.
+const VIEW_ROW: WidgetId = WidgetId::new("editor.render.view");
+
+/// The three widget ids one [`Editor::knob`] row declares.
+///
+/// Per **pane**, not per crate: the cvars pane and the render pane can be up at
+/// the same time showing the same CVar, and one id answering two hit tests is a
+/// click that lands twice (§4.9).
+struct Knobs {
+    knob: WidgetId,
+    minus: WidgetId,
+    plus: WidgetId,
+}
+
+const CVAR_KNOBS: Knobs = Knobs {
+    knob: KNOB,
+    minus: MINUS,
+    plus: PLUS,
+};
+
+const RENDER_KNOBS: Knobs = Knobs {
+    knob: WidgetId::new("editor.render.cvar"),
+    minus: WidgetId::new("editor.render.minus"),
+    plus: WidgetId::new("editor.render.plus"),
+};
+
+/// One line of the render pane's right column.
+enum Row<'a> {
+    /// A group's name, in the accent. Not a control.
+    Heading(&'a str),
+    /// A CVar, its index in `gg_core::cvar::all()` — which is what makes its
+    /// widget id stable as the pane scrolls — and the leading characters of its
+    /// name the heading above it already said.
+    Knob(usize, &'a gg_core::cvar::CVar, usize),
+}
+
+/// The render pane's groups: a heading and the prefix it claims. **First match
+/// wins**, so `r.shadow` must precede the bare `r.` catch-all — a prefix listed
+/// after one it is a prefix of would never claim a row.
+const GROUPS: &[(&str, &str)] = &[
+    ("ambient occlusion", "r.ao"),
+    ("global illumination", "r.gi"),
+    ("sun shadows", "r.shadow"),
+    ("lamp shadows", "r.lamp"),
+    ("debug", "r.debug"),
+    ("frame", "r."),
+];
+
+/// Lay `cvars` out as the render pane's rows: every `r.*` under exactly one
+/// heading, headings with nothing under them dropped.
+///
+/// Pure and separate from the drawing so it can be tested against a registry
+/// this crate's test binary does not have to populate — the `r.*` names are the
+/// shell's to register (`gg_runtime::run`), so a panel test over the live
+/// registry would assert about whichever crates happened to have started.
+fn knob_rows<'a>(cvars: &[&'a gg_core::cvar::CVar]) -> Vec<Row<'a>> {
+    let mut rows = Vec::new();
+    for (at, (heading, prefix)) in GROUPS.iter().enumerate() {
+        let mut group = Vec::new();
+        for (i, cvar) in cvars.iter().enumerate() {
+            let claimed = GROUPS[..at]
+                .iter()
+                .any(|(_, earlier)| cvar.name().starts_with(earlier));
+            if cvar.name().starts_with(prefix) && !claimed {
+                group.push((i, *cvar));
+            }
+        }
+        if group.is_empty() {
+            continue;
+        }
+        rows.push(Row::Heading(heading));
+        // The heading already says the prefix, so the rows drop it — but never
+        // to nothing: `r.ao` under "ambient occlusion" would be a blank name, so
+        // a row whose name *is* the prefix keeps everything past `r.`.
+        for (i, cvar) in group {
+            let trim = match cvar.name().len() > prefix.len() + 1 {
+                true => prefix.len() + 1,
+                false => 2,
+            };
+            rows.push(Row::Knob(i, cvar, trim));
+        }
+    }
+    rows
+}
 
 /// How far in front of the camera a spawned entity lands, in metres. Far enough
 /// to see whole at the default field of view, near enough that its gizmo arms
@@ -72,6 +156,62 @@ pub(crate) fn head_button(head: Rect, i: usize) -> Rect {
 /// something the editor and the game both answer.
 const VIEWPORT: WidgetId = WidgetId::new("editor.viewport");
 const OPEN: WidgetId = WidgetId::new("editor.project");
+
+/// Where one world axis's tip lands in an axis widget whose arms are `arm`
+/// long, as an offset from its middle — and whether that axis is coming at the
+/// operator rather than going away (§6 M63).
+///
+/// A function of its own because it is the widget's one non-obvious line and
+/// the two failures it can have are silent: a sign wrong on the vertical and
+/// the picture is a mirror of the camera, a sign wrong on the depth and the
+/// labels are on the three arms pointing into the screen.
+///
+/// Screen y counts down and a camera's up counts up, hence the negation — the
+/// same flip `crate::pick::Lens::project` applies. An axis exactly across the
+/// view counts as facing: it is neither toward nor away, and lighting it is
+/// what keeps a level camera showing three labels instead of one.
+fn axis_arm(
+    axis: gg_math::sim::DVec3,
+    basis: (
+        gg_math::sim::DVec3,
+        gg_math::sim::DVec3,
+        gg_math::sim::DVec3,
+    ),
+    arm: f32,
+) -> ((f32, f32), bool) {
+    let (right, up, forward) = basis;
+    let reach = f64::from(arm);
+    (
+        (
+            (axis.dot(right) * reach) as f32,
+            -(axis.dot(up) * reach) as f32,
+        ),
+        axis.dot(forward) <= 0.0,
+    )
+}
+
+/// The axis widget's side, in logical units — big enough that three arms and a
+/// letter are separable at scale 1, small enough to stay out of the picture.
+const AXES_BOX: f32 = 46.0;
+/// The labelled pad at an arm's tip. A square rather than a disc for
+/// `crate::marker`'s reason: `DrawList` has rectangles, and one primitive that
+/// clips is worth more than a rounder one that does not.
+const AXES_TIP: f32 = 9.0;
+/// What each arm is called. Single characters so a pad is a pad and not a chip.
+const AXES_NAME: [&str; 3] = ["X", "Y", "Z"];
+
+/// Draw the viewport's axis widget and controls legend (§6 M63).
+///
+/// A knob rather than always-on because the overlay is the one thing this editor
+/// draws *into* the picture rather than around it: a screenshot, a golden bless
+/// and a look at a dark corner all want it gone, and none of them wants the pane
+/// closed. Not `recorded` — it moves no click, declares no widget and is read
+/// only where the drawing happens.
+pub(crate) static LEGEND: gg_core::cvar::CVar = gg_core::cvar::CVar::new_bool(
+    "d.editor_overlay",
+    true,
+    "draw the viewport's axis widget and controls legend",
+);
 
 /// Transport cells, in declaration order: play, step, stop — offset and width,
 /// from the start of the set. Square-ish because they are drawn and not set:
@@ -711,6 +851,105 @@ impl Editor {
             self.tool = self.tool.next();
             tracing::info!(tool = self.tool.label(), "editor: tool");
         }
+        self.overlay(frame, view, &lens);
+    }
+
+    /// What the operator is flying, and what with (§6 M63): the world's axes as
+    /// this camera sees them, and the gestures that move it.
+    ///
+    /// **Stopped only**, for [`crate::camera`]'s reason rather than a second
+    /// one: while the scene plays the viewport is the game's, none of these
+    /// gestures do anything, and a legend for controls that are inert is worse
+    /// than no legend. Nothing here is a widget — it declares no id and takes no
+    /// click — so it cannot shadow the pick rectangle underneath it.
+    fn overlay(&mut self, frame: &Frame, view: Rect, lens: &crate::pick::Lens) {
+        if !matches!(frame.play, crate::Play::Stopped) || !LEGEND.bool() {
+            return;
+        }
+        let (right, up, forward) = lens.basis();
+        // Top-right, and laid out from that corner inward so a narrow pane
+        // clips the *left* end of the rows rather than sliding them off the
+        // picture. The play tag and the tool chip own the other corner.
+        let box_ = Rect::new(
+            view.right() - AXES_BOX - 2.0,
+            view.y + 2.0,
+            AXES_BOX,
+            AXES_BOX,
+        );
+        if box_.x <= view.x || box_.bottom() >= view.bottom() {
+            return;
+        }
+        let mid = (box_.x + box_.w * 0.5, box_.y + box_.h * 0.5);
+        let arm = box_.w * 0.5 - AXES_TIP;
+        // Painter's order: the arm pointing *away* is drawn first, so the one
+        // coming at the operator is on top of it where they cross. Sorting three
+        // axes by depth is what makes the widget read as a solid object rather
+        // than as three lines.
+        let mut order = [0usize, 1, 2];
+        let depth = |i: usize| crate::marker::AXES[i].dot(forward);
+        order.sort_by(|a, b| depth(*b).total_cmp(&depth(*a)));
+        for i in order {
+            let ((dx, dy), facing) = axis_arm(crate::marker::AXES[i], (right, up, forward), arm);
+            let tip = (mid.0 + dx, mid.1 + dy);
+            let ink = crate::marker::AXIS_INK[i];
+            // Toward the operator is lit and labelled; away is the same hue at
+            // the chrome's weight, which is what says "this axis is behind you"
+            // without a second colour to learn.
+            let shade = match facing {
+                true => ink,
+                false => (ink & 0x00ff_ffff) | 0x6000_0000,
+            };
+            crate::marker::segment(&mut self.list, box_, mid, tip, self.fit.scale, shade);
+            let pad = Rect::new(
+                tip.0 - AXES_TIP * 0.5,
+                tip.1 - AXES_TIP * 0.5,
+                AXES_TIP,
+                AXES_TIP,
+            );
+            self.list.rect(pad, shade);
+            if facing {
+                self.label_mid(pad, pad.x + (AXES_TIP - EM) * 0.5, AXES_NAME[i], CHROME);
+            }
+        }
+        // The legend, under the widget and right-aligned to the same edge. The
+        // speed is in it because §6 M63 gave the wheel a second subject, and a
+        // knob that moves invisibly is a knob nobody finds — this row *is* the
+        // discovery path for the throttle, and its readout while it moves.
+        let flying = self.camera.flying();
+        let speed = format!("wheel {:.1} m/s", crate::camera::SPEED.float());
+        let rows: [(&str, bool); 4] = [
+            ("RMB look · MMB pan", flying),
+            ("WASD + Space/Ctrl", flying),
+            (speed.as_str(), flying),
+            ("F frame · G gizmo", false),
+        ];
+        let width = rows
+            .iter()
+            .map(|(text, _)| text_width(text))
+            .fold(0.0_f32, f32::max);
+        let plate = Rect::new(
+            box_.right() - width - 4.0,
+            box_.bottom() + 2.0,
+            width + 4.0,
+            rows.len() as f32 * PITCH + 2.0,
+        );
+        if plate.x <= view.x || plate.bottom() >= view.bottom() {
+            return;
+        }
+        self.list.rect(plate, HEADER);
+        for (i, (text, lit)) in rows.iter().enumerate() {
+            let row = Rect::new(
+                plate.x + 2.0,
+                plate.y + 1.0 + i as f32 * PITCH,
+                plate.w - 4.0,
+                ROW,
+            );
+            // Right-aligned inside a left-aligned label, which is what the pad
+            // is: `label` cuts to its rectangle, so starting the run further in
+            // is the alignment.
+            let x = row.right() - text_width(text);
+            self.label_mid(row, x, text, if *lit { ACCENT } else { DIM });
+        }
     }
 
     /// The project picker, in the game pane, with no game behind it (§6 M15.1
@@ -841,45 +1080,56 @@ impl Editor {
             let Some(rect) = cell(&scroll, columns, rows, i) else {
                 continue;
             };
-            let id = i as u64;
-            if matches!(cvar.kind(), gg_core::cvar::CVarKind::Bool) {
-                let text = format!("{} {}", fit_text(cvar.name(), 20), cvar.to_text());
-                if self.button(KNOB.indexed(id), rect, &text, cvar.bool()) {
-                    cvar.set_bool(!cvar.bool());
-                    self.edits += 1;
-                    tracing::info!(cvar = cvar.name(), value = cvar.bool(), "editor: cvar set");
-                }
-                continue;
-            }
-            // Two nudges at the right end, the reading to the left of them.
-            // Narrow on purpose: the name and the value are what a reader scans
-            // and the buttons are what a tuner reaches for, so the row must not
-            // become two thirds chrome.
-            let step = ICON + 4.0;
-            let (down, up) = (
-                Rect::new(rect.right() - step * 2.0, rect.y, step, rect.h),
-                Rect::new(rect.right() - step, rect.y, step, rect.h),
-            );
-            let room = ((rect.w - step * 2.0) / EM) as usize;
-            let text = format!("{} {}", fit_text(cvar.name(), 17), cvar.to_text());
-            let color = if cvar.is_default() { DIM } else { INK };
-            self.label(rect, fit_text(&text, room), color);
-            for (button, up) in [(down, false), (up, true)] {
-                let glyph = if up { "+" } else { "-" };
-                let widget = if up { PLUS } else { MINUS };
-                if !self.button(widget.indexed(id), button, glyph, false) {
-                    continue;
-                }
-                nudge(cvar, up);
-                self.edits += 1;
-                tracing::info!(
-                    cvar = cvar.name(),
-                    value = cvar.to_text(),
-                    "editor: cvar set"
-                );
-            }
+            self.knob(rect, cvar, &CVAR_KNOBS, i as u64, 0);
         }
         self.list.pop_clip();
+    }
+
+    /// One CVar's row: a bool that toggles on click, or a reading with two
+    /// nudges at its right end.
+    ///
+    /// `id` distinguishes this row's three widgets from every other row's, and
+    /// `trim` is how many leading characters of the name to drop — the render
+    /// pane groups by prefix and a column of `r.ao_` repeated eight times is
+    /// eight glyphs of the one thing the group heading already said.
+    fn knob(&mut self, rect: Rect, cvar: &gg_core::cvar::CVar, ids: &Knobs, id: u64, trim: usize) {
+        let name = cvar.name().get(trim..).unwrap_or(cvar.name());
+        if matches!(cvar.kind(), gg_core::cvar::CVarKind::Bool) {
+            let text = format!("{} {}", fit_text(name, 20), cvar.to_text());
+            if self.button(ids.knob.indexed(id), rect, &text, cvar.bool()) {
+                cvar.set_bool(!cvar.bool());
+                self.edits += 1;
+                tracing::info!(cvar = cvar.name(), value = cvar.bool(), "editor: cvar set");
+            }
+            return;
+        }
+        // Two nudges at the right end, the reading to the left of them. Narrow
+        // on purpose: the name and the value are what a reader scans and the
+        // buttons are what a tuner reaches for, so the row must not become two
+        // thirds chrome.
+        let step = ICON + 4.0;
+        let (down, up) = (
+            Rect::new(rect.right() - step * 2.0, rect.y, step, rect.h),
+            Rect::new(rect.right() - step, rect.y, step, rect.h),
+        );
+        let room = ((rect.w - step * 2.0) / EM) as usize;
+        let text = format!("{} {}", fit_text(name, 17), cvar.to_text());
+        let color = if cvar.is_default() { DIM } else { INK };
+        self.label(rect, fit_text(&text, room), color);
+        for (button, up) in [(down, false), (up, true)] {
+            let glyph = if up { "+" } else { "-" };
+            let widget = if up { ids.plus } else { ids.minus };
+            if !self.button(widget.indexed(id), button, glyph, false) {
+                continue;
+            }
+            nudge(cvar, up);
+            self.edits += 1;
+            tracing::info!(
+                cvar = cvar.name(),
+                value = cvar.to_text(),
+                "editor: cvar set"
+            );
+        }
     }
 
     /// The M9 pack's directory (§4.6): what is in it, not what is resident.
@@ -1016,6 +1266,105 @@ impl Editor {
             &format!("save -> {elided}{cut}"),
             DIM,
         );
+    }
+
+    /// §6 M61: the frame's own knobs — which intermediate to show on the left,
+    /// and the `r.*` registry grouped by pass on the right.
+    ///
+    /// It is not a second CVar pane. Two things are here that the registry as a
+    /// flat list cannot give: the debug view is a **list** rather than a cycle
+    /// button, so reaching `shadow.2` is one click instead of nine and an
+    /// operator can see the table without walking it; and the rows are grouped
+    /// by the pass they belong to, which is what turns fifty-three names into
+    /// six questions. Both faces write the same globals, so an edit made here
+    /// and one made in `cvars` cannot disagree (§4.8).
+    ///
+    /// **Whether a view resolved is one bit and it is derived**: the graph
+    /// declares a `debug-view` pass exactly when `r.debug_view` named an image
+    /// this frame has, so its presence in the pass list is the answer. A column
+    /// claiming per-row availability would be a second copy of
+    /// `scene_attachments`' table, which is the thing `cvars::DEBUG_VIEWS`'
+    /// own note exists to forbid.
+    pub(crate) fn render(&mut self, body: Rect, frame: &Frame) {
+        let (views, knobs) = render_split(body);
+        self.views(views, frame);
+        self.knobs(knobs);
+    }
+
+    /// `r.debug_view`'s table as a list, one row per entry, the live one lit.
+    fn views(&mut self, body: Rect, frame: &Frame) {
+        let names = gg_render::cvars::DEBUG_VIEWS;
+        let live = gg_render::cvars::DEBUG_VIEW.int();
+        // The pass the renderer declares only when the view resolved to an
+        // image — see this pane's note.
+        let resolved = frame.passes.iter().any(|pass| pass.name == "debug-view");
+        self.label(Rect::new(body.x, body.y, body.w, ROW), "view", ACCENT);
+        let list = view_list(body);
+        let scroll = self.scrollable(Pane::Render, list, names.len() as f32 * PITCH);
+        self.list.push_clip(scroll.view);
+        for (i, name) in names.iter().enumerate() {
+            let Some(rect) = scroll.row(i as f32 * PITCH, ROW) else {
+                continue;
+            };
+            let on = live == i as i64;
+            if self.button(VIEW_ROW.indexed(i as u64), rect, name, on) {
+                // Clicking the live row turns it off, so the pane can put the
+                // picture back without hunting for `off` at the top of a
+                // scrolled list.
+                let next = if on { 0 } else { i };
+                gg_render::cvars::DEBUG_VIEW.set_int(next as i64);
+                self.edits += 1;
+                tracing::info!(view = names.get(next), "editor: debug view");
+            }
+        }
+        self.list.pop_clip();
+        // The one honest thing to say about the picture, on the row under the
+        // list: `off` is not a failure, and a named view the frame has nothing
+        // for is the pass that did not run rather than a bug to report.
+        let (text, color) = match (live, resolved) {
+            (0, _) => ("showing the frame", DIM),
+            (_, true) => ("showing the view", ACCENT),
+            (_, false) => ("no such image this frame", DANGER),
+        };
+        self.label(
+            Rect::new(body.x, body.bottom() - ROW, body.w, ROW),
+            text,
+            color,
+        );
+    }
+
+    /// Every `r.*` CVar, grouped under the pass it belongs to.
+    ///
+    /// The grouping is read off the **name** rather than a curated table, so a
+    /// CVar added to `gg_render::cvars` lands in its group without this file
+    /// hearing about it — the cost is that a group is whatever prefix its
+    /// members share, which is exactly how the names were chosen.
+    fn knobs(&mut self, body: Rect) {
+        let cvars = gg_core::cvar::all();
+        let rows = knob_rows(&cvars);
+        if rows.is_empty() {
+            // Reads as a bug otherwise, and it is not one: registration is the
+            // *shell's* (`gg_runtime::run`), so a harness that drives the editor
+            // without it has an empty registry rather than a broken pane.
+            self.label(body, "no render cvars registered", DIM);
+            return;
+        }
+        let columns = columns_in(body);
+        let count = rows.len().div_ceil(columns).max(1);
+        let scroll = self.scrollable_at(crate::KNOBS_SLOT, body, count as f32 * PITCH);
+        self.list.push_clip(scroll.view);
+        for (i, row) in rows.iter().enumerate() {
+            let Some(rect) = cell(&scroll, columns, count, i) else {
+                continue;
+            };
+            match row {
+                Row::Heading(text) => self.label(rect, text, ACCENT),
+                Row::Knob(id, cvar, trim) => {
+                    self.knob(rect, cvar, &RENDER_KNOBS, *id as u64, *trim);
+                }
+            }
+        }
+        self.list.pop_clip();
     }
 
     /// §6 M16: the conversation with the agent, and the reload it is usually
@@ -1595,6 +1944,40 @@ pub(crate) fn nudge_rect(body: Rect) -> Rect {
     )
 }
 
+/// The render pane's two columns, given its body: the view list and the knobs
+/// (§6 M61).
+///
+/// A third to the views, the rest to the knobs — the view names are short and
+/// fixed, while a knob row carries a name, a value and two buttons. Capped, so a
+/// wide pane spends the extra width on the knobs rather than on air beside
+/// `shadow.0`.
+pub(crate) fn render_split(body: Rect) -> (Rect, Rect) {
+    let body = body.inset(3.0);
+    let at = (body.w * 0.34).min(18.0 * EM);
+    (
+        Rect::new(body.x, body.y, at, body.h),
+        Rect::new(
+            body.x + at + 3.0,
+            body.y,
+            (body.w - at - 3.0).max(0.0),
+            body.h,
+        ),
+    )
+}
+
+/// Where the view rows are laid inside the render pane's left column — a
+/// function rather than arithmetic at the call site so `session::aim::view` and
+/// the rows it aims at cannot be two different tables (`tool_chip`'s reason).
+/// A header above and the resolved/absent line below.
+pub(crate) fn view_list(column: Rect) -> Rect {
+    Rect::new(
+        column.x,
+        column.y + PITCH,
+        column.w,
+        (column.h - PITCH * 2.0).max(0.0),
+    )
+}
+
 /// The gizmo-mode chip, beside the viewport's own tag in its top-left corner
 /// (§6 M20 item 10). A function rather than four numbers at the call site so a
 /// script can aim at it — `session::aim::tool` is its only other reader, and a
@@ -1671,6 +2054,38 @@ fn summary(slots: &[Slot], mask: u64, chars: usize, per: usize) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The axis widget reads the world the way the picture does: +X to the
+    /// right, +Y **up the screen** — which is down in these coordinates — and
+    /// the axis along the view collapsed to the middle. Turning the camera a
+    /// quarter turn swaps which of the two horizontal axes is which, and that
+    /// swap is the whole claim: a widget that ignored the camera would pass
+    /// every one of the first three assertions.
+    #[test]
+    fn the_axis_widget_reads_the_world_the_way_the_picture_does() {
+        use gg_math::sim::DVec3;
+        let level = crate::pick::basis(0.0, 0.0);
+        let at = |axis| axis_arm(axis, level, 10.0);
+        assert_eq!(at(DVec3::X).0, (10.0, 0.0), "+X is not to the right");
+        assert_eq!(at(DVec3::Y).0, (0.0, -10.0), "+Y is not up the screen");
+        // Along the view axis: no arm at all, and toward the operator, since a
+        // level camera looks down -Z.
+        assert_eq!(at(DVec3::Z).0, (0.0, 0.0));
+        assert!(at(DVec3::Z).1, "+Z reads as behind a camera facing it");
+        assert!(!at(-DVec3::Z).1, "-Z reads as in front of one facing away");
+
+        // A quarter turn of yaw faces the camera down -X, so +X is the axis
+        // collapsed to the middle now and +Z has taken the screen's *left* —
+        // the camera's right is -Z there (`gg_math::sim::fly_basis`).
+        let turned = crate::pick::basis(core::f32::consts::FRAC_PI_2, 0.0);
+        let (arm, facing) = axis_arm(DVec3::X, turned, 10.0);
+        assert!(arm.0.abs() < 1e-4 && arm.1.abs() < 1e-4, "{arm:?}");
+        assert!(facing, "+X reads as ahead of a camera facing away from it");
+        assert!(
+            (axis_arm(DVec3::Z, turned, 10.0).0.0 + 10.0).abs() < 1e-4,
+            "+Z did not take the screen's left"
+        );
+    }
 
     fn refused() -> gg_agent::Seam {
         gg_agent::Seam {
@@ -1803,5 +2218,62 @@ mod tests {
         // `fix it` follows the refusal, not the presence of a seam.
         assert!(buttons(Some(&refused())).1);
         assert!(!buttons(Some(&accepted())).1);
+    }
+
+    /// The render pane's grouping (§6 M61), over a table this test owns
+    /// rather than over the live registry — which in a panel test holds
+    /// whichever crates happened to have registered.
+    ///
+    /// Three claims, and the first is the one a curated table would break: a
+    /// name nobody wrote a group for still appears, under `frame`.
+    #[test]
+    fn every_render_cvar_lands_under_exactly_one_heading() {
+        static KNOBS: [gg_core::cvar::CVar; 7] = [
+            gg_core::cvar::CVar::new_bool("r.ao", true, ""),
+            gg_core::cvar::CVar::new_float("r.ao_radius", 0.5, ""),
+            gg_core::cvar::CVar::new_int("r.shadow_cascades", 4, ""),
+            gg_core::cvar::CVar::new_bool("r.shadow_reach", true, ""),
+            gg_core::cvar::CVar::new_bool("r.vsync", true, ""),
+            gg_core::cvar::CVar::new_int("r.something_new", 1, ""),
+            gg_core::cvar::CVar::new_int("d.editor_scale", 0, ""),
+        ];
+        let cvars: Vec<&gg_core::cvar::CVar> = KNOBS.iter().collect();
+        let rows = knob_rows(&cvars);
+        let named: Vec<&str> = rows
+            .iter()
+            .map(|row| match row {
+                Row::Heading(text) => *text,
+                Row::Knob(_, cvar, _) => cvar.name(),
+            })
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                "ambient occlusion",
+                "r.ao",
+                "r.ao_radius",
+                "sun shadows",
+                "r.shadow_cascades",
+                "r.shadow_reach",
+                "frame",
+                "r.vsync",
+                "r.something_new",
+            ],
+            "a heading with nothing under it, a row under two, or `d.` leaking in"
+        );
+
+        // The trim leaves a name, never a blank: `r.ao` under its own heading
+        // keeps everything past `r.`, and `r.ao_radius` drops the prefix whole.
+        for row in &rows {
+            let Row::Knob(_, cvar, trim) = row else {
+                continue;
+            };
+            let shown = cvar.name().get(*trim..).unwrap_or("");
+            assert!(!shown.is_empty(), "{} trims to nothing", cvar.name());
+            assert!(cvar.name().ends_with(shown));
+        }
+
+        // And an empty registry is an empty list rather than six bare headings.
+        assert!(knob_rows(&[]).is_empty());
     }
 }

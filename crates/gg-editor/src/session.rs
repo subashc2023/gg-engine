@@ -99,6 +99,17 @@ pub mod aim {
         Some((menu(editor, 0)?, menu_item(editor, 0, 0)?))
     }
 
+    /// Where `view → <pane>` is (§6 M61): the title, then the item that shows
+    /// or closes it. The row is the pane's own position in `Pane::ALL`, which is
+    /// what `menu_action` reads it as.
+    #[must_use]
+    pub fn pane_toggle(editor: &Editor, pane: Pane) -> Option<((f32, f32), (f32, f32))> {
+        Some((
+            menu(editor, 2)?,
+            menu_item(editor, 2, pane.id().0 as usize)?,
+        ))
+    }
+
     /// The window buttons, in the platform's own order.
     #[must_use]
     pub fn window(editor: &Editor, i: usize) -> (f32, f32) {
@@ -270,6 +281,20 @@ pub mod aim {
     #[must_use]
     pub fn tab(editor: &Editor, pane: Pane) -> Option<(f32, f32)> {
         editor.tab_rect(pane).map(centre)
+    }
+
+    /// The `i`-th row of the render pane's view list (§6 M61) — an index into
+    /// `gg_render::cvars::DEBUG_VIEWS`, where 0 is `off`.
+    ///
+    /// `None` when the pane is not up, or when the row is scrolled out of the
+    /// column, which is [`tree_row`]'s rule and for its reason: a script aiming
+    /// at a row that is not there would click whatever is.
+    #[must_use]
+    pub fn view(editor: &Editor, i: usize) -> Option<(f32, f32)> {
+        let (column, _) = panels::render_split(editor.pane_body(Pane::Render)?);
+        let list = panels::view_list(column);
+        let row = Rect::new(list.x, list.y + i as f32 * crate::PITCH, list.w, crate::ROW);
+        (row.bottom() <= list.bottom() + 0.01).then(|| centre(row))
     }
 
     /// The `i`-th seam of the current layout, and the position that moves it by

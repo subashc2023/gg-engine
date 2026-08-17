@@ -192,7 +192,8 @@ float4 fs_sh(VOut i) : SV_Target
     return float4(distance / total, behind / total, 0.0, 1.0);
 }
 
-// The distance record: one octahedral tile per probe, two moments a texel.
+// The distance record: one octahedral tile per probe, two moments a texel, with
+// a one-texel border (§6 M69).
 //
 // The kernel's exponent is derived rather than tuned. A texel of an `edge` tile
 // covers `4pi / edge^2` steradians, whose half-angle `t` satisfies
@@ -200,12 +201,20 @@ float4 fs_sh(VOut i) : SV_Target
 // works out at `k ~= 0.3 * edge^2` across the range this tile is allowed to be.
 // A fixed exponent would be a filter that is a blur at one tile size and a point
 // sample at another.
+//
+// **The border is one line of this shader** and no second pass: the viewport is
+// `edge + 2` square, the uv of a border texel lands outside `[0, 1]`, and
+// `octahedral_wrap` folds it back to the direction it stands for. So a border
+// texel is the same integral in the same direction as the interior texel it
+// mirrors — exactly equal rather than a replication, which is what
+// `the_moment_tile_border_is_its_own_mirror` asserts.
 [shader("fragment")]
 float4 fs_moments(VOut i) : SV_Target
 {
     uint2 texel = uint2(i.pos.xy) - push.origin;
-    float3 direction =
-        octahedral_direction((float2(texel) + 0.5) / float(push.moment_edge));
+    float2 uv =
+        (float2(texel) + 0.5 - float(PROBE_MOMENT_BORDER)) / float(push.moment_edge);
+    float3 direction = octahedral_direction(octahedral_wrap(uv));
     float sharpness = 0.3 * float(push.moment_edge * push.moment_edge);
     float edge = float(push.face_edge);
 

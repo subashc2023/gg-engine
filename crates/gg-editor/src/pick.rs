@@ -73,6 +73,12 @@ impl Lens {
         }
     }
 
+    /// The camera's own three axes, for a widget that draws the world's against
+    /// them (§6 M63's axis gizmo). Right, up, forward — [`basis`]'s order.
+    pub(crate) fn basis(&self) -> (sim::DVec3, sim::DVec3, sim::DVec3) {
+        (self.right, self.up, self.forward)
+    }
+
     /// The ray through `at` — a position **inside** the viewport in `[0, 1]`,
     /// `(0, 0)` at its top-left corner.
     ///

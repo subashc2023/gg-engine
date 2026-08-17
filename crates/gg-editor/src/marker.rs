@@ -63,13 +63,13 @@ const LEAST_EXTENT: f64 = 0.05;
 
 /// What each axis is drawn in: X red, Y green, Z blue, which is the one colour
 /// convention every tool an operator has used already agrees on.
-const AXIS_INK: [u32; 3] = [0xffd0_5a4a, 0xff5a_c07a, 0xff4a_86d0];
+pub(crate) const AXIS_INK: [u32; 3] = [0xffd0_5a4a, 0xff5a_c07a, 0xff4a_86d0];
 
 /// The three world axes a handle translates along. **World**, not the box's own:
 /// [`Renderable::position`] is a world position, so a local-axis gizmo would be
 /// a second frame of reference for the operator to keep track of and a rotation
 /// to invert on every write.
-const AXES: [sim::DVec3; 3] = [sim::DVec3::X, sim::DVec3::Y, sim::DVec3::Z];
+pub(crate) const AXES: [sim::DVec3; 3] = [sim::DVec3::X, sim::DVec3::Y, sim::DVec3::Z];
 
 const GRIP: WidgetId = WidgetId::new("editor.gizmo");
 
@@ -461,7 +461,7 @@ fn shaped(grab: &Gizmo, raw: f64, step: usize) -> Renderable {
 /// Run-length rather than per pixel: the walk visits every step of the major
 /// axis but emits a rectangle only where the minor one changes, so a near-level
 /// edge is two or three quads and only a 45° one costs a quad per step.
-fn segment(
+pub(crate) fn segment(
     list: &mut DrawList,
     bounds: Rect,
     from: (f32, f32),

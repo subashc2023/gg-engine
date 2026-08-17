@@ -67,7 +67,8 @@ fn textured_document() -> String {
       "metallicRoughnessTexture": {{ "index": 0 }}
     }},
     "normalTexture": {{ "index": 0 }},
-    "occlusionTexture": {{ "index": 0 }}
+    "occlusionTexture": {{ "index": 0 }},
+    "doubleSided": true
   }}],
   "images": [{{ "uri": "checker.png" }}],
   "textures": [{{ "source": 0 }}],
@@ -237,6 +238,15 @@ fn one_image_in_four_slots_compiles_to_four_assets_in_three_formats() {
     assert_eq!(
         material.metallic_roughness_texture,
         AssetId::of("town/model/texture/0/metallic_roughness")
+    );
+    // The document says `doubleSided`, so the pack must too (§6 M64): the flag
+    // crosses a serialization boundary to reach the one thing that reads it, and
+    // its failure mode is silent — a two-sided surface shaded as a solid looks
+    // like a *material* bug, not a missing bit.
+    assert_ne!(
+        material.flags & gg_assets::material::flags::DOUBLE_SIDED,
+        0,
+        "the pack dropped doubleSided"
     );
     assert_eq!(
         material.occlusion_texture,

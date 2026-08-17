@@ -216,6 +216,13 @@ pub fn play(
                     pointer_state = Some(app.pointer());
                     window.set_pointer(app.pointer().0, app.pointer().1);
                 }
+                // After the grab is released, never before: a warp under a live
+                // `Locked` grab is what `set_pointer` itself does to open one,
+                // and doing it in the other order would put the arrow back and
+                // then pin it to the window's middle (§6 M63).
+                if let Some((x, y)) = app.take_warp() {
+                    window.set_cursor_at(x, y);
+                }
                 // The window the player asked for (§6 M46), on the line above's
                 // rule: a tick decides, this closure is where a window exists.
                 // Read from the OS every frame rather than tracked, because a

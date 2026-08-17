@@ -587,14 +587,9 @@ impl Extracted {
             Some(previous) => blend_eye(previous, current, self.alpha as f32),
             None => current,
         };
-        let Some(latch) = latch else {
-            return blended;
-        };
-        let held = 1.0 - (self.alpha as f32).clamp(0.0, 1.0);
-        Eye {
-            yaw: wrap_angle(blended.yaw + latch.yaw + held * latch.yaw_spent),
-            pitch: latch.limit(blended.pitch + latch.pitch + held * latch.pitch_spent),
-            ..blended
+        match latch {
+            Some(latch) => latched(blended, latch, self.alpha as f32),
+            None => blended,
         }
     }
 
@@ -1246,6 +1241,26 @@ impl Latch {
             true => pitch.clamp(-self.pitch_limit, self.pitch_limit),
             false => pitch,
         }
+    }
+}
+
+/// [`Extracted::eye`]'s second half on an eye already blended: the turn no tick
+/// has spent, plus the `1 - alpha` of last tick's *hand* travel the blend is
+/// still holding back.
+///
+/// Separate from the method since §6 M63, because there are two cameras that
+/// want it and only one of them is in the world. The editor's is host state
+/// blended from a pair the editor keeps ([`blend_eye`] directly), and a shell
+/// applying this arithmetic itself would be the second copy of an algebra whose
+/// whole correctness argument — see [`Extracted::eye`] — is that the two terms
+/// are scaled differently on purpose.
+#[must_use]
+pub fn latched(blended: Eye, latch: Latch, alpha: f32) -> Eye {
+    let held = 1.0 - alpha.clamp(0.0, 1.0);
+    Eye {
+        yaw: wrap_angle(blended.yaw + latch.yaw + held * latch.yaw_spent),
+        pitch: latch.limit(blended.pitch + latch.pitch + held * latch.pitch_spent),
+        ..blended
     }
 }
 

@@ -13,7 +13,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gg_ecs::{Component, World};
-use gg_editor::session::{Act, aim, frames, script};
+use gg_editor::session::{Act, aim, frames, frames_from, script};
 use gg_editor::{Commands, Editor, Frame, Pane};
 use gg_input::{ActionId, AxisId, InputFrame};
 use gg_math::sim;
@@ -138,6 +138,7 @@ fn run(target: (u32, u32), input: &[InputFrame]) -> Run {
                 extent: target,
                 dpi: 1.0,
                 tick: tick as u64,
+                hz: 60,
                 play,
                 // The camera has its own tests, against a real map; this harness
                 // drives authored frames and holds none, which is also what
@@ -442,6 +443,7 @@ fn stopped(world: &mut World, editor: &mut Editor, input: &[InputFrame]) {
                 extent: TARGET,
                 dpi: 1.0,
                 tick: tick as u64,
+                hz: 60,
                 play: gg_editor::Play::Stopped,
                 input: None,
                 typed: "",
@@ -936,6 +938,7 @@ fn a_click_in_a_playing_viewport_picks_nothing() {
                 extent: TARGET,
                 dpi: 1.0,
                 tick: tick as u64,
+                hz: 60,
                 play: gg_editor::Play::Running,
                 input: None,
                 typed: "",
@@ -1059,6 +1062,7 @@ fn with_no_project_the_game_pane_is_a_picker_and_a_click_on_a_row_opens_one() {
                 extent: TARGET,
                 dpi: 1.0,
                 tick: 0,
+                hz: 60,
                 play: gg_editor::Play::Stopped,
                 input: None,
                 typed: "",
@@ -1165,6 +1169,7 @@ fn typing(typed: &str) -> Frame<'_> {
         extent: TARGET,
         dpi: 1.0,
         tick: 0,
+        hz: 60,
         play: gg_editor::Play::Stopped,
         input: None,
         typed,
@@ -1476,4 +1481,95 @@ fn a_spawn_lands_in_the_plane_being_worked_in_rather_than_at_a_fixed_distance() 
         at.z.abs() < 1e-9,
         "the spawn landed out of the plane: {at:?}"
     );
+}
+
+/// §6 M61's render pane: a click on a view row is the CVar, and clicking the
+/// live row puts the picture back.
+///
+/// The two arms fail in opposite directions. Without the first, the pane is a
+/// list of names that does nothing; without the second, an operator who reached
+/// `shadow.2` has to walk the table back to `off` — and the row a scrolled list
+/// puts under the pointer is not the row the script aimed at, which is why the
+/// same aim is re-read after every click rather than cached.
+#[test]
+fn the_render_pane_picks_a_view_and_puts_it_back() {
+    use gg_render::cvars::{DEBUG_VIEW, DEBUG_VIEWS};
+
+    let (mut world, _) = world();
+    let mut editor = placed(TARGET);
+    // The pane is a tab of the group `cvars` opens on, so it has to be raised
+    // before it has a body to aim into — the same click an operator makes.
+    let raise = [
+        Act::To(aim::tab(&editor, Pane::Render).expect("the render tab")),
+        Act::Settle(4),
+        Act::Click,
+        Act::Settle(2),
+    ];
+    stopped(&mut world, &mut editor, &frames(&raise, CLICK, X, Y));
+    assert_eq!(DEBUG_VIEW.int(), 0, "the editor opens showing the picture");
+
+    // Row 4 is `ao`, and it is named rather than numbered here: an index that
+    // silently became `shadow.1` is exactly the drift this asserts against.
+    let ao = DEBUG_VIEWS
+        .iter()
+        .position(|name| *name == "ao")
+        .expect("the table has an occlusion view");
+    let row = |editor: &Editor, i: usize| {
+        [
+            Act::To(aim::view(editor, i).expect("the view row is in the column")),
+            Act::Settle(4),
+            Act::Click,
+            Act::Settle(2),
+        ]
+    };
+    // `frames_from` and not `frames`: a stream carries motion, so a second
+    // script starting over at the origin aims at the sum of the two.
+    let input = frames_from(editor.pointer(), &row(&editor, ao), CLICK, X, Y);
+    stopped(&mut world, &mut editor, &input);
+    assert_eq!(DEBUG_VIEW.int(), ao as i64, "the row did not set the view");
+
+    // The same row again is off, not a no-op.
+    let input = frames_from(editor.pointer(), &row(&editor, ao), CLICK, X, Y);
+    stopped(&mut world, &mut editor, &input);
+    assert_eq!(DEBUG_VIEW.int(), 0, "the live row did not turn itself off");
+
+    // And a row the aim refuses is one the column has no room for, never a
+    // silent hit on its neighbour.
+    assert!(aim::view(&editor, DEBUG_VIEWS.len() + 40).is_none());
+}
+
+/// `view → <pane>` closes a pane and brings it back, driven as clicks rather
+/// than by calling `toggle_pane` (§6 M61).
+///
+/// The unit test beside `menu_action` proves the mapping; this proves the
+/// *geometry* — that the row an operator's pointer lands on is the row the
+/// handler reads. A menu whose items drifted one row down would toggle the
+/// pane above the one it names, and no assertion about the table would notice.
+#[test]
+fn the_view_menu_toggles_the_pane_it_names() {
+    let (mut world, _) = world();
+    let mut editor = placed(TARGET);
+    for pane in [Pane::Assets, Pane::Inspector, Pane::Render] {
+        for want in [false, true] {
+            let (title, item) = aim::pane_toggle(&editor, pane).expect("view → pane");
+            let acts = [
+                Act::To(title),
+                Act::Settle(4),
+                Act::Click,
+                Act::To(item),
+                Act::Settle(4),
+                Act::Click,
+                Act::Settle(2),
+            ];
+            let input = frames_from(editor.pointer(), &acts, CLICK, X, Y);
+            stopped(&mut world, &mut editor, &input);
+            assert_eq!(
+                editor.pane_docked(pane),
+                want,
+                "{} did not go {}",
+                pane.title(),
+                if want { "back" } else { "away" }
+            );
+        }
+    }
 }

@@ -39,6 +39,26 @@
 //! is perfectly even and is up to two tick periods stale, which at 60 Hz is
 //! 33 ms of a turn the hand finished making. Both tables print it, and the
 //! second one is what a latched view does to it.
+//!
+//! # `--editor` (§6 M65)
+//!
+//! The same three figures over the **editor's** camera, which is a second eye
+//! and not the same one seen from elsewhere: it is host state rather than a
+//! world component, it is flown by [`gg_editor::Editor::tick`] rather than by a
+//! game's look system, and the shell composes it through
+//! [`gg_editor::Editor::eyes`] + [`gg_extract::blend_eye`] + a latch built from
+//! [`gg_editor::Editor::look`] rather than through [`Extracted::eye`]. Every
+//! one of those is a different line of code from the ones the table above
+//! grades, so a green game leg says nothing whatever about it — which is the
+//! gap a report of judder in the viewport, on a build whose game camera was
+//! already smooth, walks straight into.
+//!
+//! Driven as the real editor for the reason the game leg drives a real
+//! `Extracted`: `Editor::tick` once per sim tick with the look button held and
+//! raw counts arriving between frames, then the shell's own frame composition.
+//! The *order* is restated here — an instrument cannot link `gg-runtime`, which
+//! links `gg-platform` — but none of the arithmetic is: `blend_eye` and
+//! `latched` are the shipped functions, called with the shipped arguments.
 
 use core::time::Duration;
 
@@ -46,7 +66,7 @@ use gg_core::{Pace, TickClock};
 use gg_ecs::World;
 use gg_ecs::boundary::{Eye, Look};
 use gg_extract::{Extracted, Latch};
-use gg_input::{ActionMap, AxisId, Input};
+use gg_input::{ActionMap, AxisId, Input, MouseButton};
 use gg_math::sim;
 
 /// Demo 12's bindings for the camera — `MouseX`/`MouseY` are raw device counts,
@@ -108,8 +128,10 @@ const PANELS: [f64; 6] = [60.0, 120.0, 144.0, 165.0, 240.0, 360.0];
 const NOISE_US: [f64; 2] = [0.0, 400.0];
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
-    if let [arg, ..] = args {
-        anyhow::bail!("unknown flag {arg:?} — pace takes none");
+    match args {
+        [] => {}
+        [flag] if flag == "--editor" => return editor(),
+        [arg, ..] => anyhow::bail!("unknown flag {arg:?} — pace takes --editor or nothing"),
     }
     println!("gg-tools pace: a {SIM_HZ} Hz sim under panels that are not it");
     println!(
@@ -414,6 +436,416 @@ fn map() -> ActionMap {
         Ok(map) => map,
         Err(error) => panic!("the instrument's own map does not parse: {error}"),
     }
+}
+
+// ------------------------------------------- §6 M65: the editor's camera ----
+
+/// The surface the editor is laid out on. A real desk's, because
+/// `metres_per_unit` — and so the pan, though this leg never pans — is read off
+/// the viewport pane's rectangle, and a pane sized for nothing would be a
+/// framing no session has.
+const EDITOR_EXTENT: (u32, u32) = (1920, 1080);
+
+/// `--editor`: the same question asked of the second camera (§6 M65).
+///
+/// Printed as one table rather than two, because the interesting comparison is
+/// across the row: what the same panel does to this camera interpolated and
+/// latched. The game's table above is two because it also has a `Spend`
+/// control, and there is no such choice here — the editor's camera reads the
+/// same accumulator the game's does, so `Spend::Covered` is not a variable it
+/// can be run without.
+fn editor() -> anyhow::Result<()> {
+    println!("gg-tools pace --editor: the editor camera under panels that are not the sim");
+    println!(
+        "  the hand turns at {COUNTS_PER_SEC} counts/s, reporting at {MOUSE_HZ} Hz, for \
+         {SECONDS} s, with the look button held throughout"
+    );
+    println!("  a second eye and a second composition (§6 M65): `Editor::tick` flies it, and the");
+    println!("  shell blends `Editor::eyes` and latches `Editor::look` — none of which the");
+    println!("  game's table grades, so a smooth shooter says nothing about this");
+    println!();
+    println!("                              |      interpolated      |        latched");
+    println!(
+        "  panel  noise  frames  ticks | stall  lurch    age | stall  lurch    age | tick lo  tick hi"
+    );
+    for noise in NOISE_US {
+        for hz in PANELS {
+            let interpolated = measure_editor(hz, noise, Latched::No)?;
+            let leg = measure_editor(hz, noise, Latched::Yes)?;
+            println!(
+                "  {hz:5.0}  {noise:4.0}us  {:6}  {:5} | {:5.2}  {:5.2}  {:5.1} | {:5.2}  {:5.2}  \
+                 {:5.1} | {:7.2} {:8.2}",
+                leg.frames,
+                leg.ticks,
+                interpolated.stall,
+                interpolated.lurch,
+                interpolated.age,
+                leg.stall,
+                leg.lurch,
+                leg.age,
+                leg.tick_lo,
+                leg.tick_hi
+            );
+        }
+        println!();
+    }
+    quantum()?;
+    cost()
+}
+
+/// What one mouse count is worth (§6 M65) — the column every ratio above is
+/// blind to.
+///
+/// `stall` and `lurch` are fractions of what a frame *owed*, so the look rate
+/// divides out of both: a camera turning ten times too fast reads a perfect
+/// `1.00` twice, and `age` reads 0.0 because it is fresh — it is fresh and
+/// even and stepping. What a hand sees when it moves *slowly* is not the frame
+/// cadence at all, it is the smallest angle the device can report, and on a
+/// 1920-pixel window that is a distance in pixels.
+///
+/// Under a pixel is invisible. Over about two, the picture visibly jumps
+/// between two counts however slowly the hand moves, which reads as judder that
+/// no amount of interpolation or latching touches — demo 12 found this from the
+/// other end at §6 M37 and wrote it in its own header, and the editor's camera
+/// was ten times coarser than the value that header rejects until §6 M65.
+///
+/// Graded against demo 12 rather than against a written-down threshold: that
+/// camera's rate is the one the operator has confirmed feels right, and both
+/// numbers here are read out of the shipped code rather than restated.
+fn quantum() -> anyhow::Result<()> {
+    let editor = editor_look_rate()?;
+    let shooter = f64::from(demo_12_shooter::look_per_count(
+        demo_12_shooter::SENS_DEFAULT,
+    ));
+    println!("what one mouse count is worth — the column a ratio cannot see");
+    println!("  every figure above is a fraction of what a frame owed, so the rate cancels out:");
+    println!("  a camera turning ten times too fast reads a perfect 1.00 and a fresh 0.0 ms");
+    println!(
+        "  px/count is across `r.fov`'s {:.0}-degree horizontal window {} pixels wide",
+        HORIZONTAL_FOV.to_degrees(),
+        QUANTUM_WIDTH
+    );
+    println!("  under 1 px is invisible; over about 2 the picture steps between two counts");
+    println!();
+    println!("  camera             rad/count  deg/count  px/count  counts/turn  cm @1600dpi");
+    for (name, rate) in [
+        ("editor", editor),
+        ("demo 12 default", shooter),
+        // The value this camera held from §6 M15.2 to M65, printed so the table
+        // says what was wrong rather than only what is right — a row that is
+        // merely absent is a fix nobody can check.
+        ("editor before M65", 0.005),
+    ] {
+        let turn = core::f64::consts::TAU / rate;
+        println!(
+            "  {name:<18} {rate:9.6}  {:9.4}  {:8.2}  {:11.0}  {:11.2}",
+            rate.to_degrees(),
+            rate / HORIZONTAL_FOV * f64::from(QUANTUM_WIDTH),
+            turn,
+            turn / 1600.0 * 2.54
+        );
+    }
+    println!();
+    Ok(())
+}
+
+/// The window `px/count` is quoted across. 1080p, the extent every other
+/// default in this tree is read at.
+const QUANTUM_WIDTH: u32 = 1920;
+
+/// `r.fov`'s 1.0 rad vertical over 16:9, which is what a horizontal step is
+/// actually measured against. Written out rather than computed with an
+/// `atan` — `gg_math::sim` is the only transcendental this tree may use and a
+/// constant needs neither.
+const HORIZONTAL_FOV: f64 = 1.5416;
+
+/// The editor camera's radians per count, read off the `Look` it declares
+/// rather than off a constant copied here — the rate is a private constant
+/// times `d.editor_sensitivity`, and the protocol is where the two meet.
+fn editor_look_rate() -> anyhow::Result<f64> {
+    let (verbs, bindings) = gg_editor::host::open(&gg_ecs::boundary::Verbs {
+        actions: &[],
+        axes: &[],
+    });
+    let map = ActionMap::parse(&bindings, verbs.actions, verbs.axes)?;
+    let mut input = Input::new(map);
+    input.push_named("game");
+    input.mouse_button(MouseButton::Right, true);
+    let mut world = World::new();
+    world.register::<Eye>()?;
+    let eye = world.spawn();
+    world.insert(eye, Eye::at(sim::DVec3::ZERO, 0.0, 0.0))?;
+    let mut editor = gg_editor::Editor::new(None);
+    // One tick with the button held is what makes the camera report a rate at
+    // all — `Editor::look` is `None` whenever the operator is not turning it.
+    input.tick();
+    editor.tick(&mut world, &editor_ui_tick(), &editor_frame(0, &input));
+    match editor.look(&input) {
+        Some(look) => Ok(f64::from(-look.yaw_rate)),
+        None => anyhow::bail!("the editor declared no look with its own button held"),
+    }
+}
+
+/// What `Editor::tick` costs the frame that owes it (§6 M65).
+///
+/// The other half of the same complaint, and the half the table above cannot
+/// see: those figures are the *composition*, which is arithmetic on two eyes
+/// and free. The editor's panels are rebuilt inside a **sim tick**, so their
+/// cost lands on one frame in four at 240 Hz and on none of the other three —
+/// which is not a lower frame rate, it is a periodic one, and a hand moving at
+/// a constant speed across a picture that hitches every fourth frame is exactly
+/// the "tiny steps" a flat frame rate does not produce.
+///
+/// Wall clock, so it is worth exactly what the profile is worth: an
+/// `opt-level = 1` instrument is not a shipping build and the header says so.
+fn cost() -> anyhow::Result<()> {
+    let (verbs, bindings) = gg_editor::host::open(&gg_ecs::boundary::Verbs {
+        actions: &[],
+        axes: &[],
+    });
+    let map = ActionMap::parse(&bindings, verbs.actions, verbs.axes)?;
+    let mut input = Input::new(map);
+    input.push_named("game");
+    input.mouse_button(MouseButton::Right, true);
+    let mut world = World::new();
+    world.register::<Eye>()?;
+    let eye = world.spawn();
+    world.insert(eye, Eye::at(sim::DVec3::ZERO, 0.0, 0.0))?;
+    let mut editor = gg_editor::Editor::new(None);
+
+    let mut costs: Vec<f64> = Vec::new();
+    for tick in 0..COST_TICKS {
+        input.motion((COUNTS_PER_SEC / f64::from(SIM_HZ)) as f32, 0.0);
+        input.tick();
+        let at = std::time::Instant::now();
+        editor.tick(&mut world, &editor_ui_tick(), &editor_frame(tick, &input));
+        let spent = at.elapsed().as_secs_f64() * 1.0e3;
+        // The first ticks place the layout and open the panes for the first
+        // time; charging a steady-state budget for them would price a cost the
+        // session pays once.
+        if tick >= COST_WARMUP {
+            costs.push(spent);
+        }
+    }
+    costs.sort_by(f64::total_cmp);
+    let at = |q: f64| costs[((costs.len() - 1) as f64 * q) as usize];
+    let mean = costs.iter().sum::<f64>() / costs.len() as f64;
+    println!("what `Editor::tick` costs the frame that owes it — {COST_TICKS} ticks");
+    println!(
+        "  a sim tick's cost lands on one frame in four at 240 Hz and on none of the other three,"
+    );
+    println!("  so this is a periodic hitch rather than a frame rate — and 4.17 ms is the budget");
+    println!(
+        "  profile: {}",
+        match cfg!(debug_assertions) {
+            true => "debug assertions ON — build with --release before believing a millisecond",
+            false => "release",
+        }
+    );
+    println!("    mean  {mean:6.3} ms");
+    println!("     p50  {:6.3} ms", at(0.50));
+    println!("     p95  {:6.3} ms", at(0.95));
+    println!("     p99  {:6.3} ms", at(0.99));
+    println!("   worst  {:6.3} ms", at(1.0));
+    Ok(())
+}
+
+/// Ticks the cost pass runs — a hundred seconds of session at the sim rate,
+/// long enough that a p99 is a hundred samples rather than three.
+const COST_TICKS: u64 = 6000;
+
+/// Ticks charged to opening the session rather than to running it.
+const COST_WARMUP: u64 = 120;
+
+/// [`measure`] against `gg_editor::Editor` instead of a game's look system.
+///
+/// The editor is driven, not modelled: `Editor::tick` once per sim tick with
+/// the map the host appends and the button the map binds, then the frame
+/// composed the way `gg_runtime::App::editor_eye` composes it. What that costs
+/// is running every panel sixty times a second for the whole leg, which is
+/// cheap and is also the point — a camera flown through the real tick is a
+/// camera whose ordering against the rest of the editor is being graded too.
+fn measure_editor(hz: f64, noise_us: f64, latched: Latched) -> anyhow::Result<Leg> {
+    // The map the shell builds with the editor open over a game declaring
+    // nothing, which is what makes the axis ids the host's rather than ours.
+    let (verbs, bindings) = gg_editor::host::open(&gg_ecs::boundary::Verbs {
+        actions: &[],
+        axes: &[],
+    });
+    let map = ActionMap::parse(&bindings, verbs.actions, verbs.axes)?;
+    let mut input = Input::new(map);
+    input.push_named("game");
+    let look_x = axis_named(&input, gg_editor::host::verb::LOOK_X)?;
+    let look_y = axis_named(&input, gg_editor::host::verb::LOOK_Y)?;
+    // Held for the whole leg, and never released: what is being measured is a
+    // drag in progress, so the press and release edges are not in the sample.
+    input.mouse_button(MouseButton::Right, true);
+
+    let mut world = World::new();
+    world.register::<Eye>()?;
+    let eye = world.spawn();
+    world.insert(eye, Eye::at(sim::DVec3::ZERO, 0.0, 0.0))?;
+    // The game's eye never moves here. That is deliberate: the editor's camera
+    // latches from it once and flies its own thereafter, so a frame that showed
+    // the world's eye instead of the editor's would read as a dead-flat zero
+    // rather than as a plausible-looking wrong answer.
+    let mut editor = gg_editor::Editor::new(None);
+
+    let mut clock = TickClock::new(SIM_HZ, Pace::Realtime);
+    let mut noise = Noise::new();
+    let mut wall = 0u64;
+    let mut reports = 0u64;
+    let period = 1.0e9 / hz;
+
+    let mut shown: Vec<f64> = Vec::new();
+    let mut turned: Vec<f64> = Vec::new();
+    let mut ages: Vec<f64> = Vec::new();
+    let mut last_shown = 0.0f64;
+    let mut last_yaw = 0.0f64;
+    let mut frames = 0usize;
+    let mut ticks = 0usize;
+    // Read off the shipped `Look` rather than written down here: the rate is
+    // `d.editor_sensitivity` times a constant private to `gg_editor::camera`,
+    // and an instrument holding its own copy would grade itself whenever either
+    // moved. Negative, the way the camera turns.
+    let mut rate = 0.0f64;
+
+    while (wall as f64) < SECONDS * 1.0e9 {
+        let elapsed = (period + noise.next() * noise_us).max(1.0) as u64;
+        wall += elapsed;
+        let due_reports = (wall as f64 * MOUSE_HZ / 1.0e9) as u64;
+        let arrived = due_reports.saturating_sub(reports);
+        reports = due_reports;
+        input.motion((COUNTS_PER_SEC / MOUSE_HZ) as f32 * arrived as f32, 0.0);
+
+        let due = clock.advance(Duration::from_nanos(elapsed));
+        input.frame_covered(due.covered);
+        for _ in 0..due.count {
+            // `App`'s order: the tick's input frame is folded first, then the
+            // editor tick reads it — `Camera::fly` takes `previous` from the
+            // eye this tick starts at, so there is no separate capture here the
+            // way the game's `capture_eye` is separate.
+            input.tick();
+            editor.tick(
+                &mut world,
+                &editor_ui_tick(),
+                &editor_frame(ticks as u64, &input),
+            );
+            ticks += 1;
+            let yaw = f64::from(editor.eye(Eye::ORIGIN).yaw);
+            if frames >= WARMUP {
+                turned.push(step(yaw, last_yaw));
+            }
+            last_yaw = yaw;
+        }
+
+        let alpha = clock.alpha();
+        let game = Eye::of(&world)?;
+        let (previous, current) = editor.eyes(game);
+        let blended = gg_extract::blend_eye(previous, current, alpha);
+        let composed = match (latched, editor.look(&input)) {
+            (Latched::Yes, Some(look)) => {
+                rate = COUNTS_PER_SEC * f64::from(look.yaw_rate);
+                gg_extract::latched(
+                    blended,
+                    Latch::of(
+                        look,
+                        (input.pending(look_x), input.pending(look_y)),
+                        (input.spent(look_x), input.spent(look_y)),
+                    ),
+                    alpha,
+                )
+            }
+            // The unlatched control reads the rate off the same call, so a leg
+            // that never turned cannot pass by dividing by a rate it invented.
+            (_, look) => {
+                if let Some(look) = look {
+                    rate = COUNTS_PER_SEC * f64::from(look.yaw_rate);
+                }
+                blended
+            }
+        };
+        let rendered = f64::from(composed.yaw);
+        if frames >= WARMUP {
+            shown.push(step(rendered, last_shown));
+            let hand = (reports as f64) * (COUNTS_PER_SEC / MOUSE_HZ) * (rate / COUNTS_PER_SEC);
+            ages.push(step(hand, rendered) / rate * 1.0e3);
+        }
+        last_shown = rendered;
+        frames += 1;
+    }
+
+    // A leg whose camera never turned would divide every ratio by zero and
+    // print a table of NaN that reads like a measurement. Named instead.
+    if rate == 0.0 {
+        anyhow::bail!(
+            "the editor camera never reported a look rate — the drag reached no camera at all, \
+             so this leg measures nothing"
+        );
+    }
+    let (stall, lurch) = spread(&shown, rate / hz);
+    let (tick_lo, tick_hi) = spread(&turned, rate / f64::from(SIM_HZ));
+    let (age, worst) = mean_and_worst(&ages);
+    Ok(Leg {
+        frames,
+        ticks,
+        stall,
+        lurch,
+        tick_lo,
+        tick_hi,
+        age,
+        worst,
+    })
+}
+
+/// The router's tick with nothing in it: this leg turns the camera and clicks
+/// nothing, and the camera has read raw device motion rather than the router's
+/// pointer since §6 M15.2.
+fn editor_ui_tick() -> gg_ui::router::Tick {
+    gg_ui::router::Tick {
+        motion: (0, 0),
+        primary: false,
+        advance_focus: false,
+        scroll: 0,
+    }
+}
+
+/// A stopped editor session over a project, which is the only state its camera
+/// flies in.
+fn editor_frame<'a>(tick: u64, input: &'a Input) -> gg_editor::Frame<'a> {
+    gg_editor::Frame {
+        extent: EDITOR_EXTENT,
+        dpi: 1.0,
+        tick,
+        hz: SIM_HZ,
+        play: gg_editor::Play::Stopped,
+        input: Some(input),
+        typed: "",
+        passes: &[],
+        // Inferred rather than named: the type is `gg-rhi`'s, and a whole
+        // dependency for one zeroed struct literal is the wrong trade.
+        memory: Default::default(),
+        save_path: "target/gg-tools/pace.ggsv",
+        title: "gg — pace",
+        maximized: false,
+        project: Some("pace"),
+        projects: &[],
+        reload: None,
+        draw_cursor: false,
+    }
+}
+
+/// An axis id by the name the host bound it under. By name for the reason the
+/// editor resolves its own verbs by name: the index is a property of whatever
+/// game the session is open over.
+fn axis_named(input: &Input, name: &str) -> anyhow::Result<AxisId> {
+    input
+        .map()
+        .axis_names()
+        .iter()
+        .position(|n| n == name)
+        .map(AxisId::new)
+        .ok_or_else(|| anyhow::anyhow!("the editor's own map has no {name}"))
 }
 
 /// Frame-time noise in `-0.5..0.5`, from a fixed seed.

@@ -1760,7 +1760,12 @@ fn load(pack: Option<&str>) -> anyhow::Result<()> {
 /// `Content::pending`'s argument one milestone along. Bounded rather than a
 /// spin: a field that cannot converge is a defect, and hanging is a worse way to
 /// report one than failing.
-const FIELD_FRAMES: usize = 24;
+/// The bound is `probe::MAX_PER_AXIS` cubed over one batch and margin, not a number
+/// that happened to be enough: it was 24 against a 512-probe ceiling, §6 M68 raised
+/// that ceiling to 4096, and a bound sized for the old one turns a large scene's
+/// reference into a failure whose message is about frames rather than about the
+/// scene. The loop leaves as soon as the field is whole, so nothing pays for this.
+const FIELD_FRAMES: usize = 96;
 
 /// Render until the irradiance field holds every probe, and hand back the last
 /// frame.
@@ -1778,7 +1783,31 @@ where
     // nothing here is holding a frame rate, so the rate that matters is the one
     // that converges the field in the fewest frames. `r.gi_rate`'s default is
     // the other side of that trade — frames against frame time.
+    //
+    // **Restored on the way out** (§6 M62), and it was not until then. A CVar is
+    // process-global, this harness renders every scene in one process, and a
+    // scene that gathers left the rate at zero for every scene after it — so
+    // `volumes`, `chart` and `shooter`, which have a field and do not gather it
+    // through here, converged one way in the suite and another way run on their
+    // own. Three references disagreed with their own suite by about a tenth of a
+    // code value of level, which is under `mirror`'s bias bound and over
+    // `volumes`'. A gate whose answer depends on what ran before it is not one.
+    let rate = gg_render::cvars::GI_RATE.int();
     gg_render::cvars::GI_RATE.set_int(0);
+    let gathered = converge(renderer, &mut once);
+    gg_render::cvars::GI_RATE.set_int(rate);
+    gathered
+}
+
+/// [`gathered`]'s loop, split out so the rate is restored down every path — the
+/// early return when the field settles, and the two `?`s.
+fn converge<F>(
+    renderer: &mut gg_render::OffscreenRenderer,
+    once: &mut F,
+) -> anyhow::Result<gg_render::OffscreenFrame>
+where
+    F: FnMut(&mut gg_render::OffscreenRenderer) -> anyhow::Result<gg_render::OffscreenFrame>,
+{
     let mut frame = once(renderer)?;
     for _ in 0..FIELD_FRAMES {
         if renderer.field_pending().0 == 0 {
@@ -2710,6 +2739,10 @@ fn render_editor() -> Render {
                 extent: EDITOR_EXTENT,
                 dpi: GOLDEN_DPI,
                 tick: 41_337 + tick as u64,
+                // The shell's own pace. Read only by the camera's speed knob
+                // (§6 M63), which this host never flies — stated rather than
+                // zeroed, because a zero here would be a pace no session has.
+                hz: 60,
                 // `Stopped` since §6 M15.4, and the trade is deliberate: the
                 // selection's outline and its three gizmo arms are drawn only in
                 // that state, and they are a whole new drawing path — a

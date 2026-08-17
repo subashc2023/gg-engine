@@ -65,8 +65,10 @@ impl gg_extract::Scenes for gg_render::content::Content
 pub fn gg_render::content::Content::expand(&self, u64, &mut dyn core::ops::function::FnMut(gg_extract::Placement))
 pub fn gg_render::content::Content::radius(&self, u64) -> core::option::Option<f32>
 pub struct gg_render::content::DrawMaterial
+pub gg_render::content::DrawMaterial::alpha_cutoff: f32
 pub gg_render::content::DrawMaterial::base_color: [f32; 4]
 pub gg_render::content::DrawMaterial::base_color_texture: gg_assets::pack::AssetId
+pub gg_render::content::DrawMaterial::double_sided: bool
 pub gg_render::content::DrawMaterial::metallic: f32
 pub gg_render::content::DrawMaterial::metallic_roughness_texture: gg_assets::pack::AssetId
 pub gg_render::content::DrawMaterial::normal_texture: gg_assets::pack::AssetId
@@ -76,6 +78,7 @@ impl core::default::Default for gg_render::content::DrawMaterial
 pub fn gg_render::content::DrawMaterial::default() -> Self
 pub mod gg_render::cvars
 pub const gg_render::cvars::DEBUG_VIEWS: &[&str]
+pub const gg_render::cvars::LATTICE_OFFSET: f64
 pub static gg_render::cvars::AA: gg_core::cvar::CVar
 pub static gg_render::cvars::AMBIENT: gg_core::cvar::CVar
 pub static gg_render::cvars::AO: gg_core::cvar::CVar
@@ -91,12 +94,19 @@ pub static gg_render::cvars::DEBUG_SCALE: gg_core::cvar::CVar
 pub static gg_render::cvars::DEBUG_VIEW: gg_core::cvar::CVar
 pub static gg_render::cvars::DITHER: gg_core::cvar::CVar
 pub static gg_render::cvars::EXPOSURE: gg_core::cvar::CVar
+pub static gg_render::cvars::FACING: gg_core::cvar::CVar
 pub static gg_render::cvars::FOV: gg_core::cvar::CVar
 pub static gg_render::cvars::GI: gg_core::cvar::CVar
+pub static gg_render::cvars::GI_BIAS: gg_core::cvar::CVar
+pub static gg_render::cvars::GI_BURIAL: gg_core::cvar::CVar
 pub static gg_render::cvars::GI_FACE: gg_core::cvar::CVar
+pub static gg_render::cvars::GI_FILTER: gg_core::cvar::CVar
 pub static gg_render::cvars::GI_MOMENTS: gg_core::cvar::CVar
+pub static gg_render::cvars::GI_OFFSET: gg_core::cvar::CVar
+pub static gg_render::cvars::GI_PAINT: gg_core::cvar::CVar
 pub static gg_render::cvars::GI_RATE: gg_core::cvar::CVar
 pub static gg_render::cvars::GI_SPACING: gg_core::cvar::CVar
+pub static gg_render::cvars::GI_TERM: gg_core::cvar::CVar
 pub static gg_render::cvars::HDR: gg_core::cvar::CVar
 pub static gg_render::cvars::HISTOGRAM: gg_core::cvar::CVar
 pub static gg_render::cvars::LAMPS: gg_core::cvar::CVar
@@ -226,6 +236,8 @@ impl gg_render::OffscreenRenderer
 pub fn gg_render::OffscreenRenderer::cluster_load(&self) -> gg_render::ClusterLoad
 pub fn gg_render::OffscreenRenderer::device(&self) -> &gg_rhi::device::DeviceReport
 pub fn gg_render::OffscreenRenderer::draw_counts(&self) -> (usize, usize)
+pub fn gg_render::OffscreenRenderer::field_anchored(&self) -> core::option::Option<[bool; 3]>
+pub fn gg_render::OffscreenRenderer::field_events(&self) -> (usize, usize)
 pub fn gg_render::OffscreenRenderer::field_grid(&self) -> core::option::Option<(gg_math::sim::DVec3, f32, [u32; 3])>
 pub fn gg_render::OffscreenRenderer::field_pending(&self) -> (usize, usize)
 pub fn gg_render::OffscreenRenderer::frame(&mut self, &gg_extract::Extracted, &gg_render::View, [f32; 4], &[gg_render::ui::UiVertex]) -> core::result::Result<gg_render::OffscreenFrame, gg_rhi::RhiError>
@@ -250,6 +262,8 @@ pub fn gg_render::Renderer::device(&self) -> &gg_rhi::device::DeviceReport
 pub fn gg_render::Renderer::draw_counts(&self) -> (usize, usize)
 pub fn gg_render::Renderer::dump_graph(&mut self) -> core::result::Result<alloc::string::String, gg_rhi::RhiError>
 pub fn gg_render::Renderer::extent(&self) -> (u32, u32)
+pub fn gg_render::Renderer::field_anchored(&self) -> core::option::Option<[bool; 3]>
+pub fn gg_render::Renderer::field_events(&self) -> (usize, usize)
 pub fn gg_render::Renderer::field_grid(&self) -> core::option::Option<(gg_math::sim::DVec3, f32, [u32; 3])>
 pub fn gg_render::Renderer::field_pending(&self) -> (usize, usize)
 pub fn gg_render::Renderer::frame(&mut self, &gg_extract::Extracted, &gg_render::View, [f32; 4], &[gg_render::ui::UiVertex]) -> core::result::Result<gg_rhi::FrameOutcome, gg_rhi::RhiError>

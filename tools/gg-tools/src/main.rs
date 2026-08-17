@@ -36,13 +36,18 @@
 //!   gg-tools bounce [--slow]        how much of a room's light got there by
 //!                                   bouncing, against the volume somebody drew
 //!                                   by hand (§6 M36)
+//!   gg-tools facets                 how flat the field's answer is on a flat
+//!                                   wall — a second difference at a percentile,
+//!                                   which is a crease's own number (§6 M69)
 //!   gg-tools frame [--extent WxH]   where a frame's milliseconds go: the
 //!                                   per-pass device table against the host's
 //!                                   own zones (§6 M58)
 //!   gg-tools banding                what the 8-bit output does to a smooth
 //!                                   gradient, swept over `r.dither`
-//!   gg-tools pace                   what a display rate does to a turn the hand
-//!                                   made at a constant speed
+//!   gg-tools pace [--editor]        what a display rate does to a turn the hand
+//!                                   made at a constant speed; `--editor` asks
+//!                                   the same of the editor's camera, which is a
+//!                                   second eye down a second composition
 //!   gg-tools hash-scale             what the per-tick full-world passes cost at
 //!                                   the scale §6 M38 brings — the contract's
 //!                                   sorted walk against a storage-order floor
@@ -63,6 +68,7 @@ mod ao;
 mod banding;
 mod bounce;
 mod cull;
+mod facets;
 mod field;
 mod fp_isa;
 mod frame;
@@ -120,6 +126,7 @@ fn main() -> anyhow::Result<()> {
         "ao" => ao::run(rest),
         "bounce" => bounce::run(rest),
         "field" => field::run(rest),
+        "facets" => facets::run(rest),
         "frame" => frame::run(rest),
         "views" => views::run(rest),
         "banding" => banding::run(rest),
@@ -137,7 +144,7 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
                  shadow-flat, shadow-sweep, shadow-edge, shadow-reach, lights, lamps, cull, furnace, \
-                 split-sum, ao, bounce, field, frame, views, banding, pace, hash-scale, orbit, map, \
+                 split-sum, ao, bounce, field, facets, frame, views, banding, pace, hash-scale, orbit, map, \
                  panorama, icon, timbre, transfer, fp-isa, mcp. A new instrument is a new \
                  subcommand here, not a new crate"
             )

@@ -226,6 +226,13 @@ pub struct Frame<'a> {
     pub dpi: f32,
     /// The tick about to run.
     pub tick: u64,
+    /// Ticks a second the sim is running at (§6 M63).
+    ///
+    /// Here because the camera's speed knob is metres a *second* — the only unit
+    /// an operator can picture — and this is what turns it into the metres a
+    /// tick the flight is integrated in. The shell is the one thing that knows
+    /// it; a `60` written in this crate would be a lie on every other pace.
+    pub hz: u32,
     /// Whether the sim is advancing, and whether a world is captured behind it.
     pub play: Play,
     /// This host's action map, as of this tick — what the editor's own appended
@@ -378,15 +385,20 @@ pub enum Pane {
     /// The selected entity's components, and the nudge bar.
     Inspector,
     /// §6 M16: what the last reload did, and the questions worth asking about
-    /// it. Last in [`Pane::ALL`] because the position is the persisted id.
+    /// it.
     Agent,
+    /// §6 M61: the frame's own knobs — which intermediate to show, and the
+    /// `r.*` registry grouped by the pass each row belongs to. Last in
+    /// [`Pane::ALL`] because the position is the persisted id, and a layout
+    /// written by a build without this pane must still mean what it said.
+    Render,
 }
 
 impl Pane {
     /// Every pane, in a fixed order — the order [`PaneId`]s are assigned in, so
     /// a persisted layout keeps meaning across a rebuild that added one at the
     /// end.
-    pub const ALL: [Pane; 7] = [
+    pub const ALL: [Pane; 8] = [
         Pane::Tree,
         Pane::Viewport,
         Pane::Cvars,
@@ -394,6 +406,7 @@ impl Pane {
         Pane::Perf,
         Pane::Inspector,
         Pane::Agent,
+        Pane::Render,
     ];
 
     /// Its dock identity.
@@ -420,6 +433,42 @@ impl Pane {
             Pane::Perf => "perf",
             Pane::Inspector => "inspect",
             Pane::Agent => "agent",
+            Pane::Render => "render",
+        }
+    }
+}
+
+/// Which group a pane re-opened from the `view` menu joins: whatever it shares
+/// a tab group with in [`default_layout`] and is currently docked, else the
+/// pane the default layout puts nearest it.
+///
+/// Off the default layout rather than a table of neighbours, because a second
+/// table is a second thing to keep true — a pane moved in `default_layout` would
+/// otherwise keep re-opening where it used to live.
+#[must_use]
+fn home(pane: Pane, docked: &dyn Fn(Pane) -> bool) -> Option<Pane> {
+    let mut groups: Vec<Vec<PaneId>> = Vec::new();
+    collect(&default_layout(), &mut groups);
+    let own = groups.iter().find(|panes| panes.contains(&pane.id()))?;
+    // Its own group first, then any other, so a pane whose whole default group
+    // is closed still lands somewhere rather than refusing to open.
+    let live = |panes: &[PaneId]| {
+        panes
+            .iter()
+            .filter(|id| **id != pane.id())
+            .filter_map(|id| Pane::from_id(*id))
+            .find(|p| docked(*p))
+    };
+    live(own).or_else(|| groups.iter().find_map(|panes| live(panes)))
+}
+
+/// Every tab group of a layout tree, in tree order.
+fn collect(node: &Node, out: &mut Vec<Vec<PaneId>>) {
+    match node {
+        Node::Tabs { panes, .. } => out.push(panes.clone()),
+        Node::Split { first, second, .. } => {
+            collect(first, out);
+            collect(second, out);
         }
     }
 }
@@ -444,12 +493,17 @@ pub fn default_layout() -> Node {
                 Axis::Vertical,
                 0.75,
                 Node::pane(Pane::Viewport.id()),
+                // `render` is appended rather than placed next to `cvars` where
+                // it belongs by subject: a tab's rectangle is where a recorded
+                // session clicks, and inserting one shifts every tab to its
+                // right (§4.7).
                 Node::Tabs {
                     panes: vec![
                         Pane::Cvars.id(),
                         Pane::Assets.id(),
                         Pane::Perf.id(),
                         Pane::Agent.id(),
+                        Pane::Render.id(),
                     ],
                     active: 0,
                 },
@@ -548,6 +602,12 @@ pub fn fit(extent: (u32, u32), dpi: f32) -> Fit {
 /// is not a pane and there is nothing to dock it to.
 pub(crate) const BAR_H: f32 = 13.0;
 
+/// The render pane's second scrolling list (§6 M61), past the last [`PaneId`].
+pub(crate) const KNOBS_SLOT: u16 = Pane::ALL.len() as u16;
+
+/// Scroll offsets [`Editor`] keeps: one per pane, plus [`KNOBS_SLOT`].
+const SCROLLS: usize = Pane::ALL.len() + 1;
+
 /// The menus, in strip order. What each item *does* is [`menu_action`], and
 /// `every_menu_item_does_something` holds the two together.
 pub(crate) const MENUS: &[gg_ui::menu::Menu<'static>] = &[
@@ -561,8 +621,27 @@ pub(crate) const MENUS: &[gg_ui::menu::Menu<'static>] = &[
     },
     gg_ui::menu::Menu {
         title: "view",
-        items: &["reset layout"],
+        // Every pane, then the reset (§6 M61). The pane rows are in
+        // [`Pane::ALL`] order and `menu_action` indexes them by position, which
+        // is why [`VIEW_PANES`] and this list are the same table read twice
+        // rather than two lists — `every_menu_item_does_something` holds them
+        // together, and a pane added to `ALL` fails it by name until its row is
+        // here.
+        items: VIEW_PANES,
     },
+];
+
+/// The `view` menu's pane rows, in [`Pane::ALL`] order.
+const VIEW_PANES: &[&str] = &[
+    "world",
+    "game",
+    "cvars",
+    "assets",
+    "perf",
+    "inspect",
+    "agent",
+    "render",
+    "reset layout",
 ];
 
 /// What the `item`th item of the `menu`th menu does. `None` is an index
@@ -573,19 +652,22 @@ fn menu_action(menu: usize, item: usize) -> Option<MenuAction> {
         (0, 1) => MenuAction::Quit,
         (1, 0) => MenuAction::Undo,
         (1, 1) => MenuAction::Redo,
-        (2, 0) => MenuAction::ResetLayout,
+        (2, i) if i == Pane::ALL.len() => MenuAction::ResetLayout,
+        (2, i) => MenuAction::Toggle(*Pane::ALL.get(i)?),
         _ => return None,
     })
 }
 
 /// One menu item's effect.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuAction {
     Save,
     Quit,
     Undo,
     Redo,
     ResetLayout,
+    /// Show the pane if it is closed, close it if it is up (§6 M61).
+    Toggle(Pane),
 }
 
 /// How thick the resize border around the surface is, in logical units.
@@ -725,9 +807,10 @@ pub struct Editor {
     /// property of the layout now that the layout is the operator's.
     per_page: usize,
     /// How far each pane's content is scrolled, in logical units, indexed by
-    /// [`PaneId`]. Plain state for [`panels`]' reason: it moves only in response
-    /// to a click or a wheel notch, and both arrive through the action map.
-    scroll: [f32; Pane::ALL.len()],
+    /// [`PaneId`] — plus [`KNOBS_SLOT`] on the end. Plain state for [`panels`]'
+    /// reason: it moves only in response to a click or a wheel notch, and both
+    /// arrive through the action map.
+    scroll: [f32; SCROLLS],
     /// Wheel notches this tick, spent by whichever pane the pointer is over.
     wheel: i32,
     grab: Option<Grab>,
@@ -825,7 +908,14 @@ pub struct Editor {
 /// unknown by an accident of ordering otherwise. Idempotent — [`Editor::new`]
 /// calls it too, so a host that forgets still gets the console's completion.
 pub fn register() -> Result<(), gg_core::cvar::CVarError> {
-    gg_core::cvar::register_all(&[&SCALE, &history::DEPTH])
+    gg_core::cvar::register_all(&[
+        &SCALE,
+        &history::DEPTH,
+        &camera::SPEED,
+        &camera::SENSITIVITY,
+        &camera::INVERT,
+        &panels::LEGEND,
+    ])
 }
 
 impl Editor {
@@ -869,7 +959,7 @@ impl Editor {
             step: 1,
             first_row: 0,
             per_page: 1,
-            scroll: [0.0; Pane::ALL.len()],
+            scroll: [0.0; SCROLLS],
             wheel: 0,
             grab: None,
             menus: gg_ui::menu::MenuBar::default(),
@@ -904,32 +994,53 @@ impl Editor {
         self.dock.root()
     }
 
-    /// Adopt a layout, dropping it for the default if it does not hold every
-    /// pane exactly once.
+    /// Adopt a layout, dropping it for the default if it names a pane this
+    /// build has not got, names one twice, or is empty.
     ///
-    /// Validated rather than trusted because the source is a file: a tree
-    /// missing the inspector is an editor with no way to get it back, and a
-    /// tree naming a pane twice is two widgets sharing an id every frame.
+    /// Validated rather than trusted because the source is a file. It no longer
+    /// insists on **every** pane (§6 M61): a closed pane is a thing an operator
+    /// can now ask for, so a tree missing the inspector is a persisted choice
+    /// rather than an editor with no way to get it back — the `view` menu is
+    /// the way back, and it is drawn off `Pane::ALL` rather than off the tree.
+    /// The other two arms stand: a pane named twice is two widgets sharing an
+    /// id every frame, an unknown id is a strip with a nameless tab in it, and
+    /// an empty tree is no strip at all.
+    ///
     /// Returns whether it was taken.
     pub fn set_layout(&mut self, root: Node) -> bool {
         let mut seen = [0u8; Pane::ALL.len()];
         let mut count = 0;
+        let mut unknown = 0;
         walk_panes(&root, &mut |pane| {
             count += 1;
-            if let Some(slot) = seen.get_mut(pane.0 as usize) {
-                *slot += 1;
+            match seen.get_mut(pane.0 as usize) {
+                Some(slot) => *slot += 1,
+                None => unknown += 1,
             }
         });
-        let sound = count == Pane::ALL.len() && seen.iter().all(|n| *n == 1);
+        let sound = count > 0 && unknown == 0 && seen.iter().all(|n| *n <= 1);
         if sound {
             self.dock.set_root(root);
         } else {
-            tracing::warn!(
-                count,
-                "editor: layout does not hold every pane once; default kept"
-            );
+            tracing::warn!(count, unknown, "editor: layout is not sound; default kept");
         }
         sound
+    }
+
+    /// Close `pane` if it is docked, or put it back if it is not (§6 M61).
+    ///
+    /// Where it lands is [`home`]'s answer, and the last pane cannot be closed
+    /// — [`gg_ui::dock::Dock::close`]'s floor, since a dock with nothing in it
+    /// has no strip to reopen from.
+    pub fn toggle_pane(&mut self, pane: Pane) {
+        let shown = match self.dock.holds(pane.id()) {
+            true => !self.dock.close(pane.id()),
+            false => match home(pane, &|other| self.dock.holds(other.id())) {
+                Some(onto) => self.dock.open(pane.id(), onto.id()),
+                None => false,
+            },
+        };
+        tracing::info!(pane = pane.title(), shown, "editor: pane toggled");
     }
 
     /// Put the layout back the way it opens.
@@ -1164,6 +1275,14 @@ impl Editor {
             // Left-aligned, unlike every other cell here: a menu is a list of
             // names and centring them would make it a row of buttons.
             let response = self.router.hit(ITEM.indexed(i as u64), *rect);
+            // A docked pane's row is lit rather than ticked (§6 M61): a marker
+            // column would widen every panel in the strip by a glyph the other
+            // two menus have no use for, and `gg_ui::menu` measures a label and
+            // knows nothing about state.
+            let on = matches!(menu_action(menu, i), Some(MenuAction::Toggle(pane)) if self.dock.holds(pane.id()));
+            if on {
+                self.list.rect(*rect, LIVE);
+            }
             if response.hovered || response.held {
                 self.list.rect(*rect, PICKED);
             }
@@ -1213,8 +1332,17 @@ impl Editor {
                 self.reset_layout();
                 tracing::info!("editor: layout reset");
             }
+            Some(MenuAction::Toggle(pane)) => self.toggle_pane(pane),
             None => tracing::warn!(menu, item, "editor: menu item does nothing"),
         }
+    }
+
+    /// Whether the layout holds `pane` at all (§6 M61) — as opposed to holding
+    /// it behind another tab, which is [`pane_body`](Self::pane_body) saying
+    /// `None`.
+    #[must_use]
+    pub fn pane_docked(&self, pane: Pane) -> bool {
+        self.dock.holds(pane.id())
     }
 
     /// Where a pane's contents are, in logical units, or `None` when it is
@@ -1353,6 +1481,7 @@ impl Editor {
                 Pane::Perf => self.perf(body, frame),
                 Pane::Inspector => self.inspector(world, body),
                 Pane::Agent => self.agent(body, frame),
+                Pane::Render => self.render(body, frame),
             }
         }
     }
@@ -1449,6 +1578,50 @@ impl Editor {
     #[must_use]
     pub fn eye(&self, game: gg_ecs::boundary::Eye) -> gg_ecs::boundary::Eye {
         self.camera.eye(game)
+    }
+
+    /// [`Editor::eye`] as the pair a frame blends between — the previous tick's
+    /// and this one's (§6 M63, §4.1).
+    ///
+    /// A host that renders once per tick may keep calling [`Editor::eye`] and
+    /// see no difference; one whose panel refreshes four times a tick wants
+    /// this, for the same reason `gg_extract::Extracted::interpolate` exists for
+    /// the game's instances. Both halves are `game` whenever the editor's camera
+    /// is not the one being rendered from, so the blend is the identity there.
+    #[must_use]
+    pub fn eyes(
+        &self,
+        game: gg_ecs::boundary::Eye,
+    ) -> (gg_ecs::boundary::Eye, gg_ecs::boundary::Eye) {
+        self.camera.eyes(game)
+    }
+
+    /// The editor's camera has the pointer this tick: a host with a window
+    /// should hold and hide the OS arrow (§6 M63).
+    ///
+    /// Distinct from `gg_runtime`'s "the *game* took the pointer" — that one
+    /// also stops feeding the editor and starts feeding the game, and this one
+    /// changes nothing about who is fed. The only thing it asks for is the
+    /// arrow, which is why a host that ignores it still routes every click
+    /// correctly and merely lets the cursor wander out of the window mid-drag,
+    /// which is what every session before this did.
+    #[must_use]
+    pub fn flying(&self) -> bool {
+        self.camera.flying()
+    }
+
+    /// The turn a *frame* may add to the editor's camera for counts no tick has
+    /// spent (§6 M56's latch, §6 M63's camera), or `None` on every tick the
+    /// operator is not turning it.
+    ///
+    /// Handed the host's [`gg_input::Input`] because the axis *ids* are the
+    /// host's — `editor_look_x` is a different index over every game — and the
+    /// rate, the sign and the clamp are the camera's. What comes back is exactly
+    /// the shape a game's own `Look` has, so the shell latches both through one
+    /// path.
+    #[must_use]
+    pub fn look(&self, input: &gg_input::Input) -> Option<gg_ecs::boundary::Look> {
+        self.camera.look(input)
     }
 
     /// What the agent panel's prompt field holds, unsent (§6 M16). Empty is
@@ -1585,8 +1758,15 @@ impl Editor {
     /// [`Scroll::row`] answers for — a widget outside the view is invisible and
     /// still clickable, under whichever pane is actually up there.
     pub(crate) fn scrollable(&mut self, pane: Pane, body: Rect, content: f32) -> Scroll {
-        let slot = pane.id().0 as usize;
-        let mut offset = self.scroll.get(slot).copied().unwrap_or(0.0);
+        self.scrollable_at(pane.id().0, body, content)
+    }
+
+    /// [`Editor::scrollable`] against a bare slot, for the one pane with two
+    /// lists in it (§6 M61's render pane, whose views and knobs scroll apart).
+    /// A pane's own slot is its [`PaneId`]; [`KNOBS_SLOT`] is past the last of
+    /// them, which is why [`Editor::scroll`] is one longer than `Pane::ALL`.
+    pub(crate) fn scrollable_at(&mut self, slot: u16, body: Rect, content: f32) -> Scroll {
+        let mut offset = self.scroll.get(slot as usize).copied().unwrap_or(0.0);
         let (px, py) = self.router.pointer().position();
         // Whichever pane the pointer is over takes the notch, and no chaining
         // is needed to say so: the bodies tile, so at most one contains it.
@@ -1595,9 +1775,7 @@ impl Editor {
         }
         let mut scroll = Scroll::new(body, content, offset);
         if let Some((track, thumb)) = scroll.bar {
-            let response = self
-                .router
-                .hit(BAR_ID.indexed(u64::from(pane.id().0)), track);
+            let response = self.router.hit(BAR_ID.indexed(u64::from(slot)), track);
             if response.held {
                 scroll = Scroll::new(body, content, scroll.offset_at(py));
             }
@@ -1609,7 +1787,7 @@ impl Editor {
             // only find by knowing where it is.
             self.list.rect(thumb, if lit { ACCENT } else { DIM });
         }
-        if let Some(stored) = self.scroll.get_mut(slot) {
+        if let Some(stored) = self.scroll.get_mut(slot as usize) {
             *stored = scroll.offset;
         }
         scroll
@@ -1972,6 +2150,7 @@ mod tests {
             extent,
             dpi: 1.0,
             tick,
+            hz: 60,
             play: Play::Paused,
             input: None,
             typed: "",
@@ -2338,6 +2517,100 @@ mod tests {
             assert!(menu_action(m, menu.items.len()).is_none());
         }
         assert!(menu_action(MENUS.len(), 0).is_none());
+
+        // And the `view` menu's pane rows say what they toggle (§6 M61). A pane
+        // added to `ALL` without a row here fails on the length; one added out
+        // of order fails by name, which is the failure worth having — the rows
+        // are matched to panes by *position*, so a menu reading `perf` that
+        // toggles `assets` is otherwise a silent swap.
+        assert_eq!(VIEW_PANES.len(), Pane::ALL.len() + 1);
+        for (row, pane) in VIEW_PANES.iter().zip(Pane::ALL) {
+            assert_eq!(*row, pane.title());
+            assert_eq!(
+                menu_action(2, pane.id().0 as usize),
+                Some(MenuAction::Toggle(pane))
+            );
+        }
+        assert_eq!(
+            menu_action(2, Pane::ALL.len()),
+            Some(MenuAction::ResetLayout)
+        );
+    }
+
+    /// A pane closed from the `view` menu leaves the dock and comes back, and
+    /// the last one standing refuses to go — an editor with no panes has no
+    /// menu bar to bring one back from, the bar being drawn outside the dock.
+    #[test]
+    fn the_view_menu_closes_and_reopens_every_pane() {
+        let mut editor = Editor::new(None);
+        editor.place((1280, 720), 1.0);
+        for pane in Pane::ALL {
+            assert!(
+                editor.dock.holds(pane.id()),
+                "{} did not open",
+                pane.title()
+            );
+            editor.toggle_pane(pane);
+            assert!(
+                !editor.dock.holds(pane.id()),
+                "{} did not close",
+                pane.title()
+            );
+            editor.toggle_pane(pane);
+            assert!(
+                editor.dock.holds(pane.id()),
+                "{} did not come back",
+                pane.title()
+            );
+        }
+        // Close everything. The last one refuses, so the tree is never empty and
+        // the operator is never locked out.
+        for pane in Pane::ALL {
+            editor.toggle_pane(pane);
+        }
+        assert_eq!(editor.dock.panes(), 1);
+        let left = Pane::ALL
+            .into_iter()
+            .find(|p| editor.dock.holds(p.id()))
+            .expect("one pane survives");
+        // And from there every other pane can be asked back, which is what
+        // `home`'s fallback to any live group is for.
+        for pane in Pane::ALL.into_iter().filter(|p| *p != left) {
+            editor.toggle_pane(pane);
+            assert!(editor.dock.holds(pane.id()), "{} is stranded", pane.title());
+        }
+    }
+
+    /// A persisted layout missing a pane is now taken rather than dropped (§6
+    /// M61) — but one naming a pane twice, one naming a pane this build has not
+    /// got, and an empty one are still refused.
+    #[test]
+    fn a_layout_may_be_short_a_pane_but_not_wrong_about_one() {
+        let mut editor = Editor::new(None);
+        let two = Node::split(
+            Axis::Horizontal,
+            0.5,
+            Node::pane(Pane::Tree.id()),
+            Node::pane(Pane::Viewport.id()),
+        );
+        assert!(editor.set_layout(two.clone()));
+        assert_eq!(editor.dock.panes(), 2);
+
+        let twice = Node::split(
+            Axis::Horizontal,
+            0.5,
+            Node::pane(Pane::Tree.id()),
+            Node::pane(Pane::Tree.id()),
+        );
+        assert!(!editor.set_layout(twice));
+        let unknown = Node::pane(PaneId(Pane::ALL.len() as u16));
+        assert!(!editor.set_layout(unknown));
+        assert!(!editor.set_layout(Node::Tabs {
+            panes: Vec::new(),
+            active: 0
+        }));
+        // Each refusal left the sound one in place rather than half-applying.
+        assert_eq!(editor.dock.panes(), 2);
     }
 
     /// The bug §6 M15.1 exists for: at no window size does the editor leave a
@@ -2499,34 +2772,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// A layout is taken only if it holds every pane exactly once — the check
-    /// that stops a stale file from hiding the inspector forever.
-    #[test]
-    fn a_layout_missing_or_repeating_a_pane_is_refused() {
-        let mut editor = Editor::new(None);
-        assert!(editor.set_layout(default_layout()));
-
-        let short = Node::split(
-            Axis::Horizontal,
-            0.5,
-            Node::pane(Pane::Tree.id()),
-            Node::pane(Pane::Viewport.id()),
-        );
-        assert!(!editor.set_layout(short), "four panes are missing");
-
-        let mut doubled = default_layout();
-        if let Node::Split { first, .. } = &mut doubled {
-            **first = Node::Tabs {
-                panes: vec![Pane::Tree.id(), Pane::Tree.id()],
-                active: 0,
-            };
-        }
-        assert!(!editor.set_layout(doubled), "the tree is declared twice");
-        // And the default survived both refusals.
-        editor.place((1280, 720), 1.0);
-        assert!(editor.dock.body_of(Pane::Inspector.id()).is_some());
     }
 
     /// Panes and their ids agree in both directions, which is what a persisted

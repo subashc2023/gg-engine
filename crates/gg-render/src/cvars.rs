@@ -105,6 +105,72 @@ pub static MULTISCATTER: CVar = CVar::new_bool(
     "return the energy multiple microfacet bounces would (0 = single scatter)",
 );
 
+/// Paint every fragment by which side of its face the rasterizer thinks it is,
+/// green for front and red for back — the one thing about a frame no buffer
+/// records (§6 M64).
+///
+/// Not an entry in [`DEBUG_VIEW`]'s table, and the difference is the whole
+/// reason this is a separate knob: that table resolves an *image the frame
+/// already produced*, and facing is not an image. It is a per-fragment property
+/// of the rasterizer that exists only inside the forward pass and is gone by the
+/// time anything could sample it — recording it would cost an attachment on
+/// every frame to answer a question asked twice a year.
+///
+/// What it is for: a surface shaded with the wrong side out does not look like a
+/// facing bug, it looks like a *material* bug — no direct light, no albedo, and
+/// the environment returned at full strength through a grazing Fresnel, which is
+/// a white so bright it reads as a blown highlight. §6 M64 spent an hour on that
+/// white before asking this question, and the answer took one frame: the red
+/// pixels were exactly the chains and the foliage. It also reads a mesh's
+/// *winding*, which is what found demo 06's ten inside-out spheres — the whole
+/// sphere comes back red.
+pub static FACING: CVar = CVar::new_bool("r.facing", false, "paint face winding, not shading");
+
+/// Paint what the irradiance field made of every fragment instead of shading it
+/// (§6 M66) — red where it gave up and used the fallback, green scaled by the
+/// probe weight it mustered, blue where the grid's hull is fading out.
+///
+/// [`FACING`]'s sibling and not an entry in [`DEBUG_VIEW`]'s table, for the same
+/// reason: the field's *verdict* is not an image. `gi_irradiance` returns the
+/// caller's fallback wherever eight probes cannot see the point, and nothing
+/// downstream records which pixels those were.
+///
+/// What it is for. "The fallback is the honest answer there rather than black" is
+/// true only while the fallback is near what the field would have said — and in a
+/// room lit *by* the field it is not. Demo 12's shelter reads 3x darker under the
+/// fallback than under the field, so the bottom 60 mm of every wall in it came out
+/// a hard black band (§6 M66). Nothing about that looks like a threshold in a
+/// weight product: it looks like a shadow bug, or a wrong material, or dirt. The
+/// only way to tell before this knob was to render the frame twice with `r.gi` off
+/// and on and subtract, which finds *that* the field is responsible and never
+/// which of its four terms went to zero.
+pub static GI_PAINT: CVar = CVar::new_bool(
+    "r.gi_paint",
+    false,
+    "paint the field's own verdict, not shading",
+);
+
+/// Paint *which* of the field's three suppressing terms is holding a fragment back
+/// (§6 M67) — red burial, green visibility, blue the cosine wrap, white a fragment
+/// no probe survived for, black healthy.
+///
+/// [`GI_PAINT`]'s other half, and the question that one leaves open: it reports how
+/// much weight a fragment mustered, which is the *verdict*, and the four ways a
+/// fragment can fail want four different repairs — grid placement, the distance
+/// record's resolution, the wrap's floor, and a round robin that simply has not
+/// arrived yet. §6 M66 answered it by subtracting two renders and reading the
+/// shader by hand.
+///
+/// Its own bit rather than a mode of [`GI_PAINT`]: a paint is a picture and a
+/// picture is either drawn or not, which is what makes both of these a `bool` and
+/// neither of them an entry in [`DEBUG_VIEW`]'s table. Both set makes this one win,
+/// since it is the more specific question.
+pub static GI_TERM: CVar = CVar::new_bool(
+    "r.gi_term",
+    false,
+    "paint which field term suppressed a fragment",
+);
+
 /// Whether the prefiltered chain is read along the lobe's dominant direction
 /// instead of the mirror one (§6 M33).
 ///
@@ -195,9 +261,20 @@ pub static AO_INTENSITY: CVar = CVar::new_float("r.ao_intensity", 1.0, "occlusio
 /// (+3.93 ms against +3.07) and on a real GPU the difference is inside run-to-run
 /// noise, while the 17 % it buys comes off the *smaller* half of the error —
 /// the structural 0.13 a depth buffer cannot see is untouched by any slice
-/// count. Steps matter far less once `r.ao_bias` is set (0.0312 → 0.0309 from 8
+/// count. Steps matter far less once `r.ao_bias` is set (0.0329 → 0.0328 from 8
 /// to 16), because the 4x4 rotation means a pixel's neighbours march different
 /// directions and the denoiser recovers what one pixel's budget cannot.
+///
+/// **That last clause was false at every count but one until §6 M62**, and this
+/// table is where it hid: the rotation stepped by a quarter of PI where the gap
+/// between adjacent slices is `PI / slices`, so at two the four phases were two
+/// and at four they were one. It is most of why three scored better than four
+/// here — three is the count whose slice step a quarter-turn does not divide.
+/// The error barely moved when it was fixed (0.0320 → 0.0329 at two, and 0.0589
+/// → 0.0419 under the orthographic eye), because a mean absolute error cannot
+/// tell occlusion that is wrong every other *column* from occlusion that is
+/// wrong at random, and only one of those is something a player sees.
+/// `gg-tools ao`'s pattern table is the column that can.
 pub static AO_SLICES: CVar = CVar::new_int("r.ao_slices", 2, "occlusion directions per pixel");
 /// Taps along each half of a slice — see [`AO_SLICES`].
 pub static AO_STEPS: CVar = CVar::new_int("r.ao_steps", 8, "occlusion taps per half-slice");
@@ -224,9 +301,11 @@ pub static AO_FALLOFF: CVar = CVar::new_float("r.ao_falloff", 1.0, "occlusion fa
 ///
 /// A 4x4 box, which is exactly one period of the AO pass's rotation pattern and
 /// is therefore an unbiased average of sixteen slice orientations rather than a
-/// blur. A knob because "is the denoiser doing anything" is a question the
-/// instrument should answer with a number: `gg-tools ao` prints the error
-/// against the reference either way.
+/// blur — sixteen *distinct* ones only since §6 M62, which is the milestone that
+/// made the sentence true. A knob because "is the denoiser doing anything" is a
+/// question the instrument should answer with a number: `gg-tools ao` prints the
+/// error against the reference either way, and its pattern table prints what the
+/// box is there to remove.
 pub static AO_BLUR: CVar = CVar::new_bool("r.ao_blur", true, "denoise the occlusion target");
 
 /// Which of the frame's intermediates is shown instead of the picture (§6 M59).
@@ -282,18 +361,112 @@ pub static GI: CVar = CVar::new_bool("r.gi", true, "gather bounced light from th
 ///
 /// The knob that sets what the field can *resolve*: light changes over the
 /// distance a wall is from the floor beside it, and a spacing wider than that
-/// averages the two together. Two metres is read off `gg-tools bounce`'s
-/// leak-against-loss plateau, which is 4.0–4.5 m *effective* — light invented
-/// through a wall against light the visibility term over-rejected, the two
-/// failures an absolute error averages into one improving number.
+/// averages the two together — which is what a chevron on a flat wall is, since
+/// interpolation across a cell is a saddle and its level sets are hyperbolas.
 ///
-/// It is a **floor** rather than a promise, and that is what the clamp costs:
-/// [`crate::probe`] caps the grid at eight probes an axis, so a scene wider than
-/// seven of these gets a whole multiple of it instead. Fourteen metres at the
-/// default, which is most demos and is not demo 12's room — `Grid::fit` says
-/// what happens there and why the alternative was worse.
+/// **It was a floor rather than a promise until §6 M68, and that is what the
+/// coupling cost.** `Grid::fit` widened it by a whole multiple until the axis cap
+/// spanned the scene's *widest* axis, so a 24 m room could not have cells finer than
+/// 4 m and Sponza not finer than 8 m, whatever was asked for. `Grid::place` anchors
+/// an axis that cannot fit instead of widening every axis to suit it, so this is now
+/// **exact** in a session and the widening is reachable only through `Grid::fit`
+/// itself.
+///
+/// Two metres is read off the picture and off `bounce --energy`'s slab rather than off
+/// that command's mean-error tables, and the footing is worth stating: those tables
+/// prefer a *coarse* field at every spacing, because a coarse grid leaks light through
+/// walls and the leak cancels the ~5 % of energy the record is short (§6 M68). Until
+/// that shortfall is fixed, a mean absolute error cannot rank the resolution.
 pub static GI_SPACING: CVar =
     CVar::new_float("r.gi_spacing", 2.0, "metres between probes, at least");
+
+/// Where the probe lattice sits between the multiples of its own spacing, as a
+/// fraction of a cell (§6 M67).
+///
+/// Zero is a lattice through the world origin, which is what `Grid::fit` did for
+/// three milestones and what put whole probe planes *inside* demo 12's floor and
+/// walls: authored geometry lands on round numbers and the spacing divides them.
+/// §6 M66 fixed the probe that lands there and named this as the follow-up; §6 M67
+/// measured it and `gg-tools bounce`'s offset table is what the default is read
+/// off.
+///
+/// A knob rather than a constant because it is the one number here whose right
+/// value is a property of *content* — how a level author rounds — and because the
+/// table it is read off has to be re-readable on a scene that is not demo 12's
+/// room.
+pub static GI_OFFSET: CVar = CVar::new_float(
+    "r.gi_offset",
+    LATTICE_OFFSET,
+    "probe lattice offset, in cells",
+);
+
+/// How fast a probe's weight falls with the fraction of its own sphere that came
+/// back a back face (§6 M67) — zero trusts a fully buried probe as much as an open
+/// one, and two rejects one at the half-buried point.
+///
+/// A probe inside a wall recorded the inside of that wall, so its record is a colour
+/// and not a light. What makes this a knob rather than a constant is that its right
+/// value is a *plateau* between two failures — light through a wall against light
+/// missing from a crease — and §6 M66 read that plateau off a table which, §6 M67
+/// found, had been measured through a field two thirds of which held the previous
+/// sweep row's records. `gg-tools bounce`'s burial table is the corrected reading.
+pub static GI_BURIAL: CVar =
+    CVar::new_float("r.gi_burial", 1.5, "how fast a buried probe's weight falls");
+
+/// How far a shading point is pushed along its normal before it is located in the
+/// grid — **in metres, and it was in probe spacings until §6 M68**.
+///
+/// The push exists because a shading point sits exactly on geometry the probes
+/// recorded, so without it its own wall is at distance zero from it and every
+/// visibility bound reads as occluded by the very surface being shaded.
+///
+/// The unit is half the finding. It was `0.15 * spacing`, which is 0.60 m at the
+/// 4 m grid the axis cap used to force and 0.30 m at 2 m — so every attempt to make
+/// the cells finer also halved the term that escapes self-occlusion. A surface's own
+/// thickness is not a function of how far apart the probes are, so the unit is
+/// metres and 0.6 is what the old expression meant at the only spacing it ever ran
+/// at.
+///
+/// **The other half is why it is not larger**, because `gg-tools bounce` says larger
+/// is better and that reading is a trap. Its bias table at 2 m falls monotonically
+/// to the end of the sweep — .1023 total error at 0.6 m against .0974 at 1.2 — and
+/// 1.2 m is six tenths of a cell, which does not push a shading point off its
+/// surface, it locates it somewhere else. What the improvement is: every extra metre
+/// of push brightens the field, and the field is **5 % short of energy at every
+/// spacing from 1 m to 6 m** on the one leg whose truth is exactly 1.0
+/// (`bounce --energy`'s slab). So the knob is being paid to compensate for a deficit
+/// it has nothing to do with, and it reads as an improvement because the metric is a
+/// mean. 0.6 m is where the curve *turns* in the one configuration where it turns at
+/// all — a genuine two-sided plateau at 4 m spacing, .0750 either side of .0723 —
+/// and a monotone gain that is a known defect wearing a disguise is not a plateau.
+pub static GI_BIAS: CVar = CVar::new_float(
+    "r.gi_bias",
+    0.6,
+    "shading-point offset off its surface, metres",
+);
+
+/// [`GI_OFFSET`]'s default: **zero, and the argument for moving it was wrong**.
+///
+/// §6 M66 named an offset lattice as its sized follow-up with numbers in hand — 17.5 %
+/// of the truth invented falling to 4.9 %, total error down 23 %. §6 M67 built the
+/// knob, fixed the two convergence defects that measurement was taken through, and got
+/// the opposite answer: every nonzero offset is worse, and the best of them (a half) is
+/// still 31 % worse in total error than a lattice through the world origin.
+///
+/// **Why, and it is not subtle once the sweep exists.** The offset's premise is that a
+/// probe coplanar with a surface is a wasted probe. That is true of a *wall*, which is
+/// thin — a third of a cell puts the probe through it and out the far side. It is false
+/// of a *floor* under an open sky, where a probe on the surface sees the whole sky
+/// hemisphere and is the best-placed probe in the room, because the floor is where the
+/// receivers are. At demo 12's 4 m effective spacing the vertical axis has two useful
+/// planes, so moving them off the floor costs more than moving them out of the walls
+/// buys. The offset trades a wall problem for a floor problem and the floor problem is
+/// bigger.
+///
+/// Kept as a knob rather than deleted: the trade is a property of *content* — how tall
+/// a level is against how thick its walls are — and the next level to ask this question
+/// deserves the table rather than this paragraph.
+pub const LATTICE_OFFSET: f64 = 0.0;
 
 /// Probes gathered per frame, or `0` for all of them.
 ///
@@ -319,11 +492,67 @@ pub static GI_FACE: CVar = CVar::new_int("r.gi_face", 8, "probe face edge, texel
 
 /// Octahedral edge of a probe's distance tile.
 ///
-/// Directions the visibility test can tell apart: `edge²` of them, 16 at the
-/// default. Small because a Chebyshev bound is soft — what it has to know is
-/// which side of a wall the probe is on, and that is a question with an answer
-/// at four directions a side.
-pub static GI_MOMENTS: CVar = CVar::new_int("r.gi_moments", 4, "probe distance tile edge, texels");
+/// Directions the visibility test can tell apart: `edge²` of them, 64 at the
+/// default.
+///
+/// **It was 4, and the sentence that kept it there was a measurement error of
+/// kind** (§6 M69). The doc said the knob "does nearly nothing" because
+/// `gg-tools bounce`'s tile table is flat to 0.3 % across 2, 4 and 8 — which it
+/// is, and which says nothing, because that table grades a *mean* against
+/// path-traced truth and the tile's failure is structure rather than level. What
+/// the tile's resolution actually costs is a bound quantised to `edge²`
+/// directions, and until M69 that bound was point-sampled, so it was
+/// discontinuous in direction and its discontinuities projected from a probe onto
+/// a flat wall as straight lines. A report about "large geometric triangular
+/// shadows" above the shelter's roof was one triangle per probe cell at edge 4.
+///
+/// `gg-tools facets` is the table it is now read off, and what that table says
+/// about *this* knob is a warning: 4 to 8 does not remove the facets, it
+/// **subdivides** them — three large triangles become eight small ones and the
+/// crease count moves by a tenth. The fix is [`GI_FILTER`]; 8 is here because with
+/// the bound continuous the edge is a quality knob again, and 8 is the finest the
+/// [`GI_FACE`] gather can feed (its kernel half-angle is 15.3° against a face
+/// texel's 11.25°; at 12 the kernel is narrower than the samples it averages).
+pub static GI_MOMENTS: CVar = CVar::new_int("r.gi_moments", 8, "probe distance tile edge, texels");
+
+/// Whether the visibility bound's distance tile is filtered (§6 M69).
+///
+/// **The fix, and off is the pre-M69 renderer exactly** — `r.shadow_cull`'s and
+/// `r.lut`'s arrangement (§6 M32, M34), so `gg-tools facets` grades two algorithms
+/// in one binary instead of two builds. The tile carries a one-texel border either
+/// way (`probe::MOMENT_BORDER`), because a border costs 56 % of a 1 MiB atlas and
+/// a second code path for the unbordered layout would cost a reader far more.
+///
+/// What it buys, from `gg-tools facets` — the graded leg is a wall above a roofed
+/// alcove seen head-on, where the truth for a second difference is exactly zero,
+/// and the room leg is demo 12's shelter from the chair the report was made at,
+/// whose floor is that framing with the field off:
+///
+///   read            | wall crease % | room crease % | room worst
+///   tile 4, point   |     0.307     |     0.365     |     63       (pre-M69)
+///   tile 8, point   |     0.006     |     0.341     |     38
+///   tile 4, filtered|     0.001     |     0.153     |     50
+///   tile 8, filtered|     0.002     |     0.153     |     38       (shipped)
+///   the room's floor:              |     0.136     |
+///
+/// Read the room column against its floor: point-sampled at edge 4 is 0.229 above
+/// it and filtered is 0.017, which is thirteen times less crease for the same
+/// picture. Read the two point rows against each other for why the edge is not the
+/// fix — 4 to 8 moves that excess by a tenth, because a finer tile has more
+/// boundaries each carrying a smaller step, and the crease pictures show three
+/// large triangles becoming eight small ones.
+///
+/// **And it costs nothing the accuracy tables can see.** `bounce`'s tile table
+/// reads 0.1001–0.1002 whole error across all six of those rows — the same
+/// flatness that hid the defect now says the fix is free. On the 4090 the forward
+/// pass goes 0.307 → 0.315 ms for the four taps and `probe-moments` does not move
+/// at all; on the pinned lavapipe, which is a CPU rasterizer, the border and the
+/// finer edge cost the moment pass 3.0 → 4.1 ms and the frame 7.6 %.
+pub static GI_FILTER: CVar = CVar::new_bool(
+    "r.gi_filter",
+    true,
+    "filter the probe visibility bound's tile",
+);
 
 /// Whether a fragment reads its own froxel's light list or the whole frame's
 /// (§6 M30).
@@ -696,6 +925,9 @@ pub fn register() -> Result<(), CVarError> {
         &UPLOAD_BUDGET,
         &EXPOSURE,
         &DITHER,
+        &FACING,
+        &GI_PAINT,
+        &GI_TERM,
         &LATE_LATCH,
         &HDR,
         &VSYNC,
@@ -717,9 +949,13 @@ pub fn register() -> Result<(), CVarError> {
         &DEBUG_SCALE,
         &GI,
         &GI_SPACING,
+        &GI_OFFSET,
+        &GI_BURIAL,
+        &GI_BIAS,
         &GI_RATE,
         &GI_FACE,
         &GI_MOMENTS,
+        &GI_FILTER,
         &CLUSTERS,
         &HISTOGRAM,
         &AA,

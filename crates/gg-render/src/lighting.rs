@@ -191,6 +191,22 @@ pub(crate) struct GpuFrame {
     /// the probes recorded — itself — and every visibility bound reads as
     /// occluded by the very surface being shaded.
     gi_bias: f32,
+    /// How fast a probe's weight falls with the fraction of its own sphere that
+    /// came back a back face — `r.gi_burial`, and the constant `gg-tools bounce`'s
+    /// burial table is read off (§6 M67). A knob and not a `static const` in the
+    /// shader because the plateau it sits on has to be re-readable in one process,
+    /// and because §6 M66 chose its value off a table that turned out to have been
+    /// measured through a stale field.
+    gi_burial: f32,
+    /// The field's storage rotation, one byte an axis — `probe::Grid::wrap`, which
+    /// the shader has to undo to find a probe's record (§6 M68).
+    ///
+    /// Packed into the word that was already here for
+    /// [`probe_views`](GpuFrame::probe_views)'s eight-byte alignment, rather than
+    /// spent as three: three components bounded by `probe::MAX_PER_AXIS` fit a byte
+    /// each with room to spare, and the alternative moves every base below this
+    /// point in two files to carry twelve bits of information.
+    gi_wrap: u32,
     /// This frame's gather batch: six projections and a position per probe,
     /// `probe::SLOT_BYTES` apart.
     ///
@@ -360,6 +376,18 @@ const SHADING_LUT: u32 = 4;
 const SHADING_AO: u32 = 8;
 /// The diffuse term comes from the probe field — `r.gi` (§6 M36).
 const SHADING_GI: u32 = 16;
+/// The forward pass paints facing instead of shading — `r.facing` (§6 M64).
+const SHADING_FACING: u32 = 32;
+/// The forward pass paints the field's verdict — `r.gi_paint` (§6 M66).
+const SHADING_FIELD: u32 = 64;
+/// It paints which field term suppressed the fragment — `r.gi_term` (§6 M67).
+const SHADING_TERM: u32 = 128;
+/// The visibility bound's distance tile is filtered — `r.gi_filter` (§6 M69).
+///
+/// A bit and not a `Frame` field on the argument in [`GpuFrame::shading`]'s own
+/// doc, and this is the case it was written for: the fix that made the tile
+/// filterable moved no offset in this file.
+const SHADING_GI_FILTER: u32 = 256;
 
 /// [`GpuFrame::shading`], read off the CVars once a frame.
 ///
@@ -376,6 +404,21 @@ fn shading_flags() -> u32 {
     if cvars::LUT.bool() {
         flags |= SHADING_LUT;
     }
+    if cvars::FACING.bool() {
+        flags |= SHADING_FACING;
+    }
+    // `r.gi_term` implies the walk `r.gi_paint` asks for — the shader tests
+    // `FIELD | TERM` and lets the more specific bit choose the paint, so a session
+    // that turned only this one on still gets a picture.
+    if cvars::GI_PAINT.bool() || cvars::GI_TERM.bool() {
+        flags |= SHADING_FIELD;
+    }
+    if cvars::GI_TERM.bool() {
+        flags |= SHADING_TERM;
+    }
+    if cvars::GI_FILTER.bool() {
+        flags |= SHADING_GI_FILTER;
+    }
     flags
 }
 
@@ -391,7 +434,7 @@ const _: () = {
     assert!(core::mem::size_of::<GpuCascade>() == 80);
     assert!(core::mem::size_of::<GpuEnvironment>() == 192);
     assert!(core::mem::size_of::<GpuLamp>() == 384);
-    assert!(core::mem::size_of::<GpuFrame>() == 4432);
+    assert!(core::mem::size_of::<GpuFrame>() == 4440);
     assert!(core::mem::offset_of!(GpuFrame, ambient) == 64);
     assert!(core::mem::offset_of!(GpuFrame, light_count) == 80);
     assert!(core::mem::offset_of!(GpuFrame, sun_direction) == 96);
@@ -404,17 +447,21 @@ const _: () = {
     assert!(core::mem::offset_of!(GpuFrame, gi_sh_texture) == 220);
     assert!(core::mem::offset_of!(GpuFrame, gi_counts) == 236);
     assert!(core::mem::offset_of!(GpuFrame, gi_origin) == 248);
-    assert!(core::mem::offset_of!(GpuFrame, probe_views) == 264);
-    assert!(core::mem::offset_of!(GpuFrame, environments) == 272);
-    assert!(core::mem::offset_of!(GpuFrame, cascades) == 1040);
-    assert!(core::mem::offset_of!(GpuFrame, lamps) == 1360);
+    // §6 M67 added `gi_burial` and its pad, so 264 became 272 and every base in
+    // `pbr.slang` moved eight bytes with them — the same shift M36 made, and the
+    // same four constants.
+    assert!(core::mem::offset_of!(GpuFrame, gi_burial) == 264);
+    assert!(core::mem::offset_of!(GpuFrame, probe_views) == 272);
+    assert!(core::mem::offset_of!(GpuFrame, environments) == 280);
+    assert!(core::mem::offset_of!(GpuFrame, cascades) == 1048);
+    assert!(core::mem::offset_of!(GpuFrame, lamps) == 1368);
     // `pbr.slang` derives these two from `FRAME_STRIDE`, `LIGHT_STRIDE` and its
     // own grid constants. Written out here so the derivation has something to be
     // wrong against — a froxel read at the wrong offset is a picture, not a
     // crash.
     assert!(MAX_LIGHTS == 260);
-    assert!(CLUSTER_BASE == 16912);
-    assert!(INDEX_BASE == 41488);
+    assert!(CLUSTER_BASE == 16920);
+    assert!(INDEX_BASE == 41496);
     assert!(cluster::CLUSTERS == 3072);
     // The coefficients are still the first thing in an environment, so the
     // shader's `SH_BASE` is `ENV_BASE` and M24's loader reads the innermost
@@ -1115,6 +1162,11 @@ impl Lighting {
             gi_counts: field.map_or([0; 3], |f| f.grid.counts()),
             gi_origin: field.map_or([0.0; 3], |f| f.origin.to_array()),
             gi_bias: field.map_or(0.0, |f| f.bias),
+            gi_burial: cvars::GI_BURIAL.float() as f32,
+            gi_wrap: field.map_or(0, |f| {
+                let [x, y, z] = f.grid.wrap();
+                x | (y << 8) | (z << 16)
+            }),
             probe_views: maps.probe_views,
             environments: self.blocks,
             cascades,
@@ -1418,7 +1470,7 @@ mod tests {
     fn the_gpu_records_are_what_the_shader_strides_by() {
         // `include/pbr.slang` hardcodes FRAME_STRIDE and LIGHT_STRIDE; this is
         // the other half of that agreement, the way the vertex assertions are.
-        assert_eq!(core::mem::size_of::<GpuFrame>(), 4432);
+        assert_eq!(core::mem::size_of::<GpuFrame>(), 4440);
         assert_eq!(core::mem::size_of::<GpuCascade>(), 80);
         assert_eq!(core::mem::size_of::<GpuLight>(), 48);
         assert_eq!(core::mem::offset_of!(GpuLight, direction), 16);
@@ -1426,12 +1478,12 @@ mod tests {
         // And where the froxel arrays begin (§6 M30) — `pbr.slang` derives both
         // from the three constants above, so these are what the derivation is
         // checked against.
-        assert_eq!(CLUSTER_BASE, 16912);
-        assert_eq!(INDEX_BASE, 41488);
+        assert_eq!(CLUSTER_BASE, 16920);
+        assert_eq!(INDEX_BASE, 41496);
         // The lamps (§6 M31): a face is a bare 4x4, so the stride is six of them
         // and `LAMP_BASE` is where the shader starts counting.
         assert_eq!(core::mem::size_of::<GpuLamp>(), 384);
-        assert_eq!(core::mem::offset_of!(GpuFrame, lamps), 1360);
+        assert_eq!(core::mem::offset_of!(GpuFrame, lamps), 1368);
         // ENV_STRIDE, and the offsets `load_environment` reads past the
         // coefficients (§6 M28).
         assert_eq!(core::mem::size_of::<GpuEnvironment>(), 192);
@@ -1439,8 +1491,8 @@ mod tests {
         assert_eq!(core::mem::offset_of!(GpuEnvironment, radiance_texture), 176);
         // §6 M36's eleven words, and where they pushed the arrays to.
         assert_eq!(core::mem::offset_of!(GpuFrame, gi_sh_texture), 220);
-        assert_eq!(core::mem::offset_of!(GpuFrame, probe_views), 264);
-        assert_eq!(core::mem::offset_of!(GpuFrame, environments), 272);
+        assert_eq!(core::mem::offset_of!(GpuFrame, probe_views), 272);
+        assert_eq!(core::mem::offset_of!(GpuFrame, environments), 280);
         assert_eq!(core::mem::size_of::<probe::GpuProbeView>(), 400);
     }
 

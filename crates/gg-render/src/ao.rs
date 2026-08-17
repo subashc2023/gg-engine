@@ -428,4 +428,62 @@ mod tests {
             "256 rays reported {coarse} against 16384's {fine}"
         );
     }
+
+    /// `ao.slang`'s rotation/offset assignment, transcribed. The shader is the
+    /// original and this is a copy on purpose: what is being checked is a
+    /// property of the *indices* and not of anything a GPU does, and the only
+    /// alternative — a readback of the raw target — measures the pattern's
+    /// visible effect, which is `gg-tools ao`'s pattern table and is a different
+    /// question. If the two ever disagree, that table says so in one row.
+    fn phases(x: u32, y: u32) -> (u32, u32) {
+        ((x + y) & 3, (x + 2 * y) & 3)
+    }
+
+    /// Every one of the sixteen (rotation, offset) pairs occurs exactly once in
+    /// each 4x4 tile.
+    ///
+    /// This is what `fs_blur` rests on: a 4x4 box is called an *unbiased average
+    /// of sixteen slice orientations* rather than a blur, and that sentence is
+    /// true only while the assignment is a bijection of the tile. `(x+y, x+2y)`
+    /// has determinant 1 and is therefore invertible mod 4 — the test is here
+    /// because "determinant 1" is exactly the kind of claim that survives an
+    /// edit to the coefficients it is about.
+    #[test]
+    fn pattern_is_a_bijection() {
+        let mut seen = [false; 16];
+        for y in 0..4 {
+            for x in 0..4 {
+                let (rotation, offset) = phases(x, y);
+                let slot = (rotation * 4 + offset) as usize;
+                assert!(!seen[slot], "({x},{y}) repeats phase ({rotation},{offset})");
+                seen[slot] = true;
+            }
+        }
+        assert!(seen.iter().all(|hit| *hit), "{seen:?}");
+    }
+
+    /// Neither index is constant along either axis.
+    ///
+    /// The bijection above is what keeps the denoiser honest; this is what keeps
+    /// the *raw* target from reading as a grid, which is a separate property and
+    /// the one a player sees. A rotation that is a function of x alone puts the
+    /// same slice set down every column however unbiased the average over the
+    /// tile is (§6 M62).
+    #[test]
+    fn neither_phase_is_separable() {
+        for i in 0..4 {
+            let row: Vec<_> = (0..4).map(|x| phases(x, i)).collect();
+            let column: Vec<_> = (0..4).map(|y| phases(i, y)).collect();
+            for (which, line) in [("row", &row), ("column", &column)] {
+                assert!(
+                    line.iter().any(|p| p.0 != line[0].0),
+                    "rotation is constant along {which} {i}: {line:?}"
+                );
+                assert!(
+                    line.iter().any(|p| p.1 != line[0].1),
+                    "offset is constant along {which} {i}: {line:?}"
+                );
+            }
+        }
+    }
 }

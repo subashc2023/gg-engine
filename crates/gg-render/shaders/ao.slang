@@ -161,18 +161,6 @@ float3 reconstruct_normal(float2 uv, float3 p)
     return dot(n, to_eye(p)) < 0.0 ? -n : n;
 }
 
-// `post.slang`'s integer hash, for the same reason: a `frac(sin(...))` pattern is
-// the driver's to round and a blessed reference cannot be built on one.
-uint hash(uint x)
-{
-    x ^= x >> 16;
-    x *= 0x7feb352du;
-    x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return x;
-}
-
 // How many world metres the radius is worth in pixels at this depth.
 //
 // Constant across the frame under an orthographic eye and inversely proportional
@@ -267,13 +255,33 @@ float4 fs_main(VOut i) : SV_Target
     // buys in coverage it pays for in noise, which is `fs_blur`'s business — and
     // the 4x4 period below is chosen so that a 4x4 box filter averages exactly
     // one whole period and is therefore unbiased.
-    uint2 pixel = uint2(i.pos.xy);
-    float rotation = float(pixel.x & 3u) * (0.25 * 3.14159265);
-    float offset = float(pixel.y & 3u) * 0.25;
-
     float total = 0.0;
     float slices = float(max(push.slices, 1u));
     float steps = float(max(push.steps, 1u));
+
+    // **The rotation tiles the gap between adjacent slices, not the half-turn**
+    // (§6 M62). A slice is a line and the loop below marches both ways along it,
+    // so the `slices` directions already span a whole PI; rotating by a quarter
+    // of PI therefore lands a rotated slice *on* an unrotated one whenever the
+    // step divides PI/slices. At the shipped two slices that is every other
+    // column — rotations 0 and PI/2 name the same pair {0, PI/2} — and at four
+    // it is every column, where the rotation did nothing whatsoever. Measured
+    // rather than read: `gg-tools ao`'s pattern table prints the mean difference
+    // at lag 1, 2, 4 and 8 px, and a lag that differs *less* than a nearer one
+    // is a period with no reference renderer needed to name it. It read
+    // 13.06/7.02 at lag 1 and 2 across columns, which is a period of two.
+    //
+    // The two indices are **not separable**, and that is the other half. A
+    // rotation that is a function of x alone and an offset a function of y alone
+    // put the same slice set down every column and the same tap phase along
+    // every row, which is a grid rather than noise however unbiased its average
+    // is. `(x+y, x+2y)` mod 4 has determinant 1 and is therefore a bijection of
+    // the 4x4 tile: all sixteen pairs still occur exactly once, so `fs_blur`
+    // stays the unbiased average it claims to be, and neither index is constant
+    // along either axis. `pattern_is_a_bijection` is the check.
+    uint2 pixel = uint2(i.pos.xy);
+    float rotation = float((pixel.x + pixel.y) & 3u) * (0.25 * 3.14159265 / slices);
+    float offset = float((pixel.x + 2u * pixel.y) & 3u) * 0.25;
     for (uint s = 0u; s < push.slices; ++s)
     {
         float phi = (float(s) / slices) * 3.14159265 + rotation;

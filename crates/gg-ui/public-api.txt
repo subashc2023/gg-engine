@@ -70,10 +70,13 @@ impl gg_ui::dock::Dock
 pub fn gg_ui::dock::Dock::activate(&mut self, gg_ui::dock::PaneId)
 pub fn gg_ui::dock::Dock::active_of(&self, &gg_ui::dock::Group) -> core::option::Option<gg_ui::dock::PaneId>
 pub fn gg_ui::dock::Dock::body_of(&self, gg_ui::dock::PaneId) -> core::option::Option<gg_ui::draw::Rect>
+pub fn gg_ui::dock::Dock::close(&mut self, gg_ui::dock::PaneId) -> bool
 pub fn gg_ui::dock::Dock::drop_at(&self, f32, f32) -> core::option::Option<gg_ui::dock::Drop>
 pub fn gg_ui::dock::Dock::groups(&self) -> &[gg_ui::dock::Group]
+pub fn gg_ui::dock::Dock::holds(&self, gg_ui::dock::PaneId) -> bool
 pub fn gg_ui::dock::Dock::move_pane(&mut self, gg_ui::dock::PaneId, gg_ui::dock::Drop)
 pub fn gg_ui::dock::Dock::new(gg_ui::dock::Node) -> gg_ui::dock::Dock
+pub fn gg_ui::dock::Dock::open(&mut self, gg_ui::dock::PaneId, gg_ui::dock::PaneId) -> bool
 pub fn gg_ui::dock::Dock::panes(&self) -> usize
 pub fn gg_ui::dock::Dock::preview(&self, gg_ui::dock::Drop) -> core::option::Option<gg_ui::draw::Rect>
 pub fn gg_ui::dock::Dock::resolve<F: core::ops::function::Fn(gg_ui::dock::PaneId) -> f32>(&mut self, gg_ui::draw::Rect, F)
@@ -290,10 +293,13 @@ impl gg_ui::dock::Dock
 pub fn gg_ui::dock::Dock::activate(&mut self, gg_ui::dock::PaneId)
 pub fn gg_ui::dock::Dock::active_of(&self, &gg_ui::dock::Group) -> core::option::Option<gg_ui::dock::PaneId>
 pub fn gg_ui::dock::Dock::body_of(&self, gg_ui::dock::PaneId) -> core::option::Option<gg_ui::draw::Rect>
+pub fn gg_ui::dock::Dock::close(&mut self, gg_ui::dock::PaneId) -> bool
 pub fn gg_ui::dock::Dock::drop_at(&self, f32, f32) -> core::option::Option<gg_ui::dock::Drop>
 pub fn gg_ui::dock::Dock::groups(&self) -> &[gg_ui::dock::Group]
+pub fn gg_ui::dock::Dock::holds(&self, gg_ui::dock::PaneId) -> bool
 pub fn gg_ui::dock::Dock::move_pane(&mut self, gg_ui::dock::PaneId, gg_ui::dock::Drop)
 pub fn gg_ui::dock::Dock::new(gg_ui::dock::Node) -> gg_ui::dock::Dock
+pub fn gg_ui::dock::Dock::open(&mut self, gg_ui::dock::PaneId, gg_ui::dock::PaneId) -> bool
 pub fn gg_ui::dock::Dock::panes(&self) -> usize
 pub fn gg_ui::dock::Dock::preview(&self, gg_ui::dock::Drop) -> core::option::Option<gg_ui::draw::Rect>
 pub fn gg_ui::dock::Dock::resolve<F: core::ops::function::Fn(gg_ui::dock::PaneId) -> f32>(&mut self, gg_ui::draw::Rect, F)

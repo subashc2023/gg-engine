@@ -6,13 +6,24 @@
 // Vertices are *pulled* through a buffer device address (§4.3); nothing binds a
 // vertex buffer anywhere in this engine.
 //
-// # Three pipelines, one push block
+// # Five pipelines, one push block
 //
 // Prepass, shadow and forward all take `ScenePush` rather than each declaring
 // the smallest block it needs. The forward pass must re-draw *exactly* where the
 // prepass put a fragment — a second matrix path is a second chance to disagree,
 // and `GREATER_OR_EQUAL` only forgives a bit-identical depth. The shadow pass
 // shares it for the plainer reason that it wants the same instance loader.
+//
+// The other two are the masked halves of the first two (§6 M62). glTF's `MASK`
+// alpha is a *discard*, and a discard has to happen in the depth passes as well
+// as the forward one or the depth a chain writes disagrees with the colour it
+// draws — a hole that is solid in the prepass shades as though it were there,
+// and one solid in the shadow pass casts a rectangle. They are separate
+// pipelines rather than a branch in `fs_depth` because a fragment shader that
+// *can* discard forfeits early-Z for every draw through it, whether the branch
+// is taken or not, and the depth prepass is the one pass whose whole job is to
+// make early-Z work. An opaque batch therefore goes through exactly the code it
+// went through before this milestone, down to the varyings.
 //
 // The matrix is the finished object-to-clip product, computed on the CPU and
 // stored per instance rather than assembled here from a view-projection and a
@@ -42,6 +53,8 @@ struct ScenePush
     float metallic;       // factor, multiplied with the map
     float roughness;      // factor, multiplied with the map
     uint shadow_view;     // which projection `vs_shadow` uses — see `shadow_view_projection`
+    float alpha_cutoff;   // glTF MASK below this; 0 is an opaque material (§6 M62)
+    uint two_sided;       // glTF `doubleSided`: shade a back face flipped (§6 M64)
 }
 
 [[vk::push_constant]]
@@ -94,7 +107,7 @@ struct VOut
     float3 normal : NORMAL0;
     float4 tangent : TANGENT0;    // xyz plus the handedness bit
     float2 uv : TEXCOORD0;
-    float3 tint : COLOR0;
+    float4 tint : COLOR0; // w is the material's base-colour alpha, for the mask
 }
 
 [shader("vertex")]
@@ -126,22 +139,44 @@ VOut vs_main(uint vid: SV_VertexID, uint iid: SV_InstanceID)
     float3 tangent = rotate_by(inst.rotation, float3(v[8], v[9], v[10]) * scale);
     o.tangent = float4(normalize(tangent), v[11]);
     o.uv = float2(v[6], v[7]);
-    o.tint = inst.tint.rgb;
+    o.tint = inst.tint;
     // No light_clip: which cascade a point belongs to is a per-fragment
     // question, so the projection happens in `sun_shadow` (§6 M15.3).
     return o;
 }
 
+// glTF `MASK`: a fragment whose alpha is under the cutoff is not there at all.
+//
+// Zero is opaque and skips the fetch, which is what makes this free for the
+// materials that are not masked — the branch is uniform across a draw, since the
+// cutoff is a property of the batch's material and not of the fragment.
+//
+// The alpha is the texture's times the material's `baseColorFactor.a`, which
+// rides in the instance tint's `w` beside the three channels the factor already
+// contributed to. glTF multiplies them and so does this.
+bool cut_out(float2 uv, float alpha, SamplerState sampler)
+{
+    if (push.alpha_cutoff <= 0.0)
+    {
+        return false;
+    }
+    return g_textures[push.base_color].Sample(sampler, uv).a * alpha < push.alpha_cutoff;
+}
+
 [shader("fragment")]
-float4 fs_main(VOut i) : SV_Target
+float4 fs_main(VOut i, bool front: SV_IsFrontFace) : SV_Target
 {
     Frame frame = load_frame(push.frame);
     SamplerState sampler = g_samplers[push.sampler_index];
+    if (cut_out(i.uv, i.tint.a, sampler))
+    {
+        discard;
+    }
 
     // The base-colour map is BC7 sRGB, so the sampler decodes and everything
     // below is linear. The tint arrives linear from the CPU for the same reason
     // (§4.5's `srgb_to_linear`).
-    float3 base = g_textures[push.base_color].Sample(sampler, i.uv).rgb * i.tint;
+    float3 base = g_textures[push.base_color].Sample(sampler, i.uv).rgb * i.tint.rgb;
     // glTF packs roughness in green and metalness in blue; `ggc` repacks the
     // pair into BC5's two channels once at import (§4.6), so this reads r and g
     // and no shader has to remember which convention it is looking at.
@@ -149,12 +184,30 @@ float4 fs_main(VOut i) : SV_Target
     float occlusion = g_textures[push.occlusion].Sample(sampler, i.uv).r;
     float2 normal_sample = g_textures[push.normal_map].Sample(sampler, i.uv).rg;
 
-    Surface s = make_surface(apply_normal_map(i.normal, i.tangent, normal_sample), base,
+    if ((frame.shading & SHADING_FACING) != 0)
+    {
+        return float4(facing_paint(front), 1.0);
+    }
+    // Two-sided before anything reads it (§6 M64): the map is authored against
+    // the front face, so it has to be applied to the frame the fragment is
+    // actually on rather than corrected afterwards.
+    float3 geometric = facing_normal(i.normal, front || push.two_sided == 0);
+    // The geometric normal and not the mapped one (§6 M66): what this paint
+    // reports is which *points* the field reaches, and a normal map moves the
+    // cosine wrap by a fraction of one probe's weight while making the picture a
+    // function of the material.
+    if ((frame.shading & (SHADING_FIELD | SHADING_TERM)) != 0)
+    {
+        FieldSample f = gi_sample(frame, i.world, normalize(geometric), float3(0.0), g_textures);
+        bool term = (frame.shading & SHADING_TERM) != 0;
+        return float4(term ? term_paint(f) : field_paint(f), 1.0);
+    }
+    Surface s = make_surface(apply_normal_map(geometric, i.tangent, normal_sample), base,
                              mr.g * push.metallic, mr.r * push.roughness, occlusion);
     // The receiver plane stays the geometry's: the shadow map rasterized the
     // mesh, not the normal map, and a plane taken from the mapped normal
     // re-acnes every mapped receiver.
-    s.plane = normalize(i.normal);
+    s.plane = normalize(geometric);
     // Radiance, unbounded above — the scene attachment is `Rgba16F` and the
     // tonemapper is what brings this into [0, 1] (§6 M11).
     // The footprint before anything else touches it: `pixel_footprint` takes
@@ -187,7 +240,7 @@ VOut vs_probe(uint vid: SV_VertexID, uint iid: SV_InstanceID)
     o.tangent = float4(normalize(rotate_by(inst.rotation, float3(v[8], v[9], v[10]) * scale)),
                        v[11]);
     o.uv = float2(v[6], v[7]);
-    o.tint = inst.tint.rgb;
+    o.tint = inst.tint;
     return o;
 }
 
@@ -196,14 +249,22 @@ float4 fs_probe(VOut i, bool front: SV_IsFrontFace) : SV_Target
 {
     Frame frame = load_frame(push.frame);
     SamplerState sampler = g_samplers[push.sampler_index];
-    float3 base = g_textures[push.base_color].Sample(sampler, i.uv).rgb * i.tint;
+    if (cut_out(i.uv, i.tint.a, sampler))
+    {
+        discard;
+    }
+    float3 base = g_textures[push.base_color].Sample(sampler, i.uv).rgb * i.tint.rgb;
     float2 mr = g_textures[push.metallic_rough].Sample(sampler, i.uv).rg;
     float occlusion = g_textures[push.occlusion].Sample(sampler, i.uv).r;
     float2 normal_sample = g_textures[push.normal_map].Sample(sampler, i.uv).rg;
 
-    Surface s = make_surface(apply_normal_map(i.normal, i.tangent, normal_sample), base,
+    // `front` is the signed distance's below and the shading frame's here — the
+    // probe pass gathers what a *surface* emits, so a back face that returns
+    // white poisons the field as well as the picture (§6 M64).
+    float3 geometric = facing_normal(i.normal, front || push.two_sided == 0);
+    Surface s = make_surface(apply_normal_map(geometric, i.tangent, normal_sample), base,
                              mr.g * push.metallic, mr.r * push.roughness, occlusion);
-    s.plane = normalize(i.normal);
+    s.plane = normalize(geometric);
 
     float3 probe =
         load_probe_position(load_probe_views(push.frame),
@@ -243,4 +304,49 @@ float4 vs_shadow(uint vid: SV_VertexID, uint iid: SV_InstanceID) : SV_Position
 [shader("fragment")]
 void fs_depth()
 {
+}
+
+// The masked pair (§6 M62). Position *and* the two things the cutoff needs — the
+// uv and the instance's alpha — which is why they are separate entry points
+// rather than the ones above gaining an output: an opaque batch pays neither the
+// varyings nor the lost early-Z.
+struct DOut
+{
+    float4 pos : SV_Position;
+    float2 uv : TEXCOORD0;
+    float alpha : COLOR0;
+}
+
+[shader("vertex")]
+DOut vs_depth_masked(uint vid: SV_VertexID, uint iid: SV_InstanceID)
+{
+    float* v = (float*)(push.vertices + uint64_t(vid) * VERTEX_STRIDE);
+    Instance inst = load_instance(iid);
+    DOut o;
+    o.pos = mul(inst.mvp, float4(v[0], v[1], v[2], 1.0));
+    o.uv = float2(v[6], v[7]);
+    o.alpha = inst.tint.a;
+    return o;
+}
+
+[shader("vertex")]
+DOut vs_shadow_masked(uint vid: SV_VertexID, uint iid: SV_InstanceID)
+{
+    float* v = (float*)(push.vertices + uint64_t(vid) * VERTEX_STRIDE);
+    Instance inst = load_instance(iid);
+    float3 world = inst.offset + rotate_by(inst.rotation, float3(v[0], v[1], v[2]) * inst.scale);
+    DOut o;
+    o.pos = mul(shadow_view_projection(push.frame, push.shadow_view), float4(world, 1.0));
+    o.uv = float2(v[6], v[7]);
+    o.alpha = inst.tint.a;
+    return o;
+}
+
+[shader("fragment")]
+void fs_depth_masked(DOut i)
+{
+    if (cut_out(i.uv, i.alpha, g_samplers[push.sampler_index]))
+    {
+        discard;
+    }
 }

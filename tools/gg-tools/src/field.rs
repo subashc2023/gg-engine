@@ -33,6 +33,8 @@ use gg_render::{OffscreenRenderer, View, cvars};
 
 use demo_12_shooter as demo;
 
+use crate::views;
+
 /// The frame the legs are measured over. Small for `bounce`'s reason — the
 /// subject is a *mean* over the picture, which converges long before a
 /// silhouette does — and small again because every frame here pays
@@ -53,6 +55,10 @@ const FRAMES: usize = 60;
 const TRACED: &str = "jump";
 
 pub fn run(args: &[String]) -> Result<()> {
+    // `--set r.gi_filter=0` and its like: the cost table's only way to price two
+    // reads of the same tile in one binary (§6 M69), and `views`' own flag so an
+    // operator does not have to learn a second spelling.
+    views::apply_sets(args)?;
     let traced = match args.iter().position(|a| a == "--trace") {
         Some(i) => args.get(i + 1).map_or("", String::as_str).to_owned(),
         None => TRACED.to_owned(),
@@ -69,7 +75,10 @@ pub fn run(args: &[String]) -> Result<()> {
         cvars::GI_RATE.int(),
         FRAMES
     );
-    println!("  leg      refits  settled   swing%   worst%   grids");
+    // Refits beside scrolls, because they are opposite events: the first is the
+    // field discarded and is what has to stay at zero, the second is the window
+    // sliding with every record it can keep, and a player walking produces them.
+    println!("  leg      refits  scrolls  settled   swing%   worst%   grids");
     let mut traces = Vec::new();
     for leg in LEGS {
         // A renderer a leg, and not for tidiness: the fit only ever grows while
@@ -108,6 +117,10 @@ const COST_EXTENT: (u32, u32) = (1920, 1080);
 const COST_RATES: [i64; 5] = [1, 4, 8, 16, 32];
 const WARMUP: usize = 20;
 const TIMED: usize = 40;
+
+/// Frames past which an unsettled field is a defect rather than a transient — the
+/// largest grid `probe::MAX_PER_AXIS` allows, one batch a frame, and margin.
+const SETTLE_CEILING: usize = 256;
 
 fn cost(world: &World) -> Result<()> {
     let mut renderer = OffscreenRenderer::new(COST_EXTENT)?;
@@ -177,6 +190,15 @@ struct Frame {
     grid: Option<(sim::DVec3, f32, [u32; 3])>,
     pending: usize,
     probes: usize,
+    /// Grids discarded and grids slid, as the renderer counts them (§6 M68).
+    ///
+    /// **Counted and not inferred.** This instrument used to read "the grid tuple
+    /// changed" as a refit, which was exact while every grid was fitted to the scene
+    /// and became wrong the moment one could follow the eye: an anchored grid moves
+    /// its origin every time the eye crosses a cell, keeping every record, and a
+    /// walking player would have read as a field thrown away thirty times. The
+    /// distinction is the whole of §6 M57's claim, so it comes from the renderer.
+    events: (usize, usize),
     /// Mean linear luminance of the picture — the room's light in one number.
     mean: f32,
 }
@@ -238,8 +260,25 @@ fn settle(renderer: &mut OffscreenRenderer, world: &World, leg: &Leg) -> Result<
     let (eye, yaw) = (leg.at)(0);
     let rate = cvars::GI_RATE.int();
     cvars::GI_RATE.set_int(0);
-    frame(renderer, world, eye, yaw, EXTENT)?;
-    frame(renderer, world, eye, yaw, EXTENT)?;
+    // **Until it is settled, not for two frames** (§6 M68). `r.gi_rate 0` is one
+    // *batch* and not one grid, so this gathered 128 probes — which was most of a
+    // 192-probe field and is a seventh of a 900-probe one. What it cost is the
+    // column beside it: `settled` read 0.66 and the swing it reports was partly the
+    // field still arriving, which is the transient this leg exists to distinguish
+    // from a flicker.
+    let mut frames = 0;
+    loop {
+        frame(renderer, world, eye, yaw, EXTENT)?;
+        frames += 1;
+        let (pending, probes) = renderer.field_pending();
+        if pending == 0 {
+            break;
+        }
+        anyhow::ensure!(
+            frames < SETTLE_CEILING,
+            "the field did not settle in {frames} frames: {pending} of {probes} ungathered"
+        );
+    }
     cvars::GI_RATE.set_int(rate);
     Ok(())
 }
@@ -280,6 +319,7 @@ fn frame(
         grid: renderer.field_grid(),
         pending,
         probes,
+        events: renderer.field_events(),
         mean: (sum / (pixels.len() / 4) as f64) as f32,
     })
 }
@@ -295,23 +335,13 @@ fn decode(code: u8) -> f32 {
     }
 }
 
-/// Whether two frames were fitted to the same grid. A refit always lands on a
-/// *different* grid — `Probes::update` refits on `spacing != fitted.spacing` or
-/// on `!covers && grid != fitted`, and both arms change the tuple — so equality
-/// here is exactly "the field was kept".
-fn same(a: Option<(sim::DVec3, f32, [u32; 3])>, b: Option<(sim::DVec3, f32, [u32; 3])>) -> bool {
-    match (a, b) {
-        (Some((ao, asp, ac)), Some((bo, bsp, bc))) => ao == bo && asp == bsp && ac == bc,
-        (None, None) => true,
-        _ => false,
-    }
-}
-
 fn report(name: &str, trace: &[Frame]) {
-    let refits = trace
-        .windows(2)
-        .filter(|w| !same(w[0].grid, w[1].grid))
-        .count();
+    let moved = |pick: fn(&(usize, usize)) -> usize| match (trace.first(), trace.last()) {
+        (Some(a), Some(b)) => pick(&b.events).saturating_sub(pick(&a.events)),
+        _ => 0,
+    };
+    let refits = moved(|e| e.0);
+    let scrolls = moved(|e| e.1);
     let settled = trace
         .iter()
         .map(|f| match f.probes {
@@ -335,7 +365,7 @@ fn report(name: &str, trace: &[Frame]) {
     grids.sort();
     grids.dedup();
     println!(
-        "  {name:<8} {refits:>6}   {settled:>6.2}   {mean:>6.2}   {worst:>6.2}   {:>5}",
+        "  {name:<8} {refits:>6}  {scrolls:>7}   {settled:>6.2}   {mean:>6.2}   {worst:>6.2}            {:>5}",
         grids.len()
     );
 }
@@ -358,7 +388,8 @@ fn detail(name: &str, trace: &[Frame]) {
             _ => "     -".to_owned(),
         };
         let mark = match last {
-            Some(p) if !same(p.grid, f.grid) => "  refit",
+            Some(p) if p.events.0 != f.events.0 => "  refit",
+            Some(p) if p.events.1 != f.events.1 => "  scroll",
             _ => "",
         };
         println!(

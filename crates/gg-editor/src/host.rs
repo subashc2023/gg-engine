@@ -91,22 +91,28 @@ pub mod verb {
 /// The default binding for each verb this host appends. A build that declared
 /// its own keeps whatever its bindings file says — the editor is a second
 /// consumer of one mouse, not the owner of it.
-const DEFAULTS: &[(&str, &str, bool)] = &[
-    (ui::CLICK, "Mouse1", true),
-    (ui::FOCUS, "Tab", true),
+///
+/// A *list* of sources per verb since §6 M63, because two of them want two keys:
+/// `E`/`Q` is what a hand already on `WASD` reaches without moving, and
+/// `Space`/`Ctrl` is what every other editor on the desk has trained that hand
+/// to expect. Both, rather than a choice between them — an action map takes any
+/// number of sources per verb, so the cost of the second spelling is one string.
+const DEFAULTS: &[(&str, &[&str], bool)] = &[
+    (ui::CLICK, &["Mouse1"], true),
+    (ui::FOCUS, &["Tab"], true),
     // `PointerX`, not `MouseX`: the editor wants the arrow the operator can
     // see, and a camera wants raw device deltas. They were one source through
     // M15, so every editor click also aimed the game (§6 M15.1). Note what the
     // split does *not* fix: raw deltas arrive whatever the pointer is over, so
     // a pointer crossing the viewport still swung the camera until the host
     // stopped feeding the game at all while the editor holds the mouse.
-    (ui::X, "PointerX", false),
-    (ui::Y, "PointerY", false),
+    (ui::X, &["PointerX"], false),
+    (ui::Y, &["PointerY"], false),
     // Actions and not axes, which is `gg_input::Wheel`'s decision rather than
     // this table's: a notch is discrete, and a wheel that took two axis slots
     // would be spending the headroom the look pair below now sits in.
-    (ui::SCROLL_UP, "WheelUp", true),
-    (ui::SCROLL_DOWN, "WheelDown", true),
+    (ui::SCROLL_UP, &["WheelUp"], true),
+    (ui::SCROLL_DOWN, &["WheelDown"], true),
     // The camera (§6 M15.2 item 4). Appended **after** the six above so a build
     // predating them resolves `ui_*` to the same ids it always did — appending
     // renumbers nothing, and that is the only reason the order here matters.
@@ -115,32 +121,36 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // two verbs, and the collision is harmless because these only fly while the
     // scene is stopped, which is exactly when the game's systems are not
     // running to read theirs.
-    (verb::FORWARD, "W", true),
-    (verb::BACK, "S", true),
-    (verb::LEFT, "A", true),
-    (verb::RIGHT, "D", true),
-    (verb::UP, "E", true),
-    (verb::DOWN, "Q", true),
-    (verb::LOOK, "Mouse2", true),
+    (verb::FORWARD, &["W"], true),
+    (verb::BACK, &["S"], true),
+    (verb::LEFT, &["A"], true),
+    (verb::RIGHT, &["D"], true),
+    // Two spellings each (§6 M63). A game binding `Space` to its own jump keeps
+    // it and shares it, on `W` above's rule: these fly only while the scene is
+    // stopped, which is exactly when the game's systems are not running to read
+    // theirs.
+    (verb::UP, &["E", "Space"], true),
+    (verb::DOWN, &["Q", "ControlLeft"], true),
+    (verb::LOOK, &["Mouse2"], true),
     // Demo 05 binds `MouseX` to its own `aim_x`, and keeps it: the delta reaches
     // both verbs, harmlessly and for the same reason `W` above is shared.
-    (verb::LOOK_X, "MouseX", false),
-    (verb::LOOK_Y, "MouseY", false),
+    (verb::LOOK_X, &["MouseX"], false),
+    (verb::LOOK_Y, &["MouseY"], false),
     // Last, for the same reason the camera verbs were appended after the `ui_*`
     // six: a build predating these resolves every earlier id to what it always
     // did. `Backspace` and `Enter` are bound unconditionally because no demo
     // binds either — and if one ever does it keeps its own, like `W` above.
-    (verb::TEXT_BACK, "Backspace", true),
-    (verb::TEXT_SEND, "Enter", true),
+    (verb::TEXT_BACK, &["Backspace"], true),
+    (verb::TEXT_SEND, &["Enter"], true),
     // The navigation a *flat* scene needs (§6 M20 item 10). Appended after
     // everything above for the reason that rule keeps earning: `check_verbs`
     // (§4.7) forgives an append and nothing else, so a session recorded before
     // these three still replays, with their bits zero and their behaviour
     // therefore absent. Reordering this table would invalidate every checked-in
     // editor recording at once.
-    (verb::PAN, "Mouse3", true),
-    (verb::FRAME, "F", true),
-    (verb::TOOL, "G", true),
+    (verb::PAN, &["Mouse3"], true),
+    (verb::FRAME, &["F"], true),
+    (verb::TOOL, &["G"], true),
 ];
 
 /// The verb lists a shell should bind against with the editor open, and the
@@ -159,7 +169,7 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
 pub fn open(verbs: &Verbs) -> (Verbs, String) {
     let (mut actions, mut axes) = (verbs.actions.to_vec(), verbs.axes.to_vec());
     let (mut on_actions, mut on_axes) = (String::new(), String::new());
-    for (name, source, is_action) in DEFAULTS {
+    for (name, sources, is_action) in DEFAULTS {
         let (list, text) = match is_action {
             true => (&mut actions, &mut on_actions),
             false => (&mut axes, &mut on_axes),
@@ -168,7 +178,12 @@ pub fn open(verbs: &Verbs) -> (Verbs, String) {
             continue;
         }
         list.push(name);
-        text.push_str(&format!("{name} = [\"{source}\"]\n"));
+        let spelled = sources
+            .iter()
+            .map(|source| format!("\"{source}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        text.push_str(&format!("{name} = [{spelled}]\n"));
     }
     // The same context the shell pushes for the game (`bind`'s `CONTEXT`), so
     // there is one active context and not a stack whose order would matter.
@@ -268,13 +283,34 @@ mod tests {
             "the editor appended a binding no map can read:\n{bindings}"
         );
         let mut seen: Vec<&str> = Vec::new();
-        for (name, source, _) in DEFAULTS {
-            assert!(
-                !seen.contains(source),
-                "`{source}` is bound twice, at {name}"
-            );
-            seen.push(source);
+        for (name, sources, _) in DEFAULTS {
+            for source in *sources {
+                assert!(
+                    !seen.contains(source),
+                    "`{source}` is bound twice, at {name}"
+                );
+                seen.push(source);
+            }
         }
+    }
+
+    /// §6 M63's second spelling of up and down, asserted as a *pair* on one
+    /// verb: the failure worth catching is the list collapsing back to one
+    /// source, which no other test here would notice.
+    #[test]
+    fn up_and_down_answer_to_two_keys_each() {
+        let (_, bindings) = open(&Verbs {
+            actions: &[],
+            axes: &[],
+        });
+        assert!(
+            bindings.contains("editor_up = [\"E\", \"Space\"]"),
+            "{bindings}"
+        );
+        assert!(
+            bindings.contains("editor_down = [\"Q\", \"ControlLeft\"]"),
+            "{bindings}"
+        );
     }
 
     /// A game that already declares them keeps its own bindings: the editor

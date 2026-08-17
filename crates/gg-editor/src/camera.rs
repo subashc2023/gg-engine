@@ -23,6 +23,33 @@
 //!   pair alongside whatever the game declares, which `gg_abi::MAX_AXES` (§4.7)
 //!   is wide enough to hold.
 //!
+//! # Flying it (§6 M63)
+//!
+//! The three things a fly camera needs that a drag-to-turn one does not, and
+//! the reason each is here rather than in the shell:
+//!
+//! - **The pointer is captured for the length of the drag** — [`Camera::flying`]
+//!   is what a windowed host holds and hides the OS arrow on. Decided here
+//!   because it is decided off the *recorded* frame: a replayed session then
+//!   captures and releases on the ticks the operator did, with no window
+//!   anywhere to capture into, and a headless gate can grade it.
+//! - **The wheel is the throttle while captured** ([`SPEED`]), and the dolly it
+//!   always was otherwise. One wheel, two subjects, arbitrated by the button
+//!   that is already down — and the viewport prints the number, because a knob
+//!   that moves invisibly is a knob nobody finds.
+//! - **The turn a frame owes the hand** ([`Camera::look`]) is this camera's half
+//!   of §6 M56. A tick is 16.6 ms and a panel is 4.2, so a view moved only by
+//!   ticks moves in visible steps on the desk this was written for; the shell
+//!   adds the unspent counts at frame time exactly as it does for a game's eye.
+//!   `gg-tools pace` measures both halves of why that is the right answer and
+//!   not an interpolation: latching costs no latency, and interpolating costs a
+//!   tick of it.
+//!
+//! What is *not* here: a toggle. The only key a host would spare for leaving a
+//! captured pointer is Escape, and Escape already quits (`play.rs`), so a mode
+//! would be a way in whose way out is closing the window. A hold cannot strand
+//! anyone, which is the whole of the argument.
+//!
 //! # A flat camera is not a fly camera (§6 M20 item 10)
 //!
 //! Under an orthographic eye the six fly directions stop describing anything an
@@ -47,15 +74,62 @@
 //! a stray drag left behind.
 
 use crate::host::verb;
-use gg_ecs::boundary::{Eye, Renderable};
+use gg_core::cvar::CVar;
+use gg_ecs::boundary::{Eye, Look, Renderable};
 use gg_input::{ActionId, AxisId, Input, MAX_ACTIONS, MAX_AXES};
 use gg_math::sim;
 
-/// Metres per tick held. At 60 Hz that is 15 m/s — a second crosses demo 05's
-/// scene rather than the room it is in.
-const MOVE_PER_TICK: f64 = 0.25;
+/// Metres per second held, and the wheel's own subject while the pointer is
+/// captured (§6 M63). 15 m/s crosses demo 05's scene in a second rather than
+/// the room it is in — which was `MOVE_PER_TICK`'s 0.25 at 60 Hz, so the
+/// default is the constant it replaces and no session moves differently for
+/// this existing.
+///
+/// A CVar because a fly speed is the one navigation number whose right value is
+/// the *scene's* rather than the editor's: 15 m/s is a stroll in Sponza and a
+/// blur in a Tetris well, and an operator who cannot change it flies one of the
+/// two badly. `recorded` (§6 M40) for `r.fov`'s reason — where the camera is
+/// decides what a recorded click picks.
+pub(crate) static SPEED: CVar =
+    CVar::new_float("d.editor_speed", 15.0, "editor fly speed, metres a second").recorded();
 
-/// The orthographic half-height a lateral step is [`MOVE_PER_TICK`] at. Above
+/// What the wheel multiplies [`SPEED`] by, per notch, while the pointer is
+/// captured. Geometric for [`ZOOM_PER_NOTCH`]'s reason: a notch is then the same
+/// *proportion* at 0.2 m/s and at 200.
+const SPEED_PER_NOTCH: f64 = 1.15;
+
+/// What [`SPEED`] may reach. The floor is an inspection crawl and the ceiling
+/// crosses Sponza in a third of a second; past either the wheel is a way to lose
+/// the scene rather than a way to reach it.
+const SPEED_RANGE: (f64, f64) = (0.05, 500.0);
+
+/// Multiplies [`LOOK_PER_UNIT`]. A mouse's counts per inch is a property of the
+/// desk and not of this tree, so the rate a drag turns at cannot have one right
+/// value here — 400 CPI and 3200 CPI are the same hand and eight times the
+/// counts. `recorded` for [`SPEED`]'s reason.
+///
+/// One is [`LOOK_PER_UNIT`] itself and so an ordinary shooter's rate; 1.5 is
+/// demo 12's own default, and past about 1.6 the step this camera turns by
+/// stops being sub-pixel — which is the ceiling worth knowing about and the
+/// reason it is not clamped to one.
+pub(crate) static SENSITIVITY: CVar = CVar::new_float(
+    "d.editor_sensitivity",
+    1.0,
+    "editor look sensitivity, a multiplier",
+)
+.recorded();
+
+/// Push the mouse away to look up. Half of flight simulation has wanted this
+/// since flight simulation existed, and the half that does not is the default.
+/// `recorded` for [`SPEED`]'s reason.
+pub(crate) static INVERT: CVar = CVar::new_bool(
+    "d.editor_invert_y",
+    false,
+    "editor look inverts the pitch axis",
+)
+.recorded();
+
+/// The orthographic half-height a lateral step is [`SPEED`]'s own at. Above
 /// it a step is proportionally longer and below it shorter, so the key covers
 /// the same fraction of the window at every zoom — 4.5 m is demo 11's own
 /// framing (`CAMERA_HALF_HEIGHT`), which makes the flat default *exactly* the
@@ -124,10 +198,28 @@ pub(crate) struct Nav {
     pub(crate) wheel: i32,
 }
 
-/// Radians per unit of raw device motion — a mouse count, near enough a pixel
-/// on an ordinary desk. A 600-unit sweep turns three radians, which is the
-/// gesture-to-rotation ratio every editor with a right-drag has settled on.
-const LOOK_PER_UNIT: f32 = 0.005;
+/// Radians of turn one raw device count is worth (§6 M65).
+///
+/// 0.0005 rad is 0.0286 degrees, which puts a full turn at 12 566 counts — 20 cm
+/// of desk at 1600 DPI — and is demo 12's own unit, restated rather than
+/// imported because a host crate may not depend on a demo. What matters is not
+/// the speed but the **step**: across `r.fov`'s 88-degree horizontal window
+/// 1920 pixels wide, one count moves the picture 0.6 of a pixel, so the
+/// smallest motion a mouse can report is invisible.
+///
+/// It was `0.005` from §6 M15.2 to M65, and that is *ten times* the value demo
+/// 12 rejected at §6 M37 for exactly this reason: at 0.005 one count turned the
+/// view 0.29 degrees, which is **six pixels**, so the camera visibly stepped
+/// between two counts however slowly the hand moved. The number came from
+/// "a 600-unit sweep turns three radians", which was true of the *cursor* drag
+/// this camera had until §6 M15.2 gave it raw device motion — 600 screen pixels
+/// is a gesture across the window, 600 counts at 1600 DPI is a centimetre of
+/// desk. The source changed and the constant did not, which is the whole of it.
+///
+/// `gg-tools pace --editor` is what reads this: its stall/lurch columns are
+/// blind to it by construction — they are fractions of what a frame *owed*, so
+/// the rate cancels — and its quantum table is the column that is not.
+const LOOK_PER_UNIT: f32 = 0.0005;
 
 /// Just under a right angle: at exactly one the forward and world-up axes are
 /// parallel and the basis below degenerates.
@@ -138,6 +230,23 @@ const PITCH_LIMIT: f32 = 1.5533;
 pub(crate) struct Camera {
     /// `None` until the first stop, and `Some` for the rest of the session.
     eye: Option<Eye>,
+    /// Where [`Camera::eye`] was at the end of the *previous* tick, so a host
+    /// can blend the pair (§6 M63). `None` on the tick the camera latched: there
+    /// is no previous, and blending against a default would swing the picture in
+    /// from the origin over one tick.
+    previous: Option<Eye>,
+    /// The pointer is the camera's this tick: a drag is turning or sliding it,
+    /// so the OS arrow should be held and hidden and the wheel means speed
+    /// rather than distance (§6 M63).
+    ///
+    /// Derived from the *recorded* frame like every other decision here, which
+    /// is what keeps a replayed session capturing and releasing on the ticks the
+    /// operator did — with no window anywhere to capture into.
+    flying: bool,
+    /// [`flying`](Camera::flying) by the look button specifically, which is the
+    /// only one of the two whose motion a late latch may spend: a pan slides the
+    /// eye and the latch turns it.
+    looking: bool,
     /// The scene is stopped — whether a host should be rendering from this.
     live: bool,
     /// A drag has turned it, and a key has moved it. Separately, because one
@@ -149,6 +258,9 @@ pub(crate) struct Camera {
     /// The same, for the three gestures §6 M20 item 10 added.
     panned: bool,
     zoomed: bool,
+    /// And for §6 M63's two, on the same one-line-a-session rule.
+    throttled: bool,
+    captured: bool,
     /// [`verb::FRAME`] last tick, so the key acts on its press edge. Held, it
     /// would recompute the identical answer sixty times a second and log it.
     framing: bool,
@@ -158,6 +270,14 @@ impl Camera {
     /// One tick.
     pub(crate) fn fly(&mut self, world: &gg_ecs::World, frame: &crate::Frame, nav: Nav) {
         self.live = matches!(frame.play, crate::Play::Stopped);
+        // Both cleared before the early returns below, not after: a scene that
+        // starts playing while the button is down must hand the pointer back,
+        // and a stale `true` here is an arrow that never comes back.
+        (self.flying, self.looking) = (false, false);
+        // The tick this eye ends is the tick the next one blends from. Taken
+        // before the flight rather than after, so the pair a host reads is two
+        // *different* ticks even on the frames it reads them twice.
+        self.previous = self.eye;
         // A host that routes no input at all (a golden render) never latches,
         // which is what keeps a reference image the game's own view.
         let Some(input) = frame.input.filter(|_| self.live) else {
@@ -187,12 +307,27 @@ impl Camera {
         let (dx, dy) = (delta(verb::LOOK_X), delta(verb::LOOK_Y));
         let dragging = (dx, dy) != (0, 0);
 
+        // The pointer is the camera's for as long as a drag lasts and not a
+        // moment longer (§6 M63). Held rather than toggled, and that is the
+        // whole argument: a mode has to be left, the only key a host will spare
+        // for leaving one is Escape, and Escape already quits — so a toggle
+        // would be a way to capture the pointer whose way out is closing the
+        // window. A hold cannot strand anyone.
+        //
+        // The look is refused under a flat eye (see the module docs) and there
+        // is nothing to capture the pointer *for* there; the pan is taken under
+        // both, because a pan that reaches the window edge stops for the same
+        // reason a drag did before §6 M15.2 gave it device motion.
+        self.looking = !flat && held(verb::LOOK);
+        self.flying = self.looking || held(verb::PAN);
+
         // Look first: the move below is along the basis this leaves, so a drag
         // that turns and a key that pushes compose within one tick.
-        let turned = !flat && held(verb::LOOK) && dragging && {
-            let unit = LOOK_PER_UNIT / gg_input::AXIS_SCALE as f32;
-            eye.yaw -= dx as f32 * unit;
-            eye.pitch = (eye.pitch - dy as f32 * unit).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        let turned = self.looking && dragging && {
+            let (yaw_rate, pitch_rate) = look_rates();
+            eye.yaw -= dx as f32 * yaw_rate / gg_input::AXIS_SCALE as f32;
+            eye.pitch = (eye.pitch - dy as f32 * pitch_rate / gg_input::AXIS_SCALE as f32)
+                .clamp(-PITCH_LIMIT, PITCH_LIMIT);
             true
         };
 
@@ -219,40 +354,52 @@ impl Camera {
 
         let axis = |plus, minus| f64::from(u8::from(held(plus))) - f64::from(u8::from(held(minus)));
         let ahead = axis(verb::FORWARD, verb::BACK);
-        // Zoom: the wheel always, and forward/back as well under a flat eye,
+        // While the drag has the pointer the wheel is the **throttle** (§6 M63),
+        // which is the one rebinding of it an operator flying with the other
+        // hand actually wants: the keys are already moving, and what is wrong is
+        // their rate. A notch spent dollying mid-drag moves the eye somewhere
+        // the keys were about to take it anyway, so nothing is lost by the swap
+        // — and the legend prints the number, which is what makes a wheel that
+        // does two things discoverable rather than surprising.
+        let throttled = self.flying && nav.wheel != 0 && {
+            SPEED.set_float(
+                notched(SPEED.float(), nav.wheel, SPEED_PER_NOTCH)
+                    .clamp(SPEED_RANGE.0, SPEED_RANGE.1),
+            );
+            true
+        };
+        // Zoom: the wheel otherwise, and forward/back as well under a flat eye,
         // where they otherwise move along the one direction a parallel
         // projection cannot show. A perspective eye dollies on the notch instead
         // — there, distance *is* framing and forward already means it.
+        let wheel = match throttled {
+            true => 0,
+            false => nav.wheel,
+        };
         let zoomed = match flat {
             true => {
-                let mut factor = 1.0;
-                for _ in 0..nav.wheel.abs() {
-                    factor *= match nav.wheel > 0 {
-                        true => 1.0 / ZOOM_PER_NOTCH,
-                        false => ZOOM_PER_NOTCH,
-                    };
-                }
+                // A notch away from the operator zooms *in*, so the exponent is
+                // the wheel's negation — the one place the two geometric knobs
+                // this tick can move disagree about which way a notch points.
+                let mut want = notched(f64::from(eye.ortho), -wheel, ZOOM_PER_NOTCH);
                 if ahead != 0.0 {
-                    factor *= match ahead > 0.0 {
-                        true => 1.0 / ZOOM_PER_TICK,
-                        false => ZOOM_PER_TICK,
-                    };
+                    want = notched(want, -ahead as i32, ZOOM_PER_TICK);
                 }
-                let want = (f64::from(eye.ortho) * factor).clamp(ZOOM_RANGE.0, ZOOM_RANGE.1);
+                let want = want.clamp(ZOOM_RANGE.0, ZOOM_RANGE.1);
                 let moved = want != f64::from(eye.ortho);
                 eye.ortho = want as f32;
                 moved
             }
             false => {
-                eye.position += forward * (f64::from(nav.wheel) * DOLLY_PER_NOTCH);
-                nav.wheel != 0
+                eye.position += forward * (f64::from(wheel) * DOLLY_PER_NOTCH);
+                wheel != 0
             }
         };
 
         // Lateral movement, scaled to the zoom under a flat eye so a key covers
         // the same fraction of the window at every framing. Forward and back are
         // absent there: they are the zoom above.
-        let step = MOVE_PER_TICK
+        let step = per_tick(frame.hz)
             * match flat {
                 true => f64::from(eye.ortho) / FLAT_REFERENCE,
                 false => 1.0,
@@ -295,6 +442,8 @@ impl Camera {
             ),
             (&mut self.panned, panned, "editor: camera panned"),
             (&mut self.zoomed, zoomed, "editor: camera zoomed"),
+            (&mut self.throttled, throttled, "editor: camera throttled"),
+            (&mut self.captured, self.flying, "editor: pointer captured"),
         ] {
             if !*seen && did {
                 *seen = true;
@@ -313,6 +462,98 @@ impl Camera {
             false => game,
         }
     }
+
+    /// The previous tick's eye and this one's, for a host that blends them
+    /// (§6 M63, §4.1).
+    ///
+    /// Both are `game` whenever this camera is not the one being rendered from,
+    /// which makes the blend the identity there rather than making the caller
+    /// ask twice. The pair is also equal on the tick the camera latched — see
+    /// [`Camera::previous`].
+    pub(crate) fn eyes(&self, game: Eye) -> (Eye, Eye) {
+        let current = self.eye(game);
+        match self.live {
+            true => (self.previous.unwrap_or(current), current),
+            false => (game, game),
+        }
+    }
+
+    /// The pointer is this camera's — held and hidden by a host that has one.
+    pub(crate) fn flying(&self) -> bool {
+        self.flying
+    }
+
+    /// What a *frame* may add to this camera's angles for the turn no tick has
+    /// spent yet (§6 M56), or `None` on every tick the drag is not turning it.
+    ///
+    /// The editor's own [`Look`], built here rather than in the shell for the
+    /// reason `gg_extract::Latch::of` states about a game's: the sign, the rate
+    /// and the clamp are this file's three decisions and one restatement of
+    /// them elsewhere is one too many. `None` while the button is
+    /// up is not an optimization — raw device motion arrives whatever the
+    /// pointer is doing, so a latch applied unconditionally would swing the
+    /// picture whenever the operator reached for a menu, at frame rate, while
+    /// the tick underneath it stood still.
+    pub(crate) fn look(&self, input: &Input) -> Option<Look> {
+        let (yaw, pitch) = (
+            axis_id(input, verb::LOOK_X)?.index() as u32,
+            axis_id(input, verb::LOOK_Y)?.index() as u32,
+        );
+        let (yaw_rate, pitch_rate) = look_rates();
+        self.looking.then_some(Look {
+            // Negated for `fly`'s reason and this file's: the tick above spends
+            // `yaw -= dx * rate`, and a latch that added would turn the picture
+            // one way and the tick the other.
+            yaw_rate: -yaw_rate,
+            pitch_rate: -pitch_rate,
+            pitch_limit: PITCH_LIMIT,
+            yaw_axis: yaw,
+            pitch_axis: pitch,
+            reserved: 0,
+        })
+    }
+}
+
+/// Radians per raw device count for yaw and for pitch, sensitivity and the
+/// invert applied. Two numbers rather than one because [`INVERT`] is a sign on
+/// exactly one of them.
+fn look_rates() -> (f32, f32) {
+    let rate = LOOK_PER_UNIT * SENSITIVITY.float() as f32;
+    (
+        rate,
+        match INVERT.bool() {
+            true => -rate,
+            false => rate,
+        },
+    )
+}
+
+/// Metres a held key covers in one tick at [`SPEED`], on a sim running at `hz`.
+///
+/// The knob is metres a *second* because that is the unit an operator can
+/// picture, and this is the one place the tick rate turns it into the unit the
+/// flight is integrated in. A zero `hz` cannot happen and is defended anyway:
+/// the alternative is an infinite step, which is a camera at NaN and a viewport
+/// that never comes back.
+pub(crate) fn per_tick(hz: u32) -> f64 {
+    SPEED.float() / f64::from(hz.max(1))
+}
+
+/// `value` multiplied by `per` once for each notch **away** from the operator,
+/// and divided once for each notch toward.
+///
+/// A loop and not `powi`: this file computes in `gg_math::sim` wherever an angle
+/// is involved for §1.4's reason, and a repeated multiply is the one spelling
+/// of an integer power that needs no library to agree about.
+fn notched(value: f64, notches: i32, per: f64) -> f64 {
+    let mut out = value;
+    for _ in 0..notches.abs() {
+        out *= match notches > 0 {
+            true => per,
+            false => 1.0 / per,
+        };
+    }
+    out
 }
 
 /// What [`verb::FRAME`] should fill the view with: the selection's box, or —
@@ -442,6 +683,11 @@ mod tests {
 
     const AT: sim::DVec3 = sim::DVec3::new(4.0, 1.0, -30.0);
 
+    /// What a held key covers in one tick at the shipped [`SPEED`] on the
+    /// shipped pace — the constant this file held until §6 M63 made it a knob,
+    /// so every distance below still reads against the number it always did.
+    const PER_TICK: f64 = 0.25;
+
     /// A 16:9 pane a third of a metre per device unit, with nothing selected —
     /// what the editor hands the camera on an ordinary tick, spelled once here
     /// so a test that cares about one of these says which.
@@ -545,6 +791,7 @@ mod tests {
             extent: gg_ecs::boundary::CANVAS,
             dpi: 1.0,
             tick: 7,
+            hz: 60,
             play,
             input,
             typed: "",
@@ -583,7 +830,7 @@ mod tests {
         // Yaw zero looks down -Z, so four ticks forward is exactly that far
         // along it and nothing on the other two axes.
         assert!(
-            (flown.z - (AT.z - 4.0 * MOVE_PER_TICK)).abs() < 1e-12,
+            (flown.z - (AT.z - 4.0 * PER_TICK)).abs() < 1e-12,
             "{flown:?}"
         );
         assert_eq!((flown.x, flown.y), (AT.x, AT.y));
@@ -603,7 +850,7 @@ mod tests {
         press(&mut input, verb::UP);
         camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
         let flown = camera.eye(Eye::ORIGIN).position;
-        assert_eq!(flown.y, AT.y + MOVE_PER_TICK);
+        assert_eq!(flown.y, AT.y + PER_TICK);
         assert_eq!((flown.x, flown.z), (AT.x, AT.z), "it drifted sideways");
     }
 
@@ -691,10 +938,7 @@ mod tests {
         press(&mut input, verb::FORWARD);
         camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
         let flown = camera.eye(Eye::ORIGIN).position;
-        assert!(
-            (flown.z - (AT.z - MOVE_PER_TICK)).abs() < 1e-12,
-            "{flown:?}"
-        );
+        assert!((flown.z - (AT.z - PER_TICK)).abs() < 1e-12, "{flown:?}");
     }
 
     /// A host with no action map — the golden harness — never latches, so a
@@ -870,12 +1114,9 @@ mod tests {
             camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
             travelled.push(camera.eye(Eye::ORIGIN).position.x - at.x);
         }
+        assert!((travelled[0] - PER_TICK).abs() < 1e-12, "{travelled:?}");
         assert!(
-            (travelled[0] - MOVE_PER_TICK).abs() < 1e-12,
-            "{travelled:?}"
-        );
-        assert!(
-            (travelled[1] - MOVE_PER_TICK * 4.0).abs() < 1e-12,
+            (travelled[1] - PER_TICK * 4.0).abs() < 1e-12,
             "{travelled:?}"
         );
     }
@@ -960,5 +1201,277 @@ mod tests {
             (camera.eye(Eye::ORIGIN).position.x - (framed.x - 10.0)).abs() < 1e-9,
             "the held key re-framed over the pan"
         );
+    }
+
+    // ------------------------------------------------ §6 M63: flying it ----
+
+    /// Every knob this milestone added, back where it found it. CVars are
+    /// process-global and these tests move three; nextest gives each test its
+    /// own process, so this is belt and braces — and it is what lets the
+    /// assertions below be written against the *shipped* defaults rather than
+    /// against whatever ran first.
+    struct Knobs(f64, f64, bool);
+
+    impl Knobs {
+        fn take() -> Knobs {
+            Knobs(SPEED.float(), SENSITIVITY.float(), INVERT.bool())
+        }
+    }
+
+    impl Drop for Knobs {
+        fn drop(&mut self) {
+            SPEED.set_float(self.0);
+            SENSITIVITY.set_float(self.1);
+            INVERT.set_bool(self.2);
+        }
+    }
+
+    /// The pointer is the camera's for exactly as long as a drag lasts. Both
+    /// buttons take it — a pan that reached the window edge stopped for the
+    /// same reason a look did — and the tick after the release gives it back,
+    /// which is the half a toggle would not have.
+    #[test]
+    fn the_drag_captures_the_pointer_and_the_release_gives_it_back() {
+        let (world, mut input, mut camera) = (world(), input(), Camera::default());
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+        assert!(!camera.flying(), "captured with nothing held");
+        for held in [verb::LOOK, verb::PAN] {
+            press(&mut input, held);
+            camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+            assert!(camera.flying(), "{held} did not capture");
+            input.tick_from(InputFrame::default());
+            camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+            assert!(!camera.flying(), "{held} kept the pointer after release");
+        }
+        // And a scene that starts playing hands it back without a release: the
+        // camera is not the one being flown there, so a grab would be an arrow
+        // the operator cannot get back without stopping.
+        press(&mut input, verb::LOOK);
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+        assert!(camera.flying());
+        camera.fly(&world, &frame(Play::Running, Some(&input)), nav());
+        assert!(!camera.flying(), "play kept the pointer");
+    }
+
+    /// A flat eye refuses the look, so there is nothing to capture the pointer
+    /// *for* — but it keeps the pan, which is the gesture a flat scene is
+    /// actually authored with. The pair is the assertion: one rule, two answers.
+    #[test]
+    fn a_flat_eye_captures_for_the_pan_and_not_for_the_refused_look() {
+        let (world, mut input, mut camera) = (flat_world(), input(), Camera::default());
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+        press(&mut input, verb::LOOK);
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+        assert!(!camera.flying(), "captured for a drag it refuses to act on");
+        press(&mut input, verb::PAN);
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+        assert!(camera.flying(), "the flat pan lost the pointer");
+    }
+
+    /// One wheel, two subjects, arbitrated by the button already down: while the
+    /// drag has the pointer a notch is the throttle and moves the eye not at
+    /// all, and with nothing held it is the dolly it always was and leaves the
+    /// speed alone. Asserted as a pair, because either half alone passes on a
+    /// build that does only one of the two.
+    #[test]
+    fn the_wheel_throttles_while_captured_and_dollies_otherwise() {
+        let _knobs = Knobs::take();
+        let (world, mut input, mut camera) = (world(), input(), Camera::default());
+        SPEED.set_float(15.0);
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+        let at = camera.eye(Eye::ORIGIN).position;
+
+        press(&mut input, verb::LOOK);
+        camera.fly(
+            &world,
+            &frame(Play::Stopped, Some(&input)),
+            Nav { wheel: 1, ..nav() },
+        );
+        let faster = SPEED.float();
+        assert!((faster - 15.0 * SPEED_PER_NOTCH).abs() < 1e-9, "{faster}");
+        assert_eq!(
+            camera.eye(Eye::ORIGIN).position,
+            at,
+            "the throttle also dollied"
+        );
+
+        input.tick_from(InputFrame::default());
+        camera.fly(
+            &world,
+            &frame(Play::Stopped, Some(&input)),
+            Nav { wheel: 1, ..nav() },
+        );
+        assert_eq!(SPEED.float(), faster, "the dolly also throttled");
+        assert!(
+            (camera.eye(Eye::ORIGIN).position.z - (at.z - DOLLY_PER_NOTCH)).abs() < 1e-12,
+            "the notch reached no camera at all"
+        );
+    }
+
+    /// The throttle is geometric and clamps at both ends, for
+    /// [`ZOOM_PER_NOTCH`]'s reasons: a notch is the same *proportion* at
+    /// 0.2 m/s and at 200, and a speed past either bound is a way to lose the
+    /// scene rather than a way to reach it.
+    #[test]
+    fn the_throttle_is_geometric_and_clamps_at_both_ends() {
+        let _knobs = Knobs::take();
+        let (world, mut input, mut camera) = (world(), input(), Camera::default());
+        SPEED.set_float(15.0);
+        press(&mut input, verb::LOOK);
+        let notch = |camera: &mut Camera, wheel: i32| {
+            let was = SPEED.float();
+            camera.fly(
+                &world,
+                &frame(Play::Stopped, Some(&input)),
+                Nav { wheel, ..nav() },
+            );
+            SPEED.float() / was
+        };
+        let near = notch(&mut camera, 1);
+        for _ in 0..12 {
+            notch(&mut camera, 1);
+        }
+        let far = notch(&mut camera, 1);
+        assert!(
+            (near - far).abs() < 1e-9,
+            "a notch is {near} of the speed here and {far} of it eight times faster"
+        );
+        for _ in 0..200 {
+            notch(&mut camera, 1);
+        }
+        assert_eq!(SPEED.float(), SPEED_RANGE.1);
+        for _ in 0..400 {
+            notch(&mut camera, -1);
+        }
+        assert_eq!(SPEED.float(), SPEED_RANGE.0);
+    }
+
+    /// The knob is metres a **second**, which is only true if the tick rate
+    /// divides it: the same key held for one second covers the same ground at
+    /// 60 Hz and at 240, and the per-tick distances differ by exactly four.
+    #[test]
+    fn a_held_key_covers_the_same_ground_a_second_at_any_pace() {
+        let _knobs = Knobs::take();
+        SPEED.set_float(15.0);
+        let travelled = |hz: u32| {
+            let (world, mut input, mut camera) = (world(), input(), Camera::default());
+            fn at(hz: u32, input: &Input) -> Frame<'_> {
+                Frame {
+                    hz,
+                    ..frame(Play::Stopped, Some(input))
+                }
+            }
+            camera.fly(&world, &at(hz, &input), nav());
+            let from = camera.eye(Eye::ORIGIN).position;
+            for _ in 0..hz {
+                press(&mut input, verb::FORWARD);
+                camera.fly(&world, &at(hz, &input), nav());
+            }
+            from.z - camera.eye(Eye::ORIGIN).position.z
+        };
+        let (slow, fast) = (travelled(60), travelled(240));
+        assert!(
+            (slow - 15.0).abs() < 1e-9,
+            "{slow} metres in a 60 Hz second"
+        );
+        assert!(
+            (fast - 15.0).abs() < 1e-9,
+            "{fast} metres in a 240 Hz second"
+        );
+        // The vacuity guard: a build ignoring `hz` entirely would pass the two
+        // above only by passing this one too.
+        assert!(
+            (per_tick(60) - 4.0 * per_tick(240)).abs() < 1e-12,
+            "the pace divides nothing"
+        );
+    }
+
+    /// Sensitivity scales the turn and nothing else; invert flips the pitch and
+    /// leaves the yaw where it was. Two knobs, and the failure worth catching is
+    /// one of them reaching the other axis.
+    #[test]
+    fn sensitivity_scales_the_turn_and_the_invert_reaches_only_pitch() {
+        let _knobs = Knobs::take();
+        let turned = |sensitivity: f64, invert: bool| {
+            SENSITIVITY.set_float(sensitivity);
+            INVERT.set_bool(invert);
+            let (world, mut input, mut camera) = (world(), input(), Camera::default());
+            camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+            drag(
+                &mut input,
+                (100 * gg_input::AXIS_SCALE, 100 * gg_input::AXIS_SCALE),
+            );
+            camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+            let eye = camera.eye(Eye::ORIGIN);
+            (eye.yaw, eye.pitch)
+        };
+        let (yaw, pitch) = turned(1.0, false);
+        let (twice_yaw, twice_pitch) = turned(2.0, false);
+        assert!((twice_yaw - 2.0 * yaw).abs() < 1e-6, "{twice_yaw} vs {yaw}");
+        assert!((twice_pitch - 2.0 * pitch).abs() < 1e-6);
+        let (inverted_yaw, inverted_pitch) = turned(1.0, true);
+        assert_eq!(inverted_yaw, yaw, "the invert reached the yaw");
+        assert!((inverted_pitch + pitch).abs() < 1e-9, "{inverted_pitch}");
+    }
+
+    /// The latch a frame adds is the tick's own rate and the tick's own sign,
+    /// and it exists only while the drag does — raw device motion arrives
+    /// whatever the pointer is over, so a latch offered unconditionally would
+    /// swing the picture at frame rate whenever the operator reached for a menu.
+    #[test]
+    fn the_frames_latch_is_the_ticks_own_turn_and_only_while_the_drag_lasts() {
+        let _knobs = Knobs::take();
+        SENSITIVITY.set_float(1.0);
+        INVERT.set_bool(false);
+        let (world, mut input, mut camera) = (world(), input(), Camera::default());
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+        assert!(camera.look(&input).is_none(), "latched with nothing held");
+
+        drag(&mut input, (100 * gg_input::AXIS_SCALE, 0));
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+        let look = camera.look(&input).expect("the drag is turning it");
+        // Negated, because the tick spends `yaw -= dx * rate`: a latch that
+        // added would turn the picture one way and the tick the other, which
+        // reads as a view that shakes rather than one that leads.
+        assert!((look.yaw_rate + LOOK_PER_UNIT).abs() < 1e-9, "{look:?}");
+        assert_eq!(look.yaw_rate, look.pitch_rate, "the two axes disagree");
+        assert_eq!(look.pitch_limit, PITCH_LIMIT, "the latch would pass a pole");
+        assert_eq!(
+            look.yaw_axis,
+            axis_id(&input, verb::LOOK_X).expect("appended").index() as u32
+        );
+
+        // A *pan* captures the pointer and turns nothing, so it offers no latch:
+        // the two are one gesture on two buttons everywhere except here.
+        gesture(&mut input, verb::PAN, (100 * gg_input::AXIS_SCALE, 0));
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+        assert!(camera.flying(), "the pan lost the pointer");
+        assert!(camera.look(&input).is_none(), "the pan offered a turn");
+    }
+
+    /// The pair a host blends is two *different* ticks, and it is the identity
+    /// on the tick the camera latched — a blend against a default would swing
+    /// the picture in from the origin over one tick, which is the worst frame of
+    /// a session to put a swoop in.
+    #[test]
+    fn the_blended_pair_is_two_ticks_and_the_first_one_is_not_a_swoop() {
+        let (world, mut input, mut camera) = (world(), input(), Camera::default());
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+        let (previous, current) = camera.eyes(Eye::ORIGIN);
+        assert_eq!(previous, current, "the latching tick blends from nowhere");
+        assert_eq!(current.position, AT, "and it is the game's own eye");
+
+        press(&mut input, verb::FORWARD);
+        camera.fly(&world, &frame(Play::Stopped, Some(&input)), nav());
+        let (previous, current) = camera.eyes(Eye::ORIGIN);
+        assert_eq!(previous.position, AT, "the previous tick moved with it");
+        assert!((previous.position.z - current.position.z).abs() > 1e-9);
+
+        // While playing the pair is the game's, both halves, so the blend a host
+        // does over it is the identity and the game's own interpolation is the
+        // only one running.
+        let game = Eye::at(sim::DVec3::new(1.0, 2.0, 3.0), 0.4, -0.2);
+        camera.fly(&world, &frame(Play::Running, Some(&input)), nav());
+        assert_eq!(camera.eyes(game), (game, game));
     }
 }

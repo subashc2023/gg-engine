@@ -66,6 +66,15 @@ bytemuck = { workspace = true }
 # prints is a number `gg-runtime` would have produced.
 gg-core = { path = "../../crates/gg-core" }
 gg-input = { path = "../../crates/gg-input" }
+# `pace --editor` (§6 M65): the editor's camera is a *second* eye with its own
+# tick, its own accumulator reader and its own blend, and until this line the
+# instrument graded only the game's. Driven as the real `Editor` — `tick` per
+# sim tick, `eyes`/`look` per frame — rather than as a copy of its arithmetic,
+# for the reason the game leg drives a real `Extracted`. Windowless like
+# everything here: `gg-editor` links no `gg-platform`, which is what lets an
+# instrument hold it at all (§1.5).
+gg-editor = { path = "../../crates/gg-editor" }
+gg-ui = { path = "../../crates/gg-ui" }
 # `cull`'s subject is demo 05's field — ten thousand instances of three meshes,
 # which is the pack pass's batching at its most extreme. Taken as a crate rather
 # than reproduced here so the scene the instrument measures is the scene the

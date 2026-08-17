@@ -393,6 +393,30 @@ impl Renderer {
         self.probes.grid().map(|grid| grid.report())
     }
 
+    /// Which of the field's axes follow the eye rather than the scene (§6 M68).
+    ///
+    /// Public because it is the answer to the question a coarse or partial field
+    /// raises: an anchored axis is `MAX_PER_AXIS` probes wide at the spacing asked
+    /// for and leaves the rest of the level to the fallback, so "the field only
+    /// covers part of my level" is a report about this and not about a bug.
+    #[must_use]
+    pub fn field_anchored(&self) -> Option<[bool; 3]> {
+        self.probes.grid().map(|grid| grid.anchored())
+    }
+
+    /// Grids **discarded** and grids **slid by whole cells** since this renderer
+    /// opened (§6 M68).
+    ///
+    /// Public because the difference is the whole of §6 M57's claim and no caller
+    /// can recover it from [`Self::field_grid`]: an anchored grid changes its origin
+    /// every time the eye crosses a cell, so an instrument reading "the grid moved,
+    /// therefore the field was thrown away" reports a walking player as a flicker.
+    /// The first number is the one that has to stay at zero.
+    #[must_use]
+    pub fn field_events(&self) -> (usize, usize) {
+        self.probes.events()
+    }
+
     /// Map a pack and start its load clock (§4.6). The game names what to draw
     /// out of it; this only says which file.
     ///
@@ -754,6 +778,7 @@ impl Renderer {
             let at = (
                 self.pass.variant(&mut self.rhi, samples)?,
                 self.scene.variant(&mut self.rhi, samples)?,
+                self.scene.masked_prepass(&mut self.rhi, samples)?,
             );
             (at, self.pass.skybox(&mut self.rhi, samples)?)
         };
@@ -904,6 +929,7 @@ impl Renderer {
         let at = (
             self.pass.variant(&mut self.rhi, samples)?,
             self.scene.variant(&mut self.rhi, samples)?,
+            self.scene.masked_prepass(&mut self.rhi, samples)?,
         );
         let skybox = self.pass.skybox(&mut self.rhi, samples)?;
         let mut frame = self.transients.frame(&mut self.rhi, extent)?;
@@ -1144,6 +1170,20 @@ impl OffscreenRenderer {
         self.probes.grid().map(|grid| grid.report())
     }
 
+    /// Which of the field's axes follow the eye — see
+    /// [`Renderer::field_anchored`].
+    #[must_use]
+    pub fn field_anchored(&self) -> Option<[bool; 3]> {
+        self.probes.grid().map(|grid| grid.anchored())
+    }
+
+    /// Grids discarded and grids slid by whole cells — see
+    /// [`Renderer::field_events`].
+    #[must_use]
+    pub fn field_events(&self) -> (usize, usize) {
+        self.probes.events()
+    }
+
     /// Put the frame inside `viewport` — see [`Renderer::set_viewport`].
     ///
     /// Here as well as on the windowed renderer because the windowed one is
@@ -1344,6 +1384,7 @@ impl OffscreenRenderer {
             let at = (
                 self.pass.variant(&mut self.rhi, samples)?,
                 self.scene.variant(&mut self.rhi, samples)?,
+                self.scene.masked_prepass(&mut self.rhi, samples)?,
             );
             (at, self.pass.skybox(&mut self.rhi, samples)?)
         };
@@ -1602,6 +1643,14 @@ fn report_draws(
     }
 }
 
+/// What one frame draws through: the box pass's pair, the pack pass's pair, and
+/// the pack pass's *masked* prepass (§6 M62).
+///
+/// A tuple rather than a struct because it is threaded rather than read — the
+/// two functions that take it apart are `prepass_draws` and `forward_draws`,
+/// twenty lines apart, and both name the field they want.
+pub(crate) type Pipelines = (Variant, Variant, PipelineHandle);
+
 /// The two pipelines whose shape is the scene pass's sample count, for one
 /// count (§6 M21). Copy, so a frame resolves them once and hands them around.
 #[derive(Clone, Copy)]
@@ -1712,20 +1761,18 @@ impl Solo {
 /// Boxes then pack meshes, as one list. Two pipelines inside one pass rather
 /// than a pass each: they write the same attachments, so a second prepass would
 /// be a second set of derived barriers around no new resource.
-fn prepass_draws<'a>(
-    pass: &'a BoxPass,
-    scene: &'a ScenePass,
-    at: (Variant, Variant),
-) -> Vec<DrawSpec<'a>> {
+fn prepass_draws<'a>(pass: &'a BoxPass, scene: &'a ScenePass, at: Pipelines) -> Vec<DrawSpec<'a>> {
     let mut draws = pass.draws(at.0.prepass);
-    draws.extend(scene.draws(at.1.prepass));
+    // The box pass has no materials and therefore no masked half; the pack pass
+    // forks per batch (§6 M62).
+    draws.extend(scene.draws_masked(at.1.prepass, at.2));
     draws
 }
 
 fn forward_draws<'a>(
     pass: &'a BoxPass,
     scene: &'a ScenePass,
-    at: (Variant, Variant),
+    at: Pipelines,
     sky: (PipelineHandle, &'a [skybox_shader::SkyPush]),
 ) -> Vec<DrawSpec<'a>> {
     let mut draws = pass.draws(at.0.forward);
@@ -2019,6 +2066,51 @@ struct DebugSource {
     /// What `r.debug_scale 0` means for this view — metres of white for a depth
     /// buffer, a gain of one for anything already in 0..1.
     scale: f32,
+    /// The source's *written* extent and the image's own, in texels (§6 M62).
+    ///
+    /// Equal for everything the camera renders. They part for the two field
+    /// images, which are allocated at the largest grid this renderer will build
+    /// — see [`probe::Probes::sh_live`].
+    live: (u32, u32),
+    whole: (u32, u32),
+    /// `(keep, stride)` source columns — `(1, 1)` shows every one (§6 M62).
+    ///
+    /// Only the irradiance field is not `(1, 1)`: three of its four texels per
+    /// probe are radiance and the fourth is that probe's state, which is a
+    /// distance in metres and reads as a clipped red bar. [`Self::live`] counts
+    /// the **kept** columns, so the fit is sized to what is drawn.
+    group: (u32, u32),
+}
+
+/// Where a source lands on the screen: an affine map from screen uv into the
+/// source's own uv, and the written corner it must not read past (§6 M62).
+///
+/// The aspect is the *written* region's, not the image's, and both are in
+/// texels. A source the shape of the view maps to the identity exactly —
+/// `(1, 1)` and `(0, 0)` — which is what keeps the six full-screen views on the
+/// bytes they were on before this existed.
+fn debug_fit(source: DebugSource, view: (u32, u32)) -> ([f32; 2], [f32; 2], [f32; 2]) {
+    let ratio = |live: u32, whole: u32| live as f32 / whole.max(1) as f32;
+    let limit = [
+        ratio(source.live.0, source.whole.0),
+        ratio(source.live.1, source.whole.1),
+    ];
+    let shown = source.live.0 as f32 / source.live.1.max(1) as f32;
+    let screen = view.0 as f32 / view.1.max(1) as f32;
+    // Letterbox on whichever axis has room. Equal aspects take neither branch's
+    // rounding: the ratio is exactly 1.0 and the scale below is exactly `limit`.
+    let (fx, fy) = match shown > screen {
+        true => (1.0, screen / shown),
+        false => (shown / screen, 1.0),
+    };
+    // `fit_scale` folds the crop in, so the shader does one multiply-add and
+    // tests the result against `limit`.
+    let scale = [limit[0] / fx, limit[1] / fy];
+    let bias = [
+        limit[0] * (fx - 1.0) * 0.5 / fx,
+        limit[1] * (fy - 1.0) * 0.5 / fy,
+    ];
+    (scale, bias, limit)
 }
 
 /// `r.debug_view` as an index into [`cvars::DEBUG_VIEWS`], or 0.
@@ -2126,19 +2218,51 @@ fn scene_attachments(
     // images this function just acquired and nowhere else has all of them.
     // `shadow.2` in a two-cascade frame lands on `None` by the same `get` that
     // makes a short `shadows` legal everywhere else.
+    // The fourth element is the source's shape, `(written, allocated)` in
+    // texels: equal for everything the camera renders, a whole-image pair for an
+    // atlas that is fully written, and genuinely unequal only for the two field
+    // images (§6 M62). `debug_fit` turns it into the blit's affine map.
+    let camera = (view_extent, view_extent);
+    let square = |size: u32| ((size, size), (size, size));
+    let all = (1, 1);
     let debug = match view {
-        1 => Some((scene, debug_mode::SCENE, 1.0)),
-        2 => ao_source.map(|id| (id, debug_mode::DEPTH, 50.0)),
-        3 => ao_source.map(|id| (id, debug_mode::NORMAL, 1.0)),
-        4 => ao_target.map(|id| (id, debug_mode::RED, 1.0)),
-        5 => ao_raw.map(|id| (id, debug_mode::RED, 1.0)),
-        6..=9 => shadows.get(view - 6).map(|id| (*id, debug_mode::RED, 1.0)),
-        10 => lamp_atlas.map(|id| (id, debug_mode::RED, 1.0)),
-        11 => field_sh.map(|id| (id, debug_mode::RGB, 1.0)),
-        12 => field_moments.map(|id| (id, debug_mode::RED, 0.02)),
+        1 => Some((scene, debug_mode::SCENE, 1.0, camera, all)),
+        2 => ao_source.map(|id| (id, debug_mode::DEPTH, 50.0, camera, all)),
+        3 => ao_source.map(|id| (id, debug_mode::NORMAL, 1.0, camera, all)),
+        4 => ao_target.map(|id| (id, debug_mode::RED, 1.0, camera, all)),
+        5 => ao_raw.map(|id| (id, debug_mode::RED, 1.0, camera, all)),
+        6..=9 => shadows
+            .get(view - 6)
+            .zip(sun)
+            .map(|(id, sun)| (*id, debug_mode::RED, 1.0, square(sun.size), all)),
+        10 => lamp_atlas.map(|id| {
+            let extent = lamps.extent();
+            (id, debug_mode::RED, 1.0, (extent, extent), all)
+        }),
+        11 => field_sh.zip(probes.sh_live()).map(|(id, (live, whole))| {
+            let kept = probe::SH_TEXELS - 1;
+            let shown = (live.0 / probe::SH_TEXELS * kept, live.1);
+            (
+                id,
+                debug_mode::RGB,
+                1.0,
+                (shown, whole),
+                (kept, probe::SH_TEXELS),
+            )
+        }),
+        12 => field_moments
+            .zip(probes.moment_live())
+            .map(|(id, shape)| (id, debug_mode::RED, 0.02, shape, all)),
         _ => None,
     }
-    .map(|(id, mode, scale)| DebugSource { id, mode, scale });
+    .map(|(id, mode, scale, (live, whole), group)| DebugSource {
+        id,
+        mode,
+        scale,
+        live,
+        whole,
+        group,
+    });
     Ok(SceneAttachments {
         view_extent,
         backbuffer,
@@ -2236,7 +2360,7 @@ impl<'a> SceneDraws<'a> {
         pushes: Pushes<'a>,
         sky: (PipelineHandle, &'a [skybox_shader::SkyPush]),
         lamps: &lamp::Lamps,
-        at: (Variant, Variant),
+        at: Pipelines,
         field: (&'a probe::Integrate, &'a probe::Probes),
     ) -> Self {
         let (post_push, ao_push) = (pushes.post, pushes.ao);
@@ -3021,20 +3145,32 @@ impl BoxPass {
             gain if gain > 0.0 => gain,
             _ => source.scale,
         };
+        let fit = debug_fit(source, extent);
         Ok(debug_shader::DebugPush::new(
             texture.get(),
             Sampler::NearestClamp.index(),
             source.mode,
             ao.projection,
-            // The view's texel, which is the source's for the only mode that
-            // reads it: the normal reconstruction differences neighbours of the
-            // camera depth buffer, and that one is the view's own size. An
-            // atlas view is a straight fetch and never touches this.
-            ao.texel,
+            // **The source's**, not the view's (§6 M62). They agree for the two
+            // modes that reconstruct a normal, since the image those difference
+            // is the camera depth buffer at the view's own size — and they do
+            // not agree for an atlas, which is what `regroup` walks in texels.
+            // It was the view's until the field view needed to count columns.
+            [
+                1.0 / source.whole.0.max(1) as f32,
+                1.0 / source.whole.1.max(1) as f32,
+            ],
             ao.project,
             ao.depth_params,
+            fit.0,
+            fit.1,
+            fit.2,
+            source.group.into(),
             scale,
             cvars::EXPOSURE.float() as f32,
+            // The same knob the tonemapper reads, and it has to be: the
+            // quantizer both passes feed is the swapchain's (§6 M62).
+            cvars::DITHER.float() as f32,
         ))
     }
 

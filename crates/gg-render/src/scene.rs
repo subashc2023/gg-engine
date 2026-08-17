@@ -166,6 +166,13 @@ struct Batch {
     /// This batch's slice of [`ScenePass::chunks`].
     chunk_first: u32,
     chunk_count: u32,
+    /// Whether the depth passes have to run the cutoff (§6 M62).
+    ///
+    /// A duplicate of `push.alpha_cutoff() > 0`, kept because the fork it
+    /// selects is a *pipeline* and the push is bytes: reading a float back out
+    /// of the block at every draw to pick a handle is the sort of thing that
+    /// stays correct until the field moves.
+    masked: bool,
 }
 
 /// Instances per chunk — the second level of the cull, under the batch and over
@@ -196,13 +203,22 @@ struct ViewDraw {
     push: shader::ScenePush,
     indices: BufferHandle,
     command_offset: u64,
+    /// See [`Batch::masked`].
+    masked: bool,
 }
 
-/// The pack pass: two pipelines, one fallback texel, this frame's draws.
+/// The pack pass: its pipelines, one fallback texel, this frame's draws.
 pub(crate) struct ScenePass {
     /// Prepass + forward, per sample count (§6 M21).
     variants: crate::Variants,
+    /// The prepass again, discarding (§6 M62) — a [`crate::Solo`] rather than a
+    /// third slot in [`crate::Variant`], which the box pass shares and has no
+    /// masked anything.
+    prepass_masked: crate::Solo,
     shadow: PipelineHandle,
+    /// The shadow pass again, discarding. Not per sample count: a shadow map is
+    /// always `Samples::X1`, which is why `shadow` is a bare handle too.
+    shadow_masked: PipelineHandle,
     /// One probe face's shading pass (§6 M36) — the forward pipeline writing
     /// depth, because a probe face has no prepass in front of it.
     probe: PipelineHandle,
@@ -294,10 +310,14 @@ impl ScenePass {
         // 1× eagerly, every other count on first ask — see `BoxPass::new`.
         let mut variants = crate::Variants::default();
         variants.get(rhi, Samples::X1, |s| [prepass_desc(s), forward_desc(s)])?;
+        let mut prepass_masked = crate::Solo::default();
+        prepass_masked.get(rhi, Samples::X1, prepass_masked_desc)?;
 
         Ok(ScenePass {
             variants,
+            prepass_masked,
             shadow: rhi.create_pipeline(&shadow_desc())?,
+            shadow_masked: rhi.create_pipeline(&shadow_masked_desc())?,
             white,
             white_index: rhi.register_texture(white)?,
             flat,
@@ -526,6 +546,10 @@ impl ScenePass {
                     // Overwritten per cascade in `stage`; the forward and
                     // prepass pipelines never read the field.
                     0,
+                    // Zero on every opaque material, which is every material in
+                    // the tree's own demos — see `DrawMaterial::alpha_cutoff`.
+                    material.alpha_cutoff,
+                    material.double_sided.into(),
                 ),
                 indices,
                 command_offset: (self.written.len() * core::mem::size_of::<IndirectCommand>())
@@ -536,6 +560,7 @@ impl ScenePass {
                 index_count: resident.index_count,
                 chunk_first,
                 chunk_count,
+                masked: material.alpha_cutoff > 0.0,
             });
             // The batch list is sorted visible-first, so the running high-water
             // mark *is* the prefix boundary (§6 M34).
@@ -650,6 +675,7 @@ impl ScenePass {
                 },
                 indices: batch.indices,
                 command_offset: batch.command_offset,
+                masked: batch.masked,
             };
             match view.fit(centre, radius) {
                 cull::Fit::Outside => {
@@ -745,6 +771,7 @@ impl ScenePass {
                         },
                         indices: batch.indices,
                         command_offset,
+                        masked: batch.masked,
                     });
                 }
             }
@@ -797,9 +824,26 @@ impl ScenePass {
     /// a bias the pipeline did not declare, and none of these declare one
     /// (`crate::shadow_draws` has the argument).
     pub(crate) fn draws(&self, pipeline: PipelineHandle) -> Vec<DrawSpec<'_>> {
+        self.draws_masked(pipeline, pipeline)
+    }
+
+    /// The same, where a masked batch takes the second handle (§6 M62).
+    ///
+    /// Two handles rather than a flag, because the caller is the only thing that
+    /// knows what a masked draw of *its* pass should go through — the forward
+    /// pass discards inside one pipeline and passes the same handle twice, and
+    /// the prepass has a second one whose sample count it just resolved.
+    pub(crate) fn draws_masked(
+        &self,
+        opaque: PipelineHandle,
+        masked: PipelineHandle,
+    ) -> Vec<DrawSpec<'_>> {
         self.batches[..self.visible_batches]
             .iter()
-            .map(|batch| self.spec(pipeline, &batch.push, batch.indices, batch.command_offset))
+            .map(|batch| {
+                let pipeline = if batch.masked { masked } else { opaque };
+                self.spec(pipeline, &batch.push, batch.indices, batch.command_offset)
+            })
             .collect()
     }
 
@@ -811,8 +855,17 @@ impl ScenePass {
             .map_or(&[][..], Vec::as_slice);
         draws
             .iter()
-            .map(|d| self.spec(self.shadow, &d.push, d.indices, d.command_offset))
+            .map(|d| self.spec(self.shadow_for(d), &d.push, d.indices, d.command_offset))
             .collect()
+    }
+
+    /// Which of the two depth-only pipelines a shadow or lamp draw goes through.
+    fn shadow_for(&self, draw: &ViewDraw) -> PipelineHandle {
+        if draw.masked {
+            self.shadow_masked
+        } else {
+            self.shadow
+        }
     }
 
     /// The batches that reach one lamp face, landing in that face's tile.
@@ -825,7 +878,7 @@ impl ScenePass {
         draws
             .iter()
             .map(|d| {
-                let mut spec = self.spec(self.shadow, &d.push, d.indices, d.command_offset);
+                let mut spec = self.spec(self.shadow_for(d), &d.push, d.indices, d.command_offset);
                 spec.viewport = Some(tile);
                 spec
             })
@@ -898,10 +951,30 @@ impl ScenePass {
             .get(rhi, samples, |s| [prepass_desc(s), forward_desc(s)])
     }
 
+    /// The discarding prepass for `samples` (§6 M62), on the same terms.
+    ///
+    /// Resolved beside [`Self::variant`] rather than at the draw for the plain
+    /// reason that creating a pipeline wants `&mut rhi` and by draw-list time
+    /// the frame is holding the graph. It costs one pipeline per sample count an
+    /// operator actually selects, which is the same bill MSAA already pays.
+    ///
+    /// # Errors
+    ///
+    /// Pipeline creation — including a device that does not do this count.
+    pub(crate) fn masked_prepass(
+        &mut self,
+        rhi: &mut impl GpuHost,
+        samples: Samples,
+    ) -> Result<PipelineHandle, RhiError> {
+        self.prepass_masked.get(rhi, samples, prepass_masked_desc)
+    }
+
     /// Release the pipelines, both fallback texels and the per-frame streams.
     pub(crate) fn destroy(self, rhi: &mut impl GpuHost) -> Result<(), RhiError> {
         self.variants.destroy(rhi)?;
+        self.prepass_masked.destroy(rhi)?;
         rhi.destroy_pipeline(self.shadow)?;
+        rhi.destroy_pipeline(self.shadow_masked)?;
         rhi.destroy_pipeline(self.probe)?;
         rhi.destroy_buffer(self.instances)?;
         rhi.destroy_buffer(self.commands)?;
@@ -1006,8 +1079,29 @@ impl ScenePass {
         let (vs_main, fs_main) = crate::hot::pair(module, "vs_main", "fs_main", push)?;
         let (vs_depth, fs_depth) = crate::hot::pair(module, "vs_depth", "fs_depth", push)?;
         let (vs_shadow, _) = crate::hot::pair(module, "vs_shadow", "fs_depth", push)?;
+        // The masked trio (§6 M62). Reloaded with the rest and not conditionally:
+        // an edit to `cut_out` is an edit to the two pipelines nothing else in
+        // this list holds, and a reload that skipped them would leave a session
+        // rendering the old cutoff in the depth passes and the new one in the
+        // forward pass — the exact disagreement they exist to prevent.
+        let (vs_depth_masked, fs_depth_masked) =
+            crate::hot::pair(module, "vs_depth_masked", "fs_depth_masked", push)?;
+        let (vs_shadow_masked, _) =
+            crate::hot::pair(module, "vs_shadow_masked", "fs_depth_masked", push)?;
         // Every live count, for the reason `BoxPass::swap_ugly` gives.
         let mut swaps: Vec<(&mut PipelineHandle, PipelineDesc<'_>)> = Vec::new();
+        for (samples, handle) in self.prepass_masked.each() {
+            swaps.push((
+                handle,
+                PipelineDesc {
+                    vs_spirv: &vs_depth_masked.spirv,
+                    vs_entry: &vs_depth_masked.spirv_entry,
+                    fs_spirv: &fs_depth_masked.spirv,
+                    fs_entry: &fs_depth_masked.spirv_entry,
+                    ..prepass_masked_desc(samples)
+                },
+            ));
+        }
         for (samples, variant) in self.variants.each() {
             swaps.push((
                 &mut variant.prepass,
@@ -1040,6 +1134,16 @@ impl ScenePass {
                 ..shadow_desc()
             },
         ));
+        swaps.push((
+            &mut self.shadow_masked,
+            PipelineDesc {
+                vs_spirv: &vs_shadow_masked.spirv,
+                vs_entry: &vs_shadow_masked.spirv_entry,
+                fs_spirv: &fs_depth_masked.spirv,
+                fs_entry: &fs_depth_masked.spirv_entry,
+                ..shadow_masked_desc()
+            },
+        ));
         crate::hot::swap_all(rhi, &mut swaps)
     }
 }
@@ -1066,6 +1170,35 @@ fn probe_desc() -> PipelineDesc<'static> {
 /// The shadow pass: the same geometry through the sun's projection, depth only
 /// and **unbiased** — see [`crate::shadow_draws`] for why the rasterizer does
 /// not do it.
+/// The prepass and the shadow pass again, through the pair of entry points that
+/// read the cutoff (§6 M62).
+///
+/// Everything else about them is the opaque descriptor, and it has to be: the
+/// forward pass re-draws where the prepass put a fragment and only a
+/// bit-identical depth survives `GREATER_OR_EQUAL`, so a masked batch's two
+/// pipelines have to agree on the matrix path exactly as the opaque pair does.
+fn prepass_masked_desc(samples: Samples) -> PipelineDesc<'static> {
+    PipelineDesc {
+        name: "scene.prepass.masked",
+        vs_spirv: shader::VS_DEPTH_MASKED_SPIRV,
+        vs_entry: shader::VS_DEPTH_MASKED_ENTRY,
+        fs_spirv: shader::FS_DEPTH_MASKED_SPIRV,
+        fs_entry: shader::FS_DEPTH_MASKED_ENTRY,
+        ..prepass_desc(samples)
+    }
+}
+
+fn shadow_masked_desc() -> PipelineDesc<'static> {
+    PipelineDesc {
+        name: "scene.shadow.masked",
+        vs_spirv: shader::VS_SHADOW_MASKED_SPIRV,
+        vs_entry: shader::VS_SHADOW_MASKED_ENTRY,
+        fs_spirv: shader::FS_DEPTH_MASKED_SPIRV,
+        fs_entry: shader::FS_DEPTH_MASKED_ENTRY,
+        ..shadow_desc()
+    }
+}
+
 fn shadow_desc() -> PipelineDesc<'static> {
     PipelineDesc {
         name: "scene.shadow",

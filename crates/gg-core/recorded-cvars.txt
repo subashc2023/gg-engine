@@ -5,7 +5,10 @@
 # stopped. Neither is provable from outside the declaration, which is why this
 # file exists — the change arrives as a diff instead of as a remembered rule.
 # `cargo xtask ci` compares the tree against it.
+d.editor_invert_y
 d.editor_scale
+d.editor_sensitivity
+d.editor_speed
 d.editor_undo
 r.fov
 r.near

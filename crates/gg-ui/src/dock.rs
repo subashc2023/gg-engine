@@ -397,6 +397,49 @@ impl Dock {
         self.root = insert(root, pane, drop);
     }
 
+    /// Whether the tree holds `pane` at all — as opposed to holding it behind
+    /// another tab, which is [`Dock::body_of`] returning `None`.
+    #[must_use]
+    pub fn holds(&self, pane: PaneId) -> bool {
+        holds(&self.root, pane)
+    }
+
+    /// Take `pane` out of the tree, collapsing whatever it emptied. `false` when
+    /// it was not there, or when it is the last one: a dock with no panes has no
+    /// strip to put one back from, so the tree keeps a floor of one.
+    pub fn close(&mut self, pane: PaneId) -> bool {
+        if !self.holds(pane) || self.panes() <= 1 {
+            return false;
+        }
+        let Some(root) = without(core::mem::replace(&mut self.root, Node::pane(pane)), pane) else {
+            return false;
+        };
+        self.root = root;
+        true
+    }
+
+    /// Put `pane` back as a tab of `onto`'s group, and show it. `false` when it
+    /// is already docked or `onto` is not.
+    ///
+    /// The caller chooses `onto`, because where a pane belongs is an application
+    /// question — `gg_editor::home` answers it off the default layout rather
+    /// than off a second table of neighbours.
+    pub fn open(&mut self, pane: PaneId, onto: PaneId) -> bool {
+        if self.holds(pane) || !self.holds(onto) {
+            return false;
+        }
+        let root = core::mem::replace(&mut self.root, Node::pane(pane));
+        self.root = insert(
+            root,
+            pane,
+            Drop {
+                onto,
+                zone: Zone::Centre,
+            },
+        );
+        true
+    }
+
     /// How many panes the tree holds.
     #[must_use]
     pub fn panes(&self) -> usize {
@@ -541,6 +584,13 @@ fn activate(node: &mut Node, pane: PaneId) {
             activate(first, pane);
             activate(second, pane);
         }
+    }
+}
+
+fn holds(node: &Node, pane: PaneId) -> bool {
+    match node {
+        Node::Tabs { panes, .. } => panes.contains(&pane),
+        Node::Split { first, second, .. } => holds(first, pane) || holds(second, pane),
     }
 }
 
@@ -956,5 +1006,40 @@ mod tests {
             ),
             caps
         );
+    }
+
+    /// A closed pane leaves the tree and comes back where it was asked for, and
+    /// the seam its group hung off collapses rather than fencing nothing.
+    #[test]
+    fn a_pane_closes_out_of_the_tree_and_opens_back_into_a_group() {
+        let mut dock = dock();
+        assert!(dock.holds(C) && dock.panes() == 4);
+        let seams = dock.seams().len();
+
+        assert!(dock.close(C));
+        dock.resolve(AREA, |_| 30.0);
+        assert!(!dock.holds(C) && dock.panes() == 3);
+        assert!(dock.body_of(C).is_none());
+        assert_eq!(dock.seams().len(), seams - 1, "the empty split survived");
+        assert!(!dock.close(C), "closing it twice");
+
+        assert!(dock.open(C, A));
+        dock.resolve(AREA, |_| 30.0);
+        assert!(dock.holds(C) && dock.panes() == 4);
+        // A re-opened pane is the one showing, not a tab behind the one it
+        // joined — an operator who ticked it wants to see it.
+        assert!(dock.body_of(C).is_some() && dock.body_of(A).is_none());
+        assert!(!dock.open(C, A), "opening it twice");
+        assert!(!dock.open(PaneId(9), PaneId(8)), "onto a pane not docked");
+    }
+
+    /// The floor: the last pane cannot be closed, because there would be no
+    /// strip left to put it back from.
+    #[test]
+    fn the_last_pane_stays() {
+        let mut dock = Dock::new(Node::pane(A));
+        dock.resolve(AREA, |_| 30.0);
+        assert!(!dock.close(A));
+        assert!(dock.holds(A) && dock.panes() == 1);
     }
 }

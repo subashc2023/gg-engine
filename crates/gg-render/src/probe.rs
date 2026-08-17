@@ -43,10 +43,19 @@
 //! which side of a wall a probe is on, and a projection onto four smooth bands
 //! would average the wall away. So it is stored per direction, in a small
 //! octahedral tile per probe, as [Don05]'s two moments — mean and mean of the
-//! square — which is what the shader's Chebyshev bound reads. Point-sampled
-//! rather than filtered, which is why the tiles need no border: a bound is soft
-//! already, and the seam of an octahedral map is exactly where bilinear would
-//! otherwise fetch a direction from the other side of the probe.
+//! square — which is what the shader's Chebyshev bound reads.
+//!
+//! **Filtered, and bordered so that it can be** (§6 M69). It was point-sampled
+//! until then, on the argument that a bound is soft already and that the seam of
+//! an octahedral map is exactly where a bilinear tap fetches a direction from the
+//! other side of the probe. Both halves of that are true; the conclusion was not.
+//! A point-sampled bound is a *discontinuous function of direction*, the
+//! octahedral map is piecewise linear, and so those discontinuities projected from
+//! a probe onto a flat surface are straight lines — which is what a report about
+//! "large geometric triangular shadows" on the wall above the shelter's roof
+//! turned out to be, one triangle per probe cell. The seam objection is answered
+//! by [`MOMENT_BORDER`]: one ring of texels, *computed* by folding the uv rather
+//! than copied, so a tap at the tile's edge reads the direction it means.
 //!
 //! [Don05] Donnelly & Lauritzen, "Variance Shadow Maps", I3D 2005.
 
@@ -83,23 +92,50 @@ const _: () = assert!(STATE_TEXEL < SH_TEXELS);
 
 /// Probes per axis, at most.
 ///
-/// **A cost ceiling before it is an atlas one.** A probe is six draws of the
-/// scene, so an 8-cube is 512 probes and 3072 renders for the field's first
-/// sweep — which is what a harness sits through before it may judge a picture
-/// and what a session pays over its first second. A 16-cube is eight times that,
-/// and the number it produced was twenty-four thousand renders of a golden scene
-/// for one reference image. The *atlas* would have taken 16: its height is
-/// `y * z * edge`, and 16 × 16 × 8 is 2048 against §4.3's 4096 floor — so the
-/// limit that bites is the one nobody was counting.
+/// **A convergence ceiling before it is an atlas one.** A probe is six draws of the
+/// scene, so a 16-cube's first sweep is 4096 probes and 24,576 renders — which is
+/// what a session pays over its first seconds and what a harness sits through before
+/// it may judge a picture. Nothing else scales with it: the *steady* cost is
+/// `r.gi_rate` probes a frame whatever the grid holds, the irradiance image is
+/// 128 KiB and the moment atlas 2 MiB at [`MAX_MOMENT_EDGE`], and the atlas height
+/// `y * z * edge` is 2048 against §4.3's 4096 floor. A 32-cube is what the floor
+/// would refuse.
 ///
-/// A field wanting more than an 8-cube covers less of the world per probe, not
-/// more of it — the grid fits the scene either way. What it cannot do is cover a
-/// *large* world at a *fine* spacing, which is the scrolling, camera-anchored
-/// grid §6 M36 names as its residual rather than builds.
-const MAX_PER_AXIS: u32 = 8;
+/// **It was 8 until §6 M68, and that was the binding constraint on the whole
+/// field.** [`Grid::fit`] widens the spacing until this many probes span the scene's
+/// widest axis, so an 8-cube put a hard floor of `widest / 7` under `r.gi_spacing`:
+/// 4 m in demo 12's 24 m room and 8 m in Sponza, whatever was asked for. At 16 that
+/// room *fits* at the 2 m it asks for, which is the whole of the reported defect
+/// gone, and the anchored placement below is what handles a level too large for any
+/// affordable cap.
+const MAX_PER_AXIS: u32 = 16;
+
+// A byte per axis in the frame block's `gi_wrap` (`crate::lighting::GpuFrame`),
+// packed into the word that was already there for alignment — so the cap has to
+// fit one, and a rise past this is a layout change rather than a constant.
+const _: () = assert!(MAX_PER_AXIS <= 256);
 
 /// Octahedral edge of a probe's distance tile, at most — see [`MAX_PER_AXIS`].
 const MAX_MOMENT_EDGE: u32 = 8;
+
+/// Texels of border around each side of a probe's distance tile — `pbr.slang`'s
+/// `PROBE_MOMENT_BORDER` (§6 M69).
+///
+/// **One, and its whole purpose is that the tile can be filtered.** A bilinear tap
+/// at the tile's own edge needs a neighbour, and in an atlas the neighbour is the
+/// next probe's record; one ring is exactly what a bilinear footprint over
+/// `uv ∈ [0, 1]` can reach. It costs `(edge + 2)² / edge²` of the atlas — 56 % at
+/// edge 8, which is a megabyte and a half — and no second pass, because
+/// `fs_moments` computes a border texel by folding its uv back through
+/// `octahedral_wrap` rather than copying anything.
+pub(crate) const MOMENT_BORDER: u32 = 1;
+
+/// Atlas pitch of one probe's distance tile: its octahedral edge plus a
+/// [`MOMENT_BORDER`] either side. `pbr.slang`'s `stride`, and the one number the
+/// two sides have to agree about.
+pub(crate) fn moment_stride(edge: u32) -> u32 {
+    edge + 2 * MOMENT_BORDER
+}
 
 /// Relative headroom the roundings in [`Grid::fit`] give a bound that lands on
 /// one of their risers (§6 M57).
@@ -136,6 +172,34 @@ fn floor_steady(q: f64, magnitude: f64) -> f64 {
 fn ceil_steady(q: f64, magnitude: f64) -> f64 {
     (q - SLACK * magnitude.abs().max(1.0)).ceil()
 }
+
+/// Whole multiples of `asked` [`Grid::fit`] has to widen to before
+/// [`MAX_PER_AXIS`] probes span `min..max`'s widest axis.
+///
+/// One means the spacing asked for is reachable and the scene is [`Grid::fit`]'s;
+/// anything above it is the case [`Grid::place`] anchors instead of widening.
+/// Shared so the two cannot disagree about which side of that line a scene is on.
+fn widening(min: sim::DVec3, max: sim::DVec3, asked: f64) -> f64 {
+    let widest = (max.x - min.x).max(max.y - min.y).max(max.z - min.z);
+    // `widest` may be non-finite; the 1.0 branch on a NaN is what the counts'
+    // own clamps are there to survive.
+    if !widest.is_finite() {
+        return 1.0;
+    }
+    let reached = widest / (asked * SPAN_CELLS);
+    ceil_steady(reached, reached).clamp(1.0, 1e6)
+}
+
+/// Cells an axis may spend on the scene's span before it can no longer be fitted.
+///
+/// **`MAX_PER_AXIS - 2` and not `- 1`.** The grid has `MAX_PER_AXIS - 1` cells, and
+/// the origin snap can put the origin a whole cell below `min`, so an axis that
+/// spends every cell on its span stops covering exactly when the snap moves. §6 M67
+/// found that and recorded it as a documented clamp; §6 M68 raising the cap moved a
+/// checked-in scene onto the riser, which is what turned a note into a bug. One
+/// constant, read by the widening and by the per-axis fit, so the two cannot
+/// disagree about how much room an axis has.
+const SPAN_CELLS: f64 = (MAX_PER_AXIS - 2) as f64;
 
 /// Metres the near plane of a probe's face sits at. `crate::lamp`'s reasoning
 /// and its value: inside anything a probe could be mounted in, and not so small
@@ -214,16 +278,39 @@ pub(crate) struct Field {
 
 /// A probe grid: where it starts, how far apart the probes are, how many.
 ///
-/// The origin is **absolute** (§1.4) and the spacing is a whole multiple of
-/// itself away from the world origin, which is what makes the grid a function of
-/// the scene rather than of the frame — two frames whose bounds differ by a
-/// millimetre fit the same grid, so the field is not thrown away every time
-/// something moves.
+/// The origin is **absolute** (§1.4) and sits on a lattice of the spacing away
+/// from the world origin, which is what makes the grid a function of the scene
+/// rather than of the frame — two frames whose bounds differ by a millimetre fit
+/// the same grid, so the field is not thrown away every time something moves.
+///
+/// **An axis is either fitted to the scene or anchored to the eye** (§6 M68), and
+/// the choice is per axis because a level is not a cube: demo 12's room is 24 m
+/// across and 4.5 m tall, so its vertical axis fits at any spacing worth asking
+/// for while its horizontal ones cannot. A fitted axis is stationary and covers
+/// the scene; an anchored one is [`MAX_PER_AXIS`] probes wide, follows the eye in
+/// whole cells, and leaves the rest of the level to the fallback.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Grid {
     origin: sim::DVec3,
     spacing: f64,
     counts: [u32; 3],
+    /// Which axes follow the eye. Part of the identity: switching an axis between
+    /// the two is a different grid and not a move of the one in hand, because the
+    /// records are addressed differently under each (see [`Grid::wrap`]).
+    anchored: [bool; 3],
+    /// The rotation between a probe's place in the world and its slot in the
+    /// field images — the storage slot of grid coordinate `c` is
+    /// `(c + wrap) % counts`, per axis.
+    ///
+    /// **This is what makes a scroll cheap.** A probe's slot is its lattice index
+    /// modulo the count, so when the window slides by a cell every probe that
+    /// stayed keeps the slot it was gathered into and only the plane that entered
+    /// reuses the departed plane's slots. Without it a one-cell move would have to
+    /// blit the whole field one plane over, or discard it — and discarding is what
+    /// §6 M57 exists to stop happening.
+    ///
+    /// Zero on a fitted axis, which is the identity: that window never moves.
+    wrap: [u32; 3],
 }
 
 impl Grid {
@@ -240,25 +327,21 @@ impl Grid {
     /// spacing, which is what keeps this a function of the scene rather than of
     /// the frame: an integer multiple of a constant, driven by bounds that move
     /// only when the content does.
-    pub(crate) fn fit(min: sim::DVec3, max: sim::DVec3, spacing: f64) -> Grid {
+    ///
+    /// `offset` is where the lattice sits between the multiples of its own
+    /// spacing, as a fraction of a cell — [`cvars::LATTICE_OFFSET`] in a session,
+    /// and the argument for it being nonzero is [`cvars::GI_OFFSET`]'s.
+    pub(crate) fn fit(min: sim::DVec3, max: sim::DVec3, spacing: f64, offset: f64) -> Grid {
         let asked = spacing.max(0.05);
-        let reach = f64::from(MAX_PER_AXIS - 1);
-        let widest = (max.x - min.x).max(max.y - min.y).max(max.z - min.z);
-        // `widest` may be non-finite; `max(1.0)` on a NaN takes the 1.0 branch,
-        // and the count below clamps whatever survives that.
-        let multiple = if widest.is_finite() {
-            let reached = widest / (asked * reach);
-            ceil_steady(reached, reached).clamp(1.0, 1e6)
-        } else {
-            1.0
-        };
-        let spacing = asked * multiple;
+        let spacing = asked * widening(min, max, asked);
         // Every rounding here is steadied, and a bound on a riser has to fall the
         // *same* way in all of them: a `min` that snapped down a whole spacing
         // while its span rounded up would grow the grid by a probe on one side
         // and lose it on the other.
-        let snap = |v: f64| floor_steady(v / spacing, v / spacing) * spacing;
-        let origin = sim::DVec3::new(snap(min.x), snap(min.y), snap(min.z));
+        // Wrapped into one cell so a knob set to 4.7 means the same lattice as 0.7
+        // rather than a grid four cells below the scene.
+        let phase = offset - offset.floor();
+        let snap = |v: f64| (floor_steady(v / spacing - phase, v / spacing) + phase) * spacing;
         let count = |lo: f64, hi: f64| {
             // +1 because a span of one spacing needs two probes to bracket it,
             // and 2 at the floor because one probe is a constant with a position.
@@ -273,6 +356,25 @@ impl Grid {
                 .clamp(0.0, f64::from(MAX_PER_AXIS)) as u32;
             (spans + 1).clamp(2, MAX_PER_AXIS)
         };
+        // **The lattice is offset off the world origin, and `r.gi_offset` is why**
+        // (§6 M67). Authored geometry lands on round numbers and the spacing divides
+        // them, so a lattice through the origin lands *on* the level's own surfaces:
+        // demo 12's room is the worst case and got there by being ordinary — floor
+        // top at `y = 0`, inner wall faces at `x, z = ±12`, wall tops at `y = 4`,
+        // against a 4 m spacing that divides all of them. Its three vertical planes
+        // were -4 (under the floor), 0 (in the floor's top face) and 4 (at the wall
+        // tops), and the 2.1 m shelter contained exactly the buried one.
+        //
+        // §6 M66 fixed the *probe* that lands there and named this as the follow-up.
+        // What made it a follow-up rather than a line was the fit's asymmetry, and
+        // the cost is now measured rather than feared: the origin is still snapped
+        // *down*, so [`Grid::covers`]'s hysteresis is the same step function it
+        // always was with its risers moved, and the only price is that an axis whose
+        // span is a whole multiple of the spacing spends one more probe. That is
+        // convergence time and not memory — the field images are sized at
+        // [`MAX_PER_AXIS`] whatever is fitted, and `r.gi_rate` bounds the per-frame
+        // cost by probe *count* per frame rather than by grid size.
+        let origin = sim::DVec3::new(snap(min.x), snap(min.y), snap(min.z));
         Grid {
             origin,
             spacing,
@@ -281,7 +383,159 @@ impl Grid {
                 count(origin.y, max.y),
                 count(origin.z, max.z),
             ],
+            anchored: [false; 3],
+            wrap: [0; 3],
         }
+    }
+
+    /// The grid this frame wants: every axis that fits the scene at the spacing
+    /// **asked for** fitted to it, and every axis that cannot anchored to the eye
+    /// (§6 M68).
+    ///
+    /// This is the constructor a session uses; [`Grid::fit`] is the all-axes-fit
+    /// case and is reached through here, unchanged, whenever it applies.
+    ///
+    /// **What it replaces is a spacing nobody could ask for.** `fit` widens the
+    /// spacing by a whole multiple until [`MAX_PER_AXIS`] probes span the scene's
+    /// *widest* axis, which couples all three to the longest one and makes
+    /// `r.gi_spacing` unreachable below `widest / 7` — 4 m in demo 12's 24 m room
+    /// and 8 m in Sponza, whatever was asked for. At 4 m the interpolation across a
+    /// cell is a saddle whose iso-contours are hyperbolas, which is what a chevron
+    /// on a flat wall *is*, and at 8 m a pillar is an eighth of a cell, so its
+    /// buried probe's share is redistributed along the grid's axes and reads as a
+    /// second shadow pointing nowhere near the sun. Both were reported from a
+    /// session before any table here caught them.
+    /// `sticky` is the axes the grid in hand has already anchored, and they stay
+    /// that way. **Hysteresis, and `covers`'s own argument one axis along**: a
+    /// tracer that leaves the room grows a bound past the window, which anchors an
+    /// axis that used to fit and costs a refit. Letting that axis fit again the
+    /// moment the tracer dies costs a *second* one, so one shot at the sky would
+    /// pay for the whole field twice. The price of holding it is a few probes over
+    /// a level's own height; the price of not holding it is the field, twice.
+    pub(crate) fn place(
+        min: sim::DVec3,
+        max: sim::DVec3,
+        eye: sim::DVec3,
+        spacing: f64,
+        offset: f64,
+        sticky: [bool; 3],
+    ) -> Grid {
+        let asked = spacing.max(0.05);
+        if widening(min, max, asked) <= 1.0 && !sticky.iter().any(|a| *a) {
+            return Grid::fit(min, max, asked, offset);
+        }
+        // Half the window, so the eye sits in the middle cell rather than at the
+        // corner: a look forward and a look back must reach the same distance.
+        let half = f64::from(MAX_PER_AXIS - 1) * asked * 0.5;
+        let phase = offset - offset.floor();
+        let mut grid = Grid {
+            origin: sim::DVec3::ZERO,
+            spacing: asked,
+            counts: [MAX_PER_AXIS; 3],
+            anchored: [true; 3],
+            wrap: [0; 3],
+        };
+        let (lo, hi) = ([min.x, min.y, min.z], [max.x, max.y, max.z]);
+        let (eye, mut origin) = ([eye.x, eye.y, eye.z], [0.0f64; 3]);
+        for a in 0..3 {
+            // Per axis, and against the *same* reach the whole-grid test uses: an
+            // axis that fits keeps the stationary window it has always had, which
+            // is what keeps a short vertical axis from spending two thirds of its
+            // probes on the sky above the level.
+            let fits = !sticky[a] && (hi[a] - lo[a]) <= SPAN_CELLS * asked;
+            grid.anchored[a] = !fits;
+            let from = if fits { lo[a] } else { eye[a] - half };
+            let steps = from / asked;
+            let index = floor_steady(steps - phase, steps);
+            origin[a] = (index + phase) * asked;
+            if fits {
+                // `+ 1` and the clamp are `fit`'s, for `fit`'s reasons — a span of
+                // one spacing needs two probes to bracket it.
+                let span = (hi[a] - origin[a]) / asked;
+                let spans = ceil_steady(span, (hi[a].abs() + origin[a].abs()) / asked)
+                    .clamp(0.0, f64::from(MAX_PER_AXIS)) as u32;
+                grid.counts[a] = (spans + 1).clamp(2, MAX_PER_AXIS);
+            } else {
+                // The slot rotation, and the only place it is computed: an anchored
+                // axis addresses its records by lattice index modulo the count, so
+                // the window can slide without moving a byte.
+                grid.wrap[a] = index.rem_euclid(f64::from(MAX_PER_AXIS)) as u32;
+            }
+        }
+        grid.origin = sim::DVec3::new(origin[0], origin[1], origin[2]);
+        grid
+    }
+
+    /// Whether any axis follows the eye — a grid that scrolls rather than one that
+    /// is thrown away and rebuilt.
+    pub(crate) fn scrolls(&self) -> bool {
+        self.anchored.iter().any(|a| *a)
+    }
+
+    /// The grid coordinate whose record lives in storage slot `slot`, per axis —
+    /// [`Grid::wrap`]'s inverse.
+    fn geometry(&self, slot: [u32; 3]) -> [u32; 3] {
+        core::array::from_fn(|a| {
+            // `wrap < counts` by construction, so the widening keeps this positive.
+            (slot[a] + self.counts[a] - self.wrap[a]) % self.counts[a]
+        })
+    }
+
+    /// Whichever storage slots along each axis hold a probe that has **left** the
+    /// window between `self` and `next`, and so now name a place the field has
+    /// never seen (§6 M68).
+    ///
+    /// `None` when the two are not the same window moved — a different spacing,
+    /// count, or mode is a refit and not a scroll, and so is a fitted axis whose
+    /// origin moved.
+    fn entered(&self, next: &Grid) -> Option<[[bool; MAX_PER_AXIS as usize]; 3]> {
+        if self.spacing != next.spacing
+            || self.counts != next.counts
+            || self.anchored != next.anchored
+        {
+            return None;
+        }
+        let (here, there) = (
+            [self.origin.x, self.origin.y, self.origin.z],
+            [next.origin.x, next.origin.y, next.origin.z],
+        );
+        // Fixed rather than sized to the counts, so a scroll allocates nothing —
+        // it happens every few frames under a walking player.
+        let mut stale = [[false; MAX_PER_AXIS as usize]; 3];
+        for a in 0..3 {
+            let count = i64::from(self.counts[a]);
+            // A difference of two multiples of one spacing, so the division is
+            // exact to the rounding and the round is a formality.
+            let moved = ((there[a] - here[a]) / self.spacing).round();
+            if !self.anchored[a] {
+                // A stationary axis that moved is the scene's bounds changing under
+                // the grid, which no rotation can express.
+                if moved != 0.0 {
+                    return None;
+                }
+                continue;
+            }
+            if !moved.is_finite() || moved.abs() >= count as f64 {
+                // Further than the window is wide: nothing in it survives, and the
+                // whole axis is new.
+                stale[a].fill(true);
+                continue;
+            }
+            let moved = moved as i64;
+            // Forward, the plane entering at the far face takes the slot of the one
+            // that just left the near face — which is the near face's own slot,
+            // since the two are a whole window apart. Backward, the entering plane
+            // is the new near face.
+            let first = if moved > 0 {
+                i64::from(self.wrap[a])
+            } else {
+                i64::from(next.wrap[a])
+            };
+            for k in 0..moved.abs() {
+                stale[a][(first + k).rem_euclid(count) as usize] = true;
+            }
+        }
+        Some(stale)
     }
 
     /// Whether `min..max` is inside what this grid reaches — the hysteresis that
@@ -322,6 +576,16 @@ impl Grid {
         self.counts
     }
 
+    /// The storage rotation the shader has to undo — see [`Grid::wrap`].
+    pub(crate) fn wrap(&self) -> [u32; 3] {
+        self.wrap
+    }
+
+    /// Which axes follow the eye rather than the scene.
+    pub(crate) fn anchored(&self) -> [bool; 3] {
+        self.anchored
+    }
+
     /// Origin, spacing and counts — what [`crate::Renderer::field_grid`] hands a
     /// caller that has to know where the field reaches.
     pub(crate) fn report(&self) -> (sim::DVec3, f32, [u32; 3]) {
@@ -337,9 +601,15 @@ impl Grid {
         self.counts.iter().map(|c| *c as usize).product()
     }
 
-    /// Probe `index`'s grid coordinate. The order is x fastest, then y, then z —
-    /// the same order [`Grid::sh_row`] lays the field out in, because two
+    /// Probe `index`'s **storage** coordinate. The order is x fastest, then y,
+    /// then z — the same order [`Grid::sh_row`] lays the field out in, because two
     /// orderings is one more than the shader can be told about.
+    ///
+    /// Storage and not place: an index enumerates slots of the field images, and
+    /// on an anchored axis the probe in a slot changes as the window slides
+    /// ([`Grid::wrap`]). Every layout below is therefore this coordinate directly,
+    /// and [`Grid::position`] is the one caller that has to go through
+    /// [`Grid::geometry`].
     pub(crate) fn coord(&self, index: usize) -> [u32; 3] {
         let (x, rest) = (
             index % self.counts[0] as usize,
@@ -355,7 +625,7 @@ impl Grid {
     /// Where probe `index` sits, **camera-relative** — what a face projection is
     /// built through, and what the shader compares a shading point against.
     pub(crate) fn position(&self, index: usize, camera_origin: sim::DVec3) -> render::Vec3 {
-        let [x, y, z] = self.coord(index);
+        let [x, y, z] = self.geometry(self.coord(index));
         let at = sim::DVec3::new(
             self.origin.x + f64::from(x) * self.spacing,
             self.origin.y + f64::from(y) * self.spacing,
@@ -392,22 +662,27 @@ impl Grid {
         (x * SH_TEXELS, self.sh_row(index))
     }
 
-    /// The moment image's extent, at octahedral edge `edge`.
+    /// The moment image's extent, at octahedral edge `edge` — in [`moment_stride`]
+    /// units, since every tile carries its border.
     pub(crate) fn moment_extent(&self, edge: u32) -> (u32, u32) {
+        let stride = moment_stride(edge);
         (
-            self.counts[0] * edge,
-            self.counts[1] * self.counts[2] * edge,
+            self.counts[0] * stride,
+            self.counts[1] * self.counts[2] * stride,
         )
     }
 
-    /// Where probe `index`'s octahedral distance tile starts, in texels.
+    /// Where probe `index`'s octahedral distance tile starts, in texels — the
+    /// *bordered* tile, which is what `fs_moments` renders and what
+    /// `probe_visibility` indexes.
     pub(crate) fn moment_tile(&self, index: usize, edge: u32) -> gg_rhi::Viewport {
         let [x, _, _] = self.coord(index);
+        let stride = moment_stride(edge);
         gg_rhi::Viewport {
-            x: x * edge,
-            y: self.sh_row(index) * edge,
-            width: edge,
-            height: edge,
+            x: x * stride,
+            y: self.sh_row(index) * stride,
+            width: stride,
+            height: stride,
         }
     }
 }
@@ -465,8 +740,18 @@ pub(crate) struct Probes {
     grid: Option<Grid>,
     /// Where the round robin has got to.
     cursor: usize,
-    /// Probes never gathered since the grid was fitted, by index.
+    /// Probes never gathered since the grid was fitted, by storage slot.
     ungathered: Vec<bool>,
+    /// Grids thrown away, and grids slid by whole cells, since this renderer
+    /// opened (§6 M68).
+    ///
+    /// Two counters and not one, because they are opposite events wearing the same
+    /// shape: a refit discards the field and is what §6 M57's flicker was, while a
+    /// scroll keeps every probe that stayed. An instrument that read "the origin
+    /// changed" as a refit would report a camera-anchored grid as unstable on every
+    /// step a player takes, and M57's zero would stop meaning anything.
+    refits: usize,
+    scrolls: usize,
     /// This frame's batch, kept so a frame allocates nothing.
     batch: Vec<Gather>,
     face: u32,
@@ -512,18 +797,65 @@ impl Probes {
         self.face = face_size();
         self.moment_edge = moment_edge();
         let spacing = cvars::GI_SPACING.float().max(0.05);
-        let fitted = Grid::fit(min, max, spacing);
+        let fitted = Grid::place(
+            min,
+            max,
+            camera_origin,
+            spacing,
+            cvars::GI_OFFSET.float(),
+            self.grid.map_or([false; 3], |g| g.anchored),
+        );
+        // Three outcomes, and the middle one is what §6 M68 added: hold the grid,
+        // slide it by whole cells and re-gather only the plane that entered.
+        let mut scrolled = None;
         let refit = match self.grid {
             // A grid that no longer reaches is worth replacing only by a
             // *different* one. A scene larger than [`MAX_PER_AXIS`] spacings
             // never satisfies `covers` — the fit is clamped, so it does not
             // reach either — and refitting to the same grid every frame would
             // reset the field every frame and leave it one batch old forever.
-            Some(grid) => {
+            Some(grid) if !grid.scrolls() && !fitted.scrolls() => {
                 grid.spacing != fitted.spacing || (!grid.covers(min, max) && grid != fitted)
             }
+            // Anchored on at least one axis. The window moves in whole cells, so
+            // an eye wandering inside its middle cell produces the grid it already
+            // has and this costs nothing — the hysteresis `covers` provides a
+            // fitted axis is the snap itself here.
+            Some(grid) if grid == fitted => false,
+            Some(grid) => match grid.entered(&fitted) {
+                Some(stale) => {
+                    scrolled = Some(stale);
+                    false
+                }
+                // Not the same window moved: a different spacing, count or mode.
+                None => true,
+            },
             None => true,
         };
+        if let Some(stale) = scrolled {
+            let mut entered = 0usize;
+            for (index, slot) in self.ungathered.iter_mut().enumerate() {
+                let [x, y, z] = fitted.coord(index);
+                // A slot is new if the plane it belongs to entered on **any** axis
+                // — the three sets are independent, and a diagonal step enters an
+                // L-shaped shell rather than one plane.
+                if stale[0][x as usize] || stale[1][y as usize] || stale[2][z as usize] {
+                    *slot = true;
+                    entered += 1;
+                }
+            }
+            // `trace` and not `debug`: a walking player crosses a cell every few
+            // frames, so this is per-frame chatter where a refit is an event.
+            tracing::trace!(
+                target: "gg::field",
+                origin = ?fitted.origin,
+                probes = entered,
+                of = fitted.probes(),
+                "probe field scrolled"
+            );
+            self.grid = Some(fitted);
+            self.scrolls += 1;
+        }
         if refit {
             // A refit discards every probe, so it is an event and not a detail:
             // §6 M57's flicker was sixteen of these in a sixty-frame jump and
@@ -541,6 +873,7 @@ impl Probes {
             self.ungathered = vec![true; fitted.probes()];
             self.cursor = 0;
             self.grid = Some(fitted);
+            self.refits += 1;
         }
         let Some(grid) = self.grid else { return };
         let probes = grid.probes();
@@ -728,6 +1061,28 @@ impl Probes {
         self.grid
     }
 
+    /// The written corner of the irradiance image, and the image (§6 M62).
+    ///
+    /// They differ, and that is what `r.debug_view`'s field view was showing as
+    /// data: both field images are allocated once at the *largest* grid this
+    /// renderer will build, and a scene's grid writes a corner of them. Sponza's
+    /// is 7x6x8 probes, so five eighths of the image the view stretched over the
+    /// screen had never been written by anything.
+    ///
+    /// `None` is no grid fitted, which is `r.gi` off — and is also when neither
+    /// image is imported at all, so the view resolves to nothing first.
+    pub(crate) fn sh_live(&self) -> Option<((u32, u32), (u32, u32))> {
+        Some((self.grid()?.sh_extent(), MAX_SH_EXTENT))
+    }
+
+    /// The same for the distance moments — see [`Self::sh_live`].
+    pub(crate) fn moment_live(&self) -> Option<((u32, u32), (u32, u32))> {
+        Some((
+            self.grid()?.moment_extent(self.moment_edge()),
+            MAX_MOMENT_EXTENT,
+        ))
+    }
+
     /// Metres a recorded distance is clamped to, and the value a face texel that
     /// drew nothing stands for — see [`DISTANCE_CAP`].
     pub(crate) fn distance_cap(&self) -> f32 {
@@ -741,7 +1096,11 @@ impl Probes {
     /// has to clear is the probe's own view of the surface being shaded, whose
     /// distance error is a face texel's worth of the cell it is in.
     pub(crate) fn bias(&self) -> f32 {
-        self.grid.map_or(0.0, |grid| 0.15 * grid.spacing())
+        // Absolute, and clamped below the window so a knob cannot push a shading
+        // point out of the grid it is being located in.
+        self.grid.map_or(0.0, |grid| {
+            (cvars::GI_BIAS.float().max(0.0) as f32).min(grid.spacing())
+        })
     }
 
     pub(crate) fn batch(&self) -> &[Gather] {
@@ -760,6 +1119,12 @@ impl Probes {
 
     /// [`Probes::pending`] beside the count it is out of — what a harness waits
     /// on, and what a session with the field off reports as `(0, 0)`.
+    /// Grids discarded and grids slid, since this renderer opened — see
+    /// [`Probes::refits`].
+    pub(crate) fn events(&self) -> (usize, usize) {
+        (self.refits, self.scrolls)
+    }
+
     pub(crate) fn progress(&self) -> (usize, usize) {
         (self.pending(), self.grid.map_or(0, |grid| grid.probes()))
     }
@@ -1026,9 +1391,12 @@ fn bounds_of(extracted: &gg_extract::Extracted) -> Option<(sim::DVec3, sim::DVec
 /// The irradiance image at its largest — see [`Images`].
 const MAX_SH_EXTENT: (u32, u32) = (MAX_PER_AXIS * SH_TEXELS, MAX_PER_AXIS * MAX_PER_AXIS);
 /// The distance image at its largest, and the pair [`MAX_PER_AXIS`] is set by.
+/// [`MOMENT_BORDER`]'s ring is in the stride, so this is 160 x 2560 rather than
+/// 128 x 2048 — still inside §4.3's 4096 dimension floor, which is the constraint
+/// the axis cap is read against.
 const MAX_MOMENT_EXTENT: (u32, u32) = (
-    MAX_PER_AXIS * MAX_MOMENT_EDGE,
-    MAX_PER_AXIS * MAX_PER_AXIS * MAX_MOMENT_EDGE,
+    MAX_PER_AXIS * (MAX_MOMENT_EDGE + 2 * MOMENT_BORDER),
+    MAX_PER_AXIS * MAX_PER_AXIS * (MAX_MOMENT_EDGE + 2 * MOMENT_BORDER),
 );
 
 /// One field image: a colour target a later pass samples, which is exactly
@@ -1086,6 +1454,15 @@ mod tests {
     /// level that shrinks keeps probes over the space it used to occupy, which
     /// is a field slightly too big rather than a field thrown away, and the
     /// second is much the worse of the two.
+    ///
+    /// **How far a scene may move is `min - origin`, which is luck** — uniform in
+    /// `[0, spacing)`, since the origin is `min` snapped down to the lattice. This
+    /// scene has 0.43 m of it below and §6 M67's offset is what set that number;
+    /// the plain lattice happened to leave 1.1 m. Neither is a promise, and a scene
+    /// whose `min` sits just above a plane is one footstep from a refit however the
+    /// lattice is placed. Named as §6 M67's residual rather than fixed here: buying
+    /// headroom means a halo of probes the scene does not need, or a centred fit,
+    /// and centring is what §6 M57 was about.
     #[test]
     fn a_scene_that_moves_inside_its_grid_keeps_the_field_it_gathered() {
         let mut probes = Probes::default();
@@ -1104,27 +1481,42 @@ mod tests {
             assert_eq!(probes.grid(), grid, "moved by ({dx}, {dy})");
         }
         assert_ne!(
-            Grid::fit(at(-4.9, 0.5, -4.9), at(4.9, 3.1, 4.9), 2.0),
-            grid.unwrap_or_else(|| Grid::fit(at(0.0, 0.0, 0.0), at(0.0, 0.0, 0.0), 2.0)),
+            Grid::fit(
+                at(-4.9, 0.5, -4.9),
+                at(4.9, 3.1, 4.9),
+                2.0,
+                cvars::LATTICE_OFFSET
+            ),
+            grid.unwrap_or_else(|| {
+                Grid::fit(
+                    at(0.0, 0.0, 0.0),
+                    at(0.0, 0.0, 0.0),
+                    2.0,
+                    cvars::LATTICE_OFFSET,
+                )
+            }),
             "the wobble crossed a snap boundary, so `covers` is what held the grid"
         );
     }
 
-    /// A bound sitting exactly on a spacing multiple fits *one* grid, however the
-    /// membrane rounds it (§6 M57).
+    /// A bound sitting exactly on one of the fit's own risers fits *one* grid,
+    /// however the membrane rounds it (§6 M57).
     ///
-    /// Demo 12's own numbers, because they are what found this: a 25 m room whose
-    /// walls top out at exactly `y = 4.0` against the 4 m spacing `r.gi_spacing`
-    /// widens to. The bounds reach the renderer as `f32` offsets against the
-    /// camera origin (§1.4) and are widened back, so `max.y` arrives a ULP either
-    /// side of 4.0 depending on where the eye is — and the eye's *height* is what
-    /// moves it, which is why a player saw this while jumping and not while
-    /// walking. Without [`SLACK`] the vertical count alternates 3, 4, 3, 4 and
-    /// [`Probes::update`] discards the whole field on every flip.
+    /// The bounds reach the renderer as `f32` offsets against the camera origin
+    /// (§1.4) and are widened back, so a bound arrives a ULP either side of itself
+    /// depending on where the eye is — and the eye's *height* is what moves it,
+    /// which is why a player saw this while jumping and not while walking. Without
+    /// [`SLACK`] a count on a riser alternates 3, 4, 3, 4 and [`Probes::update`]
+    /// discards the whole field on every flip.
     ///
-    /// `covers` cannot be what saves this: a 25 m room does not fit eight probes
-    /// at 4 m from a snapped origin, so it is false every frame here and the
-    /// refit test is `grid != fitted` alone. The fit *is* the hysteresis.
+    /// **Two cases, and the second is `r.gi_offset`'s** (§6 M67). Demo 12's room —
+    /// 25 m across, walls topping out at exactly `y = 4.0` against the 4 m spacing
+    /// `r.gi_spacing` widens to — is the scene that found this, and its numbers are
+    /// on risers because the shipped lattice runs through the world origin. The
+    /// second case constructs a bound on the riser *the knob puts it on*, so the
+    /// claim keeps meaning what it says at a lattice offset this tree does not
+    /// currently ship: `covers` cannot rescue either, since a 25 m room does not fit
+    /// eight probes at 4 m, so the fit is the whole of the hysteresis here.
     #[test]
     fn a_bound_on_a_spacing_multiple_fits_one_grid_however_the_membrane_rounds_it() {
         let mut probes = Probes::default();
@@ -1133,13 +1525,19 @@ mod tests {
         // Well past an `f32` ULP at these magnitudes (~1e-6 m) and far under the
         // 4 mm [`SLACK`] is worth, which is the band the claim is about.
         let wobbles = [0.0, 1e-7, -1e-7, 4e-7, -4e-7, 2e-6, -2e-6];
+        // Half-extent against the cap rather than a literal: the subject is that the
+        // *widening* is steady, so the scene has to be one that widens whatever
+        // `MAX_PER_AXIS` happens to be. It was 12.5 m, which widened at a cap of 8
+        // and fits at 16 — the test pinned the old cap by accident (§6 M68).
+        let half = f64::from(MAX_PER_AXIS) * 2.0;
         let fitted: Vec<Grid> = wobbles
             .iter()
             .map(|w| {
                 Grid::fit(
-                    at(-12.5 + w, -0.5 - w, -12.5 - w),
-                    at(12.5, 4.0 + w, 12.5),
+                    at(-half + w, -0.5 - w, -half - w),
+                    at(half, 4.0 + w, half),
                     2.0,
+                    cvars::LATTICE_OFFSET,
                 )
             })
             .collect();
@@ -1147,10 +1545,47 @@ mod tests {
             fitted.windows(2).all(|p| p[0] == p[1]),
             "the fit moved under a rounding: {fitted:?}"
         );
-        assert_eq!(fitted[0].spacing(), 4.0, "the room is wider than 8 x 2 m");
         assert!(
-            !fitted[0].covers(at(-12.5, -0.5, -12.5), at(12.5, 4.0, 12.5)),
-            "if the clamped grid ever covers this room, the test below proves nothing"
+            fitted[0].spacing() > 2.0,
+            "the room is not wider than the cap spans at 2 m, so nothing widened"
+        );
+        // **This assertion was the other way round until §6 M68**, and the flip is
+        // [`SPAN_CELLS`]: a widened fit used to reserve every cell for the span, so
+        // the origin snap took it past its own far bound and it did not reach the
+        // scene it had just been widened for. It reads as a clamp — §6 M67 recorded
+        // it as one — and it is a grid that stops covering a level because somebody
+        // moved a wall. What makes the steadiness above the claim rather than this is
+        // that the fits are compared directly; `covers` is the second line.
+        assert!(
+            fitted[0].covers(at(-half, -0.5, -half), at(half, 4.0, half)),
+            "a fit widened for this room does not reach it: {:?} for {half}",
+            fitted[0]
+        );
+        // A bound exactly on a riser, at the spacing this asks for and a span short
+        // enough not to widen it: `min` is a lattice plane, so the origin snap is on
+        // an integer, and the span is a whole number of cells, so the count's
+        // `ceil_steady` is too.
+        let riser = |k: f64| (k + cvars::LATTICE_OFFSET) * 2.0;
+        let on_riser: Vec<Grid> = wobbles
+            .iter()
+            .map(|w| {
+                Grid::fit(
+                    at(riser(-1.0) + w, riser(-1.0) - w, riser(-1.0) + w),
+                    at(riser(2.0) - w, riser(2.0) + w, riser(2.0) - w),
+                    2.0,
+                    cvars::LATTICE_OFFSET,
+                )
+            })
+            .collect();
+        assert!(
+            on_riser.windows(2).all(|p| p[0] == p[1]),
+            "a bound on the lattice moved the fit under a rounding: {on_riser:?}"
+        );
+        assert_eq!(
+            on_riser[0].counts(),
+            [4, 4, 4],
+            "three cells bracketed by four probes, or the riser is not where the \
+             test thinks it is"
         );
         // And the field survives the whole wobble, which is the observable half:
         // one grid, and `pending` never climbing back off a refit.
@@ -1180,7 +1615,7 @@ mod tests {
     #[test]
     fn every_corner_of_the_bounds_is_inside_the_probe_hull() {
         let (min, max) = (at(-5.3, -0.2, -4.1), at(4.4, 3.9, 3.2));
-        let grid = Grid::fit(min, max, 1.5);
+        let grid = Grid::fit(min, max, 1.5, cvars::LATTICE_OFFSET);
         assert!(
             grid.covers(min, max),
             "the fit does not reach its own bounds"
@@ -1195,11 +1630,16 @@ mod tests {
         // buys: the spacing widens to a whole multiple of the asked-for one
         // rather than the grid retreating into a corner of the scene.
         let wide = at(60.0, 3.9, 3.2);
-        let coarse = Grid::fit(min, wide, 1.5);
-        assert_eq!(coarse.counts()[0], MAX_PER_AXIS);
+        let coarse = Grid::fit(min, wide, 1.5, cvars::LATTICE_OFFSET);
+        assert!(coarse.counts()[0] <= MAX_PER_AXIS);
+        // This is the assertion `SPAN_CELLS` exists for. It failed the moment §6 M68
+        // raised the cap, because the widening reserved every cell for the span and
+        // the origin snap then wanted one more — the clamp §6 M67 wrote down as a
+        // property, landed on by a checked-in scene.
         assert!(
             coarse.covers(min, wide),
-            "the widened fit still does not reach"
+            "the widened fit still does not reach: {:?} vs {wide:?}",
+            coarse.corner()
         );
         let multiple = f64::from(coarse.spacing()) / 1.5;
         assert!(
@@ -1211,12 +1651,241 @@ mod tests {
         assert_eq!(grid.spacing(), 1.5);
     }
 
+    /// `r.gi_offset` moves the lattice off the world origin and the fit still
+    /// brackets its bounds (§6 M67).
+    ///
+    /// The knob ships at zero — `gg-tools bounce`'s offset table says a lattice on the
+    /// level's own round numbers grades better than one off them, which is the
+    /// opposite of what §6 M66 predicted — so nothing else in this module exercises a
+    /// nonzero one, and an untested branch in a fit is a grid nobody would notice was
+    /// wrong. The two properties that must survive any offset: every plane sits on the
+    /// offset lattice, and the hull still contains the bounds.
+    ///
+    /// **The span is deliberately well inside the clamp.** The widening reserves
+    /// `MAX_PER_AXIS - 1` cells for the *span* and the snap can eat up to one more, so
+    /// a scene close to that budget clamps and stops covering — at any offset, this one
+    /// included. Demo 12's room is exactly that case and the test above asserts it, so
+    /// coverage is not a property of the fit in general and asking for it here would be
+    /// asking the wrong question of the knob.
+    #[test]
+    fn an_offset_lattice_still_brackets_its_bounds() {
+        let (min, max) = (at(-5.3, -0.2, -4.1), at(0.4, 3.9, 1.2));
+        for offset in [0.0, 0.125, 1.0 / 3.0, 0.5, 0.75] {
+            let grid = Grid::fit(min, max, 1.5, offset);
+            assert!(
+                grid.covers(min, max),
+                "offset {offset}: the fit does not reach its own bounds"
+            );
+            let spacing = f64::from(grid.spacing());
+            for corner in [grid.origin, grid.corner()] {
+                for v in [corner.x, corner.y, corner.z] {
+                    // `v / spacing - offset` is a whole number, to the width `SLACK`
+                    // already treats as one.
+                    let phase = v / spacing - offset;
+                    assert!(
+                        (phase - phase.round()).abs() < 1e-9,
+                        "offset {offset}: {v} is not on the lattice"
+                    );
+                }
+            }
+        }
+        // And a whole cell of offset is the lattice it started from, which is what
+        // makes the knob a *phase* rather than a translation.
+        assert_eq!(
+            Grid::fit(min, max, 1.5, 0.25),
+            Grid::fit(min, max, 1.5, 3.25)
+        );
+    }
+
+    /// A level is not a cube, and §6 M68's placement is per axis because of it.
+    #[test]
+    fn a_short_axis_is_fitted_while_a_long_one_follows_the_eye() {
+        // **Demo 12's room gets the spacing it asks for**, which is the whole of the
+        // reported defect: 24 m across and 4.5 m tall at 2 m, fitted on every axis,
+        // no anchoring needed and nothing widened.
+        let (min, max) = (at(-12.0, -0.5, -12.0), at(12.0, 4.0, 12.0));
+        let eye = at(5.5, 1.62, 8.5);
+        let room = Grid::place(min, max, eye, 2.0, 0.0, [false; 3]);
+        assert_eq!(
+            (room.anchored, room.spacing, room.counts),
+            ([false; 3], 2.0, [13, 4, 13]),
+            "demo 12's room no longer holds the cells it asks for"
+        );
+        // The vertical axis is what doing this per axis buys, and it is where the
+        // report came from: four planes at -2, 0, 2 and 4, so the 2.1 m shelter
+        // contains one. It used to contain none — see the coupled fit below.
+        assert!(
+            room.origin.y <= min.y && room.corner().y >= max.y,
+            "the fitted axis stopped covering the room it was fitted to"
+        );
+        assert_eq!(room.origin.y, -2.0, "the vertical planes moved");
+
+        // A level too long for the cap at that spacing: the long axes follow the eye
+        // and the short one stays fitted to the level, which is the placement no
+        // single mode expresses.
+        let long = f64::from(MAX_PER_AXIS) * 4.0;
+        let corridor = Grid::place(
+            at(-long, -0.5, -long),
+            at(long, 4.0, long),
+            eye,
+            2.0,
+            0.0,
+            [false; 3],
+        );
+        assert_eq!(
+            (corridor.anchored, corridor.spacing, corridor.counts),
+            ([true, false, true], 2.0, [MAX_PER_AXIS, 4, MAX_PER_AXIS]),
+            "a level longer than the cap should anchor its long axes and fit its short one"
+        );
+
+        // What the coupling used to cost, and the grid the report was made against:
+        // `Grid::fit` widens to the *widest* axis, so this room could not have cells
+        // finer than `widest / (MAX - 2)` however little was asked for. Its three
+        // vertical planes were -4 (under the floor), 0 (in the floor's top face) and
+        // 4 (at the wall tops), and none was inside the shelter.
+        let coupled = Grid::fit(at(-long, -0.5, -long), at(long, 4.0, long), 2.0, 0.0);
+        assert!(
+            coupled.spacing > 2.0 && coupled.counts[1] < 4,
+            "the widening no longer couples a short axis to a long one: {coupled:?}"
+        );
+    }
+
+    /// **The claim that makes a scroll cheap**, and it is about places rather than
+    /// pictures: a slot's probe does not move when the window slides, except in the
+    /// planes the mask calls new. If it did, a scroll would be reading one probe's
+    /// record at another probe's position — a wrong field with no symptom until
+    /// something in the level happened to be there.
+    #[test]
+    fn a_scroll_moves_the_window_and_leaves_every_record_it_keeps_in_place() {
+        let spacing = 2.0;
+        // Long on every axis, so all three anchor and one test covers them.
+        let (min, max) = (at(-40.0, -40.0, -40.0), at(40.0, 40.0, 40.0));
+        let eye = at(0.6, 1.62, -3.1);
+        let here = Grid::place(min, max, eye, spacing, 0.0, [false; 3]);
+        assert_eq!(
+            here.anchored, [true; 3],
+            "an 80 m cube did not anchor at 2 m"
+        );
+        for step in [
+            at(spacing, 0.0, 0.0),
+            at(-spacing, 0.0, 0.0),
+            at(0.0, 3.0 * spacing, 0.0),
+            at(spacing, -spacing, spacing),
+            // Not a whole number of cells: the snap is what turns a wander into
+            // whole steps, so this must land on the same window as one cell.
+            at(spacing * 1.4, 0.0, 0.0),
+        ] {
+            let moved = at(eye.x + step.x, eye.y + step.y, eye.z + step.z);
+            let there = Grid::place(min, max, moved, spacing, 0.0, [false; 3]);
+            let Some(stale) = here.entered(&there) else {
+                panic!("a step of {step:?} was taken for a refit rather than a scroll");
+            };
+            let mut kept = 0;
+            for index in 0..there.probes() {
+                let [x, y, z] = there.coord(index);
+                if stale[0][x as usize] || stale[1][y as usize] || stale[2][z as usize] {
+                    continue;
+                }
+                assert_eq!(
+                    there.position(index, sim::DVec3::ZERO),
+                    here.position(index, sim::DVec3::ZERO),
+                    "slot {index} kept its record across a step of {step:?} and changed its place"
+                );
+                kept += 1;
+            }
+            // Otherwise the assertion above is vacuous and this passes on a mask
+            // that marks the whole grid stale, which is a refit wearing a scroll's
+            // name.
+            assert!(kept > 0, "a step of {step:?} kept no probe at all");
+            assert!(
+                kept < there.probes(),
+                "a step of {step:?} entered nothing — the window did not move"
+            );
+        }
+    }
+
+    /// The two ways a window can move that are **not** scrolls, and one that is.
+    #[test]
+    fn a_window_that_jumped_further_than_itself_keeps_nothing() {
+        let spacing = 2.0;
+        let (min, max) = (at(-400.0, -400.0, -400.0), at(400.0, 400.0, 400.0));
+        let here = Grid::place(min, max, at(0.0, 0.0, 0.0), spacing, 0.0, [false; 3]);
+        let reach = f64::from(MAX_PER_AXIS) * spacing;
+        // A teleport: every slot names a place the field has never seen. Still a
+        // scroll and not a refit — the grid is the same shape — and the mask says
+        // so by being entirely true.
+        let far = Grid::place(
+            min,
+            max,
+            at(reach * 4.0, 0.0, 0.0),
+            spacing,
+            0.0,
+            [false; 3],
+        );
+        let Some(stale) = here.entered(&far) else {
+            panic!("a jump past the window was taken for a refit rather than a scroll");
+        };
+        assert!(
+            stale[0].iter().all(|s| *s),
+            "a jump past the window's own width kept records for places it left"
+        );
+        assert!(
+            stale[1].iter().all(|s| !*s) && stale[2].iter().all(|s| !*s),
+            "a jump along x invalidated the axes it did not move along"
+        );
+        // A different spacing is not a move: a probe at a new spacing is at a new
+        // place, and no rotation of the images expresses that.
+        assert!(
+            here.entered(&Grid::place(
+                min,
+                max,
+                at(0.0, 0.0, 0.0),
+                3.0,
+                0.0,
+                [false; 3]
+            ))
+            .is_none(),
+            "a change of spacing was taken for a scroll"
+        );
+    }
+
+    /// One tracer leaving the room must not cost the field twice — see
+    /// [`Grid::place`]'s `sticky`.
+    #[test]
+    fn an_axis_that_had_to_anchor_stays_anchored() {
+        let spacing = 2.0;
+        let eye = at(0.0, 1.62, 0.0);
+        // Long enough that its horizontal axes anchor whatever the cap is.
+        let far = f64::from(MAX_PER_AXIS) * 4.0;
+        let (min, max) = (at(-far, -0.5, -far), at(far, 4.0, far));
+        let room = Grid::place(min, max, eye, spacing, 0.0, [false; 3]);
+        assert_eq!(room.anchored, [true, false, true]);
+        // A tracer far overhead. The vertical axis no longer fits, so it anchors —
+        // and that is a different count, which is a refit and is the price §6 M37
+        // item 3's residual still charges.
+        let shot = Grid::place(min, at(far, far, far), eye, spacing, 0.0, room.anchored);
+        assert_eq!(shot.anchored, [true; 3]);
+        assert!(room.entered(&shot).is_none(), "a new count is not a scroll");
+        // The tracer dies. Without `sticky` the vertical axis fits again, at the
+        // count it had before, and the field is thrown away a second time.
+        assert_eq!(
+            Grid::place(min, max, eye, spacing, 0.0, shot.anchored),
+            shot,
+            "the vertical axis unanchored itself and cost a second refit"
+        );
+    }
+
     /// Index → coordinate → texel is one ordering, used three times. A field
     /// laid out in one order and read in another is a bug with no symptom
     /// except that the light is in the wrong place.
     #[test]
     fn the_layout_gives_every_probe_its_own_texels() {
-        let grid = Grid::fit(at(0.0, 0.0, 0.0), at(6.0, 4.0, 8.0), 2.0);
+        let grid = Grid::fit(
+            at(0.0, 0.0, 0.0),
+            at(6.0, 4.0, 8.0),
+            2.0,
+            cvars::LATTICE_OFFSET,
+        );
         assert_eq!(grid.counts(), [4, 3, 5]);
         assert_eq!(grid.probes(), 60);
         let (w, h) = grid.sh_extent();
@@ -1233,10 +1902,15 @@ mod tests {
                 assert!(!seen[slot], "probe {index} shares texel {slot}");
                 seen[slot] = true;
             }
+            // The **bordered** tile, and the whole of it: a border texel is a
+            // texel of the atlas like any other, and if two probes shared one the
+            // filter would read the neighbour's record at exactly the seam it
+            // exists to make continuous (§6 M69).
             let tile = grid.moment_tile(index, edge);
             let (mw, _) = grid.moment_extent(edge);
-            for v in 0..edge {
-                for u in 0..edge {
+            assert_eq!(tile.width, moment_stride(edge));
+            for v in 0..tile.height {
+                for u in 0..tile.width {
                     let slot = ((tile.y + v) * mw + tile.x + u) as usize;
                     assert!(!tiles[slot], "probe {index} shares moment texel {slot}");
                     tiles[slot] = true;
@@ -1245,6 +1919,120 @@ mod tests {
         }
         assert!(seen.iter().all(|s| *s), "the field has texels nothing owns");
         assert!(tiles.iter().all(|s| *s));
+
+        // **What `probe_visibility`'s hand-written taps rest on**: a bilinear
+        // footprint over the whole octahedral square never leaves the padded tile,
+        // so no clamp against a *tile* boundary is needed and no tap can reach the
+        // next probe. `at = uv * edge + border - 0.5` over `uv` in `[0, 1]`, and
+        // the pair of texels a tap reads is `floor(at)` and `floor(at) + 1`.
+        let stride = f64::from(moment_stride(edge));
+        for uv in [0.0, 0.25, 0.5, 1.0] {
+            let at = uv * f64::from(edge) + f64::from(MOMENT_BORDER) - 0.5;
+            let base = at.floor().clamp(0.0, stride - 2.0);
+            assert!(
+                base >= 0.0 && base + 1.0 <= stride - 1.0,
+                "a tap left the tile at uv {uv}"
+            );
+        }
+    }
+
+    /// **The border holds what the interior would, exactly** (§6 M69) — the one
+    /// claim `fs_moments`' border line rests on, and it is an equality rather than
+    /// a tolerance.
+    ///
+    /// A border texel's uv is one texel outside the octahedral square;
+    /// `octahedral_wrap` folds it back, and the direction it lands on has to be the
+    /// direction of the interior texel it mirrors onto, or the filter blends a
+    /// wall's distance with something from the other side of the probe. It *is*,
+    /// and for a reason worth stating: a centre at `-0.5/edge` reflects to
+    /// `+0.5/edge` and `1 - (y + 0.5)/edge` is `((edge - 1 - y) + 0.5)/edge`, both
+    /// exactly in binary floating point, so the two integrals run in identical
+    /// directions and the two texels come out bit-identical.
+    ///
+    /// Restated on the CPU because the shader is where it happens, which is this
+    /// file's arrangement for a convention with two ends — see
+    /// `the_shader_reads_a_face_texel_as_the_direction_the_matrix_drew_it`. What
+    /// keeps the restatement honest is that both halves are checked here: the
+    /// wrap's own algebra, *and* the fold rule the four edges and four corners
+    /// need.
+    #[test]
+    fn the_moment_tile_border_is_its_own_mirror() {
+        /// `pbr.slang`'s `octahedral_wrap`, restated.
+        fn wrap(uv: (f64, f64)) -> (f64, f64) {
+            let mut r = uv;
+            if r.0 < 0.0 {
+                r = (-r.0, 1.0 - r.1);
+            } else if r.0 > 1.0 {
+                r = (2.0 - r.0, 1.0 - r.1);
+            }
+            if r.1 < 0.0 {
+                r = (1.0 - r.0, -r.1);
+            } else if r.1 > 1.0 {
+                r = (1.0 - r.0, 2.0 - r.1);
+            }
+            r
+        }
+        /// `pbr.slang`'s `octahedral_direction`, restated.
+        fn direction(uv: (f64, f64)) -> [f64; 3] {
+            let p = (uv.0 * 2.0 - 1.0, uv.1 * 2.0 - 1.0);
+            let y = 1.0 - p.0.abs() - p.1.abs();
+            let (x, z) = if y >= 0.0 {
+                p
+            } else {
+                (
+                    (1.0 - p.1.abs()) * if p.0 >= 0.0 { 1.0 } else { -1.0 },
+                    (1.0 - p.0.abs()) * if p.1 >= 0.0 { 1.0 } else { -1.0 },
+                )
+            };
+            let n = (x * x + y * y + z * z).sqrt();
+            [x / n, y / n, z / n]
+        }
+        /// `fs_moments`' own uv for a texel of the bordered tile.
+        fn uv_of(texel: (i32, i32), edge: i32) -> (f64, f64) {
+            let border = f64::from(MOMENT_BORDER as i32);
+            (
+                (f64::from(texel.0) + 0.5 - border) / f64::from(edge),
+                (f64::from(texel.1) + 0.5 - border) / f64::from(edge),
+            )
+        }
+
+        for edge in [2, 4, 8] {
+            let stride = moment_stride(edge as u32) as i32;
+            let last = stride - 1;
+            // Every texel of the ring, against the interior texel the octahedral
+            // fold says it mirrors: an edge texel mirrors across that edge with the
+            // *other* axis reversed, and a corner reaches the opposite corner.
+            let mut ring = 0;
+            for v in 0..stride {
+                for u in 0..stride {
+                    if u != 0 && u != last && v != 0 && v != last {
+                        continue;
+                    }
+                    ring += 1;
+                    let folded = wrap(uv_of((u, v), edge));
+                    // The fold has to land *inside* the square, on a texel centre.
+                    assert!(
+                        (0.0..=1.0).contains(&folded.0) && (0.0..=1.0).contains(&folded.1),
+                        "edge {edge}: the border texel ({u}, {v}) folded to {folded:?}"
+                    );
+                    let mirror = |t: f64| (t * f64::from(edge) - 0.5).round() as i32;
+                    let (mu, mv) = (mirror(folded.0), mirror(folded.1));
+                    assert!(
+                        (0..edge).contains(&mu) && (0..edge).contains(&mv),
+                        "edge {edge}: ({u}, {v}) folded off the interior to ({mu}, {mv})"
+                    );
+                    // And the two directions agree *exactly*, which is what makes
+                    // the computed border equal to a copied one.
+                    assert_eq!(
+                        direction(folded),
+                        direction(uv_of((mu + 1, mv + 1), edge)),
+                        "edge {edge}: border ({u}, {v}) and interior ({mu}, {mv}) \
+                         disagree about their direction"
+                    );
+                }
+            }
+            assert_eq!(ring as u32, 4 * (moment_stride(edge as u32) - 1));
+        }
     }
 
     /// A probe's position is its coordinate times the spacing, off the grid
@@ -1252,14 +2040,24 @@ mod tests {
     /// far-away eye does not quantize the field it is standing in.
     #[test]
     fn a_probe_sits_where_its_coordinate_says_however_far_the_eye_is() {
-        let grid = Grid::fit(at(0.0, 0.0, 0.0), at(6.0, 4.0, 8.0), 2.0);
-        let index = 1 + 4 * (1 + 3 * 2); // coord (1, 1, 2)
+        let grid = Grid::fit(
+            at(0.0, 0.0, 0.0),
+            at(6.0, 4.0, 8.0),
+            2.0,
+            cvars::LATTICE_OFFSET,
+        );
+        let index = 1 + 4 * (1 + 3 * 2); // coord (1, 1, 2) at counts [4, 3, 5]
         assert_eq!(grid.coord(index), [1, 1, 2]);
+        // Off the grid's own origin rather than off the world's: the lattice is
+        // offset (§6 M67), so a coordinate's absolute position is only a multiple of
+        // the spacing *relative to* the origin, which is what this asserts.
+        let (origin, spacing, _) = grid.report();
+        let step = f64::from(spacing);
         for eye in [at(0.0, 0.0, 0.0), at(1.0e6, 0.0, -1.0e6)] {
             let expected = render::Vec3::new(
-                (2.0 - eye.x) as f32,
-                (2.0 - eye.y) as f32,
-                (4.0 - eye.z) as f32,
+                (origin.x + step - eye.x) as f32,
+                (origin.y + step - eye.y) as f32,
+                (origin.z + 2.0 * step - eye.z) as f32,
             );
             let got = grid.position(index, eye);
             assert!(
@@ -1267,8 +2065,9 @@ mod tests {
                 "at eye {eye:?}: {got:?} against {expected:?}"
             );
             // The origin the shader locates a point against is the same frame.
-            let origin = grid.origin_relative(eye);
-            assert!((origin + render::Vec3::new(2.0, 2.0, 4.0) - got).length() < 1e-3);
+            let corner = grid.origin_relative(eye);
+            let along = render::Vec3::new(step as f32, step as f32, 2.0 * step as f32);
+            assert!((corner + along - got).length() < 1e-3);
         }
     }
 

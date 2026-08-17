@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use gg_assets::load::{Assets, asset};
+use gg_assets::material::flags as asset_flags;
 use gg_assets::pack::{AssetId, AssetKind};
 use gg_assets::{AssetError, Handle};
 use gg_extract::{Placement, Scenes};
@@ -55,6 +56,20 @@ pub struct DrawMaterial {
     pub metallic: f32,
     /// Roughness factor, multiplied with the map.
     pub roughness: f32,
+    /// glTF `MASK`'s threshold, or **0 for an opaque material** (§6 M62).
+    ///
+    /// Zero rather than an `Option` because it is a push-constant field and the
+    /// shader's test is `> 0.0`: one number says both whether to mask and where,
+    /// and a cutoff of zero would discard nothing anyway.
+    pub alpha_cutoff: f32,
+    /// glTF `doubleSided`: shade a back face with the normal flipped (§6 M64).
+    ///
+    /// Read since §6 M64, having been imported and unread since §6 M27. It is a
+    /// *shading* claim here and not the performance one it usually is: `gg-rhi`
+    /// rasterizes `CullModeFlags::NONE`, so both sides are drawn whatever this
+    /// says, and what it decides is whether the far side is a surface (a leaf,
+    /// a chain link, a curtain) or the inside of a solid.
+    pub double_sided: bool,
 }
 
 impl Default for DrawMaterial {
@@ -76,6 +91,8 @@ impl Default for DrawMaterial {
             occlusion_texture: AssetId::NONE,
             metallic: 0.0,
             roughness: 1.0,
+            alpha_cutoff: 0.0,
+            double_sided: false,
         }
     }
 }
@@ -258,10 +275,15 @@ impl Content {
                 occlusion_texture: material.occlusion_texture,
                 metallic: material.metallic,
                 roughness: material.roughness,
-                // `flags` and `alpha_cutoff` stay unread. Alpha masking needs
-                // the *same* discard in the prepass and the shadow pass or the
-                // depth it writes disagrees with the colour it draws, and that
-                // is a transparency milestone rather than a lighting one (§4.6).
+                // Read since §6 M62 — the discard is in the prepass and the
+                // shadow pass as well as the forward one, which is what that
+                // milestone's masked pipelines are for. glTF's `BLEND` is still
+                // a sorting problem and arrives with the pass that can sort.
+                alpha_cutoff: match material.flags & asset_flags::ALPHA_MASK {
+                    0 => 0.0,
+                    _ => material.alpha_cutoff,
+                },
+                double_sided: material.flags & asset_flags::DOUBLE_SIDED != 0,
             },
             Err(error) => {
                 warn(id, &error);

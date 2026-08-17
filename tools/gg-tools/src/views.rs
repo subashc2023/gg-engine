@@ -32,7 +32,18 @@ const EXTENT: (u32, u32) = (1280, 720);
 /// The field converges over `probes / r.gi_rate` frames and a view of it taken
 /// before that is a picture of a transient (§6 M57) — so every view waits, not
 /// just the field's, because they must all describe the same frame.
+///
+/// A **floor**, not the wait: `probes / r.gi_rate` is a property of the grid the
+/// scene fitted, so a constant is only ever right for one grid. This one was
+/// right for demo 12's 192-probe 8-cube and silently wrong for anything larger —
+/// a 900-probe grid needs 56 frames and rendered as though the field were off,
+/// which reads as *the field contributes nothing here* rather than as *the
+/// instrument did not wait*. Same class as the two §6 M67 found in `bounce`.
 pub(crate) const WARMUP: usize = 40;
+
+/// Frames the field is given to converge before its state is a defect rather than
+/// a transient — an 8-cube at `r.gi_rate 1` and a wide margin.
+const SETTLE: usize = 2048;
 
 /// `frame`'s chair, so the three instruments describe the same room from the
 /// same place.
@@ -79,21 +90,45 @@ pub(crate) fn apply_sets(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `--pack`/`--scene`/`--eye`/`--yaw`, or demo 12's room when none is given.
+/// `--pack`/`--scene`/`--eye`/`--yaw`/`--pitch`, or demo 12's room when no pack
+/// is given.
+///
+/// The placement flags reach **both** scenes. They were the pack's alone until a
+/// report about the shelter's corner, which is a place in the built-in room this
+/// could not be pointed at — an instrument whose chair is a constant answers
+/// questions about one framing, and a defect that lives in a crease is a question
+/// about a different one.
 pub(crate) fn scene_from(args: &[String]) -> Result<Scene> {
+    let eye = flag(args, "--eye");
+    let yaw = flag(args, "--yaw");
+    // `Option`, so each scene keeps the pitch it was blessed with: the room's
+    // chair looks slightly down and the pack's looks level, and a shared default
+    // here would have re-aimed the one nobody asked about.
+    let pitch: Option<f32> = match flag(args, "--pitch") {
+        Some(text) => Some(text.trim().parse()?),
+        None => None,
+    };
     match flag(args, "--pack") {
         Some(pack) => from_pack(
             PathBuf::from(pack),
             flag(args, "--scene").unwrap_or_else(|| "Sponza/scene".to_owned()),
-            flag(args, "--eye").as_deref(),
-            flag(args, "--yaw").as_deref(),
+            eye.as_deref(),
+            yaw.as_deref(),
+            pitch,
         ),
         None => Ok(Scene {
             world: field::world()?,
             pack: None,
-            eye: sim::DVec3::new(0.0, 1.62, 8.0),
+            eye: match eye {
+                Some(text) => parse_eye(&text)?,
+                None => sim::DVec3::new(0.0, 1.62, 8.0),
+            },
             view: View {
-                pitch: PITCH,
+                pitch: pitch.unwrap_or(PITCH),
+                yaw: match yaw {
+                    Some(text) => text.trim().parse()?,
+                    None => View::default().yaw,
+                },
                 ..View::default()
             },
         }),
@@ -134,9 +169,22 @@ pub fn run(args: &[String]) -> Result<()> {
     // warmup is also what makes the first view a picture of resident content
     // rather than of the fallback (§6 M36's note, one instrument along).
     cvars::DEBUG_VIEW.set_int(0);
-    for _ in 0..WARMUP {
+    let mut frames = 0;
+    // The floor first, then until the field says it has gathered every probe
+    // against the grid in hand. Both, because `field_pending` counts probes never
+    // gathered *since the grid was fitted* (§6 M67) and reads zero on the frame a
+    // refit has not happened on yet.
+    while frames < WARMUP || renderer.field_pending().0 > 0 {
         let extracted = extract(&scene, extent, renderer.scenes())?;
         renderer.frame(&extracted, &scene.view, [0.0; 4], &[])?;
+        frames += 1;
+        anyhow::ensure!(
+            frames <= SETTLE,
+            "the field still has {} of {} probes ungathered after {frames} frames — every view \
+             below would be a picture of a transient",
+            renderer.field_pending().0,
+            renderer.field_pending().1
+        );
     }
     if let Some(pending) = renderer.pack().map(gg_render::content::Content::pending) {
         anyhow::ensure!(
@@ -146,6 +194,34 @@ pub fn run(args: &[String]) -> Result<()> {
         );
     }
 
+    // The grid, before the views (§6 M66). `r.gi_paint` says *which* pixels the
+    // field gave up on; this says where its probe planes are, and the two
+    // together are the whole diagnosis — a plane that lands on a floor is a plane
+    // of half-buried probes, and no picture of the result can say so.
+    if let Some((origin, spacing, counts)) = renderer.field_grid() {
+        // Which axes follow the eye, and how the grid got here (§6 M68). An anchored
+        // axis leaves the rest of the level to the fallback, so a report of "the
+        // field stops halfway across my level" is answered by this line rather than
+        // by any of the pictures below — and a *refit* count above zero says the
+        // field was thrown away rather than slid, which is §6 M57's subject.
+        let axes = renderer.field_anchored().map_or_else(
+            || "-".to_owned(),
+            |a| {
+                ["x", "y", "z"]
+                    .iter()
+                    .zip(a)
+                    .map(|(n, on)| format!("{n}:{}", if on { "eye" } else { "scene" }))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            },
+        );
+        let (refits, scrolls) = renderer.field_events();
+        println!(
+            "  field: {}x{}x{} probes, {spacing} m apart, origin ({:.2}, {:.2}, {:.2})\n  \
+             anchored to {axes}, {refits} refit(s) and {scrolls} scroll(s) to get here\n",
+            counts[0], counts[1], counts[2], origin.x, origin.y, origin.z
+        );
+    }
     println!("  view       | in this frame | file");
     for (index, name) in cvars::DEBUG_VIEWS.iter().enumerate().skip(1) {
         cvars::DEBUG_VIEW.set_int(index as i64);
@@ -175,7 +251,13 @@ pub fn run(args: &[String]) -> Result<()> {
 /// One `Model` from a pack, a sun and a sky — the smallest world that shows an
 /// authored scene, and deliberately not demo 14's own: this crate takes no
 /// dependency on a game, and what a scene viewer needs from one is a placement.
-fn from_pack(pack: PathBuf, scene: String, eye: Option<&str>, yaw: Option<&str>) -> Result<Scene> {
+fn from_pack(
+    pack: PathBuf,
+    scene: String,
+    eye: Option<&str>,
+    yaw: Option<&str>,
+    pitch: Option<f32>,
+) -> Result<Scene> {
     use gg_ecs::boundary::{Light, Model, Sky};
     let mut world = gg_ecs::World::new();
     world.register::<Model>()?;
@@ -204,6 +286,7 @@ fn from_pack(pack: PathBuf, scene: String, eye: Option<&str>, yaw: Option<&str>)
         eye,
         view: View {
             yaw,
+            pitch: pitch.unwrap_or(View::default().pitch),
             ..View::default()
         },
     })

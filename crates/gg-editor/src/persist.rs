@@ -62,7 +62,10 @@ pub fn layout_path(stem: &str) -> PathBuf {
 /// Total by construction — every way it can fail leaves the default tree, which
 /// is the only outcome a caller could act on anyway. No file is the ordinary
 /// first run and says nothing; a file that does not parse, or parses to a tree
-/// missing a pane, is a *changed* build meeting an old layout and logs so.
+/// [`Editor::set_layout`] refuses, is a *changed* build meeting an old layout
+/// and logs so. A tree merely **short** a pane is not one of those since §6 M61
+/// — closing a pane is a thing an operator asks for, and a session that
+/// reopened every pane it was left without would be ignoring the request.
 pub fn restore(editor: &mut Editor, path: &Path) {
     let Some(root) = std::fs::read_to_string(path).ok().and_then(|t| decode(&t)) else {
         return;
@@ -276,6 +279,29 @@ mod tests {
         std::fs::write(&bad, "tabs 0 1 nosuchpane").unwrap();
         restore(&mut editor, &bad);
         assert_eq!(editor.layout(), &default);
+    }
+
+    /// A pane the operator closed stays closed across the file (§6 M61). The
+    /// arm that matters is the *second* session: before this, a short tree was
+    /// refused on the way back in, so the editor forgot every close.
+    #[test]
+    fn a_closed_pane_survives_the_file() {
+        let path = std::path::Path::new("target/gg-editor-tests/closed.layout");
+        let mut first = Editor::new(None);
+        first.place((1280, 720), 1.0);
+        first.toggle_pane(Pane::Agent);
+        first.toggle_pane(Pane::Assets);
+        remember(&first, path);
+        assert!(!encode(first.layout()).contains("agent"));
+
+        let mut second = Editor::new(None);
+        second.place((1280, 720), 1.0);
+        restore(&mut second, path);
+        assert_eq!(second.layout(), first.layout());
+        // And it is asked back the same way it went, in the session that
+        // inherited the file rather than the one that made it.
+        second.toggle_pane(Pane::Agent);
+        assert!(encode(second.layout()).contains("agent"));
     }
 
     /// The names are the pane titles, so a file is legible and a renamed pane
