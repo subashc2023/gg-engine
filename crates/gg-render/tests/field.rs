@@ -207,6 +207,9 @@ fn a_field_walked_along_a_corridor_is_the_field_gathered_where_it_stopped() {
     cvars::AMBIENT.set_float(AMBIENT);
     cvars::DITHER.set_float(0.0);
     cvars::GI_RATE.set_int(0);
+    // Stated rather than inherited (§6 M71 turned the default off): a test whose
+    // whole subject is the grid cannot take "is there a field" from a knob.
+    cvars::GI.set_bool(true);
     // Long on x, so x anchors and y and z stay fitted to the corridor: the mixed
     // case, which is what a level actually is.
     let long = 160.0;

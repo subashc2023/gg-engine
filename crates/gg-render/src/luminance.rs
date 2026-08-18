@@ -217,7 +217,7 @@ fn log2(x: f32) -> f32 {
 
 /// IEEE-754 binary16 → `f32`. Bit surgery: both formats put the mantissa at the
 /// bottom, so a normal value is a bias swap and a 13-bit shift.
-fn f16_to_f32(bits: u16) -> f32 {
+pub(crate) fn f16_to_f32(bits: u16) -> f32 {
     let sign = u32::from(bits & 0x8000) << 16;
     let exponent = u32::from((bits >> 10) & 0x1f);
     let mantissa = u32::from(bits & 0x3ff);

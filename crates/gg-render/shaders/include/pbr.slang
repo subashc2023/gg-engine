@@ -1074,6 +1074,29 @@ float screen_occlusion(Frame frame, float2 pixel, Texture2D<float4> textures[])
 // reason, so the two are interchangeable at the one place they are chosen
 // between. The channel texels are `(c_y, c_z, c_x, c_0)`, `sh_basis`'s own order
 // with the constant last, which is what `probe.slang` writes.
+//
+// # What four coefficients cost, measured (§6 M70)
+//
+// The kernel this reconstructs with is not `max(0, cos)` but its band-1 truncation,
+// which the factors above make `0.25 + 0.5 cos` — **negative for everything more than
+// 120 degrees off the normal**. So light arriving from behind a surface subtracts from
+// its irradiance, and that cancels exactly only when the light behind is isotropic:
+// `∫(0.25 - 0.5|cos|) dω` over a hemisphere is zero.
+//
+// What breaks the cancellation is this renderer being right about something else. The
+// diffuse lobe is scaled by `1 - Ess(n·v)` (§6 M33), so a floor is dimmer seen at a
+// grazing angle than seen from above — and a probe over that floor records the
+// difference, whose bright half lands under the kernel's negative lobe. `gg-tools
+// bounce --energy` is where the size of it is: a flat slab under a uniform sky, whose
+// irradiance is `pi * L` at every point by construction, reads **2.9 % short**, and
+// the same slab painted black reads **1.0000 exactly**. Nothing else in the field
+// moves it — not the spacing, the gather's resolution, the burial slope, the distance
+// tile or the sky's level.
+//
+// One more band would take the antipode from -0.25 to +0.06. It is not here because
+// nine coefficients a channel is 2.5x this atlas *and* 2.5x the projection — every
+// texel of the record runs `probe.slang`'s whole gather loop — for three per cent of
+// a term that is itself a fraction of most frames.
 float3 probe_irradiance(Texture2D<float4> sh_image, uint2 texel, float3 normal)
 {
     int3 at = int3(int2(texel), 0);

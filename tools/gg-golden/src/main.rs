@@ -302,6 +302,13 @@ const SCENES: &[Scene] = &[
         // to catch is *the wrong environment winning*, and one sky standing in
         // for another is a whole-frame level shift long before it is a
         // structural one.
+        //
+        // Since §6 M72 the blend it grades is the **shading's** alone: the
+        // background is the environment at infinity, so the room's panorama
+        // reaches the balls and the floor and no longer paints the sky behind
+        // them. The reference before that carried a ghost of an interior over an
+        // open sky, in a scene whose room has no walls at all — which is the
+        // defect stated as a picture.
         policy: Policy {
             tolerance: 4,
             max_diff_pixels: 512,

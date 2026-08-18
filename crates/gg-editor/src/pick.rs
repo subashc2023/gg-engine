@@ -246,28 +246,72 @@ pub(crate) const EDGES: [(usize, usize); 12] = [
     (3, 7),
 ];
 
-/// The nearest [`Renderable`] `ray` hits, or `None`.
+/// The nearest placement `ray` hits, or `None`.
 ///
 /// Ties go to the **lowest entity index**, on [`Eye::of`]'s reasoning and not as
 /// a formality: two boxes at the same distance is what a duplicate is, and
 /// iteration order is archetype order, so without this the answer would move
 /// when an unrelated component was added to one of them.
 ///
+/// # What a light is hit-tested as (§6 M72)
+///
+/// Not its range. A lamp's placement box *is* its reach ([`crate::place`]), and
+/// a ray entering a six-metre sphere would select the lamp over every box
+/// inside it — clicking a wall in a lit room would select the light. So a
+/// lamp and a volume are tested against a **screen-constant pad** at their
+/// centre instead: `handle` metres, sized off the same
+/// [`Lens::metres_per_unit`] the gizmo's arms are, which is what makes a marker
+/// four pixels across clickable at four pixels across however far away it is.
+/// The depth compared against the bodies is then the marker's own, so the
+/// arbitration between the two remains one number.
+///
 /// # Errors
 ///
 /// `None` if the world refuses the query, which one read alone cannot cause.
-pub(crate) fn nearest(world: &gg_ecs::World, ray: &Ray) -> Option<gg_ecs::Entity> {
-    let query = gg_ecs::Query::<&Renderable>::new().ok()?;
+pub(crate) fn nearest(
+    world: &gg_ecs::World,
+    ray: &Ray,
+    lens: &Lens,
+    height: f64,
+) -> Option<gg_ecs::Entity> {
     let mut best: Option<(f64, u32, gg_ecs::Entity)> = None;
-    world.each_ref(&query, |entity, box_: &Renderable| {
-        let Some(t) = ray.hits(box_) else { return };
+    let mut take = |t: f64, entity: gg_ecs::Entity| {
         let index = entity.index();
         if best.is_none_or(|(far, other, _)| t < far || (t == far && index < other)) {
             best = Some((t, index, entity));
         }
+    };
+    crate::place::each(world, &mut |entity, kind, box_| match kind {
+        crate::place::Kind::Body => {
+            if let Some(t) = ray.hits(&box_) {
+                take(t, entity);
+            }
+        }
+        crate::place::Kind::Sun => {}
+        _ => {
+            let (_, depth) = lens.project(box_.position);
+            if depth < lens.near {
+                return;
+            }
+            let pad = lens.metres_per_unit(depth, height) * HANDLE_PAD;
+            let mark = Renderable {
+                half_extent: sim::Vec3::splat(pad as f32),
+                rotation: sim::DQuat::IDENTITY,
+                ..box_
+            };
+            if let Some(t) = ray.hits(&mark) {
+                take(t, entity);
+            }
+        }
     });
     best.map(|(_, _, entity)| entity)
 }
+
+/// Half the world size of a marker's hit pad, in logical units of pane height —
+/// the same screen space [`crate::marker`] draws the cross in, a little wider,
+/// because what an operator aims at is a cross and a target exactly as big as
+/// the drawn one is a target that is missed.
+const HANDLE_PAD: f64 = 6.0;
 
 #[cfg(test)]
 mod tests {
@@ -280,6 +324,13 @@ mod tests {
 
     fn lens(aspect: f64) -> Lens {
         Lens::new(Eye::ORIGIN, FOV, aspect, NEAR)
+    }
+
+    /// `nearest` through the same camera the rays above are built with. The
+    /// pane height is the marker pads' scale and nothing else reads it, so one
+    /// number serves every case here.
+    fn nearest(world: &gg_ecs::World, ray: &Ray) -> Option<gg_ecs::Entity> {
+        super::nearest(world, ray, &lens(1.0), 720.0)
     }
 
     fn box_at(x: f64, y: f64, z: f64) -> Renderable {
@@ -466,6 +517,52 @@ mod tests {
         world.insert(behind, box_at(0.0, 0.0, 5.0)).unwrap();
         let ray = lens(1.0).ray((0.5, 0.5));
         assert_eq!(nearest(&world, &ray), None);
+    }
+
+    /// A lamp is clicked where it *is*, not everywhere it reaches (§6 M72).
+    ///
+    /// The failure this exists to refuse is the obvious implementation: a lamp's
+    /// placement box is its range, so testing the ray against it would mean
+    /// every click inside a lit room selecting the light — the box is six metres
+    /// wide and everything the operator wants is inside it. The screen-constant
+    /// pad is what makes the two comparable, and the body here is deliberately
+    /// *further away* than the lamp's near face so the wrong answer would also
+    /// be the nearer one.
+    #[test]
+    fn a_lamp_is_picked_at_its_marker_and_not_across_its_range() {
+        use gg_ecs::boundary::Light;
+
+        let mut world = gg_ecs::World::new();
+        world.register::<Renderable>().unwrap();
+        world.register::<Light>().unwrap();
+        let lamp = world.spawn();
+        world
+            .insert(
+                lamp,
+                Light::point(sim::DVec3::new(0.0, 0.0, -10.0), 0x00ff_ffff, 5.0, 6.0),
+            )
+            .unwrap();
+        let body = world.spawn();
+        world.insert(body, box_at(2.0, 0.0, -8.0)).unwrap();
+
+        let lens = lens(1.0);
+        let aim = |at: sim::DVec3| lens.ray(lens.project(at).0);
+        assert_eq!(
+            nearest(&world, &aim(sim::DVec3::new(2.0, 0.0, -8.0))),
+            Some(body),
+            "the click is on the box, and the lamp's range covers it"
+        );
+        assert_eq!(
+            nearest(&world, &aim(sim::DVec3::new(0.0, 0.0, -10.0))),
+            Some(lamp),
+            "and the lamp is still reachable, at its own marker"
+        );
+        // A hand's width off it in world metres is a long way in pad-widths, so
+        // the pad is a pad and not the range under another name.
+        assert_eq!(
+            nearest(&world, &aim(sim::DVec3::new(1.0, 0.0, -10.0))),
+            None
+        );
     }
 
     /// A click into empty sky hits nothing — the case that clears a selection,

@@ -308,6 +308,16 @@ pub static AO_FALLOFF: CVar = CVar::new_float("r.ao_falloff", 1.0, "occlusion fa
 /// box is there to remove.
 pub static AO_BLUR: CVar = CVar::new_bool("r.ao_blur", true, "denoise the occlusion target");
 
+/// Which per-pixel index pair the occlusion pass rotates and offsets by: 0 none,
+/// 1 `(x+y, x+2y)`, 2 `(x+y, x-y)`.
+///
+/// Zero is the control rather than a mode anyone ships — the question "how much
+/// of this defect is the pattern at all" has no answer without it, and §6 M71
+/// spent two wrong hypotheses before asking it. The other two differ in whether
+/// the tap-offset index is *balanced*: see `ao.slang`, and `gg-tools ao
+/// --crease` for the sweep the default is read off.
+pub static AO_PATTERN: CVar = CVar::new_int("r.ao_pattern", 1, "occlusion's per-pixel index pair");
+
 /// Which of the frame's intermediates is shown instead of the picture (§6 M59).
 ///
 /// An index into [`DEBUG_VIEWS`], where 0 is off. An index rather than a name
@@ -355,7 +365,21 @@ pub const DEBUG_VIEWS: &[&str] = &[
 /// milestone. That is what makes the A/B in `gg-tools bounce` one binary
 /// (§6 M32's argument for `r.shadow_cull`) — and what a scene blessed before M36
 /// still renders.
-pub static GI: CVar = CVar::new_bool("r.gi", true, "gather bounced light from the scene itself");
+///
+/// **Off by default since §6 M71, and that is a judgement rather than a
+/// measurement.** The numbers favour the field and always have: `gg-tools
+/// bounce` puts the authored volumes +0.152 too bright on a room's dark half and
+/// -0.087 too dark on its bright one, against a field that is 2.9 % short of
+/// energy and wrong in no bucket by that much. What the numbers do not grade is
+/// three milestones of reports about how it *looks* — chevrons on a flat wall
+/// (M68), facets a `r.gi_moments` bump subdivides rather than removes (M69), and
+/// a shortfall M70 attributed to the four coefficients a probe stores and priced
+/// three fixes for, all of which were declined. A term that is more accurate on
+/// average and visibly structured in place is worse than one that is neither,
+/// and the operator's call is that the fancy term waits until the plain ones are
+/// right. Nothing is deleted: `r.gi 1` is the field, every instrument that grades
+/// it still does, and the residuals stay named.
+pub static GI: CVar = CVar::new_bool("r.gi", false, "gather bounced light from the scene itself");
 
 /// Metres between probes.
 ///
@@ -488,6 +512,24 @@ pub static GI_RATE: CVar = CVar::new_int("r.gi_rate", 16, "probes gathered per f
 /// which is the scene convolved with a cosine lobe, so it is a far smaller
 /// number than a shadow map's: [`GI_FACE`] trades against nothing visible until
 /// a small bright thing (a lamp, a window) falls between samples.
+///
+/// **Swept at last in §6 M70**, against `gg-tools bounce --energy`'s slab, whose truth
+/// is 1.0 by construction — and the sweep says the argument above is right and the
+/// default is one row past where it stops paying:
+///
+///   face | samples | quadrature |  field | short | vs sum
+///      4 |      96 |    +1.53 % | 0.9784 | 2.2 % |  3.7 %
+///      8 |     384 |    +0.38 % | 0.9729 | 2.7 % |  3.1 %   (shipped)
+///     16 |    1536 |    +0.10 % | 0.9715 | 2.9 % |  2.9 %
+///     32 |    6144 |    +0.02 % | 0.9711 | 2.9 % |  2.9 %
+///
+/// The `quadrature` column is why the sweep needed no reference renderer and why the
+/// `short` column alone would have misled: `probe_face_solid_angle` is a midpoint rule
+/// on the gnomonic Jacobian, it **over**-counts, and an SH projection is not
+/// normalized by its own measure — so the coarse rows were being flattered by exactly
+/// the amount they were wrong. Corrected (`vs sum`), the error is flat from 8 upward,
+/// and what is left is the record's four coefficients rather than its sampling
+/// (`probe_irradiance`).
 pub static GI_FACE: CVar = CVar::new_int("r.gi_face", 8, "probe face edge, texels");
 
 /// Octahedral edge of a probe's distance tile.
@@ -945,6 +987,7 @@ pub fn register() -> Result<(), CVarError> {
         &AO_FALLOFF,
         &AO_BIAS,
         &AO_BLUR,
+        &AO_PATTERN,
         &DEBUG_VIEW,
         &DEBUG_SCALE,
         &GI,

@@ -86,6 +86,7 @@ pub static gg_render::cvars::AO_BIAS: gg_core::cvar::CVar
 pub static gg_render::cvars::AO_BLUR: gg_core::cvar::CVar
 pub static gg_render::cvars::AO_FALLOFF: gg_core::cvar::CVar
 pub static gg_render::cvars::AO_INTENSITY: gg_core::cvar::CVar
+pub static gg_render::cvars::AO_PATTERN: gg_core::cvar::CVar
 pub static gg_render::cvars::AO_RADIUS: gg_core::cvar::CVar
 pub static gg_render::cvars::AO_SLICES: gg_core::cvar::CVar
 pub static gg_render::cvars::AO_STEPS: gg_core::cvar::CVar
@@ -231,8 +232,10 @@ pub struct gg_render::OffscreenFrame
 pub gg_render::OffscreenFrame::dump: alloc::string::String
 pub gg_render::OffscreenFrame::order: alloc::vec::Vec<alloc::string::String>
 pub gg_render::OffscreenFrame::pixels: alloc::vec::Vec<u8>
+pub gg_render::OffscreenFrame::radiance: alloc::vec::Vec<f32>
 pub struct gg_render::OffscreenRenderer
 impl gg_render::OffscreenRenderer
+pub fn gg_render::OffscreenRenderer::capture_radiance(&mut self, bool)
 pub fn gg_render::OffscreenRenderer::cluster_load(&self) -> gg_render::ClusterLoad
 pub fn gg_render::OffscreenRenderer::device(&self) -> &gg_rhi::device::DeviceReport
 pub fn gg_render::OffscreenRenderer::draw_counts(&self) -> (usize, usize)

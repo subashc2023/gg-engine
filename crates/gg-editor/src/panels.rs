@@ -822,6 +822,7 @@ impl Editor {
         // Nothing is plumbed between them to say so — the router's capture is
         // what keeps the pane from reporting a click during a drag (§4.9).
         self.pick(world, frame, view, &lens);
+        self.markers(world, view, &lens);
         self.mark(world, view, &lens);
         self.gizmo(world, frame, view, &lens);
         let tag = match frame.play {
@@ -1046,7 +1047,7 @@ impl Editor {
             f64::from((px - view.x) / view.w),
             f64::from((py - view.y) / view.h),
         );
-        self.selected = crate::pick::nearest(world, &lens.ray(at));
+        self.selected = crate::pick::nearest(world, &lens.ray(at), lens, f64::from(view.h));
         // The lane is an offset into whatever was selected before, so it cannot
         // survive the selection moving — including to nothing.
         self.lane = None;

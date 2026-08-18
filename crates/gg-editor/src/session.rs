@@ -134,6 +134,17 @@ pub mod aim {
         )))
     }
 
+    /// The centre of the game pane, inside the border `panels::viewport` draws.
+    ///
+    /// The one aiming point here that is a place in the *world* rather than a
+    /// control: what is under it is whatever the camera happens to be looking
+    /// at, so a script using this is asserting about the scene and not about the
+    /// layout (§6 M72).
+    #[must_use]
+    pub fn viewport(editor: &Editor) -> Option<(f32, f32)> {
+        Some(centre(editor.pane_body(Pane::Viewport)?.inset(1.0)))
+    }
+
     /// The `i`-th button in the tree's header, counted from the right: `>` is 0,
     /// `<` is 1, then delete, duplicate and spawn (§6 M15.4 item 5).
     fn head(editor: &Editor, i: usize) -> Option<(f32, f32)> {

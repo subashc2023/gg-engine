@@ -69,6 +69,7 @@ mod marker;
 pub mod panels;
 pub mod persist;
 mod pick;
+mod place;
 pub mod project;
 pub mod scan;
 pub mod session;
@@ -915,6 +916,7 @@ pub fn register() -> Result<(), gg_core::cvar::CVarError> {
         &camera::SENSITIVITY,
         &camera::INVERT,
         &panels::LEGEND,
+        &marker::MARKERS,
     ])
 }
 

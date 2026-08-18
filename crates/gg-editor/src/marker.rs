@@ -21,6 +21,7 @@
 //! projects to a coordinate whose line would be stepped for as long as it took.
 
 use crate::pick::{EDGES, Lens, corners};
+use crate::place;
 use crate::{ACCENT, ANGLES, Editor, PICKED, STEPS, Tool};
 use gg_ecs::boundary::Renderable;
 use gg_math::sim;
@@ -30,6 +31,70 @@ use gg_ui::draw::{DrawList, Rect};
 /// How thick an outline's edge is, in device pixels per unit of UI scale — so it
 /// thickens with the panels rather than thinning into invisibility at 4K.
 const STROKE: f32 = 1.0;
+
+/// Chords in a lamp's range circle. Fixed rather than adaptive — see
+/// [`Editor::circle`] — and 32 is where a circle four hundred pixels across
+/// stops reading as a polygon.
+const CIRCLE: usize = 32;
+
+/// Half the arm of an unselected marker's cross, in logical units. Small: there
+/// may be one of these per light in the level, and the job is "there is one
+/// here", not "read this".
+const MARK: f32 = 4.0;
+
+/// Draw the markers for placements with no geometry — lights and environment
+/// volumes (§6 M72).
+///
+/// A knob for [`crate::panels::LEGEND`]'s reason and not a second policy: these
+/// are drawn *into* the picture, and a screenshot or a look at a dark corner
+/// wants them gone without closing the pane. On by default, because the report
+/// that built them was about not being able to find a light. Not `recorded` —
+/// it moves no click and declares no widget, and the pick reads the world
+/// rather than what was drawn, so a session recorded with markers off replays
+/// the same selections with them on.
+pub(crate) static MARKERS: gg_core::cvar::CVar = gg_core::cvar::CVar::new_bool(
+    "d.editor_markers",
+    true,
+    "draw markers for lights and environment volumes",
+);
+
+/// Half of `ink`'s colour at the same alpha — a second line of the same thing,
+/// read as further off rather than as a different subject.
+///
+/// Arithmetic on the packed bytes and not a blend against the background: the
+/// marker is drawn over the game's picture, and what is behind it is not this
+/// crate's to know.
+fn dim(ink: u32) -> u32 {
+    (ink & 0xff00_0000) | ((ink >> 1) & 0x007f_7f7f)
+}
+
+/// The viewport as the pixel rectangle a marker is drawn into, and the camera
+/// it is drawn through.
+///
+/// One value rather than three arguments threaded through six signatures, and
+/// it carries [`Pane::at`] so that the projection every one of them performs is
+/// written once. The lens rides along because it is never separable from the
+/// rectangle: a pane position is a projection, and a projection needs both.
+#[derive(Clone, Copy)]
+struct Pane<'a> {
+    bounds: Rect,
+    scale: f32,
+    lens: &'a Lens,
+}
+
+impl Pane<'_> {
+    /// Where `point` lands in pixels, or `None` for a point at or behind the
+    /// near plane — which has no position on the pane at all, and whose
+    /// projection is a division by a depth approaching zero.
+    fn at(self, point: sim::DVec3) -> Option<(f32, f32)> {
+        let (uv, depth) = self.lens.project(point);
+        let on = (
+            self.bounds.x + uv.0 as f32 * self.bounds.w,
+            self.bounds.y + uv.1 as f32 * self.bounds.h,
+        );
+        (depth >= self.lens.near).then_some(on)
+    }
+}
 
 /// How long an axis handle is, in logical units — a screen length, not a world
 /// one ([`Lens::metres_per_unit`]).
@@ -96,6 +161,10 @@ pub(crate) struct Gizmo {
     /// Integer, for [`crate::camera`]'s reason: the differences accumulate
     /// exactly, so a replayed drag lands where the recorded one did.
     from: (i32, i32),
+    /// Which component the box came out of, held for the drag rather than
+    /// re-resolved per tick: a drag that changed kind mid-gesture would write
+    /// the last tick's metres into a different field.
+    kind: place::Kind,
     /// The whole box as it was then. Every tick writes `origin + quantized`
     /// rather than adding to the last one, so a drag out and back lands exactly
     /// where it started and a slow drag and a fast one over the same distance
@@ -109,67 +178,258 @@ pub(crate) struct Gizmo {
 }
 
 impl Editor {
-    /// Outline the selection inside `view`, if it has a box to outline.
+    /// Outline the selection inside `view`, whatever component put it there.
     ///
-    /// Silent for a selection that is not [`Renderable`] — a tree row may name
-    /// any entity, and most of them have no shape at all. Drawn in every play
-    /// state, because the point of it while the game runs is watching the thing
-    /// you selected move.
+    /// Silent for a selection with no placement at all — a tree row may name any
+    /// entity, and a `Prefs` is nowhere. Drawn in every play state, because the
+    /// point of it while the game runs is watching the thing you selected move.
     ///
-    /// [`Renderable`]: gg_ecs::boundary::Renderable
+    /// What is drawn is [`place::Kind`]'s business and not this one's: a body
+    /// and a volume are boxes, a lamp is the **sphere of its own range** (§6
+    /// M72) and a sun is an arrow, because the question an operator has about
+    /// each is a different question.
     pub(crate) fn mark(&mut self, world: &gg_ecs::World, view: Rect, lens: &Lens) {
         let Some(entity) = self.selected else { return };
-        let Some(box_) = world.get::<gg_ecs::boundary::Renderable>(entity) else {
+        let Some((kind, box_)) = place::of(world, entity) else {
             return;
         };
-        let corners = corners(box_);
-        // Cut to the view before anything is stepped, and in *pixels*, which is
-        // the space the steps are in.
+        let Some(pane) = self.pane(view, lens) else {
+            return;
+        };
+        // The list is already inside `Editor::tick`'s fit transform, so this
+        // undoes it exactly as `in_pixels` and `text` do.
+        self.list.push_transform((0.0, 0.0), 1.0 / pane.scale);
+        self.shape(world, entity, kind, &box_, pane, ACCENT);
+        if !matches!(kind, place::Kind::Sun) {
+            // The centre, so a box too small or too far to have a readable
+            // outline is still visibly the selected one. Two pixels, in the
+            // tree's own selected colour.
+            if let Some((x, y)) = pane.at(box_.position) {
+                let dot = Rect::new(
+                    x - pane.scale,
+                    y - pane.scale,
+                    pane.scale * 2.0,
+                    pane.scale * 2.0,
+                );
+                self.list.rect(dot.intersect(&pane.bounds), PICKED);
+            }
+        }
+        self.list.pop_transform();
+    }
+
+    /// Every placement in the world that has no geometry of its own, drawn
+    /// where it is (§6 M72).
+    ///
+    /// **Always, not only when selected**, which is the whole point: a light you
+    /// have to select to see is a light you have to find first. Small and in the
+    /// thing's own colour — a lamp's marker is the colour it emits, so four
+    /// lamps in a room are four distinguishable crosses rather than four
+    /// identical ones.
+    ///
+    /// Bodies are skipped: they are already in the picture, and a cross on every
+    /// box in the level is not a marker, it is a texture.
+    pub(crate) fn markers(&mut self, world: &gg_ecs::World, view: Rect, lens: &Lens) {
+        if !MARKERS.bool() {
+            return;
+        }
+        let Some(pane) = self.pane(view, lens) else {
+            return;
+        };
+        let selected = self.selected;
+        let mut found: Vec<(gg_ecs::Entity, place::Kind, gg_ecs::boundary::Renderable)> =
+            Vec::new();
+        place::each(world, &mut |entity, kind, box_| {
+            // The selection is drawn by `mark` at full strength, and drawing it
+            // twice would leave the dim pass on top of the bright one.
+            if matches!(kind, place::Kind::Body) || Some(entity) == selected {
+                return;
+            }
+            found.push((entity, kind, box_));
+        });
+        if found.is_empty() {
+            return;
+        }
+        self.list.push_transform((0.0, 0.0), 1.0 / pane.scale);
+        for (entity, kind, box_) in found {
+            let ink = 0xff00_0000 | box_.color;
+            match kind {
+                // A sun's arrow *is* its marker — it has no position to cross —
+                // and a volume's box is drawn in full, because "where does the
+                // light in this room stop" is the question a volume exists to
+                // answer and a level holds a handful of them. A lamp gets the
+                // cross alone: its shape is three circles of 32 chords, which is
+                // an outline worth drawing for the one that was asked about and
+                // not for every light in the level.
+                place::Kind::Sun | place::Kind::Volume => {
+                    self.shape(world, entity, kind, &box_, pane, ink);
+                }
+                _ => self.cross(box_.position, pane, ink),
+            }
+        }
+        self.list.pop_transform();
+    }
+
+    /// The outline a placement of `kind` draws, in `ink`.
+    ///
+    /// Inside the caller's pixel transform, so every coordinate here is already
+    /// in device pixels.
+    fn shape(
+        &mut self,
+        world: &gg_ecs::World,
+        entity: gg_ecs::Entity,
+        kind: place::Kind,
+        box_: &gg_ecs::boundary::Renderable,
+        pane: Pane,
+        ink: u32,
+    ) {
+        match kind {
+            place::Kind::Body => {
+                let corners = corners(box_);
+                for (a, b) in EDGES {
+                    self.edge(corners[a], corners[b], pane, ink);
+                }
+            }
+            // Two boxes, and the second is the point of drawing a volume at all:
+            // `Sky::fade` is metres *outside* the box over which the environment
+            // gives way, so the inner one is where this room's light is entirely
+            // its own and the outer one is where it stops mattering. An operator
+            // asking "why does the light change here" is asking about the band
+            // between them, and one box cannot show a band.
+            place::Kind::Volume => {
+                let inner = corners(box_);
+                for (a, b) in EDGES {
+                    self.edge(inner[a], inner[b], pane, ink);
+                }
+                let fade = world
+                    .get::<gg_ecs::boundary::Sky>(entity)
+                    .map_or(0.0, |sky| sky.fade);
+                if fade > 0.0 {
+                    let band = Renderable {
+                        half_extent: box_.half_extent + sim::Vec3::splat(fade),
+                        ..*box_
+                    };
+                    let outer = corners(&band);
+                    for (a, b) in EDGES {
+                        self.edge(outer[a], outer[b], pane, dim(ink));
+                    }
+                }
+            }
+            // Three great circles rather than a cube of the same size: a light
+            // falls off to a *radius*, and a box drawn at that radius overstates
+            // its corners by the root of three — which is exactly the operator's
+            // question ("does this reach the wall?") answered wrongly.
+            place::Kind::Lamp => {
+                let reach = f64::from(box_.half_extent.x);
+                for (u, v) in [
+                    (sim::DVec3::X, sim::DVec3::Y),
+                    (sim::DVec3::Y, sim::DVec3::Z),
+                    (sim::DVec3::Z, sim::DVec3::X),
+                ] {
+                    self.circle(box_.position, reach, u, v, pane, ink);
+                }
+            }
+            // The direction it travels, from the world origin, and a cross at
+            // the far end so which way it points is legible when the arrow is
+            // nearly end-on. A sun is not anywhere; the origin is a convention
+            // and the *slope* is the information.
+            place::Kind::Sun => {
+                let Some(light) = world.get::<gg_ecs::boundary::Light>(entity) else {
+                    return;
+                };
+                let travel = sim::DVec3::new(
+                    f64::from(light.direction.x),
+                    f64::from(light.direction.y),
+                    f64::from(light.direction.z),
+                );
+                let Some(unit) = travel.try_normalize() else {
+                    return;
+                };
+                let tip = unit * place::SUN_ARM;
+                self.edge(-tip, tip, pane, ink);
+                self.cross(tip, pane, ink);
+            }
+        }
+    }
+
+    /// One world-space segment, cut at the near plane and stepped onto the pane.
+    fn edge(&mut self, from: sim::DVec3, to: sim::DVec3, pane: Pane, ink: u32) {
+        let (mut from, mut to) = (from, to);
+        let lens = pane.lens;
+        let (depth_a, depth_b) = (lens.project(from).1, lens.project(to).1);
+        // Both ends behind the near plane: the edge is not on the pane at all.
+        // One end behind it: cut there, or the projection divides by a depth
+        // approaching zero and the edge becomes a stripe.
+        if depth_a < lens.near && depth_b < lens.near {
+            return;
+        }
+        if depth_a < lens.near {
+            from = lens.clip_near(from, to);
+        } else if depth_b < lens.near {
+            to = lens.clip_near(to, from);
+        }
+        let (Some(a), Some(b)) = (pane.at(from), pane.at(to)) else {
+            return;
+        };
+        segment(&mut self.list, pane.bounds, a, b, pane.scale, ink);
+    }
+
+    /// A circle of `radius` about `centre`, in the plane the unit vectors `u`
+    /// and `v` span, as [`CIRCLE`] chords.
+    ///
+    /// Chords and not an arc primitive for [`segment`]'s reason — `DrawList` has
+    /// rectangles — and the count is fixed rather than adaptive because a
+    /// circle that gains segments as the camera approaches it is a circle that
+    /// shimmers while an operator walks.
+    fn circle(
+        &mut self,
+        centre: sim::DVec3,
+        radius: f64,
+        u: sim::DVec3,
+        v: sim::DVec3,
+        pane: Pane,
+        ink: u32,
+    ) {
+        let step = core::f64::consts::TAU / CIRCLE as f64;
+        let on = |i: usize| {
+            let angle = step * i as f64;
+            // `gg_math::sim` rather than `std`, per §3's ban — this is drawing
+            // and not sim state, and the ban is on the *call* so that no reader
+            // has to work out which.
+            centre + u * (radius * sim::cos(angle)) + v * (radius * sim::sin(angle))
+        };
+        let mut previous = on(0);
+        for i in 1..=CIRCLE {
+            let next = on(i);
+            self.edge(previous, next, pane, ink);
+            previous = next;
+        }
+    }
+
+    /// A small screen-constant cross at a world point — the marker for a thing
+    /// whose whole placement is one position.
+    fn cross(&mut self, at: sim::DVec3, pane: Pane, ink: u32) {
+        let Some((x, y)) = pane.at(at) else { return };
+        let arm = MARK * pane.scale;
+        let bar = STROKE * pane.scale;
+        for rect in [
+            Rect::new(x - arm, y - bar * 0.5, arm * 2.0, bar),
+            Rect::new(x - bar * 0.5, y - arm, bar, arm * 2.0),
+        ] {
+            self.list.rect(rect.intersect(&pane.bounds), ink);
+        }
+    }
+
+    /// The viewport as the pixel rectangle everything above draws into, or
+    /// `None` when it has collapsed to nothing.
+    fn pane<'a>(&self, view: Rect, lens: &'a Lens) -> Option<Pane<'a>> {
         let scale = self.fit.scale;
         let px = |v: f32| v * scale;
         let bounds = Rect::new(px(view.x), px(view.y), px(view.w), px(view.h));
-        if bounds.is_empty() {
-            return;
-        }
-        // The list is already inside `Editor::tick`'s fit transform, so this
-        // undoes it exactly as `in_pixels` and `text` do.
-        self.list.push_transform((0.0, 0.0), 1.0 / scale);
-        for (a, b) in EDGES {
-            let (mut from, mut to) = (corners[a], corners[b]);
-            let (depth_a, depth_b) = (lens.project(from).1, lens.project(to).1);
-            // Both ends behind the near plane: the edge is not on the pane at
-            // all. One end behind it: cut there, or the projection divides by a
-            // depth approaching zero and the edge becomes a stripe.
-            if depth_a < lens.near && depth_b < lens.near {
-                continue;
-            }
-            if depth_a < lens.near {
-                from = lens.clip_near(from, to);
-            } else if depth_b < lens.near {
-                to = lens.clip_near(to, from);
-            }
-            let at = |point| {
-                let (uv, _) = lens.project(point);
-                (
-                    bounds.x + uv.0 as f32 * bounds.w,
-                    bounds.y + uv.1 as f32 * bounds.h,
-                )
-            };
-            segment(&mut self.list, bounds, at(from), at(to), scale, ACCENT);
-        }
-        // The centre, so a box too small or too far to have a readable outline
-        // is still visibly the selected one. Two pixels, in the tree's own
-        // selected colour.
-        let (centre, depth) = lens.project(box_.position);
-        if depth >= lens.near {
-            let (x, y) = (
-                bounds.x + centre.0 as f32 * bounds.w,
-                bounds.y + centre.1 as f32 * bounds.h,
-            );
-            let dot = Rect::new(x - scale, y - scale, scale * 2.0, scale * 2.0);
-            self.list.rect(dot.intersect(&bounds), PICKED);
-        }
-        self.list.pop_transform();
+        (!bounds.is_empty()).then_some(Pane {
+            bounds,
+            scale,
+            lens,
+        })
     }
 
     /// The three axis handles on the selection, and the drag that moves, sizes
@@ -201,14 +461,22 @@ impl Editor {
     ) {
         self.arms = [None; 3];
         let stopped = matches!(frame.play, crate::Play::Stopped);
+        let tool = self.tool;
         let on = self.selected.filter(|_| stopped).and_then(|entity| {
-            let box_ = *world.get::<Renderable>(entity)?;
+            let (kind, box_) = place::of(world, entity)?;
+            // A tool the kind has no field for is refused here rather than at
+            // the write, so no arm is drawn for a gesture that cannot land
+            // (§6 M72) — a lamp and a volume have no rotation, and a sun has no
+            // placement at all.
+            if !kind.takes(tool) {
+                return None;
+            }
             let (centre, depth) = lens.project(box_.position);
             // Behind the camera there is no centre to hang arms off, and the
             // projection there is a division by a depth approaching zero.
-            (depth >= lens.near).then_some((entity, box_, centre, depth))
+            (depth >= lens.near).then_some((entity, kind, box_, centre, depth))
         });
-        let Some((entity, box_, centre, depth)) = on else {
+        let Some((entity, kind, box_, centre, depth)) = on else {
             self.release(world);
             return;
         };
@@ -292,6 +560,7 @@ impl Editor {
         }
         let grab = *self.gizmo.get_or_insert(Gizmo {
             entity,
+            kind,
             axis,
             tool: self.tool,
             from: self.router.pointer().raw(),
@@ -314,10 +583,7 @@ impl Editor {
         }
         let raw = (moved.0 * grab.per_metre.0 + moved.1 * grab.per_metre.1) / along;
         let want = shaped(&grab, raw, self.step);
-        if let Some(target) = world.get_mut::<Renderable>(grab.entity)
-            && *target != want
-        {
-            *target = want;
+        if place::put(world, grab.entity, grab.kind, grab.axis, &want) {
             self.edits += 1;
         }
     }
@@ -329,8 +595,10 @@ impl Editor {
             return;
         };
         // Each tool's own answer to "by how much", because a rotation has no
-        // metres and a resize's metres are not the position's.
-        let by = world.get::<Renderable>(grab.entity).map_or(0.0, |box_| {
+        // metres and a resize's metres are not the position's. Read back through
+        // `place` rather than off `Renderable`, so a lamp's line reports the
+        // range it now has rather than nothing at all.
+        let by = place::of(world, grab.entity).map_or(0.0, |(_, box_)| {
             let component = |v: sim::Vec3| f64::from([v.x, v.y, v.z][grab.axis.min(2)]);
             match grab.tool {
                 Tool::Move => (box_.position - grab.origin.position).length(),
@@ -340,6 +608,7 @@ impl Editor {
         });
         tracing::info!(
             entity = grab.entity.index(),
+            kind = grab.kind.label(),
             tool = grab.tool.label(),
             axis = ["x", "y", "z"][grab.axis.min(2)],
             by,

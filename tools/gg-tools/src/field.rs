@@ -86,6 +86,7 @@ pub fn run(args: &[String]) -> Result<()> {
         // predecessor's refits as stability. `Probes` has no reset and should
         // not grow one for an instrument.
         let mut renderer = OffscreenRenderer::new(EXTENT)?;
+        renderer.capture_radiance(true);
         let trace = walk(&mut renderer, &world, leg)?;
         report(leg.name, &trace);
         if leg.name == traced {
@@ -124,6 +125,7 @@ const SETTLE_CEILING: usize = 256;
 
 fn cost(world: &World) -> Result<()> {
     let mut renderer = OffscreenRenderer::new(COST_EXTENT)?;
+    renderer.capture_radiance(true);
     println!(
         "the field's price — demo 12's room at {}x{}, median of {TIMED} frames\n",
         COST_EXTENT.0, COST_EXTENT.1
@@ -304,12 +306,17 @@ fn frame(
     extracted.append_lights(world)?;
     extracted.cast_shadows(view.caster_reach(extent));
     extracted.append::<Renderable>(world)?;
+    // The **scene attachment** and not the backbuffer (§6 M70): the swing this
+    // module reports is a *relative* change in the room's mean luminance, and the
+    // tonemapper's pedestal exaggerates one of those by `x / (x - 0.04)` — so a
+    // percentage read off the pixels was about 1.4x the swing a radiometer would
+    // measure, at the brightness demo 12's room sits at.
     let pixels = renderer
         .frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?
-        .pixels;
+        .radiance;
     let sum: f64 = pixels
         .chunks_exact(4)
-        .map(|p| f64::from(0.2126 * decode(p[0]) + 0.7152 * decode(p[1]) + 0.0722 * decode(p[2])))
+        .map(|p| f64::from(0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]))
         .sum();
     let (pending, probes) = renderer.field_pending();
     Ok(Frame {
@@ -322,17 +329,6 @@ fn frame(
         events: renderer.field_events(),
         mean: (sum / (pixels.len() / 4) as f64) as f32,
     })
-}
-
-/// sRGB decode — `bounce`'s, restated for that module's reason: the two never
-/// meet at runtime.
-fn decode(code: u8) -> f32 {
-    let e = f32::from(code) / 255.0;
-    if e <= 0.040_45 {
-        e / 12.92
-    } else {
-        sim::powf((e + 0.055) / 1.055, 2.4)
-    }
 }
 
 fn report(name: &str, trace: &[Frame]) {

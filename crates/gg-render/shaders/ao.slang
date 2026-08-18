@@ -26,6 +26,13 @@
 static const uint PROJECTION_PERSPECTIVE = 0u;
 static const uint PROJECTION_ORTHOGRAPHIC = 1u;
 
+// Per-pixel index pairs — `r.ao_pattern`, see `fs_main`. NONE is the control
+// that says how much of a defect the pattern is responsible for at all; a
+// measurement that cannot be switched off is an assertion.
+static const uint PATTERN_NONE = 0u;
+static const uint PATTERN_SHIPPED = 1u;
+static const uint PATTERN_BALANCED = 2u;
+
 struct AoPush
 {
     uint depth_index;    // the prepass depth (or its resolve) in g_textures
@@ -45,6 +52,7 @@ struct AoPush
     uint steps;          // taps along each half-slice
     float falloff;       // radius multiples over which a horizon fades to nothing
     float min_pixels;    // nearest a tap may be taken, in pixels — see `fs_main`
+    uint pattern;        // which per-pixel index pair — PATTERN_*
 }
 
 [[vk::push_constant]]
@@ -134,18 +142,40 @@ float3 to_eye(float3 p)
 // The normal, from the depth buffer rather than from a G-buffer the prepass does
 // not write.
 //
-// The nearer neighbour on each axis is the one differenced, which is what keeps
-// a silhouette from producing a normal that spans two surfaces: at a depth
-// discontinuity one of the two candidates belongs to a different object, and it
-// is always the further one.
+// One of the two one-sided differences on each axis is the surface's and the
+// other may belong to something else, and the whole difficulty is telling which.
+//
+// **By curvature, not by depth difference** (§6 M71). Differencing toward the
+// *nearer* neighbour is the obvious rule and it is wrong in exactly one place,
+// which happens to be the place a normal matters most: at a crease, where a
+// surface seen at a glancing angle meets one seen closer to head-on. The
+// glancing surface's own neighbour is several per cent of the depth away while
+// the head-on surface across the seam is barely any distance at all, so the
+// nearer-neighbour rule reaches *across* the crease and returns a normal
+// belonging to the other wall — and which way it goes flips with the seam's
+// sub-pixel position, so the answer walks as the camera turns. It cost twenty
+// code values along a seam whose truth is a constant, against three for the same
+// seam cast on the CPU, and no sampling knob touched it: `gg-tools ao --crease`.
+//
+// A second difference asks the question that is actually being asked. Three
+// samples on one surface are collinear in view space whatever the angle, so
+// `|2*a1 - a2 - p|` is zero on the co-planar side and is the kink's full size on
+// the side that crosses a crease or a silhouette. Four taps an axis rather than
+// two, which is the price.
 float3 reconstruct_normal(float2 uv, float3 p)
 {
-    float3 right = position_at(uv + float2(push.texel.x, 0.0));
-    float3 left = position_at(uv - float2(push.texel.x, 0.0));
-    float3 down = position_at(uv + float2(0.0, push.texel.y));
-    float3 up = position_at(uv - float2(0.0, push.texel.y));
-    float3 dx = abs(right.z - p.z) < abs(p.z - left.z) ? right - p : p - left;
-    float3 dy = abs(down.z - p.z) < abs(p.z - up.z) ? down - p : p - up;
+    float2 sx = float2(push.texel.x, 0.0);
+    float2 sy = float2(0.0, push.texel.y);
+    float3 right = position_at(uv + sx);
+    float3 left = position_at(uv - sx);
+    float3 down = position_at(uv + sy);
+    float3 up = position_at(uv - sy);
+    float bend_right = abs(2.0 * right.z - position_at(uv + 2.0 * sx).z - p.z);
+    float bend_left = abs(2.0 * left.z - position_at(uv - 2.0 * sx).z - p.z);
+    float bend_down = abs(2.0 * down.z - position_at(uv + 2.0 * sy).z - p.z);
+    float bend_up = abs(2.0 * up.z - position_at(uv - 2.0 * sy).z - p.z);
+    float3 dx = bend_right < bend_left ? right - p : p - left;
+    float3 dy = bend_down < bend_up ? down - p : p - up;
     float3 n = cross(dy, dx);
     float len = length(n);
     if (len < 1e-12)
@@ -279,9 +309,34 @@ float4 fs_main(VOut i) : SV_Target
     // the 4x4 tile: all sixteen pairs still occur exactly once, so `fs_blur`
     // stays the unbiased average it claims to be, and neither index is constant
     // along either axis. `pattern_is_a_bijection` is the check.
+    //
+    // **A bijection is not enough, and `(x + 2y)` is not balanced** (§6 M71).
+    // The box is unbiased for a *constant* field because all sixteen pairs occur
+    // once; a crease is not a constant field, and what a 4x4 average of a
+    // gradient owes is that each index's four residue classes have the same
+    // centroid inside the tile. `(x + y)` does: every class means x = 1.5 and
+    // y = 1.5. `(x + 2y)` does not — its classes sit at mean x of 1, 2, 1, 2 —
+    // so a signal with an x gradient couples into the tap phase and survives the
+    // box. `(x - y)` is the main diagonal and is balanced on both axes; the
+    // price is that x+y and x-y share a parity, so eight of the sixteen pairs
+    // occur twice rather than all sixteen once. Which of those two prices is
+    // worth paying is `gg-tools ao --crease`'s `r.ao_pattern` sweep and not an
+    // argument.
     uint2 pixel = uint2(i.pos.xy);
-    float rotation = float((pixel.x + pixel.y) & 3u) * (0.25 * 3.14159265 / slices);
-    float offset = float((pixel.x + 2u * pixel.y) & 3u) * 0.25;
+    uint rotation_index = 0u;
+    uint offset_index = 0u;
+    if (push.pattern == PATTERN_SHIPPED)
+    {
+        rotation_index = (pixel.x + pixel.y) & 3u;
+        offset_index = (pixel.x + 2u * pixel.y) & 3u;
+    }
+    else if (push.pattern == PATTERN_BALANCED)
+    {
+        rotation_index = (pixel.x + pixel.y) & 3u;
+        offset_index = (pixel.x - pixel.y) & 3u;
+    }
+    float rotation = float(rotation_index) * (0.25 * 3.14159265 / slices);
+    float offset = float(offset_index) * 0.25;
     for (uint s = 0u; s < push.slices; ++s)
     {
         float phi = (float(s) / slices) * 3.14159265 + rotation;
@@ -365,6 +420,29 @@ float4 fs_main(VOut i) : SV_Target
 // Depth-aware, because a box that crossed a silhouette would drag an occluded
 // crease onto the surface behind it — the halo that makes screen-space AO look
 // like a filter rather than like shading.
+//
+// **The rejection is against the centre's plane, not against its depth** (§6
+// M71). The two are the same test on a surface square to the eye and nothing
+// alike on one seen at a glancing angle: there a neighbour two pixels away on
+// the *same flat wall* is several per cent of the depth further off, so a
+// proportional depth threshold threw it away. What that costs is not a slightly
+// smaller average — it is the box's entire claim. Sixteen taps are an unbiased
+// sample of the sixteen rotations above; some phase-dependent subset of them is
+// a *biased* one, and the bias moves with the sub-pixel position of whatever
+// caused the rejection. Along a crease that leans a fraction of a pixel per row
+// it beats against the 4x4 tile and reads as segments of alternating light and
+// dark marching up the corner as the camera turns.
+//
+// A plane distance would be zero on any flat surface at any angle and the whole
+// depth jump at a silhouette, and that is the fix if this ever grades badly —
+// but it does not. `gg-tools ao --crease` swept it as a knob and the seam's
+// swing is flat from a tolerance of 0.02 upward, *including* the test switched
+// off entirely, with the graded scene's invented occlusion unmoved at 0.0132.
+// So at these framings the box is already complete, the rejection was never
+// firing, and neither the defect above nor any halo below is its doing. It
+// stayed a depth test rather than gaining a plane's eight extra taps for a
+// measurement that did not move. §6 M62's grazing residual therefore stands, and
+// what it now has is an instrument that would catch it.
 [shader("fragment")]
 float4 fs_blur(VOut i) : SV_Target
 {

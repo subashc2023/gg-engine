@@ -868,6 +868,7 @@ impl Renderer {
                     viewport: self.viewport,
                     ui: &ui_draws,
                     readback: None,
+                    radiance: None,
                     luminance,
                 },
             )
@@ -1016,6 +1017,7 @@ impl Renderer {
                 viewport: self.viewport,
                 ui: &ui_draws,
                 readback: None,
+                radiance: None,
                 luminance,
             },
         );
@@ -1046,6 +1048,17 @@ impl Renderer {
 pub struct OffscreenFrame {
     /// RGBA8, tightly packed, `extent.0 * extent.1 * 4` bytes.
     pub pixels: Vec<u8>,
+    /// The same frame in **linear scene radiance** — RGBA `f32`, four per pixel,
+    /// tightly packed — or empty unless [`OffscreenRenderer::capture_radiance`] was
+    /// asked for it (§6 M70).
+    ///
+    /// This is [`Self::pixels`] with the whole display encoding taken off: no
+    /// exposure, no `pbr_neutral`, no antialiasing pass and no eight-bit quantizer.
+    /// An instrument grading a *ratio* of two renders wants this and not those — the
+    /// tonemapper's opening step subtracts a pedestal, so a ratio of code values
+    /// exaggerates every deviation from 1 by `x / (x - 0.04)`, and eight bits put a
+    /// floor of about 1.6 % on the ratio itself at the brightness a dim room sits at.
+    pub radiance: Vec<f32>,
     /// The compiled graph as text (§4.5).
     pub dump: String,
     /// The passes handed to the RHI, in submission order — read off the
@@ -1073,6 +1086,9 @@ pub struct OffscreenRenderer {
     probes: probe::Probes,
     integrate: probe::Integrate,
     readback: BufferHandle,
+    /// The scene attachment's readback and whether a frame declares it (§6 M70).
+    radiance: BufferHandle,
+    capture_radiance: bool,
     extent: (u32, u32),
     content: Option<Content>,
     viewport: Option<Viewport>,
@@ -1129,6 +1145,15 @@ impl OffscreenRenderer {
             size: u64::from(extent.0) * u64::from(extent.1) * 4,
             kind: BufferKind::Readback,
         })?;
+        // Eight bytes a pixel, `SCENE_FORMAT` being `Rgba16F`. Allocated with the
+        // renderer even when nothing asks for it, for the buffer above's reason and
+        // one more: a first frame that allocated it would be the only frame in a
+        // sweep that did, and `bounce`'s rows are compared against each other.
+        let radiance = rhi.create_buffer(&BufferDesc {
+            name: "render.offscreen.radiance",
+            size: u64::from(extent.0) * u64::from(extent.1) * 8,
+            kind: BufferKind::Readback,
+        })?;
         Ok(OffscreenRenderer {
             rhi,
             pass,
@@ -1140,6 +1165,8 @@ impl OffscreenRenderer {
             probes,
             integrate,
             readback,
+            radiance,
+            capture_radiance: false,
             extent,
             content: None,
             viewport: None,
@@ -1147,6 +1174,21 @@ impl OffscreenRenderer {
             #[cfg(feature = "hot-reload")]
             hot: hot::Shaders::new(),
         })
+    }
+
+    /// Ask every following frame to hand back [`OffscreenFrame::radiance`] as well
+    /// as its pixels (§6 M70).
+    ///
+    /// **Off by default, and that is not a performance default.** The copy is one
+    /// declared pass, and a pass declared here lands in the render-graph dump the
+    /// push tier compares — so a golden scene's graph would change for a buffer no
+    /// golden reads. What wants it is an instrument grading a *ratio*: the display
+    /// encoding between the scene attachment and the backbuffer is not linear (the
+    /// tonemapper subtracts a pedestal) and it is not fine (eight bits are worth
+    /// about 1.6 % of the radiance in a dim room), so a ratio taken from the pixels
+    /// is neither the quantity it looks like nor precise enough to be one.
+    pub fn capture_radiance(&mut self, on: bool) {
+        self.capture_radiance = on;
     }
 
     /// As [`Renderer::field_pending`] — and the entry point that needs it, since
@@ -1407,6 +1449,9 @@ impl OffscreenRenderer {
             (frame, att)
         };
         let into = frame.readback_buffer("render.offscreen.readback", self.readback);
+        let radiance_into = self
+            .capture_radiance
+            .then(|| frame.readback_buffer("render.offscreen.radiance", self.radiance));
         // After the attachments, because the atlas's bindless slot does not exist
         // until the graph has acquired it — and before the draw lists, which
         // borrow the pushes this writes (§6 M36).
@@ -1474,6 +1519,7 @@ impl OffscreenRenderer {
                     viewport: self.viewport,
                     ui: &ui_draws,
                     readback: Some(into),
+                    radiance: radiance_into,
                     luminance,
                 },
             )
@@ -1526,8 +1572,35 @@ impl OffscreenRenderer {
             gg_core::zone!("render.readback");
             self.rhi.map_buffer(self.readback)?.to_vec()
         };
+        // `view_extent` and not `self.extent`: a viewport smaller than the frame
+        // writes only its own rectangle, and the rest of the buffer is whatever the
+        // last frame left there. Trimmed rather than returned whole, so a caller
+        // indexing by `y * width + x` cannot be reading a stale row.
+        let radiance = match radiance_into {
+            None => Vec::new(),
+            Some(_) => {
+                gg_core::zone!("render.readback-radiance");
+                let bytes = self.rhi.map_buffer(self.radiance)?;
+                let stride = self.extent.0 as usize;
+                let (w, h) = (view_extent.0 as usize, view_extent.1 as usize);
+                let mut out = Vec::with_capacity(w * h * 4);
+                for y in 0..h {
+                    let row = &bytes[y * stride * 8..][..w * 8];
+                    for texel in row.chunks_exact(8) {
+                        for c in 0..4 {
+                            out.push(luminance::f16_to_f32(u16::from_le_bytes([
+                                texel[c * 2],
+                                texel[c * 2 + 1],
+                            ])));
+                        }
+                    }
+                }
+                out
+            }
+        };
         Ok(OffscreenFrame {
             pixels,
+            radiance,
             dump,
             order,
         })
@@ -1792,17 +1865,36 @@ fn forward_draws<'a>(
     draws
 }
 
-/// One background draw per environment whose volume reaches the camera, empty
+/// One background draw per environment that reaches **the end of a ray**, empty
 /// when the frame has no sky at all — which is what declares the pass out of
 /// existence (§6 M29).
 ///
 /// **Outermost first**, and that ordering is the whole of why this composites
 /// correctly: back-to-front `over` with each environment's *raw* weight is
 /// algebraically the same sum as `ambient_light`'s front-to-back budget with the
-/// spent ones, so the background fades exactly where the shading does. The
-/// budget is still walked innermost-first here, to stop at the same place the
-/// shader's loop stops — an environment the ones inside it have already covered
-/// contributes nothing and does not earn a draw.
+/// spent ones, so the background is the same accumulation the shading performs.
+/// The budget is still walked innermost-first here, to stop at the same place
+/// the shader's loop stops — an environment the ones inside it have already
+/// covered contributes nothing and does not earn a draw.
+///
+/// # Where the weights are evaluated (§6 M72)
+///
+/// At **infinity**, not at the camera. This draw only reaches pixels the
+/// forward pass left alone, and a pixel with no geometry behind it is a ray that
+/// escaped the scene — so what belongs there is the environment out where the
+/// ray ended, and every bounded volume's weight there is zero. Through M71 it
+/// was the camera's own weight, which meant a `Sky` bounded to a room repainted
+/// the sky **visible through that room's opening**: standing in demo 12's
+/// shelter took the sky from `(82, 130, 196)` to `(16, 22, 28)` with nothing
+/// between the eye and it changing, and the tonemapper's pedestal took most of
+/// what was left (§6 M70). A bounded environment is a description of the light
+/// in a place, not a picture of what is beyond it.
+///
+/// The fallback is the case that says why this is not simply `unbounded`: a
+/// world that named *nothing* at infinity has no answer, and rather than a black
+/// frame it gets the walk it had — which is what keeps a fully enclosed level
+/// (`gg-golden`'s `parallax`, one bounded room and no outdoors) rendering as it
+/// did.
 ///
 /// The inverse projection is taken **here**, once per frame on the host, for the
 /// reason `skybox.slang` gives: the alternative is the shader rebuilding it from
@@ -1820,22 +1912,32 @@ fn sky_pushes(
     skies: &[gg_extract::ExtractedSky],
     frame: u64,
 ) -> Vec<skybox_shader::SkyPush> {
-    let mut kept: Vec<(u32, f32)> = Vec::new();
-    let mut budget = 1.0_f32;
-    for (index, sky) in skies.iter().take(gg_extract::MAX_SKY).enumerate() {
-        if budget <= 1e-3 {
-            break;
+    // One walk, twice: at infinity first, and at the camera only if nothing out
+    // there answered. Same loop both times, so the composite's algebra is the
+    // same in the fallback as in the ordinary case.
+    let walk = |at: fn(&gg_extract::ExtractedSky) -> f32| {
+        let mut kept: Vec<(u32, f32)> = Vec::new();
+        let mut budget = 1.0_f32;
+        for (index, sky) in skies.iter().take(gg_extract::MAX_SKY).enumerate() {
+            if budget <= 1e-3 {
+                break;
+            }
+            let raw = at(sky).clamp(0.0, 1.0);
+            let spent = raw * budget;
+            if spent <= 0.0 {
+                continue;
+            }
+            budget -= spent;
+            // The index is the block's, and it is the enumeration's because
+            // `Lighting::resolve` fills the array from this same slice in this
+            // same order — the one coupling that would be silent if it broke.
+            kept.push((index as u32, raw));
         }
-        let raw = weight_at_camera(sky).clamp(0.0, 1.0);
-        let spent = raw * budget;
-        if spent <= 0.0 {
-            continue;
-        }
-        budget -= spent;
-        // The index is the block's, and it is the enumeration's because
-        // `Lighting::resolve` fills the array from this same slice in this same
-        // order — the one coupling that would be silent if it broke.
-        kept.push((index as u32, raw));
+        kept
+    };
+    let mut kept = walk(weight_at_infinity);
+    if kept.is_empty() {
+        kept = walk(weight_at_camera);
     }
     kept.reverse();
     let inverse = render::rows(view_projection.inverse());
@@ -2414,6 +2516,11 @@ struct FramePlan<'a> {
     ui: &'a [DrawSpec<'a>],
     /// Where the finished backbuffer is copied — the offscreen path's present.
     readback: Option<graph::ResourceId>,
+    /// Where the *scene* attachment is copied — the same frame in linear radiance,
+    /// before the tonemapper and before the quantizer (§6 M70). Off unless an
+    /// instrument asked, because a pass declared here appears in every golden
+    /// scene's graph dump and costs a full-frame copy nothing would read.
+    radiance: Option<graph::ResourceId>,
     /// The luminance grid and the buffer it lands in (§6 M11).
     luminance: Option<(graph::ResourceId, graph::ResourceId)>,
 }
@@ -2473,6 +2580,13 @@ fn declare_frame<'a>(
     if let Some(into) = plan.readback {
         declared.push(graph::readback_pass(att.backbuffer, into));
     }
+    // The scene attachment rather than the backbuffer, and that *is* the point: it
+    // holds radiance, and everything between it and the backbuffer is display
+    // encoding — the exposure, `pbr_neutral`, the antialiaser and eight bits.
+    // Declared last so it perturbs no other pass's place in the order.
+    if let Some(into) = plan.radiance {
+        declared.push(graph::readback_pass(att.scene, into));
+    }
     if let Some((grid, into)) = plan.luminance {
         declared.extend(luminance_passes(
             grid,
@@ -2526,6 +2640,17 @@ fn write_lighting(
 /// because everything in `Extracted` is camera-relative.
 fn weight_at_camera(sky: &gg_extract::ExtractedSky) -> f32 {
     sky.weight_at(render::Vec3::ZERO)
+}
+
+/// How much of `sky` applies at the end of a ray that hit nothing (§6 M72).
+///
+/// `weight_at` evaluated infinitely far out, which is a bounded volume's zero
+/// and an unbounded one's 1 — so this is `unbounded` and is written as the
+/// limit rather than as the predicate, because that is the reasoning: a pixel
+/// the forward pass left alone is a ray that reached infinity, and what it
+/// should show is the environment *there*, not the one around the camera.
+fn weight_at_infinity(sky: &gg_extract::ExtractedSky) -> f32 {
+    f32::from(sky.unbounded())
 }
 
 /// The compiled chain a sky names, if the pack holds it and the chain is on the
@@ -3120,6 +3245,7 @@ impl BoxPass {
             cvars::AO_STEPS.int().clamp(1, 32) as u32,
             cvars::AO_FALLOFF.float().max(1e-3) as f32,
             cvars::AO_BIAS.float().max(0.0) as f32,
+            cvars::AO_PATTERN.int().clamp(0, 2) as u32,
         ))
     }
 
@@ -4328,6 +4454,11 @@ mod tests {
     #[test]
     fn the_v1_pass_list_puts_a_declared_box_on_the_target() {
         const EXTENT: (u32, u32) = (64, 64);
+        // Stated rather than inherited: the subject is the *widest* graph this
+        // renderer derives, and `r.gi`'s default has now moved in both
+        // directions (§6 M36 on, §6 M71 off). A pass list asserted against
+        // whatever the default happens to be is a test about the default.
+        cvars::GI.set_bool(true);
         let extracted = one_lit_box(true);
 
         // Through the public offscreen entry point, not around it: this is the
@@ -4573,6 +4704,10 @@ mod tests {
     #[test]
     fn a_frame_with_no_sun_declares_no_shadow_pass() {
         const EXTENT: (u32, u32) = (64, 64);
+        // On for the reason above: what this asserts is that *the sun's* absence
+        // costs the shadow passes and nothing else, which needs the rest of the
+        // graph present to be a claim at all.
+        cvars::GI.set_bool(true);
         let extracted = one_lit_box(false);
         let mut renderer = OffscreenRenderer::new(EXTENT).unwrap();
         let frame = renderer
@@ -4922,7 +5057,7 @@ mod tests {
     }
 
     #[test]
-    fn the_background_is_one_draw_indoors_and_two_in_the_doorway() {
+    fn a_room_never_repaints_the_sky_seen_out_of_it() {
         let unbounded = a_sky([0.0; 3], [0.0; 3], 0.0, 0x10);
         // A room the camera (the origin, always) is 1 m outside of, over a 4 m
         // fade — so it is well inside the band where both apply.
@@ -4936,26 +5071,44 @@ mod tests {
         assert_eq!(one[0].weight, 1.0);
         assert_eq!(one[0].environment, 0);
 
-        // Deep inside the room: the room weighs 1, spends the whole budget, and
-        // the world's sky never earns a draw.
+        // §6 M72. Deep inside the room *and* in its doorway are the same answer,
+        // and it is the world's sky at full weight: a ray that hit nothing left
+        // the room, whatever the camera is standing in. The shading still fades
+        // — `ambient_light` weighs the same volumes at each fragment's own
+        // position, which is the half of §6 M28 this does not touch.
         let inside = a_sky([0.0; 3], [2.0, 2.0, 2.0], 1.0, 0x80);
-        let indoors = sky_pushes(m, &[inside, unbounded], 0);
-        assert_eq!(indoors.len(), 1, "{indoors:?}");
-        assert_eq!(indoors[0].environment, 0);
-        assert_eq!(indoors[0].weight, 1.0);
+        for (name, skies) in [
+            ("indoors", [inside, unbounded]),
+            ("doorway", [room, unbounded]),
+        ] {
+            let pushes = sky_pushes(m, &skies, 0);
+            assert_eq!(pushes.len(), 1, "{name}: {pushes:?}");
+            assert_eq!(pushes[0].environment, 1, "{name}: the world's sky");
+            assert_eq!(pushes[0].weight, 1.0, "{name}");
+        }
 
-        // In the doorway: two draws, and the *outermost* is first because
-        // `Blend::Alpha` is back to front.
-        let doorway = sky_pushes(m, &[room, unbounded], 0);
-        assert_eq!(doorway.len(), 2, "{doorway:?}");
-        assert_eq!(doorway[0].environment, 1, "the world's sky draws first");
-        assert_eq!(doorway[0].weight, 1.0);
-        assert_eq!(doorway[1].environment, 0);
-        assert!(
-            doorway[1].weight > 0.0 && doorway[1].weight < 1.0,
-            "{:?}",
-            doorway[1].weight
-        );
+        // Two unbounded skies is the budget's own case and not a new one: the
+        // first spends it all, exactly as the shader's loop does.
+        let both = sky_pushes(m, &[unbounded, a_sky([0.0; 3], [0.0; 3], 0.0, 0x40)], 0);
+        assert_eq!(both.len(), 1, "{both:?}");
+        assert_eq!(both[0].environment, 0);
+    }
+
+    /// The fallback (§6 M72): a world that named nothing at infinity has no
+    /// answer for a ray that escaped it, and gets the camera's walk rather than
+    /// a black frame — which is `gg-golden`'s `parallax`, one bounded room and
+    /// no outdoors.
+    #[test]
+    fn a_world_with_no_outdoors_still_has_a_background() {
+        let room = a_sky([0.0; 3], [2.0, 2.0, 2.0], 1.0, 0x80);
+        let pushes = sky_pushes(render::Mat4::IDENTITY, &[room], 0);
+        assert_eq!(pushes.len(), 1, "{pushes:?}");
+        assert_eq!(pushes[0].weight, 1.0);
+
+        // And it is the *camera's* walk, so a room the camera is nowhere near
+        // still draws nothing at all.
+        let far = a_sky([0.0, 0.0, 40.0], [1.0, 1.0, 1.0], 1.0, 0x80);
+        assert!(sky_pushes(render::Mat4::IDENTITY, &[far], 0).is_empty());
     }
 
     /// The load-bearing claim of §6 M29's background: back-to-front `over` with
@@ -4963,12 +5116,18 @@ mod tests {
     /// front-to-back budget. Nothing at runtime can compare the two — one is a
     /// blend state and the other is a loop in a shader — so it is checked here,
     /// on three nested volumes with the camera in two of their fades at once.
+    ///
+    /// Run through §6 M72's **fallback**, which is where a background of more
+    /// than one draw still occurs: at infinity the weights are zero and one, so
+    /// the ordinary case is a single draw with nothing to blend. The algebra is
+    /// unchanged and the evaluation point is the only thing that moved, which is
+    /// why this is still the walk's test rather than a deleted one.
     #[test]
     fn the_background_composites_to_what_the_shading_accumulates() {
         let skies = [
             a_sky([0.0, 0.0, 3.0], [1.0, 1.0, 1.0], 3.0, 0xc0),
             a_sky([0.0, 0.0, 6.0], [2.0, 2.0, 3.0], 5.0, 0x60),
-            a_sky([0.0; 3], [0.0; 3], 0.0, 0x20),
+            a_sky([0.0, 0.0, 9.0], [3.0, 3.0, 4.0], 7.0, 0x20),
         ];
         let pushes = sky_pushes(render::Mat4::IDENTITY, &skies, 0);
         assert_eq!(pushes.len(), 3, "all three reach the camera");

@@ -45,7 +45,10 @@ const PITCH: f32 = -0.22;
 /// whole alcoves.
 const RADII: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
 
-pub fn run(_args: &[String]) -> Result<()> {
+pub fn run(args: &[String]) -> Result<()> {
+    if args.iter().any(|a| a == "--crease") {
+        return crease();
+    }
     truth();
     grade()?;
     Ok(())
@@ -278,16 +281,6 @@ fn grade_ray(x: u32, y: u32, ortho: bool) -> (sim::Vec3, sim::Vec3) {
     (sim::Vec3::ZERO, direction)
 }
 
-/// sRGB decode, IEC 61966-2-1 — `post.slang`'s encode run backwards.
-fn decode(code: u8) -> f32 {
-    let e = f32::from(code) / 255.0;
-    if e <= 0.040_45 {
-        e / 12.92
-    } else {
-        sim::powf((e + 0.055) / 1.055, 2.4)
-    }
-}
-
 /// One render of the graded scene, as decoded linear luminance per pixel.
 fn render_scene(renderer: &mut OffscreenRenderer, world: &World) -> Result<Vec<f32>> {
     render_scene_at(renderer, world, false)
@@ -303,19 +296,28 @@ fn render_scene_at(
     extracted.clear(GRADE_EYE, view.frustum(FRAME));
     extracted.append::<Renderable>(world)?;
     extracted.append_lights(world)?;
-    let pixels = renderer
-        .frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?
-        .pixels;
-    Ok(pixels.chunks_exact(4).map(|p| decode(p[1])).collect())
+    // The **scene attachment**, not the backbuffer (§6 M70). Green, as before, so
+    // this is one change and not two: what moved is the linearity of the number, not
+    // which channel it is read from.
+    let frame = renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?;
+    Ok(frame.radiance.chunks_exact(4).map(|p| p[1]).collect())
 }
 
 /// The rendered occlusion, per pixel: the same frame with the pass on and off.
 ///
 /// A **ratio of the same pixel**, which is what makes this exact rather than
-/// calibrated. Occlusion multiplies the ambient term and nothing else touches
-/// it, so whatever the normal and the encode did to a pixel, they did to both —
-/// and below the tonemapper's knee the encode is the only nonlinearity left,
-/// which `decode` undoes.
+/// calibrated. Occlusion multiplies the ambient term and nothing else touches it, so
+/// whatever the rest of the shading did to a pixel, it did to both.
+///
+/// **Taken from the scene attachment since §6 M70, and the sentence that used to be
+/// here was wrong.** It said that below the tonemapper's knee the sRGB encode is the
+/// only nonlinearity left — but `pbr_neutral` opens by subtracting a pedestal from
+/// every channel, so the map is `x - 0.04` at these brightnesses and a *ratio*
+/// through it is exaggerated by `x / (x - 0.04)`. Which is not a constant: it depends
+/// on the pixel, so a bright error and a dark one were scaled differently, and the
+/// two columns of every table below fail in opposite directions. Eight bits put a
+/// floor under it besides. `OffscreenRenderer::capture_radiance` is the fix and it is
+/// upstream of all of it.
 fn rendered_occlusion(renderer: &mut OffscreenRenderer, world: &World) -> Result<Vec<f32>> {
     rendered_occlusion_at(renderer, world, false)
 }
@@ -429,8 +431,14 @@ fn grade() -> Result<()> {
     // The dither is a deliberate plus-or-minus one code value and this reads
     // single pixels; the ratio would carry it twice.
     cvars::DITHER.set_float(0.0);
+    // And the field off, for [`crease`]'s reason: every number here is a ratio of
+    // two consecutive frames, and a field still gathering its probes moves
+    // between them. The tables below survived it only because they are dozens of
+    // renders deep by the time they are printed.
+    cvars::GI.set_bool(false);
     let world = graded_world()?;
     let mut renderer = OffscreenRenderer::new(FRAME)?;
+    renderer.capture_radiance(true);
 
     println!(
         "graded scene: {} boxes, {}x{}, ambient {AMBIENT}, no sky and no lights\n",
@@ -463,6 +471,7 @@ fn grade() -> Result<()> {
     cost(&mut renderer, &world, &reference, &covered)?;
     radii(&mut renderer, &world)?;
 
+    cvars::GI.set_bool(true);
     cvars::DITHER.set_float(1.0);
     let report = renderer.shutdown();
     anyhow::ensure!(report.clean(), "unclean render: {report:?}");
@@ -590,17 +599,30 @@ const FAMILIES: [(&str, fn(usize, usize) -> usize); 4] = [
 /// box takes that to a hundredth of a code value, which is why the answer was
 /// that the lines were the *irradiance field's* and not this pass's.
 fn direction(renderer: &mut OffscreenRenderer, world: &World, covered: &[bool]) -> Result<()> {
-    println!("  slices | blur | spread of the four residue-class means, code values");
-    println!("         |      | {}", {
+    println!("  slices | blur | pattern | spread of the four residue-class means, code values");
+    println!("         |      |         | {}", {
         let mut header = String::new();
         for (label, _) in FAMILIES {
             header.push_str(&format!("{label:>8} "));
         }
         header
     });
-    for (slices, blur) in [(2i64, false), (4, false), (2, true)] {
+    // The pattern rows are §6 M71's, and they are here rather than in `--crease`
+    // because this is the table that can refuse the change: `r.ao_pattern 2`
+    // moves the tap-offset index onto `(x - y)`, which is the *other* diagonal,
+    // and a spread that climbs in that column is the M66 defect re-created on the
+    // mirror axis. It is a better seam by every column of `--crease`; whether it
+    // is a worse frame is asked here.
+    for (slices, blur, pattern) in [
+        (2i64, false, 1i64),
+        (4, false, 1),
+        (2, true, 1),
+        (2, false, 2),
+        (2, true, 2),
+    ] {
         cvars::AO_SLICES.set_int(slices);
         cvars::AO_BLUR.set_bool(blur);
+        cvars::AO_PATTERN.set_int(pattern);
         let rendered = rendered_occlusion(renderer, world)?;
         let mut row = String::new();
         for (_, key) in FAMILIES {
@@ -609,10 +631,14 @@ fn direction(renderer: &mut OffscreenRenderer, world: &World, covered: &[bool]) 
                 class_spread(&rendered, covered, key) * 255.0
             ));
         }
-        println!("  {slices:>6} | {:>4} | {row}", u32::from(blur));
+        println!(
+            "  {slices:>6} | {:>4} | {pattern:>7} | {row}",
+            u32::from(blur)
+        );
     }
     cvars::AO_SLICES.set_int(2);
     cvars::AO_BLUR.set_bool(true);
+    cvars::AO_PATTERN.set_int(1);
     println!();
     Ok(())
 }
@@ -854,15 +880,581 @@ fn cost(
         );
     }
     // Back to the shipped pair. Three slices is measurably better and is not the
-    // default: on the pin it is +3.93 ms against two slices' +3.07, a 28 % wider
+    // default: on the pin it is +4.67 ms against two slices' +3.79, a 23 % wider
     // pass, and on the 4090 the difference between them is inside what one
     // binary's frame time moves between runs — `cull`'s lesson, unchanged. What
-    // it buys is 17 % of the error (0.0299 → 0.0247), and that 17 % comes off
+    // it buys is 18 % of the error (0.0332 → 0.0271), and that 18 % comes off
     // the *smaller* half: the structural blindness in the crease rows above is
-    // 0.13 and no slice count touches it. Two is what CI's rasterizer pays for;
+    // 0.14 and no slice count touches it. Two is what CI's rasterizer pays for;
     // a player on real hardware can raise it for nothing.
+    //
+    // Both columns are ~0.7 ms wider than they were before §6 M71, which is what
+    // the normal's second difference costs: four depth taps an axis instead of
+    // two, on a software rasterizer, in the pass that runs per pixel.
     cvars::AO_SLICES.set_int(2);
     cvars::AO_STEPS.set_int(8);
     println!();
+    Ok(())
+}
+
+// ----------------------------------------------------------------- crease ----
+
+/// The seam leg's frame. Wider than [`FRAME`] because the subject is a *line*
+/// and a line's length is its sample count.
+const SEAM: (u32, u32) = (640, 360);
+
+/// Two walls meeting at a vertical seam, and nothing else in the frame.
+///
+/// The one property that makes this gradeable without a reference renderer:
+/// **the occlusion along a straight 90-degree concave dihedral is constant.**
+/// Every point on that seam sees the same two half-planes at the same angles, so
+/// whatever the right answer is, it is the *same* answer at every height — and
+/// the pass is free to be wrong about its value as long as it is wrong evenly.
+/// `facets`' second difference is the same argument one pass along; what differs
+/// is that this measures along a line an eye is already following.
+///
+/// Deliberately without a floor: a floor puts a second crease in the frame, and
+/// the metric below is the darkest pixel in each row.
+fn seam_scene() -> Vec<(sim::DVec3, sim::Vec3)> {
+    vec![
+        // The wall the seam runs up: face at z = -3, spanning x from 0 to 6.
+        (
+            sim::DVec3::new(3.0, 1.5, -3.25),
+            sim::Vec3::new(3.0, 3.0, 0.25),
+        ),
+        // The wall it meets: face at x = 0, spanning z from -3 to 3.
+        (
+            sim::DVec3::new(-0.25, 1.5, 0.0),
+            sim::Vec3::new(0.25, 3.0, 3.0),
+        ),
+    ]
+}
+
+/// Where the seam is viewed from, and the yaw that puts it up the middle of the
+/// frame. Close enough that `r.ao_radius` is worth tens of pixels, which is the
+/// regime the pass is tuned for and the one the report came from.
+const SEAM_EYE: sim::DVec3 = sim::DVec3::new(2.5, 1.5, 1.0);
+const SEAM_YAW: f32 = 0.30;
+
+/// And the pitch, which is what makes the seam *lean*.
+///
+/// Not cosmetic and not a taste: with the eye level, a world-vertical line
+/// projects to an exactly vertical screen line, so the seam sits in one column
+/// for its whole length and cannot beat against a screen-space tile at all. The
+/// first version of this leg had pitch 0 and reported `drift 0` on every row —
+/// a scene built so the defect under investigation could not occur. Any tilt
+/// puts the vertical vanishing point in the frame and every off-centre vertical
+/// leans toward it, which is the case a player is in essentially always.
+const SEAM_PITCH: f32 = -0.18;
+
+/// Rows measured, as a fraction of the frame. The walls end somewhere and their
+/// ends are real occlusion; the middle is the part whose truth is a constant.
+const SEAM_BAND: (f32, f32) = (0.2, 0.8);
+
+fn seam_world() -> Result<World> {
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    for (position, half_extent) in seam_scene() {
+        let entity = world.spawn();
+        world.insert(
+            entity,
+            Renderable::boxed(position, half_extent, 0x00ff_ffff).surfaced(0.0, 0.0),
+        )?;
+    }
+    Ok(world)
+}
+
+fn seam_view(yaw: f32, pitch: f32) -> View {
+    View {
+        yaw,
+        pitch,
+        ..View::default()
+    }
+}
+
+/// The seam frame's occlusion, as a ratio of the same pixel — [`rendered_occlusion`]'s
+/// argument at this framing.
+fn seam_occlusion(
+    renderer: &mut OffscreenRenderer,
+    world: &World,
+    yaw: f32,
+    pitch: f32,
+) -> Result<Vec<f32>> {
+    fn shade(
+        renderer: &mut OffscreenRenderer,
+        world: &World,
+        yaw: f32,
+        pitch: f32,
+    ) -> Result<Vec<f32>> {
+        let view = seam_view(yaw, pitch);
+        let mut extracted = Extracted::default();
+        extracted.clear(SEAM_EYE, view.frustum(SEAM));
+        extracted.append::<Renderable>(world)?;
+        extracted.append_lights(world)?;
+        let frame = renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?;
+        Ok(frame.radiance.chunks_exact(4).map(|p| p[1]).collect())
+    }
+    cvars::AO.set_bool(false);
+    let open = shade(renderer, world, yaw, pitch)?;
+    cvars::AO.set_bool(true);
+    let occluded = shade(renderer, world, yaw, pitch)?;
+    Ok(occluded
+        .iter()
+        .zip(&open)
+        .map(|(a, b)| if *b > 1e-5 { (a / b).min(1.0) } else { 1.0 })
+        .collect())
+}
+
+/// The seam itself, row by row: the darkest pixel in each measured row, and the
+/// column it sat in.
+///
+/// The darkest pixel rather than a projected line, because the subject is what
+/// an eye picks out — the dark line's *darkness* — and because a sub-pixel
+/// projection would need the seam's screen position to the precision the metric
+/// is trying to measure.
+fn seam_profile(field: &[f32]) -> Vec<(f32, usize)> {
+    let (w, h) = (SEAM.0 as usize, SEAM.1 as usize);
+    let lo = (SEAM_BAND.0 * h as f32) as usize;
+    let hi = (SEAM_BAND.1 * h as f32) as usize;
+    (lo..hi)
+        .map(|y| {
+            let row = &field[y * w..(y + 1) * w];
+            row.iter().enumerate().fold(
+                (1.0f32, 0usize),
+                |best, (x, v)| {
+                    if *v < best.0 { (*v, x) } else { best }
+                },
+            )
+        })
+        .collect()
+}
+
+/// Columns either side of the render's own darkest pixel that the reference
+/// searches. Wide enough to hold the seam wherever a half-pixel of disagreement
+/// puts it, narrow enough that the cast is seconds rather than minutes.
+const SEAM_WINDOW: usize = 30;
+
+/// A primary ray through pixel `(x, y)` of the seam frame, in the eye's frame.
+///
+/// [`ray`]'s arithmetic with the yaw and pitch as arguments, because the whole
+/// question here is what changes when the camera turns.
+fn seam_ray(x: usize, y: usize, yaw: f32, pitch: f32) -> sim::Vec3 {
+    let aspect = SEAM.0 as f32 / SEAM.1 as f32;
+    let tan = sim::tan(View::default().fov_y * 0.5);
+    let sx = ((x as f32 + 0.5) / SEAM.0 as f32 * 2.0 - 1.0) * tan * aspect;
+    let sy = (1.0 - (y as f32 + 0.5) / SEAM.1 as f32 * 2.0) * tan;
+    let (sin_yaw, cos_yaw) = sim::sin_cos(yaw);
+    let (sin_pitch, cos_pitch) = sim::sin_cos(pitch);
+    let forward = sim::Vec3::new(-sin_yaw * cos_pitch, sin_pitch, -cos_yaw * cos_pitch);
+    let right = sim::Vec3::new(cos_yaw, 0.0, -sin_yaw);
+    let up = forward.cross(right) * -1.0;
+    (forward + right * sx + up * sy)
+        .try_normalize()
+        .unwrap_or(forward)
+}
+
+/// The same profile, cast rather than rendered — **the instrument's own floor**,
+/// and the reason this leg can call a swing a defect at all.
+///
+/// A leaning seam walks in sub-pixel phase down the frame, and occlusion across
+/// a crease is a V: the darkest *sampled* pixel is therefore genuinely lighter
+/// when the seam falls between two pixel centres than when it falls on one. That
+/// is a property of the question, not of the pass, and it would show up in this
+/// metric whatever rendered it. So the reference is asked the identical question
+/// — same rays, same window, same minimum — and what the pass owes is the
+/// difference.
+fn seam_reference(profile: &[(f32, usize)], yaw: f32, pitch: f32) -> Vec<f32> {
+    let scene: Vec<ao::Occluder> = seam_scene()
+        .into_iter()
+        .map(|(center, half_extent)| ao::Occluder {
+            center: sim::Vec3::new(
+                (center.x - SEAM_EYE.x) as f32,
+                (center.y - SEAM_EYE.y) as f32,
+                (center.z - SEAM_EYE.z) as f32,
+            ),
+            rotation: sim::Quat::IDENTITY,
+            half_extent,
+            sphere: false,
+            albedo: sim::Vec3::ZERO,
+            emission: sim::Vec3::ZERO,
+        })
+        .collect();
+    let params = ao::Params {
+        radius: cvars::AO_RADIUS.float() as f32,
+        ..ao::Params::default()
+    };
+    let lo = (SEAM_BAND.0 * SEAM.1 as f32) as usize;
+    profile
+        .iter()
+        .enumerate()
+        .map(|(row, (_, column))| {
+            let y = lo + row;
+            let from = column.saturating_sub(SEAM_WINDOW);
+            let to = (column + SEAM_WINDOW).min(SEAM.0 as usize - 1);
+            (from..=to).fold(1.0f32, |best, x| {
+                let direction = seam_ray(x, y, yaw, pitch);
+                let Some(hit) = ao::trace(sim::Vec3::ZERO, direction, &scene, 1e-3, 1e4) else {
+                    return best;
+                };
+                let point = direction * hit.distance;
+                best.min(ao::occlusion(point, hit.normal, &scene, params))
+            })
+        })
+        .collect()
+}
+
+/// The cast occlusion at one pixel — [`seam_reference`]'s inner loop, for the
+/// cross-section table.
+fn seam_cast_at(x: usize, y: usize, yaw: f32, pitch: f32) -> f32 {
+    let scene: Vec<ao::Occluder> = seam_scene()
+        .into_iter()
+        .map(|(center, half_extent)| ao::Occluder {
+            center: sim::Vec3::new(
+                (center.x - SEAM_EYE.x) as f32,
+                (center.y - SEAM_EYE.y) as f32,
+                (center.z - SEAM_EYE.z) as f32,
+            ),
+            rotation: sim::Quat::IDENTITY,
+            half_extent,
+            sphere: false,
+            albedo: sim::Vec3::ZERO,
+            emission: sim::Vec3::ZERO,
+        })
+        .collect();
+    let params = ao::Params {
+        radius: cvars::AO_RADIUS.float() as f32,
+        ..ao::Params::default()
+    };
+    let direction = seam_ray(x, y, yaw, pitch);
+    let Some(hit) = ao::trace(sim::Vec3::ZERO, direction, &scene, 1e-3, 1e4) else {
+        return 1.0;
+    };
+    ao::occlusion(direction * hit.distance, hit.normal, &scene, params)
+}
+
+/// What the profile says, in the numbers that fail differently.
+///
+/// `swing` is the whole defect — the darkest row against the lightest, over a
+/// line whose truth is one value. `grain` is how much of it sits between
+/// *neighbours*, which is the difference between a gradient a player forgives
+/// and the marching dashes they report. `drift` is the seam's own lean in
+/// columns, context rather than defect: a line that crosses a screen-space tile
+/// slowly beats against it slowly, and that beat is what makes a four-pixel
+/// period read as a fifty-pixel dash.
+fn seam_stats(values: &[f32]) -> (f32, f32, f32, Option<usize>) {
+    let mean = values.iter().sum::<f32>() / values.len().max(1) as f32;
+    let (lo, hi) = values
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    let grain = values.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>()
+        / values.len().saturating_sub(1).max(1) as f32;
+    let mut d = [0.0f32; LAGS.len()];
+    for (slot, lag) in d.iter_mut().zip(LAGS) {
+        let (mut total, mut n) = (0.0f64, 0u32);
+        for i in 0..values.len().saturating_sub(lag) {
+            total += f64::from((values[i] - values[i + lag]).abs());
+            n += 1;
+        }
+        *slot = (total / f64::from(n.max(1))) as f32;
+    }
+    (mean, (hi - lo) * 255.0, grain * 255.0, period(&d))
+}
+
+/// How far the seam leans over the measured rows, in columns.
+fn seam_drift(profile: &[(f32, usize)]) -> usize {
+    let columns: Vec<usize> = profile.iter().map(|(_, x)| *x).collect();
+    columns.iter().max().unwrap_or(&0) - columns.iter().min().unwrap_or(&0)
+}
+
+fn values_of(profile: &[(f32, usize)]) -> Vec<f32> {
+    profile.iter().map(|(v, _)| *v).collect()
+}
+
+/// The marching dashes, measured.
+///
+/// The report was a corner line broken into alternating light and dark segments
+/// that walk along it as the camera turns. Everything the accuracy tables above
+/// grade is blind to it by construction: mean absolute error over a frame is a
+/// scalar, so occlusion wrong in a stripe scores the same as occlusion wrong at
+/// random. [`pattern`] is closer — it finds periods — but it walks x and y over
+/// a whole frame, and this defect lives on a one-pixel-wide line that is
+/// neither.
+fn crease() -> Result<()> {
+    cvars::AMBIENT.set_float(AMBIENT);
+    cvars::DITHER.set_float(0.0);
+    // **Off, and the first run of this leg was wrong for want of it.** Every
+    // number here is a ratio of two consecutive frames, and the irradiance field
+    // gathers a slice of its probes per frame — so an unconverged field moves
+    // between the numerator and the denominator and the ratio reads it as
+    // occlusion. It read a mean swinging from 0.63 to 0.73 across a yaw sweep
+    // whose truth is one number. Nothing on this page is about the field.
+    cvars::GI.set_bool(false);
+    let world = seam_world()?;
+    let mut renderer = OffscreenRenderer::new(SEAM)?;
+    renderer.capture_radiance(true);
+
+    println!(
+        "a 90-degree concave seam, {}x{}, ambient {AMBIENT}, no sky, no lights, r.gi 0",
+        SEAM.0, SEAM.1
+    );
+    println!("the truth along it is a constant, so swing and grain are defects outright\n");
+
+    // The cast floor, once, at the shipped framing: what this metric reads on a
+    // reference that has no screen-space anything in it. Everything below is
+    // against this number and not against zero.
+    let shipped = seam_profile(&seam_occlusion(
+        &mut renderer,
+        &world,
+        SEAM_YAW,
+        SEAM_PITCH,
+    )?);
+    let (rmean, rswing, rgrain, rperiod) =
+        seam_stats(&seam_reference(&shipped, SEAM_YAW, SEAM_PITCH));
+    println!(
+        "  the cast reference, same rays: mean {rmean:.4}, swing {rswing:.2}, grain {rgrain:.2}, \
+         period {}\n",
+        match rperiod {
+            Some(p) => format!("{p} px"),
+            None => "-".to_owned(),
+        }
+    );
+
+    println!("  blur | slices | steps |   mean |  swing |  grain | drift | period");
+    for (blur, slices, steps) in [
+        (true, 2i64, 8i64),
+        (false, 2, 8),
+        (true, 1, 8),
+        (true, 3, 8),
+        (true, 4, 8),
+        (true, 2, 16),
+        (true, 4, 16),
+    ] {
+        cvars::AO_BLUR.set_bool(blur);
+        cvars::AO_SLICES.set_int(slices);
+        cvars::AO_STEPS.set_int(steps);
+        let profile = seam_profile(&seam_occlusion(
+            &mut renderer,
+            &world,
+            SEAM_YAW,
+            SEAM_PITCH,
+        )?);
+        let (mean, swing, grain, period) = seam_stats(&values_of(&profile));
+        println!(
+            "  {:>4} | {slices:>6} | {steps:>5} | {mean:>6.4} | {swing:>6.2} | {grain:>6.2} | \
+             {:>5} | {}",
+            u32::from(blur),
+            seam_drift(&profile),
+            match period {
+                Some(p) => format!("{p} px"),
+                None => "-".to_owned(),
+            }
+        );
+    }
+    cvars::AO_BLUR.set_bool(true);
+    cvars::AO_SLICES.set_int(2);
+    cvars::AO_STEPS.set_int(8);
+    println!();
+
+    // The lean, which is the mechanism rather than the complaint: `drift` is how
+    // many columns the seam crosses over the measured rows, and a period that
+    // tracks it is a screen-space tile being sampled along a slanted line. A
+    // level eye is the degenerate case and is in the table so the zero is
+    // visible.
+    println!("  pitch   | drift |   mean |  swing |  grain | cast swing | cast grain");
+    for pitch in [0.0f32, -0.06, -0.12, -0.18, -0.24] {
+        let profile = seam_profile(&seam_occlusion(&mut renderer, &world, SEAM_YAW, pitch)?);
+        let (mean, swing, grain, _) = seam_stats(&values_of(&profile));
+        let (_, cast_swing, cast_grain, _) = seam_stats(&seam_reference(&profile, SEAM_YAW, pitch));
+        println!(
+            "  {pitch:>7.2} | {:>5} | {mean:>6.4} | {swing:>6.2} | {grain:>6.2} | {cast_swing:>10.2} \
+             | {cast_grain:>10.2}",
+            seam_drift(&profile)
+        );
+    }
+    println!();
+
+    // The complaint's own axis. A seam's truth does not depend on where it is
+    // looked at from, so every row here is one number measured seven times —
+    // and the dashes *march*, which says the defect is a function of the yaw
+    // rather than a property of the geometry.
+    println!("  yaw     |   mean |  swing |  grain | drift | period");
+    for step in -3i32..=3 {
+        let yaw = SEAM_YAW + step as f32 * 0.004;
+        let profile = seam_profile(&seam_occlusion(&mut renderer, &world, yaw, SEAM_PITCH)?);
+        let (mean, swing, grain, period) = seam_stats(&values_of(&profile));
+        println!(
+            "  {yaw:>7.4} | {mean:>6.4} | {swing:>6.2} | {grain:>6.2} | {:>5} | {}",
+            seam_drift(&profile),
+            match period {
+                Some(p) => format!("{p} px"),
+                None => "-".to_owned(),
+            }
+        );
+    }
+    println!();
+
+    // The second scene, carried the whole way through this leg: the graded room
+    // above, so every row that moves the seam can be read against what it did to
+    // occlusion the reference can grade. A fix for a stripe that costs accuracy
+    // is not a fix.
+    let (reference, covered) = reference_occlusion(cvars::AO_RADIUS.float() as f32);
+    let graded = graded_world()?;
+    let mut halo = OffscreenRenderer::new(FRAME)?;
+    halo.capture_radiance(true);
+
+    // What the per-pixel pattern is worth, with the control in the table.
+    // `r.ao_pattern 0` is the pass with no rotation and no tap offset at all: it
+    // is a worse *estimator* by every accuracy column, and if it were also free
+    // of the seam's swing then the swing is the pattern's and nothing else's.
+    // Two hypotheses died before this row was asked for.
+    println!("  r.ao_pattern | blur | seam swing | seam grain | invented | missed |   mean");
+    for pattern in [0i64, 1, 2] {
+        for blur in [false, true] {
+            cvars::AO_PATTERN.set_int(pattern);
+            cvars::AO_BLUR.set_bool(blur);
+            let profile = seam_profile(&seam_occlusion(
+                &mut renderer,
+                &world,
+                SEAM_YAW,
+                SEAM_PITCH,
+            )?);
+            let (_, swing, grain, _) = seam_stats(&values_of(&profile));
+            let rendered = rendered_occlusion(&mut halo, &graded)?;
+            let (invented, missed) = sides(&rendered, &reference, &covered);
+            let (mean, _) = error(&rendered, &reference, &covered);
+            println!(
+                "  {pattern:>12} | {:>4} | {swing:>10.2} | {grain:>10.2} | {invented:>8.4} | \
+                 {missed:>6.4} | {mean:>6.4}",
+                u32::from(blur)
+            );
+        }
+    }
+    cvars::AO_PATTERN.set_int(1);
+    cvars::AO_BLUR.set_bool(true);
+
+    // Where the taps land. `r.ao_bias` is the nearest one, in pixels, and at a
+    // crease it is the whole subject: the occlusion of a corner is made by
+    // geometry a pixel or two away, and a bias of 2 px is an estimator that
+    // never looks there. The cast column is the same seam with no tap grid in
+    // it at all, so a row that sits on it has no aliasing left to remove.
+    println!("  r.ao_bias | seam swing | seam grain |   mean | invented | missed | cast swing");
+    for pixels in [0.0f64, 0.5, 1.0, 1.5, 2.0, 3.0] {
+        cvars::AO_BIAS.set_float(pixels);
+        let profile = seam_profile(&seam_occlusion(
+            &mut renderer,
+            &world,
+            SEAM_YAW,
+            SEAM_PITCH,
+        )?);
+        let (mean, swing, grain, _) = seam_stats(&values_of(&profile));
+        let (_, cast_swing, _, _) = seam_stats(&seam_reference(&profile, SEAM_YAW, SEAM_PITCH));
+        let rendered = rendered_occlusion(&mut halo, &graded)?;
+        let (invented, missed) = sides(&rendered, &reference, &covered);
+        println!(
+            "  {pixels:>9.1} | {swing:>10.2} | {grain:>10.2} | {mean:>6.4} | {invented:>8.4} | \
+             {missed:>6.4} | {cast_swing:>10.2}"
+        );
+    }
+    cvars::AO_BIAS.set_float(2.0);
+    println!();
+
+    println!("  r.ao_radius | seam swing | seam grain |   mean | cast swing");
+    for radius in [0.25f64, 0.5, 1.0, 2.0] {
+        cvars::AO_RADIUS.set_float(radius);
+        let profile = seam_profile(&seam_occlusion(
+            &mut renderer,
+            &world,
+            SEAM_YAW,
+            SEAM_PITCH,
+        )?);
+        let (mean, swing, grain, _) = seam_stats(&values_of(&profile));
+        let (_, cast_swing, _, _) = seam_stats(&seam_reference(&profile, SEAM_YAW, SEAM_PITCH));
+        println!(
+            "  {radius:>11.2} | {swing:>10.2} | {grain:>10.2} | {mean:>6.4} | {cast_swing:>10.2}"
+        );
+    }
+    cvars::AO_RADIUS.set_float(0.5);
+    println!();
+
+    let report = halo.shutdown();
+    anyhow::ensure!(report.clean(), "unclean render: {report:?}");
+    println!();
+
+    // The shape of the thing, across the seam rather than along it. Every knob
+    // above leaves the swing at twenty code values, which says the defect is not
+    // in the sampling at all — so this prints the profile itself, rendered over
+    // cast, for rows spanning one column of drift. What a sawtooth in the
+    // *minimum* means is that the rendered crease has a different width from the
+    // one it is estimating, and a width is visible here and nowhere above.
+    let field = seam_occlusion(&mut renderer, &world, SEAM_YAW, SEAM_PITCH)?;
+    let profile = seam_profile(&field);
+    let lo = (SEAM_BAND.0 * SEAM.1 as f32) as usize;
+    println!("  the profile across the seam, code values, rendered / cast");
+    println!("    row |  col | {}", {
+        let mut header = String::new();
+        for d in -6i32..=6 {
+            header.push_str(&format!("{d:>9} "));
+        }
+        header
+    });
+    for row in (0..profile.len()).step_by(4).take(7) {
+        let (_, column) = profile[row];
+        let y = lo + row;
+        let mut rendered = String::new();
+        let mut cast = String::new();
+        for d in -6i32..=6 {
+            let x = (column as i32 + d).clamp(0, SEAM.0 as i32 - 1) as usize;
+            rendered.push_str(&format!("{:>9.1} ", field[y * SEAM.0 as usize + x] * 255.0));
+            cast.push_str(&format!(
+                "{:>9.1} ",
+                seam_cast_at(x, y, SEAM_YAW, SEAM_PITCH) * 255.0
+            ));
+        }
+        println!("  {y:>5} | {column:>4} | {rendered}");
+        println!("        |      | {cast}");
+    }
+    println!();
+
+    write_seam(&field, "seam")?;
+    println!("  frames under target/gg-tools/ao-seam*.png\n");
+
+    cvars::GI.set_bool(true);
+    cvars::DITHER.set_float(1.0);
+    let report = renderer.shutdown();
+    anyhow::ensure!(report.clean(), "unclean render: {report:?}");
+    Ok(())
+}
+
+/// The seam field as a picture, and the same field about its own mean at ten
+/// times the contrast — the second is the dashes with the shading taken out,
+/// which is the only way to see a two-code-value stripe on a white wall.
+fn write_seam(field: &[f32], name: &str) -> Result<()> {
+    let plain: Vec<u8> = field
+        .iter()
+        .flat_map(|v| {
+            let c = (v.clamp(0.0, 1.0) * 255.0) as u8;
+            [c, c, c, 255]
+        })
+        .collect();
+    write_png(&plain, SEAM, name)?;
+    let profile = seam_profile(field);
+    let mean = profile.iter().map(|(v, _)| *v).sum::<f32>() / profile.len().max(1) as f32;
+    let hot: Vec<u8> = field
+        .iter()
+        .flat_map(|v| {
+            let c = (((v - mean) * 10.0 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+            [c, c, c, 255]
+        })
+        .collect();
+    write_png(&hot, SEAM, &format!("{name}-gain"))
+}
+
+fn write_png(pixels: &[u8], extent: (u32, u32), name: &str) -> Result<()> {
+    let path = crate::output_dir()?.join(format!("ao-{name}.png"));
+    let file = std::fs::File::create(&path)?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), extent.0, extent.1);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(pixels)?;
     Ok(())
 }

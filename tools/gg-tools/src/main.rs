@@ -82,6 +82,7 @@ mod mcp;
 mod orbit;
 mod pace;
 mod panorama;
+mod radiance;
 mod shadow_bias;
 mod shadow_edge;
 mod shadow_fit;

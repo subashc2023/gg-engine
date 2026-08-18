@@ -25,6 +25,26 @@
 //! leaking through a wall, and light **missed**, which is a probe the visibility
 //! term rejected too hard. `r.gi_spacing` and `r.gi_moments` are read off the
 //! plateau between them.
+//!
+//! # Every table here is a ratio of the same pixel, and until §6 M70 it was the wrong pixel
+//!
+//! That method is what makes this file exact rather than calibrated: occlusion and
+//! indirect light multiply a term and nothing else touches it, so whatever the rest
+//! of the shading did to a pixel it did to both renders. It rests on one condition
+//! nobody had checked — that everything between a radiance and the number read back
+//! is **linear** — and it is not. `post.slang`'s tonemapper opens by subtracting a
+//! pedestal (`x - 0.04` at these brightnesses, `6.25x²` below 0.08), so a ratio
+//! through it is exaggerated by `x / (x - 0.04)`; and eight bits are worth about
+//! 1.6 % of the radiance where a dim room sits, which put a floor under the ratio
+//! itself.
+//!
+//! Neither is a constant, which is why neither could have been divided out of a
+//! finished table: the factor depends on the pixel's own brightness, so a **bright**
+//! error and a **dark** one were scaled differently — and the shape every plateau in
+//! this tree is read off is two columns that fail in opposite directions.
+//! `OffscreenRenderer::capture_radiance` is the fix, [`energy`]'s three-row
+//! decomposition is what it is worth, and `crate::radiance` is the inverse for
+//! anything that has only a presented frame to read.
 
 use anyhow::Result;
 use gg_ecs::World;
@@ -32,6 +52,8 @@ use gg_ecs::boundary::{Light, Renderable, Sky};
 use gg_extract::{Extracted, SkyLook};
 use gg_math::{render, sim};
 use gg_render::{OffscreenRenderer, View, ao, bounce, cvars, sky, srgb_to_linear};
+
+use crate::radiance;
 
 use demo_12_shooter as demo;
 
@@ -410,12 +432,12 @@ fn field(solids: &[ao::Occluder], points: &[Sample]) -> Result<()> {
         lamps: &[],
     };
     let reference = openness(&cast, points);
-    let mut renderer = OffscreenRenderer::new(EXTENT)?;
+    let mut renderer = device()?;
 
     println!(
         "the field against the paths — the same room under a uniform sky of {AMBIENT}, no lights\n"
     );
-    let shipped = rendered(&mut renderer, &world, points)?;
+    let shipped = rendered(&mut renderer, &world, points)?.linear;
     let inside = covered(&renderer, points);
     let (_, probes) = renderer.field_pending();
     println!(
@@ -474,11 +496,23 @@ fn openness(scene: &bounce::Scene, points: &[Sample]) -> Vec<f32> {
 /// `r.gi 0` leg is one frame after it, which costs nothing the field cares about
 /// — a frame with the term switched off still gathers, and gathering is the only
 /// thing that writes.
-fn rendered(
-    renderer: &mut OffscreenRenderer,
-    world: &World,
-    points: &[Sample],
-) -> Result<Vec<f32>> {
+/// A leg's graded reading: what the field says at each sample point, as a ratio of
+/// the same pixel with `r.gi` off and on.
+struct Reading {
+    /// In **scene radiance**, which is the only ratio that means what this file's
+    /// tables say it means (§6 M70) — see [`crate::radiance`] for what the display
+    /// pipeline does to one that is not.
+    linear: Vec<f32>,
+    /// The same ratio in code values: what every table here printed before M70, kept
+    /// for [`energy`]'s three-row decomposition of this file's own error.
+    display: Vec<f32>,
+    /// And the code values with the tonemapper **inverted** — the middle row of that
+    /// decomposition, which is what splits the pre-M70 error into the part the
+    /// pedestal caused and the part eight bits did.
+    decoded: Vec<f32>,
+}
+
+fn rendered(renderer: &mut OffscreenRenderer, world: &World, points: &[Sample]) -> Result<Reading> {
     cvars::GI.set_bool(true);
     // **Every frame of the budget, and no early break on `pending`** (§6 M67).
     //
@@ -514,17 +548,63 @@ fn rendered(
     cvars::GI.set_bool(false);
     let flat = frame(renderer, world)?;
     cvars::GI.set_bool(true);
-    Ok(points
-        .iter()
-        .map(|s| match flat.get(s.pixel) {
-            Some(d) if *d > 1e-4 => lit.get(s.pixel).copied().unwrap_or(*d) / d,
-            _ => 1.0,
-        })
-        .collect())
+    Ok(Reading {
+        linear: ratios(&lit.radiance, &flat.radiance, points),
+        display: ratios(&displayed(&lit.pixels), &displayed(&flat.pixels), points),
+        decoded: ratios(
+            &radiance::scene_luminances(&lit.pixels)?,
+            &radiance::scene_luminances(&flat.pixels)?,
+            points,
+        ),
+    })
 }
 
-/// One render of the graded room, as decoded linear luminance per pixel.
-fn frame(renderer: &mut OffscreenRenderer, world: &World) -> Result<Vec<f32>> {
+/// The field's answer at each point: the lit sample over the unlit one, and 1.0 where
+/// the unlit one is too dark to divide by — a pixel the primary ray found but the
+/// renderer left black has no ratio, and a leg that let it through would grade the
+/// background.
+///
+/// `lit` and `flat` are **RGBA, four per pixel**, which is the shape both readbacks
+/// come in; the luminance is taken here so the reduction is one line rather than two
+/// functions that could disagree about the weights.
+fn ratios(lit: &[f32], flat: &[f32], points: &[Sample]) -> Vec<f32> {
+    let luma = |v: &[f32], i: usize| {
+        v.get(i * 4..i * 4 + 3)
+            .map(|c| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2])
+    };
+    points
+        .iter()
+        .map(|s| match luma(flat, s.pixel) {
+            Some(d) if d > 1e-4 => luma(lit, s.pixel).unwrap_or(d) / d,
+            _ => 1.0,
+        })
+        .collect()
+}
+
+/// The pre-M70 reduction: the backbuffer, sRGB decoded and nothing else, so the
+/// tonemapper's pedestal and the quantizer are both still in it. One line of
+/// [`energy`] reads this and no table does. Widened to RGBA per pixel so [`ratios`]
+/// can take either.
+fn displayed(pixels: &[u8]) -> Vec<f32> {
+    pixels.iter().map(|c| radiance::decode(*c)).collect()
+}
+
+/// A device of its own for a leg, with the radiance readback on (§6 M70).
+///
+/// Every table in this file is a **ratio of the same pixel**, and until M70 it took
+/// that ratio from the backbuffer — where the tonemapper's pedestal had already
+/// exaggerated it and eight bits had already put a floor of about 1.6 % under it, at
+/// the brightness these rooms sit at. The slab leg read 4.7 % short of an exact truth
+/// that way and 3.0 % in code values corrected for the pedestal; on this readback it
+/// is a number with three digits that mean something.
+fn device() -> Result<OffscreenRenderer> {
+    let mut renderer = OffscreenRenderer::new(EXTENT)?;
+    renderer.capture_radiance(true);
+    Ok(renderer)
+}
+
+/// One render of the graded room, with the scene attachment beside the pixels.
+fn frame(renderer: &mut OffscreenRenderer, world: &World) -> Result<gg_render::OffscreenFrame> {
     let view = View {
         pitch: PITCH,
         yaw: YAW,
@@ -534,24 +614,7 @@ fn frame(renderer: &mut OffscreenRenderer, world: &World) -> Result<Vec<f32>> {
     extracted.clear(EYE, view.frustum(EXTENT));
     extracted.append::<Renderable>(world)?;
     extracted.append_lights(world)?;
-    let pixels = renderer
-        .frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?
-        .pixels;
-    Ok(pixels
-        .chunks_exact(4)
-        .map(|p| 0.2126 * decode(p[0]) + 0.7152 * decode(p[1]) + 0.0722 * decode(p[2]))
-        .collect())
-}
-
-/// sRGB decode, IEC 61966-2-1 — `post.slang`'s encode run backwards. `ao`'s, and
-/// restated for that module's reason: the two never meet at runtime.
-fn decode(code: u8) -> f32 {
-    let e = f32::from(code) / 255.0;
-    if e <= 0.040_45 {
-        e / 12.92
-    } else {
-        sim::powf((e + 0.055) / 1.055, 2.4)
-    }
+    Ok(renderer.frame(&extracted, &view, [0.0, 0.0, 0.0, 1.0], &[])?)
 }
 
 /// Demo 12's room as the renderer draws it: the same boxes with the same
@@ -751,6 +814,9 @@ fn only_energy() -> Result<()> {
     cvars::AO.set_bool(false);
     cvars::GI_RATE.set_int(0);
     energy()?;
+    faces()?;
+    knobs()?;
+    ringing();
     scales()?;
     cvars::DITHER.set_float(1.0);
     cvars::AO.set_bool(true);
@@ -772,6 +838,206 @@ fn only_energy() -> Result<()> {
 /// accuracy somewhere a path tracer disagrees about, or the weighting failing at
 /// short probe distances. Here there is no somewhere: one plane, one answer, and a
 /// spacing column that ought to be constant.
+/// [`energy`]'s slab over the **gather's** own resolution — `r.gi_face` (§6 M70).
+///
+/// The knob had never been swept against anything. Its doc reasons about it correctly
+/// and from first principles — irradiance is the scene under a cosine lobe, so it
+/// needs far fewer samples than a shadow map — and that argument says which
+/// *direction* the error goes without saying how big it is, which is the half a
+/// number is for.
+///
+/// What makes the row gradeable without a path tracer is that the quadrature's own
+/// bias is computable: [`quadrature`] is the measure the shader integrates with,
+/// summed and compared against `4π`, which is what it would read on a *constant*
+/// sphere. So `vs sum` is the field's error with the sum's own bias taken out, and a
+/// row whose `vs sum` is zero has nothing wrong with it that a finer gather could
+/// fix. The bias is **positive** at every edge — a midpoint rule on the gnomonic
+/// Jacobian over-counts — so it has been flattering every reading here, and a table
+/// that only printed `short` would have credited the gather for it.
+fn faces() -> Result<()> {
+    let world = slab()?;
+    let solids = vec![room()[0]];
+    let points = &surfaces(&solids);
+    let was = cvars::GI_FACE.int();
+    println!("the same slab over the gather's resolution — every row's truth is still 1.0\n");
+    println!("  face | samples | quadrature |    field |  short | vs sum | worst");
+    for edge in [4i64, 8, 16, 32] {
+        cvars::GI_FACE.set_int(edge);
+        let mut renderer = device()?;
+        let shipped = rendered(&mut renderer, &world, points)?.linear;
+        let inside = covered(&renderer, points);
+        let n = inside.iter().filter(|c| **c).count();
+        let (mut field, mut worst) = (0.0f64, 0.0f32);
+        for (s, on) in shipped.iter().zip(&inside) {
+            if *on {
+                field += f64::from(*s);
+                if (s - 1.0).abs() > worst.abs() {
+                    worst = s - 1.0;
+                }
+            }
+        }
+        let field = field / n.max(1) as f64;
+        let sum = quadrature(edge as u32);
+        println!(
+            "  {edge:>4} | {:>7} | {:>+9.3} % | {field:>8.4} | {:>5.1} % | {:>5.1} % | {worst:>+7.4}",
+            6 * edge * edge,
+            (sum - 1.0) * 100.0,
+            (1.0 - field) * 100.0,
+            (sum - field) * 100.0
+        );
+        let report = renderer.shutdown();
+        anyhow::ensure!(report.clean(), "unclean render: {report:?}");
+    }
+    cvars::GI_FACE.set_int(was);
+    println!();
+    Ok(())
+}
+
+/// **Where the slab's remaining deficit comes from, as arithmetic** (§6 M70).
+///
+/// No scene, no device and no reference implementation: the clamped cosine's own
+/// spherical-harmonic expansion, truncated where the field truncates it. A probe
+/// stores four coefficients per channel, so what it reconstructs irradiance with is
+/// not `max(0, cos)` but that function's band-1 truncation — and
+/// [RH01]'s factors make it `0.25 + 0.5 cos`, which is **negative** for everything
+/// more than 120° off the normal.
+///
+/// That is the whole mechanism. Light arriving from behind a surface *subtracts* from
+/// its irradiance, and it cancels exactly only when the light behind is isotropic:
+/// `∫(0.25 - 0.5|cos|)dω` over a hemisphere is zero. What breaks the cancellation
+/// here is the renderer being right about something else — `diffuse` is scaled by
+/// `1 - Ess(n·v)`, so a floor is dimmer seen at a grazing angle than seen from
+/// above, and a probe records that. The dim part lands under the kernel's positive
+/// lobe and the bright part under its negative one, and the leftover is proportional
+/// to how much light comes off the floor at all. Which is exactly what the slab's
+/// albedo row measures: **0.0000 at black**, and it climbs monotonically to white.
+///
+/// The `L2` column is what one more band would be worth and is the reason it is
+/// printed rather than described: the ringing at the antipode falls from -0.25 to
+/// +0.06, about four times better, for a record of nine coefficients per channel
+/// instead of four — which is 2.5x this atlas and 2.5x the projection, since every
+/// texel of it runs the whole gather loop.
+fn ringing() {
+    println!("\nthe kernel a four-coefficient probe reconstructs irradiance with\n");
+    println!("    cos | clamped |      L1 |      L2 | L1 error");
+    for step in 0..=8 {
+        let c = 1.0 - f64::from(step) * 0.25;
+        let clamped = c.max(0.0);
+        let l1 = 0.25 + 0.5 * c;
+        let l2 = l1 + 0.15625 * (3.0 * c * c - 1.0);
+        println!(
+            "  {c:>5.2} | {clamped:>7.4} | {l1:>+7.4} | {l2:>+7.4} | {:>+8.4}",
+            l1 - clamped
+        );
+    }
+    println!();
+}
+
+/// Every other knob the field has, over [`energy`]'s slab (§6 M70).
+///
+/// **A knob sweep on this world is a defect detector for the knob**, and that is the
+/// whole design: the truth here is 1.0 at every point by construction, and it does not
+/// depend on the probe spacing, the burial slope, the distance tile, the filter, or how
+/// bright the sky is. So a row that *moves* is a defect in the term it swept — not a
+/// trade, not a quality setting, and not something a plateau argument can excuse.
+/// Every table in this file above [`energy`] grades a room where a knob is allowed to
+/// buy accuracy in one place and spend it in another; here there is nowhere to spend it.
+///
+/// `r.ambient` is in the list because it is the one axis that says whether the deficit
+/// is a *factor* or an *offset* — the field's answer is a ratio of two renders of the
+/// same surface, so a multiplicative fault is flat in this column and an additive one
+/// is not.
+fn knobs() -> Result<()> {
+    let world = slab()?;
+    let solids = vec![room()[0]];
+    let points = &surfaces(&solids);
+    println!("the same slab over everything else — every row's truth is still 1.0\n");
+    println!("  knob             |    value |    field |  short | worst");
+    let was_ambient = cvars::AMBIENT.float();
+    for slope in [0.0f64, 1.0, 1.5, 2.0] {
+        let was = cvars::GI_BURIAL.float();
+        cvars::GI_BURIAL.set_float(slope);
+        knob("r.gi_burial", &format!("{slope:.2}"), &world, points)?;
+        cvars::GI_BURIAL.set_float(was);
+    }
+    for edge in [2i64, 4, 8] {
+        let was = cvars::GI_MOMENTS.int();
+        cvars::GI_MOMENTS.set_int(edge);
+        knob("r.gi_moments", &format!("{edge}"), &world, points)?;
+        cvars::GI_MOMENTS.set_int(was);
+    }
+    for on in [false, true] {
+        let was = cvars::GI_FILTER.bool();
+        cvars::GI_FILTER.set_bool(on);
+        knob("r.gi_filter", &format!("{}", u8::from(on)), &world, points)?;
+        cvars::GI_FILTER.set_bool(was);
+    }
+    for level in [0.05f64, 0.15, AMBIENT, 0.5] {
+        cvars::AMBIENT.set_float(level);
+        knob("r.ambient", &format!("{level:.2}"), &world, points)?;
+    }
+    cvars::AMBIENT.set_float(was_ambient);
+    for (name, color) in [
+        ("black", 0x0000_0000u32),
+        ("grey", 0x0080_8080),
+        ("the demo's", demo::ROOM[0].2),
+        ("white", 0x00ff_ffff),
+    ] {
+        let tint = tinted(color)?;
+        knob("the slab", name, &tint, &surfaces(&[room()[0]]))?;
+    }
+    println!();
+    Ok(())
+}
+
+/// One row of [`knobs`] — a device of its own, for [`scales`]' reason.
+fn knob(name: &str, value: &str, world: &World, points: &[Sample]) -> Result<()> {
+    let mut renderer = device()?;
+    let shipped = rendered(&mut renderer, world, points)?.linear;
+    let inside = covered(&renderer, points);
+    let n = inside.iter().filter(|c| **c).count();
+    let (mut field, mut worst) = (0.0f64, 0.0f32);
+    for (s, on) in shipped.iter().zip(&inside) {
+        if *on {
+            field += f64::from(*s);
+            if (s - 1.0).abs() > worst.abs() {
+                worst = s - 1.0;
+            }
+        }
+    }
+    let field = field / n.max(1) as f64;
+    println!(
+        "  {name:<16} | {value:>8} | {field:>8.4} | {:>5.1} % | {worst:>+7.4}",
+        (1.0 - field) * 100.0
+    );
+    let report = renderer.shutdown();
+    anyhow::ensure!(report.clean(), "unclean render: {report:?}");
+    Ok(())
+}
+
+/// What the shader's own quadrature makes of a **constant** sphere: `Σ solid_angle`
+/// over the six faces, against `4π`.
+///
+/// A restatement of `probe_face_solid_angle` and nothing else, and scene-free for
+/// that reason — the answer depends on the cube-face Jacobian sampled at texel
+/// centres and on no geometry at all. Which is what makes it a reference: an SH
+/// projection is an integral over the sphere and `probe.slang` deliberately does not
+/// normalize by the measure, so whatever this over- or under-counts by lands directly
+/// on every coefficient and therefore on the irradiance the field reports.
+fn quadrature(edge: u32) -> f64 {
+    let step = 2.0 / f64::from(edge);
+    let mut total = 0.0f64;
+    for y in 0..edge {
+        for x in 0..edge {
+            let a = (f64::from(x) + 0.5) * step - 1.0;
+            let b = (f64::from(y) + 0.5) * step - 1.0;
+            let r = 1.0 + a * a + b * b;
+            total += step * step / (r * sim::sqrt(r));
+        }
+    }
+    total * 6.0 / (4.0 * std::f64::consts::PI)
+}
+
 fn scales() -> Result<()> {
     let world = slab()?;
     let solids = vec![room()[0]];
@@ -783,8 +1049,8 @@ fn scales() -> Result<()> {
         for bias in [was_bias, 0.15 * spacing] {
             cvars::GI_SPACING.set_float(spacing);
             cvars::GI_BIAS.set_float(bias);
-            let mut renderer = OffscreenRenderer::new(EXTENT)?;
-            let shipped = rendered(&mut renderer, &world, points)?;
+            let mut renderer = device()?;
+            let shipped = rendered(&mut renderer, &world, points)?.linear;
             let inside = covered(&renderer, points);
             let (_, probes) = renderer.field_pending();
             let n = inside.iter().filter(|c| **c).count();
@@ -829,8 +1095,9 @@ fn energy() -> Result<()> {
     // ("the truth here is exactly 1.0, at every point") is about a different scene
     // than the one on screen. §6 M67 found this class twice and §6 M68 twice more;
     // this is the fourth site.
-    let mut renderer = OffscreenRenderer::new(EXTENT)?;
-    let shipped = rendered(&mut renderer, &world, points)?;
+    let mut renderer = device()?;
+    let reading = rendered(&mut renderer, &world, points)?;
+    let shipped = &reading.linear;
     let inside = covered(&renderer, points);
     let open = vec![1.0f32; points.len()];
     let (_, probes) = renderer.field_pending();
@@ -841,7 +1108,38 @@ fn energy() -> Result<()> {
         inside.iter().filter(|c| **c).count(),
         points.len()
     );
-    report(&shipped, &open, &inside, points);
+    report(shipped, &open, &inside, points);
+    // **The three rows that price this file's own method** (§6 M70), and they are the
+    // reason the number above is trustworthy where the pre-M70 one was not. The same
+    // points and the same two renders, read three ways:
+    //
+    //   the backbuffer            what every table here graded until M70
+    //   the backbuffer, inverted  the tonemapper undone on the CPU, eight bits left
+    //   the scene attachment      the copy taken before either (`capture_radiance`)
+    //
+    // So the first gap is `post.slang`'s **pedestal** — `x / (x - 0.04)` at the
+    // pixel's own brightness, which is why it could not have been divided out of a
+    // finished table — and the second is the **quantizer**, one code value being
+    // worth about 1.6 % of the radiance where a dim room sits.
+    let mean = |v: &[f32]| {
+        let (mut sum, mut n) = (0.0f64, 0usize);
+        for (s, on) in v.iter().zip(&inside) {
+            if *on {
+                sum += f64::from(*s);
+                n += 1;
+            }
+        }
+        sum / n.max(1) as f64
+    };
+    println!("\n  how this leg was read      |    field |  short");
+    for (name, v) in [
+        ("the backbuffer", &reading.display),
+        ("the backbuffer, inverted", &reading.decoded),
+        ("the scene attachment", &reading.linear),
+    ] {
+        let m = mean(v);
+        println!("  {name:<25}  | {m:>8.4} | {:>5.1} %", (1.0 - m) * 100.0);
+    }
     let report = renderer.shutdown();
     anyhow::ensure!(report.clean(), "unclean render: {report:?}");
     Ok(())
@@ -853,9 +1151,22 @@ fn energy() -> Result<()> {
 /// every other table here was measured against rather than a second set of numbers
 /// to keep in step.
 fn slab() -> Result<World> {
+    tinted(demo::ROOM[0].2)
+}
+
+/// [`slab`] in a colour of its own, which is [`knobs`]' sharpest row (§6 M70).
+///
+/// The truth is 1.0 whatever this is — the reading is a ratio of two renders of the
+/// same surface, so its own albedo divides out — and what the colour changes is what
+/// the *probes* see. At white the slab returns everything the sky gave it, so a
+/// probe's whole sphere is one radiance and the record is the trivial case: the
+/// hemisphere split is gone and only the quadrature's own bias is left. At black the
+/// split is as sharp as it gets. A deficit that survives both is a scale factor
+/// somewhere; one that only appears at black is about the split.
+fn tinted(color: u32) -> Result<World> {
     let mut world = World::new();
     world.register::<Renderable>()?;
-    let (center, half_extent, color) = demo::ROOM[0];
+    let (center, half_extent, _) = demo::ROOM[0];
     let entity = world.spawn();
     world.insert(
         entity,
@@ -943,8 +1254,8 @@ fn biases(world: &World, points: &[Sample], reference: &[f32]) -> Result<()> {
         );
         for bias in [0.05f64, 0.15, 0.3, 0.45, 0.6, 0.9, 1.2] {
             cvars::GI_BIAS.set_float(bias);
-            let mut renderer = OffscreenRenderer::new(EXTENT)?;
-            let shipped = rendered(&mut renderer, world, points)?;
+            let mut renderer = device()?;
+            let shipped = rendered(&mut renderer, world, points)?.linear;
             let inside = covered(&renderer, points);
             let (_, probes) = renderer.field_pending();
             let effective = renderer.field_grid().map_or(1.0, |(_, s, _)| f64::from(s));
@@ -1030,8 +1341,8 @@ fn graded(
     points: &[Sample],
     reference: &[f32],
 ) -> Result<(f64, usize)> {
-    let mut renderer = OffscreenRenderer::new(EXTENT)?;
-    let shipped = rendered(&mut renderer, world, points)?;
+    let mut renderer = device()?;
+    let shipped = rendered(&mut renderer, world, points)?.linear;
     let inside = covered(&renderer, points);
     let (_, probes) = renderer.field_pending();
     let effective = renderer.field_grid().map_or(0.0, |(_, s, _)| s);
