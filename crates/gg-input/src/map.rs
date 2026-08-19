@@ -9,12 +9,23 @@
 //! # The file format, and why it is parsed here
 //!
 //! The map is a **subset of TOML** — table headers, and keys whose values are a
-//! string or an array of strings. Editors and formatters treat it as TOML
-//! because it is TOML; the parser is ~150 lines because the subset is small.
+//! string or an array of strings **on one line**. Editors and formatters treat
+//! it as TOML because it is TOML; the parser is ~150 lines because the subset is
+//! small.
+//!
 //! The alternative was `toml` + `serde` in the dist graph of every shipped
 //! game, for a file with three shapes in it. Should the format ever need
 //! genuine TOML, swapping the crate in is mechanical and the format does not
 //! move under anyone.
+//!
+//! **One line** is that subset's one real edge, and it is worth stating in bold
+//! because the sentence above cuts both ways: a TOML formatter treats this as
+//! TOML and will wrap a long array across several lines without asking, leaving
+//! a file that is valid TOML and is not a map. §6 M74 walked into exactly that —
+//! the wrapped array left demo 10 with no bindings at all, and what noticed was
+//! a *golden image*, because the legend it draws is read off this file and the
+//! key column went blank. Refused at the line the array **opens** on rather than
+//! half-read, and the test below is what keeps that true.
 //!
 //! ```toml
 //! [game.actions]
@@ -763,6 +774,37 @@ mod tests {
         assert!(!map.claims(&[], Source::Key(Key::Escape)), "no layer is up");
         assert!(map.claims(&[game], Source::Key(Key::Escape)));
         assert!(!map.claims(&[game], Source::Key(Key::Tab)));
+    }
+
+    /// The subset's one real edge, refused by line rather than half-read (§6
+    /// M74). A TOML formatter wraps a long array without asking, and the file
+    /// that comes back is valid TOML this parser cannot read — so what a wrapped
+    /// array must never be is *partly* accepted, leaving a game bound to the
+    /// first few keys of a list and silently missing the rest.
+    #[test]
+    fn an_array_wrapped_across_lines_is_refused_and_says_which_line() {
+        const WRAPPED: &str = "[game.actions]\nlook = [\n  \"Tab\",\n  \"Escape\",\n]\n";
+        let err = ActionMap::parse(WRAPPED, ACTIONS, AXES).unwrap_err();
+        // Line 2 — where the array *opens*, which is where a reader looks,
+        // rather than line 3 where the first orphaned element is. That is the
+        // value shape being checked whole rather than the tokens being swept up
+        // one at a time, and it is the difference between a message that names
+        // the mistake and one that names its second symptom.
+        assert!(
+            matches!(&err, MapError::Syntax { line: 2, .. }),
+            "a wrapped array should be refused by line: {err}"
+        );
+        // And the one-line spelling of the same intent is fine, which is what
+        // says the refusal is about the wrapping and not about the length.
+        let map = ActionMap::parse(
+            "[game.actions]\nlook = [\"Tab\", \"Escape\"]\n",
+            ACTIONS,
+            AXES,
+        )
+        .unwrap();
+        let game = map.context("game").unwrap();
+        assert!(map.claims(&[game], Source::Key(Key::Escape)));
+        assert!(map.claims(&[game], Source::Key(Key::Tab)));
     }
 
     /// And whether the game does mouse-look at all, which is a question about

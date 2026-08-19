@@ -149,9 +149,12 @@ impl Voice {
             at: 0,
             len,
             attack,
-            // A loop has no end to fade into, and a release applied per repeat
-            // would pump it (`Sound::release_ms`'s contract).
-            release: if looping { 0 } else { release },
+            // Kept for a loop as well as a note, and unread while the loop
+            // repeats: `len` is `u32::MAX`, so `envelope_at`'s `left` never
+            // falls under it. A release applied *per repeat* would pump the
+            // loop (`Sound::release_ms`'s contract) and this is not that —
+            // it is spent once, by [`Voice::stop`], as the fade out (§6 M77).
+            release,
             rng: sim::Rng::from_seed(seed),
             clip,
         })
@@ -227,6 +230,67 @@ impl Voice {
     /// first sample past it.
     fn finished(&self) -> bool {
         self.at >= self.len
+    }
+
+    /// Bring this voice to an end, and say whether it will get there itself.
+    ///
+    /// `true` only for a **loop with a release**: it is the one voice with no
+    /// end of its own, so it is the one that has to be given one. Giving it
+    /// an `at + release` end hands the ramp to the envelope that already
+    /// exists, and the clip goes on reading — a fade a player hears as the
+    /// music receding rather than as a value walked to zero.
+    ///
+    /// Everything else answers `false` and is dropped where it stands, which
+    /// is what it always was: a note is finite, near its own release, and
+    /// replacing one is the case §6 M77 measured at a ratio of 0.63 — under
+    /// the step the incoming sound makes by itself, so there is nothing there
+    /// to hear.
+    fn stop(&mut self) -> bool {
+        if self.wave != wave::CLIP_LOOP || self.release == 0 {
+            return false;
+        }
+        self.len = self.at.saturating_add(self.release);
+        true
+    }
+
+    /// Whether this voice is a loop on its way out — [`Voice::stop`] has
+    /// given it an end and it has not reached it.
+    fn fading(&self) -> bool {
+        self.wave == wave::CLIP_LOOP && self.len != u32::MAX
+    }
+
+    /// Take a fade back, if `next` is the same loop this voice is already
+    /// playing. `true` if it did, and the caller keeps this voice.
+    ///
+    /// This is a player who paused and changed their mind inside the fade,
+    /// and it is worth its own path for a reason larger than the seam: a
+    /// fresh voice reads from sample 0, so a pause taken back would drop the
+    /// needle at the top of the track. Resuming keeps the phrase.
+    ///
+    /// The envelope is rejoined rather than reset. Putting `len` back alone
+    /// would take the amplitude from wherever the fade had reached straight
+    /// to 1.0 — a step *larger* than the one this exists to remove — so `at`
+    /// is moved to the point on the attack that reads the level the release
+    /// had it at, and the ramp continues upward from exactly there.
+    fn resume(&mut self, next: &Voice) -> bool {
+        if !self.fading() || next.wave != wave::CLIP_LOOP {
+            return false;
+        }
+        // Same clip, by where it lives in the bank — two names for one blob
+        // are one blob, and a different clip is a different track.
+        let same = match (self.clip, next.clip) {
+            (Some(held), Some(want)) => held.start == want.start && held.frames == want.frames,
+            _ => false,
+        };
+        if !same {
+            return false;
+        }
+        let level = self.envelope_at();
+        self.len = u32::MAX;
+        self.at = (level * self.attack as f32) as u32;
+        // The slider may have moved while it was going.
+        self.gain = next.gain;
+        true
     }
 }
 
@@ -309,6 +373,15 @@ fn envelope(sound: &Sound, rate: u32, len: u32) -> (u32, u32) {
     (attack, (len - attack).max(1))
 }
 
+/// How long the master takes to reach a value [`Mixer::set_master`] was
+/// handed, milliseconds.
+///
+/// Ten: over the shortest step a click needs to become a slope, and under
+/// what a hand moving a slider could tell from instant. It is not a fade —
+/// a fade is [`Sound::release_ms`] on a loop and is measured in hundreds of
+/// milliseconds — it is the smallest ramp that stops a jump being a step.
+const GLIDE_MS: u32 = 10;
+
 /// The voice bank. Owned by the audio callback and reached from nowhere else.
 pub struct Mixer {
     voices: [Option<Voice>; VOICES],
@@ -320,6 +393,14 @@ pub struct Mixer {
     /// The clips (§6 M43). `None` until the shell hands one over, which is what
     /// a game with no pack stays at.
     clips: Option<Arc<Bank>>,
+    /// Where [`Mixer::set_master`] is taking the gain, and where `master`
+    /// walks to a sample at a time.
+    ///
+    /// A step rather than a glide was a discontinuity in every looping voice
+    /// at once, because master reaches them *live* (see below): §6 M77
+    /// measured a suspend at 0.202 against the signal's own 0.030 — a
+    /// full-amplitude cut of the music on every lost focus (§6 M49).
+    target: f32,
     /// The player's master volume, applied **to looping voices only**.
     ///
     /// A one-shot carries its volume in the trigger's own gain, set when it
@@ -339,6 +420,7 @@ impl Mixer {
             rate: rate.max(1),
             fired: 0,
             clips: None,
+            target: 1.0,
             master: 1.0,
         }
     }
@@ -356,8 +438,12 @@ impl Mixer {
     }
 
     /// The player's master volume, `0.0..=1.0`.
+    ///
+    /// Reached over [`GLIDE_MS`] rather than on the next sample — see
+    /// [`Mixer::target`]. A caller that sets the same value twice glides
+    /// nowhere, so restating it every tick costs nothing.
     pub fn set_master(&mut self, master: f32) {
-        self.master = master.clamp(0.0, 1.0);
+        self.target = master.clamp(0.0, 1.0);
     }
 
     /// Start `trigger`, replacing whatever was in its slot.
@@ -369,7 +455,30 @@ impl Mixer {
         let slot = trigger.slot % VOICES;
         self.fired = self.fired.wrapping_add(1);
         let bank = self.clips.as_deref();
-        self.voices[slot] = Voice::new(&trigger.sound, self.rate, self.fired, bank);
+        match Voice::new(&trigger.sound, self.rate, self.fired, bank) {
+            Some(voice) => {
+                // The same loop, asked for again while the last request to
+                // stop it is still running out — see [`Voice::resume`].
+                if !self.voices[slot]
+                    .as_mut()
+                    .is_some_and(|held| held.resume(&voice))
+                {
+                    self.voices[slot] = Some(voice);
+                }
+            }
+            // Nothing to start. On a loop that is a **stop**, and a loop
+            // stopped on the sample it was asked to is a click: §6 M77
+            // measured demo 10's theme cut at 0.202 against a signal whose
+            // own largest step was 0.030, which is the noise a player hears
+            // every time they pause. Asking the voice to end itself leaves
+            // the slot busy for the length of the fade, which is what makes
+            // this a stop rather than a deletion.
+            None => {
+                if !self.voices[slot].as_mut().is_some_and(Voice::stop) {
+                    self.voices[slot] = None;
+                }
+            }
+        }
     }
 
     /// Fill `out` with the sum of every sounding voice, one channel. Overwrites
@@ -381,8 +490,17 @@ impl Mixer {
         // free but the branch on `None` in an inner loop is not, and this loop
         // runs a few hundred thousand times a second.
         let block = self.clips.as_deref().map_or(&[][..], Bank::block);
-        let master = self.master;
+        let target = self.target;
+        // One glide's worth of gain per sample. Computed once: the division
+        // is the only one in this loop and it does not vary.
+        let glide = 1.0 / samples(GLIDE_MS, self.rate).max(1) as f32;
+        let mut master = self.master;
         for sample in out.iter_mut() {
+            let delta = target - master;
+            master += delta.clamp(-glide, glide);
+            if delta.abs() <= glide {
+                master = target;
+            }
             let mut sum = 0.0;
             for voice in &mut self.voices {
                 let Some(playing) = voice else { continue };
@@ -398,6 +516,9 @@ impl Mixer {
             }
             *sample = limit(sum);
         }
+        // Carried across buffers, or the glide would restart from where the last
+        // one began and never arrive.
+        self.master = master;
         // Retire what ended exactly on this buffer's last sample. Without it a
         // note holds its slot until the *next* buffer asks it for a sample it
         // does not have, which makes `sounding()` off by one buffer — and a
@@ -728,8 +849,163 @@ mod tests {
         }
         assert!(peak(&out) > 0.4, "the loop went quiet on a later pass");
 
+        // A silent trigger asks it to end, and since §6 M77 it *ends* rather
+        // than vanishing: the slot stays busy for the release and then goes.
+        // Through M76 this asserted silence on the very next call, which is
+        // the cut that measured a step of 0.202 against a signal whose own
+        // largest was 0.030.
         fire(&mut mixer, Sound::tone(wave::SILENT, 0.0, 100, 1.0));
-        assert_eq!(mixer.sounding(), 0, "a silent trigger did not stop it");
+        assert_eq!(mixer.sounding(), 1, "the stop is a fade, not a delete");
+        let fade = samples(gg_ecs::boundary::FADE_MS, RATE) as usize;
+        let mut tail = vec![0.0; fade + 64];
+        mixer.mix(&mut tail);
+        assert_eq!(mixer.sounding(), 0, "and it is over inside its release");
+        assert_eq!(
+            tail[fade + 8..].iter().fold(0.0f32, |m, s| m.max(s.abs())),
+            0.0,
+            "and stays over"
+        );
+    }
+
+    /// The fade itself: a stopped loop comes down rather than off.
+    ///
+    /// Graded as a **monotone envelope** rather than as a step count, because
+    /// the material underneath is still playing — what has to fall is the
+    /// loudest sample in each successive window, and it has to reach zero.
+    /// `gg-tools clicks` is the instrument this threshold came off (§6 M77).
+    #[test]
+    fn a_stopped_loop_comes_down_instead_of_off() {
+        let mut mixer = Mixer::new(RATE);
+        // A square at full scale: the worst case for a cut, since every
+        // sample is at the peak and there is no quiet moment to stop in.
+        mixer.set_bank(banked(RATE, &[24_000, -24_000, 24_000, -24_000]));
+        fire(&mut mixer, Sound::music("cue", 1.0));
+        let fade = samples(gg_ecs::boundary::FADE_MS, RATE) as usize;
+
+        // Past the attack, so what is measured below is the release.
+        let mut warm = vec![0.0; fade * 2];
+        mixer.mix(&mut warm);
+        let loud = peak(&warm);
+        assert!(loud > 0.5, "the loop is at full scale before the stop");
+
+        fire(&mut mixer, Sound::tone(wave::SILENT, 0.0, 100, 1.0));
+        let mut out = vec![0.0; fade];
+        mixer.mix(&mut out);
+
+        // Eight windows across the release, each quieter than the last.
+        let step = out.len() / 8;
+        let mut last = f32::INFINITY;
+        for window in out.chunks(step) {
+            let level = peak(window);
+            assert!(
+                level < last,
+                "the fade stopped falling at {level} after {last}"
+            );
+            last = level;
+        }
+        assert!(last < loud / 8.0, "and it got most of the way down");
+
+        // The claim the instrument makes: no sample-to-sample step in the
+        // fade is larger than the ones the material was already making.
+        let own = out
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            own <= loud * 2.0,
+            "the fade introduced a step of {own} into a signal of {loud}"
+        );
+    }
+
+    /// A pause taken back inside the fade keeps the phrase.
+    ///
+    /// The claim that matters is not the seam — `gg-tools clicks` reads that at
+    /// 0.04 where a fresh voice read 1.46 — but *where the music is*: a new
+    /// voice reads from sample 0, so before §6 M77 pausing demo 10 and resuming
+    /// dropped the needle at the top of the track every time.
+    ///
+    /// Graded as an A/B against the same act performed a moment later, once the
+    /// fade has finished — which is a genuine restart and stays one. Both runs
+    /// end the same distance into the session, so the only difference between
+    /// them is whether the cursor was kept, and no number here is a threshold.
+    #[test]
+    fn a_pause_taken_back_inside_the_fade_keeps_its_place() {
+        let fade = samples(gg_ecs::boundary::FADE_MS, RATE) as usize;
+        // A ramp long enough never to wrap, so a sample *is* a position.
+        let steps: Vec<i16> = (0..400_000_i64)
+            .map(|i| (i * 32_000 / 400_000) as i16)
+            .collect();
+
+        // `gap` is how long the player leaves it before changing their mind.
+        let run = |gap: usize| {
+            let mut mixer = Mixer::new(RATE);
+            mixer.set_bank(banked(RATE, &steps));
+            fire(&mut mixer, Sound::music("cue", 1.0));
+            let mut warm = vec![0.0; fade * 2];
+            mixer.mix(&mut warm);
+
+            fire(&mut mixer, Sound::tone(wave::SILENT, 0.0, 100, 1.0));
+            let mut waited = vec![0.0; gap];
+            mixer.mix(&mut waited);
+            let voices = mixer.sounding();
+
+            fire(&mut mixer, Sound::music("cue", 1.0));
+            // Long enough to be past the attack either way, so what is compared
+            // is the clip's own value and not an envelope.
+            let mut after = vec![0.0; fade * 4];
+            mixer.mix(&mut after);
+            (voices, peak(&after))
+        };
+
+        // Inside the fade: one voice all along, and it never stopped.
+        let (voices, resumed) = run(fade / 4);
+        assert_eq!(voices, 1, "the fade was still running");
+
+        // And after it: the voice had gone, so this one starts over.
+        let (gone, restarted) = run(fade * 2);
+        assert_eq!(gone, 0, "the fade had finished and the slot was free");
+
+        assert!(
+            resumed > restarted,
+            "a pause taken back read {resumed} where starting over reads \
+             {restarted} — the resumed voice did not keep its place"
+        );
+    }
+
+    /// The master reaches a new value over a ramp, not on the next sample.
+    ///
+    /// A suspend is `set_master(0.0)` (§6 M49), and it reached every looping
+    /// voice at once — `gg-tools clicks` measured that cut at 0.202 against a
+    /// signal whose own largest step was 0.030.
+    #[test]
+    fn the_master_glides_to_where_it_was_sent() {
+        let mut mixer = Mixer::new(RATE);
+        mixer.set_bank(banked(RATE, &[24_000, -24_000, 24_000, -24_000]));
+        fire(&mut mixer, Sound::music("cue", 1.0));
+        let mut warm = vec![0.0; samples(gg_ecs::boundary::FADE_MS, RATE) as usize * 2];
+        mixer.mix(&mut warm);
+        let loud = peak(&warm);
+
+        mixer.set_master(0.0);
+        // One glide's worth, plus a margin for the sample it lands on.
+        let glide = samples(10, RATE) as usize;
+        let mut out = vec![0.0; glide * 4];
+        mixer.mix(&mut out);
+        assert!(
+            peak(&out[..glide / 4]) > loud / 4.0,
+            "the first samples after a suspend are not silent"
+        );
+        assert_eq!(
+            peak(&out[glide * 2..]),
+            0.0,
+            "and it is silent well inside the glide"
+        );
+        // Back up, and the loop is still there to come back — a glide is not
+        // a stop.
+        mixer.set_master(1.0);
+        let mut back = vec![0.0; glide * 4];
+        mixer.mix(&mut back);
+        assert!(peak(&back) > loud / 2.0, "the music came back");
     }
 
     /// A pack rebuilt while the game runs, and a game shipped without its pack:
@@ -787,11 +1063,18 @@ mod tests {
         mixer.set_bank(banked(RATE, &[16_384; 512]));
 
         fire(&mut mixer, Sound::music("cue", 1.0));
+        // Past the fade in, and past the glide after each move: since §6 M77 the
+        // music arrives over `FADE_MS` and the slider over `GLIDE_MS`, so this
+        // measures where the two *land* rather than where they set off.
+        let settle = samples(gg_ecs::boundary::FADE_MS, RATE) as usize * 2;
+        let mut warm = vec![0.0; settle];
+        mixer.mix(&mut warm);
         let mut out = [0.0; 256];
         mixer.mix(&mut out);
         assert!((peak(&out) - 0.5).abs() < 1e-6);
 
         mixer.set_master(0.5);
+        mixer.mix(&mut warm);
         mixer.mix(&mut out);
         assert!(
             (peak(&out) - 0.25).abs() < 1e-6,

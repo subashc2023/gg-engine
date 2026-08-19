@@ -362,6 +362,7 @@ pub fn gg_ecs::boundary::Widget::state_hash(&self, &mut gg_ecs::hash::StateHashe
 pub const gg_ecs::boundary::CANVAS: (u32, u32)
 pub const gg_ecs::boundary::CELL: (u32, u32)
 pub const gg_ecs::boundary::DEFAULT_SMOOTHNESS: f32
+pub const gg_ecs::boundary::FADE_MS: u32
 pub const gg_ecs::boundary::MAX_MS: u32
 pub const gg_ecs::boundary::QUIET_MAX: u32
 pub const gg_ecs::boundary::TEXT: usize

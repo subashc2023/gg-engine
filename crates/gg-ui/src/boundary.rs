@@ -58,6 +58,13 @@ pub mod verb {
     pub const CLICK: &str = "ui_click";
     /// Move focus to the next widget.
     pub const FOCUS: &str = "ui_focus";
+    /// Press the focused widget — the keyboard's half of [`CLICK`] (§6 M74).
+    ///
+    /// **Optional, like the wheel pair below**, and for the same reason turned
+    /// around: a build that does not declare it has the UI it always had, one
+    /// reachable only by pointer. A build that does can be played by somebody
+    /// whose mouse is in the other room, which is the whole of what it buys.
+    pub const PRESS: &str = "ui_press";
     /// One wheel notch away from the operator, and one toward.
     ///
     /// **Optional, unlike the four above**, and the only pair a build may
@@ -88,8 +95,10 @@ pub fn binding(verbs: &Verbs) -> Option<Binding> {
         y: AxisId::new(find(verbs.axes, verb::Y, MAX_AXES)?),
         primary: ActionId::new(find(verbs.actions, verb::CLICK, MAX_ACTIONS)?),
         advance_focus: ActionId::new(find(verbs.actions, verb::FOCUS, MAX_ACTIONS)?),
-        // Absent is a UI that does not scroll, not a UI that does not route —
-        // which is why these two are outside the `?`s above.
+        // Absent is a UI that does not scroll — or, for the first of the three,
+        // one a keyboard cannot press. Not a UI that does not route, which is
+        // why these are outside the `?`s above.
+        activate: action(verb::PRESS),
         scroll_up: action(verb::SCROLL_UP),
         scroll_down: action(verb::SCROLL_DOWN),
     })
@@ -421,6 +430,83 @@ mod tests {
         );
         assert_eq!(state_of(&world, OK), state::HOVERED);
         assert_eq!(state_of(&world, CANCEL), 0);
+    }
+
+    /// The keyboard's whole path through this stage (§6 M74), which is what no
+    /// unit test of the router alone can say: a game's declared `ui_press`
+    /// resolves to a binding, an edge on it reaches the router, and the
+    /// **widget's own `CLICKED` bit** lands back in the world where the game
+    /// reads it — the same bit a mouse would have set, which is the point.
+    ///
+    /// The pointer is parked off both buttons throughout, so every state below
+    /// is the keyboard's and not a hover that happened to be underneath.
+    #[test]
+    fn a_key_presses_the_focused_widget_and_the_game_reads_the_same_bit() {
+        let mut ui = Ui::new().expect("query");
+        let mut world = world();
+        let tab = Tick {
+            advance_focus: true,
+            ..Tick::default()
+        };
+        let enter = Tick {
+            activate: true,
+            ..Tick::default()
+        };
+        ui.frame(&mut world, &moved(190.0, 58.0), Fit::new(TARGET));
+        ui.frame(&mut world, &Tick::default(), Fit::new(TARGET));
+        assert_eq!(state_of(&world, OK) & state::HOVERED, 0, "off both buttons");
+
+        ui.frame(&mut world, &tab, Fit::new(TARGET));
+        // Draw order, not world order: the ring walks the list the frame built.
+        let ringed = [OK, CANCEL]
+            .into_iter()
+            .find(|id| state_of(&world, *id) & state::FOCUSED != 0)
+            .expect("Tab focused nothing");
+        assert_eq!(
+            state_of(&world, ringed) & state::CLICKED,
+            0,
+            "moving the ring pressed something"
+        );
+
+        ui.frame(&mut world, &enter, Fit::new(TARGET));
+        assert_eq!(state_of(&world, ringed) & state::CLICKED, state::CLICKED);
+        let other = if ringed == OK { CANCEL } else { OK };
+        assert_eq!(state_of(&world, other) & state::CLICKED, 0);
+        // And it is an edge: the next frame's bit is clear again, which is what
+        // makes a held key one press rather than sixty a second.
+        ui.frame(&mut world, &Tick::default(), Fit::new(TARGET));
+        assert_eq!(state_of(&world, ringed) & state::CLICKED, 0);
+    }
+
+    /// A build that declares no `ui_press` routes exactly as it did before §6
+    /// M74 — the reason the verb is optional, and the reason demo 07 and the
+    /// editor needed no edit.
+    #[test]
+    fn a_build_that_declares_no_press_verb_still_routes_everything_else() {
+        let verbs = Verbs {
+            actions: &["ui_click", "ui_focus"],
+            axes: &["ui_x", "ui_y"],
+        };
+        let bound = binding(&verbs).expect("the four required verbs are all here");
+        assert!(bound.activate.is_none());
+        assert!(bound.scroll_up.is_none(), "nor a wheel");
+        let with = Verbs {
+            actions: &["ui_click", "ui_focus", "ui_press"],
+            axes: &["ui_x", "ui_y"],
+        };
+        assert_eq!(
+            binding(&with)
+                .expect("still routes")
+                .activate
+                .map(|a| a.index()),
+            Some(2)
+        );
+        // And the four that are not optional are still all-or-nothing.
+        let short = Verbs {
+            actions: &["ui_click", "ui_press"],
+            axes: &["ui_x", "ui_y"],
+        };
+        assert!(binding(&short).is_none(), "a press without a focus key");
     }
 
     /// The sort is what decides the picture, not the world. `cancel` is spawned

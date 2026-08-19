@@ -156,6 +156,9 @@ pub struct Binding {
     pub primary: ActionId,
     /// Move focus to the next widget.
     pub advance_focus: ActionId,
+    /// Press the focused widget, if this build declared a verb for it — the
+    /// keyboard's half of a click (§6 M74).
+    pub activate: Option<ActionId>,
     /// One wheel notch away from the operator, if this build declared one.
     pub scroll_up: Option<ActionId>,
     /// One toward.
@@ -173,6 +176,9 @@ pub struct Tick {
     /// Focus moves on this tick. An edge, not a held state: a held key must not
     /// walk the whole panel in a second.
     pub advance_focus: bool,
+    /// The focused widget is pressed on this tick. An edge for
+    /// [`advance_focus`](Self::advance_focus)'s reason, one key later.
+    pub activate: bool,
     /// Wheel notches this tick: `+1` away from the operator, `-1` toward, `0`
     /// for the overwhelming majority of ticks.
     ///
@@ -196,6 +202,7 @@ impl Tick {
             motion: (axes[binding.x.index()], axes[binding.y.index()]),
             primary: input.pressed(binding.primary),
             advance_focus: input.just_pressed(binding.advance_focus),
+            activate: binding.activate.is_some_and(|id| input.just_pressed(id)),
             scroll: notch(binding.scroll_up) - notch(binding.scroll_down),
         }
     }
@@ -291,6 +298,35 @@ impl Router {
             // mind, and it must not fire.
             self.clicked = self.captured.take().filter(|id| Some(*id) == self.hovered);
         }
+        // The keyboard's half of a click (§6 M74), and deliberately not folded
+        // into the button's press/release above: a click is a *gesture* that can
+        // be dragged off a widget and abandoned, and a key has nowhere to drag
+        // to. So this writes the click directly and touches neither capture nor
+        // focus — pressing a button with Enter leaves the ring where it was,
+        // which is what a menu wants.
+        //
+        // Before the advance, so a tick carrying both presses what the ring was
+        // on rather than what it is about to move to.
+        //
+        // A screen that has just appeared has *nothing* focused — no game can
+        // set the ring (there is no setter, deliberately: focus is the
+        // player's) — so M74's keyboard only worked on a page somebody had
+        // already pressed Tab on, and a title screen offering a key nobody
+        // advertised is a title screen with no keyboard at all (§6 M76). The
+        // fallback is the *first* row, which is the one a reader's eye is on,
+        // and it leaves the ring alone on purpose: focus is a choice and this
+        // is the absence of one, so the glass shows no highlight for a
+        // decision the player has not made. `after(None)` is already "the
+        // first declaration with somewhere to be pressed".
+        if tick.activate {
+            let target = self
+                .focused
+                .filter(|id| self.area(*id))
+                .or_else(|| self.after(None));
+            if let Some(id) = target {
+                self.clicked = Some(id);
+            }
+        }
         if tick.advance_focus {
             self.focused = self.after(self.focused);
         }
@@ -338,18 +374,33 @@ impl Router {
 
     /// The widget declared after `current`, wrapping; the first when nothing is
     /// focused or the focused widget is gone.
+    /// The next widget with **area**, wrapping.
+    ///
+    /// A zero rect is how a game hides a widget (§4.9), and every hidden menu in
+    /// the tree is still declared every frame — so a walk over `declared` visits
+    /// a pause menu's five buttons while the player is mid-game. That was merely
+    /// untidy while focus was the only thing it moved and became a hazard the
+    /// moment a key could *press* what it landed on (§6 M74). Same rule as
+    /// `resolve_hover`'s, for the same reason: a widget nobody can point at is
+    /// not a widget anybody can reach.
     fn after(&self, current: Option<WidgetId>) -> Option<WidgetId> {
-        let first = self.declared.first().map(|(id, _)| *id);
-        let Some(current) = current else { return first };
-        match self.declared.iter().position(|(id, _)| *id == current) {
-            Some(at) => self
-                .declared
-                .get(at + 1)
-                .map(|(id, _)| *id)
-                .or(first)
-                .or(Some(current)),
-            None => first,
-        }
+        let shown = |(id, rect): &(WidgetId, Rect)| (rect.w > 0.0 && rect.h > 0.0).then_some(*id);
+        let at = current.and_then(|id| self.declared.iter().position(|(d, _)| *d == id));
+        // From just after the current one, wrapping — which is one pass over a
+        // rotation of the list rather than two searches.
+        let from = at.map_or(0, |at| at + 1);
+        self.declared[from..]
+            .iter()
+            .chain(&self.declared[..from])
+            .find_map(shown)
+            .or(current)
+    }
+
+    /// Whether a declared widget has somewhere to be pressed.
+    fn area(&self, id: WidgetId) -> bool {
+        self.declared
+            .iter()
+            .any(|(d, rect)| *d == id && rect.w > 0.0 && rect.h > 0.0)
     }
 
     fn check_duplicates(&mut self) {
@@ -547,6 +598,139 @@ mod tests {
         router.begin(&Tick::default(), EXTENT);
         let (a, _) = declare(&mut router);
         assert!(!a.clicked);
+    }
+
+    /// The keyboard's whole path (§6 M74): Tab lands the ring somewhere, the
+    /// press verb clicks *that*, and none of it moves the pointer or the ring.
+    #[test]
+    fn a_focused_widget_can_be_pressed_without_a_pointer() {
+        let mut router = Router::default();
+        let tab = Tick {
+            advance_focus: true,
+            ..Tick::default()
+        };
+        let enter = Tick {
+            activate: true,
+            ..Tick::default()
+        };
+        // The pointer is parked off both widgets for the whole test, so nothing
+        // below can be a hover in disguise.
+        router.begin(&moved(150.0, 90.0), EXTENT);
+        declare(&mut router);
+        router.begin(&tab, EXTENT);
+        let (a, b) = declare(&mut router);
+        assert_eq!(router.focused(), Some(A));
+        assert!(!a.clicked && !b.clicked, "moving the ring presses nothing");
+
+        router.begin(&enter, EXTENT);
+        let (a, b) = declare(&mut router);
+        assert!(a.clicked && !b.clicked);
+        assert!(!a.hovered && !a.held, "a key is not a pointer");
+        assert_eq!(router.focused(), Some(A), "the ring stays where it was");
+
+        // Once, and only while the key is down — an edge like every other.
+        router.begin(&Tick::default(), EXTENT);
+        assert!(!declare(&mut router).0.clicked);
+        router.begin(&tab, EXTENT);
+        declare(&mut router);
+        router.begin(&enter, EXTENT);
+        let (a, b) = declare(&mut router);
+        assert!(
+            b.clicked && !a.clicked,
+            "the ring moved on and so did the press"
+        );
+
+        // With nothing focused the press falls to the first row (§6 M76) —
+        // and *only* the first, so it is a default rather than a broadcast.
+        // Through M75 this asserted that nothing was pressed at all, which
+        // is the state a screen appears in and therefore the state a title
+        // screen would have been stuck in.
+        router.begin(&moved(0.0, 0.0), EXTENT);
+        router.focused = None;
+        declare(&mut router);
+        router.begin(&enter, EXTENT);
+        let (a, b) = declare(&mut router);
+        assert!(a.clicked && !b.clicked);
+        assert_eq!(
+            router.focused(),
+            None,
+            "a default is not a choice, so the ring stays dark"
+        );
+    }
+
+    /// The fallback above has somewhere to fall to only if the page has a row
+    /// a pointer could reach. A page whose buttons are all hidden — every
+    /// menu in the tree, most of the time (§4.9) — presses nothing, which is
+    /// what stops Enter mid-game from reaching a pause menu's first button.
+    #[test]
+    fn a_page_with_no_reachable_row_presses_nothing() {
+        let mut router = Router::default();
+        let enter = Tick {
+            activate: true,
+            ..Tick::default()
+        };
+        let hidden = |router: &mut Router| {
+            let a = router.hit(A, Rect::new(0.0, 0.0, 0.0, 0.0));
+            let b = router.hit(B, Rect::new(0.0, 0.0, 50.0, 0.0));
+            (a, b)
+        };
+        router.begin(&moved(500.0, 500.0), EXTENT);
+        hidden(&mut router);
+        router.begin(&enter, EXTENT);
+        let (a, b) = hidden(&mut router);
+        assert!(!a.clicked && !b.clicked, "a zero rect is not a row");
+
+        // The same tick with one of them given a body does press it, so the
+        // refusal above is the area rule and not a dead code path.
+        router.begin(&moved(0.0, 0.0), EXTENT);
+        declare(&mut router);
+        router.begin(&enter, EXTENT);
+        assert!(declare(&mut router).0.clicked);
+    }
+
+    /// A zero rect is how a game hides a widget (§4.9) and hidden menus are
+    /// still declared every frame, so the walk has to skip them — untidy while
+    /// focus was cosmetic, and a hazard once a key can press what it lands on.
+    ///
+    /// Graded in both directions: the ring never stops on the hidden one, and a
+    /// press cannot reach it even when focus is put there by hand — which is
+    /// also the state a screen change leaves behind, focus being stale on a
+    /// button the new page does not show. Where the press goes *instead* is
+    /// §6 M76's: the first row that has somewhere to be pressed, so a stale
+    /// ring and no ring at all behave alike.
+    #[test]
+    fn the_ring_walks_past_a_widget_a_pointer_could_not_reach() {
+        let mut router = Router::default();
+        let hidden = |router: &mut Router| {
+            let a = router.hit(A, Rect::new(0.0, 0.0, 50.0, 50.0));
+            let b = router.hit(B, Rect::new(0.0, 0.0, 0.0, 0.0));
+            (a, b)
+        };
+        router.begin(&moved(150.0, 90.0), EXTENT);
+        hidden(&mut router);
+        for _ in 0..3 {
+            router.begin(
+                &Tick {
+                    advance_focus: true,
+                    ..Tick::default()
+                },
+                EXTENT,
+            );
+            hidden(&mut router);
+            assert_eq!(router.focused(), Some(A), "B has nowhere to be pressed");
+        }
+        router.focused = Some(B);
+        router.begin(
+            &Tick {
+                activate: true,
+                ..Tick::default()
+            },
+            EXTENT,
+        );
+        let (a, b) = hidden(&mut router);
+        assert!(!b.clicked, "B has nowhere to be pressed");
+        assert!(a.clicked, "so the press falls to the row that has");
+        assert_eq!(router.focused(), Some(B), "and the ring is not moved by it");
     }
 
     #[test]

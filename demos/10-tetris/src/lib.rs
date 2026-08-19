@@ -121,7 +121,7 @@ pub const BACK: ActionId = ActionId::new(11);
 /// crate's own `input.toml` to draw the legend the shell would (§4.10), and the
 /// test below that pins each `ActionId` to its position here. Both would
 /// otherwise be a second copy, which is the failure §6 M45 exists to stop.
-pub const ACTIONS: [&str; 12] = [
+pub const ACTIONS: [&str; 13] = [
     "left",
     "right",
     "soft_drop",
@@ -134,6 +134,10 @@ pub const ACTIONS: [&str; 12] = [
     "ui_click",
     "ui_focus",
     "back",
+    // Appended, which is the only place a verb may be added: the order of this
+    // list is the id space a replay records (§4.7), so one inserted among the
+    // others renumbers every stream ever made against them.
+    "ui_press",
 ];
 
 /// The axis names, in id order. [`ACTIONS`]'s reason.
@@ -352,7 +356,14 @@ const WIDEST_VALUE: &str = "999999";
 /// The top-out banner: a plate, then two lines centred over the well. `("", _)`
 /// is the plate — a [`widget::PANEL`](gg_ecs::boundary::widget) draws no text,
 /// so an empty body is how the table says which row is the backdrop.
-const BANNER: [(&str, u32); 3] = [("", SHROUD), ("GAME OVER", ACCENT), ("PRESS R", INK)];
+const BANNER: [(&str, u32); 3] = [
+    ("", SHROUD),
+    ("GAME OVER", ACCENT),
+    // Both ways out, because until §6 M74 there was one and the banner named
+    // it: `pause` and `back` were gated on a live game, so a finished one was a
+    // keyboard dead end that could only be left by starting another.
+    ("R RESTART  ESC TITLE", INK),
+];
 /// Height of the banner's plate, and where its top sits inside the well.
 const BANNER_PLATE: (f32, f32) = (110.0, 56.0);
 
@@ -1591,8 +1602,16 @@ pub fn step(world: &mut GameWorld) {
     let mut began_with = None;
     let _ = world.each::<(&mut Well, &mut Play, &mut Piece, &Rules, &mut Best)>(
         |_, (well, play, piece, rules, best)| {
-            if play.over != 0 {
+            if play.over != 0 || restart {
                 if restart {
+                    // Mid-game as well as after a top-out (§6 M74). The legend
+                    // in the CONTROLS panel has advertised `RESTART` since §6
+                    // M18 and the key did nothing while a game was in progress,
+                    // which is the sort of lie a player reads as a stuck
+                    // keyboard. Filed like a QUIT rather than discarded — an
+                    // abandoned run is a run, and the score table is the only
+                    // record it leaves.
+                    record_top(best, play.score);
                     // `reset_game` reseeds from the stream itself — a
                     // clock-read seed would make the next game unreproducible.
                     reset_game(well, play, piece);
@@ -1696,10 +1715,17 @@ pub fn step(world: &mut GameWorld) {
                 piece.row = landed;
                 lock_now = true;
             } else {
-                let budget = if soft {
-                    rules.soft_drop_ticks.max(1)
-                } else {
-                    gravity_for(rules, play.level)
+                // Soft drop is a floor on the *rate*, not a replacement for it
+                // (§6 M74): past level 34 gravity's own budget is under the
+                // three ticks this defaults to, so the plain spelling —
+                // `soft_drop_ticks` outright — made holding Down slow the piece
+                // down. Unreachable in any recorded session, which is exactly
+                // why no gate had ever seen it: the blessed stream tops out in
+                // single digits.
+                let gravity = gravity_for(rules, play.level);
+                let budget = match soft {
+                    true => rules.soft_drop_ticks.max(1).min(gravity),
+                    false => gravity,
                 };
                 play.fall_accum = play.fall_accum.saturating_add(1);
                 if play.fall_accum >= budget {
@@ -1958,6 +1984,15 @@ pub fn menu(world: &mut GameWorld) {
     // PLAY is always a new game (§6 M19). The score is recorded exactly as a
     // top-out records it — walking away is finishing. It says TO TITLE since
     // M44 because the title screen grew an EXIT and one word cannot mean both.
+    // Leaving a finished game (§6 M74). The score is already filed — the
+    // top-out filed it — so this is `M_QUIT`'s reset without its `record_top`,
+    // which would put one run in the table twice.
+    if at == SCREEN_PLAYING && over && (pause || back) {
+        let _ = world.each::<(&mut Well, &mut Play, &mut Piece)>(|_, (well, play, piece)| {
+            reset_game(well, play, piece);
+        });
+        world.log(log_level::INFO, "tetris: quit");
+    }
     if at == SCREEN_PAUSED && is(M_QUIT) {
         let _ = world.each::<(&mut Well, &mut Play, &mut Piece, &mut Best)>(
             |_, (well, play, piece, best)| {
@@ -1972,6 +2007,10 @@ pub fn menu(world: &mut GameWorld) {
         Some((SCREEN_PLAYING, from))
     } else if at == SCREEN_TITLE && is(M_TITLE_SETTINGS) {
         Some((SCREEN_SETTINGS, SCREEN_TITLE))
+    } else if at == SCREEN_PLAYING && (pause || back) && over {
+        // A run that has ended is left rather than paused: RESUME over a dead
+        // board is a button that says the opposite of what the board shows.
+        Some((SCREEN_TITLE, from))
     } else if at == SCREEN_PLAYING && (pause || back) && !over {
         Some((SCREEN_PAUSED, from))
     } else if at == SCREEN_PAUSED && (pause || back || is(M_RESUME)) {
@@ -2467,7 +2506,7 @@ mod tests {
         assert_eq!(named.len(), 10, "and nothing is documented twice");
         // The id space and the name list are one thing, which is what lets the
         // golden parse this crate's `input.toml` without a second copy of it.
-        assert_eq!(ACTIONS.len(), 12);
+        assert_eq!(ACTIONS.len(), 13);
         assert_eq!(ACTIONS[BACK.index()], "back");
         assert_eq!(ACTIONS[LEFT.index()], "left");
         assert_eq!(AXES, ["ui_x", "ui_y"]);

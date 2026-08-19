@@ -544,7 +544,7 @@ fn file_name(path: &Path) -> anyhow::Result<String> {
 /// The commit the archive is keyed on. A dirty tree still archives — the
 /// artifact is keyed by what produced it, and refusing here would only mean no
 /// artifact for exactly the builds most likely to crash.
-fn commit() -> anyhow::Result<String> {
+pub(crate) fn commit() -> anyhow::Result<String> {
     let out = run_capture(
         std::process::Command::new("git")
             .current_dir(workspace_root())

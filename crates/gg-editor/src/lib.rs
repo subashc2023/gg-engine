@@ -2209,8 +2209,7 @@ mod tests {
             let tick = Tick {
                 motion,
                 primary: down,
-                advance_focus: false,
-                scroll: 0,
+                ..Tick::default()
             };
             self.tick += 1;
             let commands = self.editor.tick(

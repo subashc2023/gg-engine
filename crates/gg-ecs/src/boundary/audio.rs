@@ -78,6 +78,14 @@ pub mod wave {
 /// [`wave::CLIP_LOOP`] outlives this cap on purpose (§6 M43).
 pub const MAX_MS: u32 = 4_000;
 
+/// How long [`Sound::music`] takes to fade in, and to fade out when it is
+/// stopped (§6 M77).
+///
+/// A quarter of a second. Long enough that a pause is the music receding
+/// rather than the music ending, and short enough that the screen it opens
+/// onto is not waiting for it.
+pub const FADE_MS: u32 = 250;
+
 /// One voice the game can trigger.
 ///
 /// Every field is the game's. The host reads them and writes none — see the
@@ -122,8 +130,11 @@ pub struct Sound {
     pub attack_ms: u32,
     /// Fade out, milliseconds, ending at silence. Overlapping attack and release
     /// in a note shorter than their sum is resolved by the host, not refused.
-    /// Unread for [`wave::CLIP_LOOP`]: a note with no end has nothing to fade
-    /// into, and a release applied per repeat would pump the loop.
+    /// For [`wave::CLIP_LOOP`] it is the **stop**: unread while the loop
+    /// repeats, because a release applied per repeat would pump it, and spent
+    /// once when a [`wave::SILENT`] trigger asks the loop to end (§6 M77).
+    /// Before that a loop was cut on the sample it was asked to, which is a
+    /// step the size of whatever it was playing.
     pub release_ms: u32,
     /// Which baked clip to play, as [`gg_abi::asset_id`] of its pack name — or
     /// 0 for none. Read only by the clip waves.
@@ -183,13 +194,24 @@ impl Sound {
 
     /// The same clip, repeated until something else takes the voice — music.
     ///
-    /// Stopped by [`wave::SILENT`] and a [`play`](Sound::play), which is the
-    /// protocol it already had: a trigger replaces the slot's voice, and a
-    /// silent trigger leaves nothing behind.
+    /// Stopped by [`wave::SILENT`] and a [`play`](Sound::play): a silent
+    /// trigger over a loop asks it to **end**, and it spends
+    /// [`Sound::release_ms`] getting there (§6 M77).
+    ///
+    /// [`FADE_MS`] at both ends rather than [`Sound::clip`]'s single
+    /// millisecond, and the difference is what the two are for. A cue's
+    /// envelope exists only to keep a source that starts mid-waveform from
+    /// clicking, and anything larger would be the engine overruling the file.
+    /// Music is not a cue: it is stopped by a *player*, at a moment of their
+    /// choosing and usually mid-phrase, and a quarter of a second is the
+    /// difference between the music receding and the music being switched
+    /// off. A game that wants the cue's behaviour writes the field.
     #[must_use]
     pub fn music(name: &str, gain: f32) -> Self {
         Sound {
             wave: wave::CLIP_LOOP,
+            attack_ms: FADE_MS,
+            release_ms: FADE_MS,
             ..Sound::clip(name, gain)
         }
     }

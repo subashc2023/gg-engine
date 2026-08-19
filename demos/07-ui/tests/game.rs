@@ -96,8 +96,11 @@ impl Game {
                 // `just_pressed` for the same reason.
                 advance_focus: held(&frame, self.binding.advance_focus)
                     && !held(&self.previous, self.binding.advance_focus),
-                // Demo 07 declares no wheel verbs, so its UI never scrolls —
-                // which is the case `gg_ui::boundary::binding` leaves optional.
+                // Demo 07 declares neither the wheel verbs nor `ui_press`, so
+                // its UI never scrolls and its keyboard cannot press — the two
+                // cases `gg_ui::boundary::binding` leaves optional, and the
+                // reason this harness can stay this small.
+                activate: false,
                 scroll: 0,
             },
             gg_ui::Fit::new(self.target),

@@ -234,7 +234,8 @@ pub const STATE_OVER: u32 = 1;
 /// Targets standing at once. Three: enough that there is always one to swing
 /// to, few enough that the room does not read as a shooting gallery.
 pub const TARGETS_LIVE: usize = 3;
-/// Ticks a target stands before it leaves — 3.5 s, about two swings and a shot.
+/// Ticks a target stands before it leaves **in the first wave** — 3.5 s, about
+/// two swings and a shot. [`life_for`] is what happens to it after that.
 pub const TARGET_LIFE: u32 = 210;
 /// Targets allowed to leave before the round ends.
 pub const MISSES_ALLOWED: u32 = 3;
@@ -251,6 +252,63 @@ pub const TARGET_SMOOTHNESS: f32 = 0.65;
 pub const STREAK_STEP: u32 = 25;
 /// See [`STREAK_STEP`]. Eight, so a perfect run tops out at triple.
 pub const STREAK_CAP: u32 = 8;
+
+/// Targets taken per wave — the round's difficulty step.
+///
+/// Five, so a wave is about seven seconds of play at [`TARGET_LIFE`] and the
+/// arc is something a single round contains rather than something a session
+/// accumulates. The round had no arc at all until §6 M76: every target stood
+/// [`TARGET_LIFE`] for ever, so a good player left out of boredom rather than
+/// because the course beat them, and the score was a measure of patience.
+pub const WAVE_HITS: u32 = 5;
+/// Per cent of a target's life the next wave keeps. Demo 10's `gravity_ticks`
+/// decay two points steeper, because a wave is five hits and a level is ten
+/// rows.
+pub const WAVE_DECAY: u32 = 90;
+/// The shortest a target ever stands, ticks — 0.9 s.
+///
+/// A floor rather than a wall, and the difference is arithmetic: taking one
+/// target costs a turn, a trigger and [`FIRE_TICKS`] of cooldown, and
+/// [`TARGETS_LIVE`] of them stand at once, so any life under
+/// `(FIRE_TICKS + 2) * TARGETS_LIVE` cannot be cleared by a shot that never
+/// misses and the round would end on the clock instead of on the play. This
+/// is 1.6x that bound; `tests/game.rs` holds the inequality rather than the
+/// number, so retuning the weapon cannot quietly make the course impossible.
+pub const LIFE_FLOOR: u32 = 54;
+/// Added to [`TARGET_WORTH`] per wave.
+pub const WAVE_WORTH: u32 = 25;
+
+/// Which wave `hits` targets into. **Derived, never stored**: a wave is a
+/// reading of the round's own counter, so there is no second number to keep in
+/// step, none to migrate, and a save that carries [`Range::hits`] carries the
+/// wave with it. Zero-based, shown `+ 1` for [`Range::streak`]'s reason.
+#[must_use]
+pub const fn wave_of(hits: u32) -> u32 {
+    hits / WAVE_HITS
+}
+
+/// Ticks a target dealt in `wave` stands: [`WAVE_DECAY`] per cent of the wave
+/// before it, down to [`LIFE_FLOOR`]. Demo 10's `gravity_for` in this game's
+/// units, and integer for its reason — a float curve is a float in the hash.
+#[must_use]
+pub fn life_for(wave: u32) -> u32 {
+    let mut ticks = TARGET_LIFE;
+    for _ in 0..wave {
+        ticks = ticks * WAVE_DECAY / 100;
+        if ticks <= LIFE_FLOOR {
+            return LIFE_FLOOR;
+        }
+    }
+    ticks.max(LIFE_FLOOR)
+}
+
+/// What a target dealt in `wave` pays before the streak. Linear where
+/// [`life_for`] decays: the reward for a wave reached should be legible off
+/// the HUD, and the risk should not need arithmetic to feel.
+#[must_use]
+pub const fn worth_for(wave: u32) -> u32 {
+    TARGET_WORTH + wave * WAVE_WORTH
+}
 /// A target's colour, and what a hit and an escape leave behind.
 pub const TARGET_INK: u32 = 0x00e0_5a3c;
 /// See [`TARGET_INK`].
@@ -443,6 +501,40 @@ pub const PAUSE: ActionId = ActionId::new(2);
 /// arbitration itself — the menu is up or it is not, and [`shoot`] and the host
 /// read the same fact off [`Session::paused`].
 pub const FIRE: ActionId = ActionId::new(5);
+/// Begin, and begin again — the title screen's key and the over screen's
+/// (§6 M76).
+///
+/// **Appended**, which is the only place a verb may be added: the order of
+/// [`ACTIONS`] is the id space a replay records (§4.7). Bound to Enter *and*
+/// Space, which are both already bound to something else — a map sends a key
+/// to every verb that names it, and the two that share this one are the two
+/// this game stops for: `jump` does nothing while the sim is stopped, and
+/// `ui_press` reaches the row the ring is on rather than the round.
+///
+/// It has to be a *game* verb rather than a button, and that is not a taste:
+/// `[game.modal] keep` withholds `fire` while a menu is up, and the recorded
+/// session drives systems with no host UI at all, so a screen a widget was
+/// the only way off would be a screen no gate could ever leave.
+pub const BEGIN: ActionId = ActionId::new(7);
+/// The verb names, in id order — what `gg_game!` declares and what
+/// `input.toml` resolves against (§4.7).
+///
+/// A `const` rather than a literal list inside the macro, demo 10's reason:
+/// the test that pins each `ActionId` to its position needs the same list the
+/// macro got, and a second copy is the failure §6 M45 exists to stop.
+pub const ACTIONS: [&str; 8] = [
+    "jump", "restart", "pause", "ui_click", "ui_focus", "fire", "ui_press", "begin",
+];
+/// The axis names, in id order. [`ACTIONS`]'s reason.
+pub const AXES: [&str; 6] = [
+    "move_right",
+    "move_forward",
+    "aim_x",
+    "aim_y",
+    "ui_x",
+    "ui_y",
+];
+
 /// Strafe.
 pub const MOVE_RIGHT: AxisId = AxisId::new(0);
 /// Forward and back.
@@ -479,8 +571,9 @@ pub const HUD_STATE: u32 = 1;
 pub const HUD_SCORE: u32 = 2;
 /// The best this session has managed.
 pub const HUD_BEST: u32 = 3;
-/// Misses spent, or how the round ended.
-pub const HUD_MISS: u32 = 4;
+/// How the round is going: the wave it has reached and the misses spent, or
+/// how it ended. Named `HUD_MISS` until §6 M76 gave it the wave to carry.
+pub const HUD_ROUND: u32 = 4;
 /// Every text row `bootstrap` deals, and what it reads before a tick has had
 /// anything to say. One table so the rows and their count cannot drift — the
 /// crosshair arms are the other kind of `Hud` and are counted by [`ARMS`].
@@ -489,7 +582,7 @@ pub const HUD_ROWS: [(u32, &str); 5] = [
     (HUD_STATE, "GROUND"),
     (HUD_SCORE, "SCORE 0"),
     (HUD_BEST, "BEST 0"),
-    (HUD_MISS, "MISS 0/3"),
+    (HUD_ROUND, "WAVE 1  MISS 0/3"),
 ];
 /// The first crosshair arm's line. Above the text rows and never equal to one,
 /// so `present`'s match reaches the arms only through its default arm.
@@ -512,17 +605,57 @@ pub const HITMARK_TICKS: u32 = 6;
 /// How many crosshair rects `bootstrap` deals.
 pub const ARMS: usize = 4;
 
+/// Where a HUD widget sits, text rows and crosshair arms alike.
+///
+/// A function rather than two literals in `bootstrap`, because since §6 M76
+/// `present` puts the whole HUD away while a screen is up and therefore has
+/// to know how to bring it back. Before that the crosshair was drawn *through*
+/// every menu — the scrim is translucent by design, so a pause menu had a
+/// reticle in the middle of it and the title screen had one over its name.
+fn hud_slot(line: u32) -> [f32; 4] {
+    let (arm, thick, gap) = CROSS;
+    let (cx, cy) = CENTRE;
+    match line.checked_sub(HUD_CROSS) {
+        Some(0) => [cx - gap - arm, cy - thick / 2.0, arm, thick],
+        Some(1) => [cx + gap, cy - thick / 2.0, arm, thick],
+        Some(2) => [cx - thick / 2.0, cy - gap - arm, thick, arm],
+        Some(3) => [cx - thick / 2.0, cy + gap, thick, arm],
+        Some(_) => HIDDEN,
+        // A text row: stacked down the top-left corner.
+        None => [8.0, 6.0 + 14.0 * line as f32, 150.0, 12.0],
+    }
+}
+
 // ---------------------------------------------------------------- menu ------
 
 /// [`Session::page`]: the pause menu's first page.
+///
+/// **Zero**, so a zeroed migration is a paused game rather than a screen a
+/// build might not have — [`STATE_RUNNING`]'s rule applied to the other
+/// component a save carries.
 pub const PAGE_MAIN: u32 = 0;
-/// [`Session::page`]: the settings panel.
+/// [`Session::page`]: the settings panel. Reached from [`PAGE_TITLE`] and
+/// from [`PAGE_MAIN`], and [`Session::from`] is what it returns to.
 pub const PAGE_SETTINGS: u32 = 1;
+/// [`Session::page`]: the screen a session opens on (§6 M76).
+///
+/// The game had no beginning until this: the shell dropped a player into a
+/// room holding a gun, and the one rule — the one this game is *named* after
+/// — was written down nowhere a player could read it.
+pub const PAGE_TITLE: u32 = 2;
+/// [`Session::page`]: the round is out of misses and this is what it came to.
+///
+/// A page rather than demo 10's banner, and the difference is that this game
+/// has *numbers* worth reading at the end (the wave it reached, the shots it
+/// took to get there — [`Range::shots`] has been counted since §6 M37 and
+/// shown to nobody) and a *body* that would otherwise keep walking around a
+/// room that has stopped dealing targets.
+pub const PAGE_OVER: u32 = 3;
 
-/// [`Menu::item`], in the order `bootstrap` deals them. The scrim is first so
-/// it is behind everything else at equal order, and the value doubles as the
-/// draw order — a menu that overlaps the HUD must be on top of it, and
-/// [`HUD_CROSS`] is 8.
+/// [`Menu::item`] — an identity, and since §6 M76 *only* an identity. The
+/// value was the draw order too, which stopped working the moment one row
+/// could appear on two pages in two different positions; [`page_rows`] holds
+/// the order now and [`MENU_ORDER`] is where it starts.
 pub const MENU_SCRIM: u32 = 16;
 /// The panel behind the rows.
 pub const MENU_PANEL: u32 = 17;
@@ -552,14 +685,30 @@ pub const MENU_VOLUME_DOWN: u32 = 28;
 pub const MENU_VOLUME_UP: u32 = 29;
 /// The edge treatment, cycled by clicking it.
 pub const MENU_AA: u32 = 30;
-/// Every menu widget, in deal order.
-pub const MENU_ITEMS: [u32; 15] = [
+/// The rule, under the name, on [`PAGE_TITLE`].
+pub const MENU_RULE: u32 = 31;
+/// Begin. [`START`](crate::START_VERB) is the key that does the same thing.
+pub const MENU_START: u32 = 32;
+/// Back to [`PAGE_TITLE`], from the pause menu and from [`PAGE_OVER`].
+pub const MENU_TO_TITLE: u32 = 33;
+/// [`PAGE_OVER`]'s first summary line: what the round scored.
+pub const MENU_TALLY: u32 = 34;
+/// [`PAGE_OVER`]'s second: how far it got and how straight it shot.
+pub const MENU_AIM: u32 = 35;
+/// Every menu widget. Deal order only — where a row *sits*, and in what
+/// order the ring visits it, is [`page_rows`]'s and differs per page.
+pub const MENU_ITEMS: [u32; 20] = [
     MENU_SCRIM,
     MENU_PANEL,
     MENU_TITLE,
+    MENU_RULE,
+    MENU_TALLY,
+    MENU_AIM,
+    MENU_START,
     MENU_RESUME,
     MENU_SETTINGS,
     MENU_RESTART,
+    MENU_TO_TITLE,
     MENU_QUIT,
     MENU_BACK,
     MENU_LOOK,
@@ -571,36 +720,88 @@ pub const MENU_ITEMS: [u32; 15] = [
     MENU_AA,
 ];
 
-/// The menu's rectangles in [`gg_ecs::boundary::CANVAS`] units, `[x, y, w, h]`.
-/// One table so the panel and the rows cannot drift apart, and so a row that
-/// moves moves in one place.
-const fn slot(item: u32) -> [f32; 4] {
-    // Panel x 200..440, y 60..300. Rows are 208 wide inside an 8-unit margin.
-    match item {
-        MENU_SCRIM => [0.0, 0.0, 640.0, 360.0],
-        MENU_PANEL => [200.0, 60.0, 240.0, 240.0],
-        MENU_TITLE => [216.0, 76.0, 208.0, 12.0],
-        MENU_RESUME => [216.0, 110.0, 208.0, 26.0],
-        MENU_SETTINGS => [216.0, 146.0, 208.0, 26.0],
-        MENU_RESTART => [216.0, 182.0, 208.0, 26.0],
-        MENU_QUIT => [216.0, 218.0, 208.0, 26.0],
-        MENU_LOOK => [216.0, 116.0, 150.0, 12.0],
-        MENU_LOOK_DOWN => [370.0, 110.0, 24.0, 24.0],
-        MENU_LOOK_UP => [400.0, 110.0, 24.0, 24.0],
-        MENU_VOLUME => [216.0, 156.0, 150.0, 12.0],
-        MENU_VOLUME_DOWN => [370.0, 150.0, 24.0, 24.0],
-        MENU_VOLUME_UP => [400.0, 150.0, 24.0, 24.0],
-        MENU_AA => [216.0, 188.0, 208.0, 26.0],
-        MENU_BACK => [216.0, 248.0, 208.0, 26.0],
-        // Not a panic: an id no arm knows draws nowhere, which is the same
-        // answer a hidden widget gets and the safe one for a table edit.
-        _ => HIDDEN,
+/// Where the menu's draw order starts. Above [`HUD_CROSS`] and the [`ARMS`]
+/// that follow it, so the whole menu is over the HUD whatever page is up; a
+/// row's own order is this plus its position in [`page_rows`].
+pub const MENU_ORDER: u32 = 16;
+
+/// The rows of `page`, **in the order they are read**, each with its rectangle
+/// in [`gg_ecs::boundary::CANVAS`] units.
+///
+/// One table where there were two. `slot(item)` gave geometry and
+/// `on_page(item, page)` gave visibility, and the second had a catch-all arm
+/// — so every row nobody thought about landed on the settings page,
+/// uninvited, which is a defect that grows with the menu. A row's page, its
+/// rectangle and its position are one fact, and a button that appears on two
+/// pages genuinely sits in a different place on each.
+///
+/// **Order in the list is order on the glass**: [`lay_out`] writes it into
+/// `Widget::order`, which is the draw order and — because the host's focus
+/// ring walks declarations in that order (§6 M74) — also the order `Tab`
+/// visits the buttons in. A page whose list reads top to bottom therefore
+/// needs no second table to make the keyboard sensible, and a row moved here
+/// takes the ring with it.
+///
+/// The panel is x 200..440; rows are 208 wide inside an 8-unit margin.
+fn page_rows(page: u32) -> &'static [(u32, [f32; 4])] {
+    match page {
+        PAGE_TITLE => &[
+            (MENU_SCRIM, [0.0, 0.0, 640.0, 360.0]),
+            (MENU_PANEL, [200.0, 60.0, 240.0, 200.0]),
+            (MENU_TITLE, [216.0, 80.0, 208.0, 12.0]),
+            (MENU_RULE, [216.0, 100.0, 208.0, 12.0]),
+            (MENU_START, [216.0, 132.0, 208.0, 26.0]),
+            (MENU_SETTINGS, [216.0, 168.0, 208.0, 26.0]),
+            (MENU_QUIT, [216.0, 204.0, 208.0, 26.0]),
+        ],
+        PAGE_SETTINGS => &[
+            (MENU_SCRIM, [0.0, 0.0, 640.0, 360.0]),
+            (MENU_PANEL, [200.0, 60.0, 240.0, 240.0]),
+            (MENU_TITLE, [216.0, 76.0, 208.0, 12.0]),
+            (MENU_LOOK, [216.0, 116.0, 150.0, 12.0]),
+            (MENU_LOOK_DOWN, [370.0, 110.0, 24.0, 24.0]),
+            (MENU_LOOK_UP, [400.0, 110.0, 24.0, 24.0]),
+            (MENU_VOLUME, [216.0, 156.0, 150.0, 12.0]),
+            (MENU_VOLUME_DOWN, [370.0, 150.0, 24.0, 24.0]),
+            (MENU_VOLUME_UP, [400.0, 150.0, 24.0, 24.0]),
+            (MENU_AA, [216.0, 188.0, 208.0, 26.0]),
+            (MENU_BACK, [216.0, 248.0, 208.0, 26.0]),
+        ],
+        PAGE_OVER => &[
+            (MENU_SCRIM, [0.0, 0.0, 640.0, 360.0]),
+            (MENU_PANEL, [200.0, 60.0, 240.0, 240.0]),
+            (MENU_TITLE, [216.0, 76.0, 208.0, 12.0]),
+            (MENU_TALLY, [216.0, 100.0, 208.0, 12.0]),
+            (MENU_AIM, [216.0, 116.0, 208.0, 12.0]),
+            (MENU_RESTART, [216.0, 146.0, 208.0, 26.0]),
+            (MENU_TO_TITLE, [216.0, 182.0, 208.0, 26.0]),
+            (MENU_QUIT, [216.0, 218.0, 208.0, 26.0]),
+        ],
+        // [`PAGE_MAIN`] - and anything else, because an unknown page is a
+        // save from a build with a screen this one does not have, and the
+        // pause menu is the one screen it is always safe to land on.
+        _ => &[
+            (MENU_SCRIM, [0.0, 0.0, 640.0, 360.0]),
+            (MENU_PANEL, [200.0, 60.0, 240.0, 240.0]),
+            (MENU_TITLE, [216.0, 76.0, 208.0, 12.0]),
+            (MENU_RESUME, [216.0, 110.0, 208.0, 26.0]),
+            (MENU_SETTINGS, [216.0, 146.0, 208.0, 26.0]),
+            (MENU_RESTART, [216.0, 182.0, 208.0, 26.0]),
+            (MENU_TO_TITLE, [216.0, 218.0, 208.0, 26.0]),
+            (MENU_QUIT, [216.0, 254.0, 208.0, 26.0]),
+        ],
     }
 }
 
 /// A zero rect — how a widget hides (§4.9), and therefore also how the menu
 /// gives the mouse back.
 const HIDDEN: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
+/// Not a value [`Session::page`] ever holds: the round is `paused == 0`, and
+/// `page` goes on holding the screen to come back to. This is the name
+/// [`menu`]'s table uses for "no screen is up", so every arm there can be a
+/// page comparison instead of a page *and* a paused bit.
+const PAGE_PLAYING: u32 = u32::MAX;
 
 /// The scrim over the scene: black at two-thirds, so the room reads through it
 /// and the rows do not have to compete with it.
@@ -612,6 +813,18 @@ pub const MENU_PANEL_INK: u32 = 0xf01c_2230;
 pub const MENU_BUTTON_INK: u32 = 0xff2e_3a4e;
 /// Text on a button, and the title.
 pub const MENU_TEXT_INK: u32 = 0xffe8_f0ff;
+
+/// What the title screen says the game is called.
+///
+/// The same words as `game.ggproj`'s `title`, which is what the window bar,
+/// the shipped folder and the executable's own version resource read (§6 M73,
+/// M75). Two files cannot share a constant, so a test reads the manifest and
+/// asserts they still agree — the alternative is a game whose title screen
+/// and whose title bar disagree about its name.
+pub const TITLE_NAME: &str = "THREE MISSES";
+/// The rule, under the name. The game is *named* after this and had nowhere
+/// to say it, which made the name a pun a player could not check.
+pub const RULE: &str = "MISS THREE AND IT IS OVER";
 
 // ---------------------------------------------------------------- level -----
 
@@ -1019,9 +1232,18 @@ pub struct Menu {
 pub struct Session {
     /// The sim is stopped and the menu is up. `u32` for `Pod`; 0 or 1.
     pub paused: u32,
-    /// [`PAGE_MAIN`] or [`PAGE_SETTINGS`]. Kept while playing, so re-opening
-    /// the menu comes back to the front page.
+    /// Which screen is up. Kept while playing, so re-opening the menu comes
+    /// back to the front page.
     pub page: u32,
+    /// Where [`PAGE_SETTINGS`] returns to — [`PAGE_TITLE`] or [`PAGE_MAIN`],
+    /// whichever opened it.
+    ///
+    /// A **field**, written where settings is entered rather than reasoned
+    /// back out of the rest of the state, which is the only thing that proves
+    /// one settings panel serves two screens rather than one hardcoded return
+    /// (§6 M44, demo 10's `Screen::from`). Meaningless on every other page,
+    /// and hashed like the rest, so a replay reopens the same menus.
+    pub from: u32,
     /// Look sensitivity in [`SENS_ONE`]ths, clamped to
     /// [`SENS_MIN`]..=[`SENS_MAX`].
     pub sens: u32,
@@ -1033,11 +1255,18 @@ pub struct Session {
 
 /// Put the body back at [`START`] facing where a session opens. Not a wipe: the
 /// room is `bootstrap`'s and nothing here could deal it back.
+///
+/// The one screen it is refused on is the title, where there is no round to
+/// start over and `R` would deal a course nobody has asked to play.
 pub fn restart(world: &mut GameWorld) {
+    let session = session_of(world);
+    if session.paused != 0 && session.page == PAGE_TITLE {
+        return;
+    }
     if !world.just_pressed(RESTART) {
         return;
     }
-    respawn(world);
+    respawn(world, session.paused != 0 && session.page == PAGE_OVER);
 }
 
 /// Deal the body, the room, the light and the HUD if there is no body yet.
@@ -1123,19 +1352,9 @@ pub fn bootstrap(world: &mut GameWorld) {
         world.put(entity, sound);
     }
 
-    let (arm, thick, gap) = CROSS;
-    let (cx, cy) = CENTRE;
-    for (index, rect) in [
-        [cx - gap - arm, cy - thick / 2.0, arm, thick],
-        [cx + gap, cy - thick / 2.0, arm, thick],
-        [cx - thick / 2.0, cy - gap - arm, thick, arm],
-        [cx - thick / 2.0, cy + gap, thick, arm],
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let line = HUD_CROSS + index as u32;
-        let mut widget = Widget::panel(rect, CROSS_INK);
+    for index in 0..ARMS as u32 {
+        let line = HUD_CROSS + index;
+        let mut widget = Widget::panel(hud_slot(line), CROSS_INK);
         // Distinct ids even though nothing hit-tests these: two live widgets
         // sharing one is a conflict the host reports rather than arbitrates.
         widget.id = widget_id("shooter.cross") ^ u64::from(line);
@@ -1147,9 +1366,13 @@ pub fn bootstrap(world: &mut GameWorld) {
     // The globals, on an entity of their own: `restart` rewrites the body and
     // nothing else, and settings that a respawn cleared would be a bug shaped
     // like a feature.
+    // The session opens on the title screen (§6 M76), one tick in: the room,
+    // the round and the body are all dealt behind it, so START is a screen
+    // change and not a second bootstrap — demo 10's shape.
     let globals = world.spawn_with(Session {
-        paused: 0,
-        page: PAGE_MAIN,
+        paused: 1,
+        page: PAGE_TITLE,
+        from: PAGE_TITLE,
         sens: SENS_DEFAULT,
         _pad: 0,
     });
@@ -1169,26 +1392,12 @@ pub fn bootstrap(world: &mut GameWorld) {
     );
 
     for item in MENU_ITEMS {
-        let mut widget = match item {
-            MENU_SCRIM => Widget::panel(HIDDEN, MENU_SCRIM_INK),
-            MENU_PANEL => Widget::panel(HIDDEN, MENU_PANEL_INK),
-            MENU_TITLE | MENU_LOOK | MENU_VOLUME => Widget::label(HIDDEN, MENU_TEXT_INK, ""),
-            _ => Widget::button(0, HIDDEN, MENU_BUTTON_INK, MENU_TEXT_INK, label_of(item)),
-        };
-        widget.id = widget_id("shooter.menu") ^ u64::from(item);
-        // The item *is* the draw order (see `MENU_SCRIM`): the scrim under the
-        // panel under the rows, and the whole menu over a HUD that stops at 11.
-        widget.order = item;
         let entity = world.spawn_with(Menu { item });
-        world.put(entity, widget);
+        world.put(entity, menu_widget(item));
     }
 
     for (line, text) in HUD_ROWS {
-        let mut widget = Widget::label(
-            [8.0, 6.0 + 14.0 * line as f32, 150.0, 12.0],
-            0xffe8_f0ff,
-            text,
-        );
+        let mut widget = Widget::label(hud_slot(line), 0xffe8_f0ff, text);
         widget.id = widget_id("shooter.hud") ^ u64::from(line);
         widget.order = line;
         let entity = world.spawn_with(Hud { line });
@@ -1412,6 +1621,13 @@ pub fn shoot(world: &mut GameWorld) {
             if range.hits == 1 {
                 world.log(log_level::INFO, "shooter: hit");
             }
+            // The arc, once: the hit that carries this round into its second
+            // wave (§6 M76). `== WAVE_HITS` rather than a modulus, so the
+            // line is one per round by construction and a gate can assert it
+            // exactly once — the same shape `"shooter: hit"` above uses.
+            if range.hits == WAVE_HITS {
+                world.log(log_level::INFO, "shooter: wave");
+            }
         }
         // A wall, or nothing at all: both end the streak, and the difference
         // between them is a puff of dust. Nothing is reachable — the room is
@@ -1489,7 +1705,7 @@ pub fn targets(world: &mut GameWorld) {
         };
         let slot = free[pick as usize];
         held.push(slot);
-        deal(world, slot);
+        deal(world, slot, wave_of(range.hits));
     }
     world.visit::<&mut Range>(|_, held| *held = range);
 }
@@ -1540,18 +1756,14 @@ pub fn menu(world: &mut GameWorld) {
     let mut session = session_of(world);
     let mut prefs = prefs_of(world);
 
-    // Escape layers: out of the settings page first, then out of the menu. One
-    // key walking back one level is what every game does, and it is also what
-    // keeps the page you left on from being the page you return to.
-    if world.just_pressed(PAUSE) {
-        match (session.paused != 0, session.page) {
-            (true, PAGE_SETTINGS) => session.page = PAGE_MAIN,
-            (true, _) => session.paused = 0,
-            (false, _) => {
-                session.paused = 1;
-                session.page = PAGE_MAIN;
-            }
-        }
+    // The round ran out of misses on the *last* tick — `targets` comes after
+    // this system in the table — so the panel that says what happened is this
+    // tick's. First, so the tick a round ends on cannot also be one that
+    // starts another, and so no play happens after the last miss: `aim`,
+    // `walk` and `shoot` all read the flag this sets and all run below.
+    if session.paused == 0 && range_of(world).state == STATE_OVER {
+        session.paused = 1;
+        session.page = PAGE_OVER;
     }
 
     // At most one: a release lands over one widget, and the host has already
@@ -1562,17 +1774,66 @@ pub fn menu(world: &mut GameWorld) {
             hit = menu.item;
         }
     });
-    let mut respawning = false;
+    let is = |item: u32| hit == item;
+    let back = world.just_pressed(PAUSE);
+    let begin = world.just_pressed(BEGIN);
+
+    // Every screen change in one table (§6 M44's shape, demo 10's `menu`).
+    // `at` folds the paused bit in so each arm is a plain page comparison:
+    // `page` is *kept* while playing, so `page == PAGE_MAIN` alone cannot
+    // tell a pause menu from a round, and every arm would otherwise carry a
+    // second guard nobody would notice was missing.
+    //
+    // Escape still walks back exactly one level — out of settings to whatever
+    // opened them, out of the pause menu to the round, off the over screen to
+    // the title — which is what keeps the page you left on from being the
+    // page you return to.
+    let at = match session.paused {
+        0 => PAGE_PLAYING,
+        _ => session.page,
+    };
+    let mut respawning = None;
+    let next = if at == PAGE_PLAYING && back {
+        Some((1, PAGE_MAIN))
+    } else if at == PAGE_TITLE && (begin || is(MENU_START)) {
+        world.log(log_level::INFO, "shooter: started");
+        Some((0, PAGE_MAIN))
+    } else if at == PAGE_TITLE && is(MENU_SETTINGS) {
+        session.from = PAGE_TITLE;
+        Some((1, PAGE_SETTINGS))
+    } else if at == PAGE_MAIN && (back || is(MENU_RESUME)) {
+        Some((0, PAGE_MAIN))
+    } else if at == PAGE_MAIN && is(MENU_SETTINGS) {
+        session.from = PAGE_MAIN;
+        Some((1, PAGE_SETTINGS))
+    } else if at == PAGE_SETTINGS && (back || is(MENU_BACK)) {
+        Some((1, session.from))
+    // Straight back into the round: a restart that left you looking at the
+    // menu would need a second click to do the thing you asked for.
+    } else if at == PAGE_MAIN && is(MENU_RESTART) {
+        respawning = Some(false);
+        Some((0, PAGE_MAIN))
+    } else if at == PAGE_OVER && (begin || is(MENU_RESTART)) {
+        respawning = Some(true);
+        Some((0, PAGE_MAIN))
+    // Two screens offer the way back to the title, and only one of them takes
+    // Escape for it: from the pause menu one level back is the round, and from
+    // the over screen there is no round left to go back to.
+    } else if (at == PAGE_MAIN && is(MENU_TO_TITLE))
+        || (at == PAGE_OVER && (is(MENU_TO_TITLE) || back))
+    {
+        Some((1, PAGE_TITLE))
+    } else {
+        None
+    };
+    if let Some((paused, page)) = next {
+        session.paused = paused;
+        session.page = page;
+    }
+
+    // What a row *does* where it is not a screen change. Reached on any page
+    // that shows the row, which is what lets QUIT sit on three of them.
     match hit {
-        MENU_RESUME => session.paused = 0,
-        MENU_SETTINGS => session.page = PAGE_SETTINGS,
-        MENU_BACK => session.page = PAGE_MAIN,
-        // Straight back into the game: a restart that left you looking at the
-        // menu would need a second click to do the thing you asked for.
-        MENU_RESTART => {
-            respawning = true;
-            session.paused = 0;
-        }
         MENU_QUIT => prefs.close = 1,
         MENU_LOOK_DOWN => session.sens = session.sens.saturating_sub(SENS_STEP).max(SENS_MIN),
         MENU_LOOK_UP => session.sens = session.sens.saturating_add(SENS_STEP).min(SENS_MAX),
@@ -1593,55 +1854,147 @@ pub fn menu(world: &mut GameWorld) {
     prefs.modal = u32::from(session.paused != 0);
     world.visit::<&mut Session>(|_, held| *held = session);
     world.visit::<&mut Prefs>(|_, held| *held = prefs);
-    if respawning {
-        respawn(world);
+    if let Some(again) = respawning {
+        respawn(world, again);
     }
-    lay_out(world, session, prefs);
+    let range = range_of(world);
+    lay_out(world, session, prefs, range);
 }
 
 /// Put the menu where the session says it is — and, by the same act, decide who
 /// holds the mouse: a hidden widget is a zero rect (§4.9), a canvas with no
 /// hit-tested area is a canvas with nothing to point at, and the host hands the
 /// pointer back to mouse-look on exactly that condition.
-pub fn lay_out(world: &mut GameWorld, session: Session, prefs: Prefs) {
-    use core::fmt::Write as _;
-    let showing = session.paused != 0;
-    let page = session.page;
-
-    // Two numbers, because the multiplier alone answers "faster or slower" and
-    // nothing else. Counts-per-turn is the one a hand can be set against: divide
-    // by the mouse's DPI for inches of desk per full turn.
-    let mut look = Line::default();
-    let _ = write!(
-        look,
-        "LOOK {}.{:02}  {}/TURN",
-        session.sens / SENS_ONE,
-        session.sens % SENS_ONE,
-        counts_per_turn(session.sens)
-    );
-    let mut volume = Line::default();
-    let _ = write!(
-        volume,
-        "VOLUME {}%",
-        (QUIET_MAX - prefs.quiet.min(QUIET_MAX)) * 100 / QUIET_MAX
-    );
-
+pub fn lay_out(world: &mut GameWorld, session: Session, prefs: Prefs, range: Range) {
     world.visit::<(&Menu, &mut Widget)>(|_, (menu, widget)| {
-        widget.rect = match showing && on_page(menu.item, page) {
-            true => slot(menu.item),
-            false => HIDDEN,
-        };
-        match menu.item {
-            MENU_TITLE => widget.set_text(match page {
-                PAGE_SETTINGS => "SETTINGS",
-                _ => "PAUSED",
-            }),
-            MENU_LOOK => widget.set_text(look.as_str()),
-            MENU_VOLUME => widget.set_text(volume.as_str()),
-            MENU_AA => widget.set_text(aa_label(prefs.aa)),
-            _ => {}
-        }
+        dress(menu.item, session, prefs, range, widget);
     });
+}
+
+/// Every menu widget of the screen `session` is on, as the host would see it.
+///
+/// A callback rather than a returned list because the game side allocates
+/// nothing, and demo 10's `declare` for its reason: the golden harness cannot
+/// link a second `gg_game!` (§3's deny pin), so a reference image for one of
+/// these screens would otherwise restate twenty rectangles and drift from them
+/// — the second table §4.10 exists to forbid. `bootstrap` deals these and
+/// [`lay_out`] dresses them; this is the same two acts composed for a caller
+/// that has no world.
+pub fn declare_menu(
+    session: Session,
+    prefs: Prefs,
+    range: Range,
+    mut emit: impl FnMut(u32, Widget),
+) {
+    for item in MENU_ITEMS {
+        let mut widget = menu_widget(item);
+        dress(item, session, prefs, range, &mut widget);
+        emit(item, widget);
+    }
+}
+
+/// The widget an item is dealt as: its kind, its identity and its ink. Geometry
+/// and text are [`dress`]'s, which is what lets a screen change move a row
+/// without respawning anything.
+fn menu_widget(item: u32) -> Widget {
+    let mut widget = match item {
+        MENU_SCRIM => Widget::panel(HIDDEN, MENU_SCRIM_INK),
+        MENU_PANEL => Widget::panel(HIDDEN, MENU_PANEL_INK),
+        MENU_TITLE | MENU_RULE | MENU_TALLY | MENU_AIM | MENU_LOOK | MENU_VOLUME => {
+            Widget::label(HIDDEN, MENU_TEXT_INK, "")
+        }
+        _ => Widget::button(0, HIDDEN, MENU_BUTTON_INK, MENU_TEXT_INK, label_of(item)),
+    };
+    widget.id = widget_id("shooter.menu") ^ u64::from(item);
+    widget.order = MENU_ORDER;
+    widget
+}
+
+/// Put one row where the screen says it is, and give it the words that screen
+/// gives it.
+///
+/// Position in the page's list is the draw order and the ring's order both (see
+/// [`page_rows`]). A row the page does not list is hidden, which is also how the
+/// menu hands the mouse back (§4.9).
+fn dress(item: u32, session: Session, prefs: Prefs, range: Range, widget: &mut Widget) {
+    use core::fmt::Write as _;
+    let page = session.page;
+    let rows = page_rows(page);
+    match (session.paused != 0)
+        .then(|| rows.iter().position(|(row, _)| *row == item))
+        .flatten()
+    {
+        Some(at) => {
+            widget.rect = rows[at].1;
+            widget.order = MENU_ORDER + at as u32;
+        }
+        // Back to the base, not left where the last page put it: every field a
+        // hidden row carries is hashed, and one that remembered a screen it is
+        // no longer on would make the world depend on where the player has been.
+        None => {
+            widget.rect = HIDDEN;
+            widget.order = MENU_ORDER;
+        }
+    }
+
+    let mut line = Line::default();
+    match item {
+        MENU_TITLE => widget.set_text(match page {
+            PAGE_TITLE => TITLE_NAME,
+            PAGE_SETTINGS => "SETTINGS",
+            PAGE_OVER => "ROUND OVER",
+            _ => "PAUSED",
+        }),
+        MENU_RULE => widget.set_text(RULE),
+        // What the round came to. Two lines: what it scored, and how it got
+        // there — the wave is the arc, and the accuracy is the number
+        // [`Range::shots`] has been counted for since §6 M37 and never shown.
+        MENU_TALLY => {
+            let _ = write!(
+                line,
+                "SCORE {}  BEST {}",
+                range.score,
+                range.best.max(range.score)
+            );
+            widget.set_text(line.as_str());
+        }
+        MENU_AIM => {
+            let _ = write!(
+                line,
+                "WAVE {}  ACCURACY {}%",
+                wave_of(range.hits) + 1,
+                accuracy(&range)
+            );
+            widget.set_text(line.as_str());
+        }
+        MENU_RESTART => widget.set_text(match page {
+            PAGE_OVER => "AGAIN",
+            _ => "RESTART",
+        }),
+        // Two numbers, because the multiplier alone answers "faster or slower"
+        // and nothing else. Counts-per-turn is the one a hand can be set
+        // against: divide by the mouse's DPI for inches of desk per full turn.
+        MENU_LOOK => {
+            let _ = write!(
+                line,
+                "LOOK {}.{:02}  {}/TURN",
+                session.sens / SENS_ONE,
+                session.sens % SENS_ONE,
+                counts_per_turn(session.sens)
+            );
+            widget.set_text(line.as_str());
+        }
+        MENU_VOLUME => {
+            let _ = write!(
+                line,
+                "VOLUME {}%",
+                (QUIET_MAX - prefs.quiet.min(QUIET_MAX)) * 100 / QUIET_MAX
+            );
+            widget.set_text(line.as_str());
+        }
+        MENU_AA => widget.set_text(aa_label(prefs.aa)),
+        _ => {}
+    }
 }
 
 /// Say what the tick looks like: where the eye is, and what the HUD reads. Last
@@ -1698,7 +2051,15 @@ pub fn present(world: &mut GameWorld) {
     let _ = if range.state == STATE_OVER {
         write!(misses, "OVER - R TO RESTART")
     } else {
-        write!(misses, "MISS {}/{MISSES_ALLOWED}", range.misses)
+        // The wave rides here rather than on a row of its own: it is how the
+        // round is going, which is what the misses are, and a sixth row would
+        // be a sixth thing to read while aiming.
+        write!(
+            misses,
+            "WAVE {}  MISS {}/{MISSES_ALLOWED}",
+            wave_of(range.hits) + 1,
+            range.misses
+        )
     };
     let cross = if range.hitmark > 0 {
         HITMARK_INK
@@ -1706,14 +2067,24 @@ pub fn present(world: &mut GameWorld) {
         CROSS_INK
     };
 
-    world.visit::<(&Hud, &mut Widget)>(|_, (hud, widget)| match hud.line {
-        HUD_SPEED => widget.set_text(speed.as_str()),
-        HUD_STATE => widget.set_text(if grounded { "GROUND" } else { "AIR" }),
-        HUD_SCORE => widget.set_text(score.as_str()),
-        HUD_BEST => widget.set_text(best.as_str()),
-        HUD_MISS => widget.set_text(misses.as_str()),
-        // The four crosshair rects, and nothing else reaches here.
-        _ => widget.color = cross,
+    // The whole HUD belongs to the round, so it goes away with it: a reticle
+    // over a title screen is aiming at a menu, and the scrim is translucent
+    // enough that every row read through it (§6 M76).
+    let playing = session.paused == 0;
+    world.visit::<(&Hud, &mut Widget)>(|_, (hud, widget)| {
+        widget.rect = match playing {
+            true => hud_slot(hud.line),
+            false => HIDDEN,
+        };
+        match hud.line {
+            HUD_SPEED => widget.set_text(speed.as_str()),
+            HUD_STATE => widget.set_text(if grounded { "GROUND" } else { "AIR" }),
+            HUD_SCORE => widget.set_text(score.as_str()),
+            HUD_BEST => widget.set_text(best.as_str()),
+            HUD_ROUND => widget.set_text(misses.as_str()),
+            // The four crosshair rects, and nothing else reaches here.
+            _ => widget.color = cross,
+        }
     });
 }
 
@@ -1742,7 +2113,14 @@ fn at_start() -> Walker {
 /// means in a game with a score; [`Range::best`] is the one thing carried
 /// across, which is also the only thing a save would have to carry the day this
 /// game gets one (M14's `--best` is the shape).
-fn respawn(world: &mut GameWorld) {
+fn respawn(world: &mut GameWorld, again: bool) {
+    // Whatever screen asked for this, the answer is the round (§6 M76). One
+    // place, so a page that forgot to put itself away would be a page that
+    // could not exist rather than one nobody noticed.
+    world.visit::<&mut Session>(|_, session| {
+        session.paused = 0;
+        session.page = PAGE_MAIN;
+    });
     world.visit::<&mut Walker>(|_, walker| *walker = at_start());
     world.visit::<&mut Gun>(|_, gun| *gun = fresh_gun());
     world.visit::<&mut Range>(|_, range| *range = fresh_range(range.best.max(range.score)));
@@ -1755,7 +2133,17 @@ fn respawn(world: &mut GameWorld) {
     for entity in clear {
         world.despawn(entity);
     }
-    world.log(log_level::INFO, "shooter: restarted");
+    // Two words for one act, because a gate has to tell them apart: the
+    // milestone list asserts each line once, and a round begun from the over
+    // screen is the loop closing where a mid-game `R` is a player starting
+    // over.
+    world.log(
+        log_level::INFO,
+        match again {
+            true => "shooter: again",
+            false => "shooter: restarted",
+        },
+    );
 }
 
 /// A cooled weapon on a fresh stream. Seeded from `!`[`SEED`] rather than
@@ -1876,12 +2264,12 @@ fn nearer(best: &mut Option<(f64, Contact)>, distance: f64, contact: Contact) {
 }
 
 /// One target at `slot`.
-fn deal(world: &mut GameWorld, slot: u32) {
+fn deal(world: &mut GameWorld, slot: u32, wave: u32) {
     let entity = world.spawn_with(Target {
         age: 0,
-        life: TARGET_LIFE,
+        life: life_for(wave),
         slot,
-        worth: TARGET_WORTH,
+        worth: worth_for(wave),
     });
     world.put(
         entity,
@@ -1996,6 +2384,17 @@ pub fn look_per_count(sens: u32) -> f32 {
     LOOK_PER_UNIT * sens as f32 / SENS_ONE as f32
 }
 
+/// Hits as a percentage of shots — what [`Range::shots`] has been counted for
+/// since §6 M37 and what nothing showed until [`PAGE_OVER`] existed. A round
+/// that fired nothing reads zero rather than dividing by it.
+#[must_use]
+pub fn accuracy(range: &Range) -> u32 {
+    match range.shots {
+        0 => 0,
+        shots => range.hits * 100 / shots,
+    }
+}
+
 /// Mouse counts in a full turn at `sens` — what the settings row reports,
 /// because it is the number a hand can be set against: divide by the mouse's
 /// DPI for inches of desk per 360.
@@ -2038,6 +2437,7 @@ fn session_of(world: &mut GameWorld) -> Session {
     let mut found = Session {
         paused: 0,
         page: PAGE_MAIN,
+        from: PAGE_MAIN,
         sens: SENS_DEFAULT,
         _pad: 0,
     };
@@ -2052,22 +2452,17 @@ fn prefs_of(world: &mut GameWorld) -> Prefs {
     found
 }
 
-/// Whether an item belongs to the page being shown.
-fn on_page(item: u32, page: u32) -> bool {
-    match item {
-        MENU_SCRIM | MENU_PANEL | MENU_TITLE => true,
-        MENU_RESUME | MENU_SETTINGS | MENU_RESTART | MENU_QUIT => page == PAGE_MAIN,
-        _ => page == PAGE_SETTINGS,
-    }
-}
-
 /// A button's fixed text. The three rows whose text is a *value* are written
 /// every tick by [`lay_out`] and start empty here.
 fn label_of(item: u32) -> &'static str {
     match item {
+        MENU_START => "START",
         MENU_RESUME => "RESUME",
         MENU_SETTINGS => "SETTINGS",
+        // [`PAGE_OVER`] calls it AGAIN, which `lay_out` writes: the button
+        // does one thing and two screens ask for it in two words.
         MENU_RESTART => "RESTART",
+        MENU_TO_TITLE => "TITLE",
         MENU_QUIT => "QUIT",
         MENU_BACK => "BACK",
         MENU_LOOK_DOWN | MENU_VOLUME_DOWN => "-",
@@ -2294,7 +2689,7 @@ gg_ecs::gg_game! {
         Walker, Solid, Cue, Hud, Menu, Session, Gun, Range, Target, Spark,
         Renderable, Light, Sky, Eye, Look, Widget, Sound, Prefs
     ],
-    actions: ["jump", "restart", "pause", "ui_click", "ui_focus", "fire"],
-    axes: ["move_right", "move_forward", "aim_x", "aim_y", "ui_x", "ui_y"],
+    actions: &ACTIONS,
+    axes: &AXES,
     systems: [restart, bootstrap, menu, aim, walk, shoot, targets, effects, present],
 }

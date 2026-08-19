@@ -606,11 +606,14 @@ pub fn check_platformer() -> anyhow::Result<()> {
 }
 
 /// Demo 12's verbs, in the id order `gg_game!` declares them (§4.7). Unlike
-/// demo 11's two, this list runs all the way to `fire` — the trigger is verb 5,
-/// and a stream declaring only the ones it presses would index its bits against
-/// a shorter list and press something else. The two `ui_*` in the middle are
-/// along for that reason and no other.
-const SHOOTER_ACTIONS: &[&str] = &["jump", "restart", "pause", "ui_click", "ui_focus", "fire"];
+/// demo 11's two, this list runs all the way to the last verb the stream
+/// presses — a stream declaring only the ones it uses would index its bits
+/// against a shorter list and press something else. The `ui_*` entries are
+/// along for that reason and no other; `begin` is verb 7 and is what the
+/// recording leaves the title screen and the over screen with (§6 M76).
+const SHOOTER_ACTIONS: &[&str] = &[
+    "jump", "restart", "pause", "ui_click", "ui_focus", "fire", "ui_press", "begin",
+];
 /// The same rule on the axis side: the aim pair is 2 and 3, so the walk pair
 /// has to be declared to reach them.
 const SHOOTER_AXES: &[&str] = &["move_right", "move_forward", "aim_x", "aim_y"];
@@ -3206,19 +3209,38 @@ fn shooter() -> anyhow::Result<()> {
     let at = |find: &dyn Fn(&demo_12_shooter::session::Progress) -> bool| {
         progress.iter().position(find).map(|i| i as u64)
     };
-    let (hit_at, escaped_at, over_at) = match (
-        at(&|p| p.hits == 1),
-        at(&|p| p.misses == 1),
-        at(&|p| p.over),
-    ) {
-        (Some(hit), Some(escaped), Some(over)) => (hit, escaped, over),
-        (hit, escaped, over) => anyhow::bail!(
-            "the in-process round hit at {hit:?}, lost one at {escaped:?} and ended at {over:?} \
-             — the bot no longer plays this room out, so there is nothing for the shell to agree \
-             with"
+    // Since §6 M76 the shape has edges as well as a middle: the title screen
+    // left, the wave turned over, and a second round begun from the screen
+    // that ended the first. Each is named rather than indexed off `LOG`, so a
+    // milestone added there cannot silently re-point one of these.
+    let marks: Vec<(&str, Option<u64>)> = vec![
+        ("shooter: started", at(&|p| !p.stopped)),
+        ("shooter: hit", at(&|p| p.hits == 1)),
+        (
+            "shooter: wave",
+            at(&|p| p.hits == demo_12_shooter::WAVE_HITS),
         ),
-    };
-    let scored = progress.last().map_or(0, |p| p.score);
+        ("shooter: escaped", at(&|p| p.misses == 1)),
+        // The *state*, not the page: `targets` sets the state and writes this
+        // line on one tick, and the screen follows on the next because `menu`
+        // runs ahead of it in the table (§6 M76).
+        ("shooter: over", at(&|p| p.over)),
+    ];
+    let mut ticks: Vec<(&str, u64)> = Vec::new();
+    for (name, found) in &marks {
+        match found {
+            Some(tick) => ticks.push((name, *tick)),
+            None => anyhow::bail!(
+                "the in-process round never reached `{name}` — the bot no longer plays this \
+                 room out, so there is nothing for the shell to agree with (marks: {marks:?})"
+            ),
+        }
+    }
+    let over_at = ticks[4].1;
+    // The score the round *ended* on. The stream now runs on into a second
+    // round, so the last tick reads zero and would say the session scored
+    // nothing (§6 M76).
+    let scored = progress[over_at as usize].score;
 
     let mut runs: Vec<(&str, Vec<(u64, String)>)> = Vec::new();
     for tier in HASHED_TIERS {
@@ -3259,11 +3281,7 @@ fn shooter() -> anyhow::Result<()> {
         // Where the three milestones land is the shape this run *has*, and each
         // is the bot's own doing: re-seed the course or move a pillar and they
         // move with it.
-        for (needle, want) in [
-            (wanted[2], hit_at),
-            (wanted[3], escaped_at),
-            (wanted[4], over_at),
-        ] {
+        for (needle, want) in ticks.iter().copied() {
             let got = logged_at(&log, needle);
             anyhow::ensure!(
                 got == Some(want),
@@ -3280,11 +3298,17 @@ fn shooter() -> anyhow::Result<()> {
             anyhow::bail!("§6 M37: {found}");
         }
     }
+    let where_at = ticks
+        .iter()
+        .map(|(name, tick)| format!("{} at {tick}", name.trim_start_matches("shooter: ")))
+        .collect::<Vec<_>>()
+        .join(", ");
     println!(
-        "xtask reload: demo 12's recorded round — restart, {} targets taken for {scored} points, \
-         then the course run out over {} ticks — replayed identically under dev, instrumented and \
-         dist-verify, hitting at {hit_at}, losing one at {escaped_at} and ending at {over_at} \
-         exactly where the baseline the aarch64 leg reads puts them (§6 M37)",
+        "xtask reload: demo 12's whole shape — the title screen left, {} targets taken for \
+         {scored} points across a wave, the course run out, and another round begun from the \
+         screen that reported it, over {} ticks — replayed identically under dev, instrumented \
+         and dist-verify, with {where_at}, exactly where the baseline the aarch64 leg reads \
+         puts them (§6 M37, M76)",
         demo_12_shooter::session::HITS_WANTED,
         runs[0].1.len(),
     );

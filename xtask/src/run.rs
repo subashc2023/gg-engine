@@ -100,6 +100,25 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
     if bindings.is_file() {
         shell.arg("--input").arg(&bindings);
     }
+    // And the manifest, for a demo that has one (§6 M75). Without it a game
+    // played out of the tree is a *different game* from the one `xtask ship`
+    // assembles: no title, no icon, and — the one that costs something — no
+    // `Project::data_dir`, so the shell writes no `progress.ggsave` and no
+    // `settings.cfg` and every session starts from nothing. Tetris had a
+    // manifest from §6 M41 and this command never passed it, so the shipped
+    // build remembered and the one the operator actually plays did not.
+    //
+    // Argv still wins field by field (§6 M42), so `--game`, `--input` and
+    // `--pack` above are untouched and every existing invocation is unchanged;
+    // what the manifest adds is exactly the fields nothing here sets. The tree
+    // build and the shipped build share the player's directory deliberately,
+    // because they are the same game — and the startup line names it, so a
+    // session that lands somewhere unexpected says so rather than being found
+    // out later.
+    let project = crate_dir.join(gg_core::config::project::MANIFEST);
+    if project.is_file() {
+        shell.arg("--project").arg(&project);
+    }
     // Same argument for the pack (§4.6): a demo that declares an `assets/` tree
     // gets it compiled and passed. Built here rather than assumed present,
     // because a pack is build output and a stale one is worse than none — and

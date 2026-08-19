@@ -32,6 +32,7 @@ pub mod gg_ui::boundary
 pub mod gg_ui::boundary::verb
 pub const gg_ui::boundary::verb::CLICK: &str
 pub const gg_ui::boundary::verb::FOCUS: &str
+pub const gg_ui::boundary::verb::PRESS: &str
 pub const gg_ui::boundary::verb::SCROLL_DOWN: &str
 pub const gg_ui::boundary::verb::SCROLL_UP: &str
 pub const gg_ui::boundary::verb::X: &str
@@ -198,6 +199,7 @@ pub const gg_ui::menu::ROW: f32
 pub mod gg_ui::router
 pub use gg_ui::router::AXIS_SCALE
 pub struct gg_ui::router::Binding
+pub gg_ui::router::Binding::activate: core::option::Option<gg_abi::input::ActionId>
 pub gg_ui::router::Binding::advance_focus: gg_abi::input::ActionId
 pub gg_ui::router::Binding::primary: gg_abi::input::ActionId
 pub gg_ui::router::Binding::scroll_down: core::option::Option<gg_abi::input::ActionId>
@@ -222,6 +224,7 @@ pub fn gg_ui::router::Router::focused(&self) -> core::option::Option<gg_ui::rout
 pub fn gg_ui::router::Router::hit(&mut self, gg_ui::router::WidgetId, gg_ui::draw::Rect) -> gg_ui::router::Response
 pub fn gg_ui::router::Router::pointer(&self) -> gg_ui::router::Pointer
 pub struct gg_ui::router::Tick
+pub gg_ui::router::Tick::activate: bool
 pub gg_ui::router::Tick::advance_focus: bool
 pub gg_ui::router::Tick::motion: (i32, i32)
 pub gg_ui::router::Tick::primary: bool

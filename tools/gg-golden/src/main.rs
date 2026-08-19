@@ -610,6 +610,77 @@ const SCENES: &[Scene] = &[
         render: render_shooter,
     },
     Scene {
+        name: "shooter-title",
+        // §6 M76's four screens over the room they are drawn on, which is the
+        // only reference set in the roster whose subject is *composited*: a
+        // scrim is translucent by contract, so a picture of the menu alone
+        // would forgive every alpha in it and a picture of the room alone
+        // would forgive the menu entirely.
+        //
+        // What they guard that no test can: the words. Every row here reads
+        // its text off live state through the game's own `declare_menu` —
+        // the name, the rule, the score, the wave, the accuracy, the
+        // sensitivity and its counts-per-turn, the volume, the edge mode —
+        // and a row whose text went blank is a row a hash still agrees with.
+        // §6 M74 is the precedent and the reason: demo 10 lost every binding
+        // to a reformatted array, no unit test noticed, and the CONTROLS
+        // column of a golden did.
+        //
+        // Judged like `shooter`, whose room fills most of every one of them.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.25,
+        },
+        render: render_shooter_title,
+    },
+    Scene {
+        name: "shooter-pause",
+        // The screen a player reaches mid-round, and the one that proves
+        // RESTART reads RESTART here and AGAIN on the over screen — one
+        // button, two words, and only a picture says which is where.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.25,
+        },
+        render: render_shooter_pause,
+    },
+    Scene {
+        name: "shooter-settings",
+        // The rows whose text is a *computation* — a sensitivity as two
+        // numbers and the counts a full turn costs at it, an attenuation as a
+        // percentage the right way up, and an edge mode named rather than
+        // numbered.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.25,
+        },
+        render: render_shooter_settings,
+    },
+    Scene {
+        name: "shooter-over",
+        // The screen the game did not have until §6 M76, reporting a round
+        // with real numbers in it: the score against the best it did not
+        // beat, the wave it reached, and the accuracy `Range::shots` had been
+        // counted for since §6 M37 with nowhere to appear.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.25,
+        },
+        render: render_shooter_over,
+    },
+    Scene {
         name: "orbit",
         // §6 M38's map at the moment the transfer is handed to the star — the
         // roster's only subject whose positions are astronomical, and the only
@@ -1241,11 +1312,36 @@ fn render_lampshade() -> Render {
 /// That is what makes this the first-person subject rather than a second studio
 /// shot of the same room.
 fn render_shooter() -> Render {
+    shooter_room(None)
+}
+
+/// Demo 12's room from the player's own chair, with `screen`'s menu over it
+/// when there is one (§6 M76).
+///
+/// The menu comes from the game's own `declare_menu`, not from a table here:
+/// this binary cannot link a second `gg_game!` (§3), and restating twenty
+/// rectangles would guard a lookalike rather than the demo (§4.10). It is the
+/// composited picture rather than the UI alone — demo 10's screens are drawn
+/// over a board this binary *can* compose, and this one's are drawn over a
+/// rendered room, which is also the thing the scrim has to be translucent
+/// against.
+fn shooter_room(screen: Option<(u32, demo_12_shooter::Range)>) -> Render {
     use demo_12_shooter as shooter;
     use gg_ecs::World;
     use gg_ecs::boundary::{Light, Renderable, Sky};
 
-    let extent = BOXES_EXTENT;
+    // A screen renders at the *canvas*, where the room alone renders at half of
+    // it. Not a preference and not a guess: the fit scales canvas units into
+    // surface pixels, so at `BOXES_EXTENT` a 12-unit row is six pixels tall, and
+    // blanking one measured 33 differing pixels against a budget of 256 — the
+    // exact gate forgave it outright and only the perceptual one objected. The
+    // same edit at the canvas moves 305 and both fire. Text is the whole reason
+    // these four exist, and a reference a reviewer cannot read is half a gate
+    // (§4.10).
+    let extent = match screen {
+        Some(_) => gg_ecs::boundary::CANVAS,
+        None => BOXES_EXTENT,
+    };
     let mut world = World::new();
     world.register::<Renderable>()?;
     world.register::<Light>()?;
@@ -1315,9 +1411,16 @@ fn render_shooter() -> Render {
         culled = extracted.culled,
         "offscreen device"
     );
+    let vertices = match screen {
+        Some((page, range)) => shooter_menu(page, range, extent)?,
+        None => Vec::new(),
+    };
+    if !vertices.is_empty() {
+        renderer.set_ui_atlas(&gg_ui::atlas::fallback())?;
+    }
     let frame = gathered(&mut renderer, |r| {
         let _capture = gg_debug::capture::frame();
-        Ok(r.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?)
+        Ok(r.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &vertices)?)
     })?;
     ensure_clean(&renderer.shutdown())?;
     Ok(Capture {
@@ -1325,6 +1428,84 @@ fn render_shooter() -> Render {
         extent,
         graph: frame.dump,
     })
+}
+
+/// The widgets of one of demo 12's screens, shaped into UI vertices.
+///
+/// The round handed in is the one the over screen reports, and it is a real
+/// round rather than zeroes: a summary of nothing would render four rows of
+/// `0` and forgive every arithmetic in `dress`.
+fn shooter_menu(
+    page: u32,
+    range: demo_12_shooter::Range,
+    extent: (u32, u32),
+) -> anyhow::Result<Vec<gg_render::ui::UiVertex>> {
+    use demo_12_shooter as shooter;
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Prefs, Widget};
+
+    let session = shooter::Session {
+        paused: 1,
+        page,
+        from: shooter::PAGE_MAIN,
+        sens: shooter::SENS_DEFAULT,
+        _pad: 0,
+    };
+    // The shipped defaults, which is what makes the settings picture the one a
+    // player opens on: full volume, and the 4x the game asks for (§6 M37).
+    let prefs = Prefs {
+        aa: gg_ecs::boundary::aa::MSAA_4,
+        ..Prefs::default()
+    };
+    let mut world = World::new();
+    world.register::<Widget>()?;
+    let mut declared = Vec::new();
+    shooter::declare_menu(session, prefs, range, |_, widget| declared.push(widget));
+    for widget in declared {
+        let entity = world.spawn();
+        world.insert(entity, widget)?;
+    }
+    let mut ui = gg_ui::boundary::Ui::new()?;
+    Ok(ui
+        .frame(
+            &mut world,
+            &gg_ui::router::Tick::default(),
+            gg_ui::Fit::new(extent),
+        )
+        .to_vec())
+}
+
+/// The round demo 12's over screen reports in the reference image. Not a
+/// fresh one: every number on that panel is arithmetic over these fields, and
+/// zeroes would render a picture that forgave all of it.
+fn shooter_round() -> demo_12_shooter::Range {
+    demo_12_shooter::Range {
+        rng: gg_math::sim::Rng::from_seed(demo_12_shooter::SEED),
+        score: 4275,
+        best: 6100,
+        streak: 0,
+        misses: demo_12_shooter::MISSES_ALLOWED,
+        hits: 17,
+        shots: 23,
+        state: demo_12_shooter::STATE_OVER,
+        hitmark: 0,
+    }
+}
+
+fn render_shooter_title() -> Render {
+    shooter_room(Some((demo_12_shooter::PAGE_TITLE, shooter_round())))
+}
+
+fn render_shooter_pause() -> Render {
+    shooter_room(Some((demo_12_shooter::PAGE_MAIN, shooter_round())))
+}
+
+fn render_shooter_settings() -> Render {
+    shooter_room(Some((demo_12_shooter::PAGE_SETTINGS, shooter_round())))
+}
+
+fn render_shooter_over() -> Render {
+    shooter_room(Some((demo_12_shooter::PAGE_OVER, shooter_round())))
 }
 
 fn render_chart() -> Render {
@@ -2739,8 +2920,7 @@ fn render_editor() -> Render {
             &gg_ui::router::Tick {
                 motion: (frame.axes[x.index()], frame.axes[y.index()]),
                 primary: frame.pressed(click),
-                advance_focus: false,
-                scroll: 0,
+                ..Default::default()
             },
             &gg_editor::Frame {
                 extent: EDITOR_EXTENT,

@@ -22,6 +22,12 @@ restart = ["R"]
 pause = ["P"]
 ui_click = ["Mouse1"]
 ui_focus = ["Tab"]
+# The keyboard's half of a click (§6 M74). Tab has always moved the focus ring
+# and nothing could press what it landed on, so every settings row, QUIT TO
+# TITLE and EXIT wanted a mouse. Enter alone rather than Enter and Space: Space
+# is `hold`, and a verb sharing a key with a gameplay one is a decision that has
+# to be right in both directions rather than convenient in one.
+ui_press = ["Enter"]
 # Claimed from the shell, which quits on an unclaimed Escape without the game
 # ever hearing it (§6 M44) — the one key a game has to take to own its own exit.
 back = ["Escape"]
@@ -43,4 +49,4 @@ ui_y = ["PointerY"]
 # delivered behind the pause plate, by contrast, would slide a piece nobody can
 # see moving, which is why it is not here.
 [game.modal]
-keep = ["pause", "back", "restart", "ui_click", "ui_focus", "ui_x", "ui_y"]
+keep = ["pause", "back", "restart", "ui_click", "ui_focus", "ui_press", "ui_x", "ui_y"]

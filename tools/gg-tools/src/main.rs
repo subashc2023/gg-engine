@@ -67,6 +67,7 @@
 mod ao;
 mod banding;
 mod bounce;
+mod clicks;
 mod cull;
 mod facets;
 mod field;
@@ -122,6 +123,7 @@ fn main() -> anyhow::Result<()> {
         "lights" => lights::run(rest),
         "lamps" => lamps::run(rest),
         "cull" => cull::run(rest),
+        "clicks" => clicks::run(rest),
         "furnace" => furnace::run(rest),
         "split-sum" => split_sum::run(rest),
         "ao" => ao::run(rest),
@@ -146,7 +148,7 @@ fn main() -> anyhow::Result<()> {
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
                  shadow-flat, shadow-sweep, shadow-edge, shadow-reach, lights, lamps, cull, furnace, \
                  split-sum, ao, bounce, field, facets, frame, views, banding, pace, hash-scale, orbit, map, \
-                 panorama, icon, timbre, transfer, fp-isa, mcp. A new instrument is a new \
+                 panorama, icon, timbre, clicks, transfer, fp-isa, mcp. A new instrument is a new \
                  subcommand here, not a new crate"
             )
         }

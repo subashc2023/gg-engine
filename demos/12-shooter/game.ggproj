@@ -1,0 +1,22 @@
+# What `cargo xtask ship 12-shooter` assembles a folder from (§6 M41), and what
+# gives this game a directory of its own to keep things in (§6 M75).
+#
+# Until this file existed demo 12 could not be shipped and could not remember
+# anything: `Project::data_dir` is where the shell writes `progress.ggsave`,
+# `settings.cfg` and the warm pipeline cache, and a run with no project has no
+# such directory — so every launch reset the high score, the look sensitivity
+# and the volume, and the crate's own comment named the wrong blocker for it.
+#
+# The title is the operator's, not the tree's: `12-shooter` is what the demo is
+# called in `demos/`, and this is what the window says.
+title   = Three Misses
+version = 0.1.0
+
+input   = input.toml
+# The reticle and the target it is around, from this game's own `CROSS` and
+# `TARGET_INK`, written by `cargo run -p gg-tools -- icon --game 12-shooter`.
+icon    = icon.ggicon
+
+# Twice the 640x360 canvas the HUD and the pause menu lay out in, so every
+# widget lands on a whole pixel — and a first-person game wants the room.
+window  = 1280x720

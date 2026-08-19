@@ -79,6 +79,7 @@ fn drive(editor: &mut Editor, world: &mut World, input: &[InputFrame], from: u64
             motion: (frame.axes[X.index()], frame.axes[Y.index()]),
             primary: frame.pressed(CLICK),
             advance_focus: false,
+            activate: false,
             scroll: 0,
         };
         editor.tick(

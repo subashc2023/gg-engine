@@ -9,6 +9,10 @@
 # exactly as long as the menu is up, and the axis a parked pointer feeds is
 # zero either way.
 #
+# The session opens on a title screen (§6 M76), so `begin` is in `keep` below:
+# a key that only reaches the game while the game is already running is a key
+# that cannot start one.
+#
 # `pause` on Escape is what takes Escape *off* the shell, where it has quit every
 # demo since M4: a key the game's map binds is not the app's key. Quitting is the
 # menu's button now, and the window's close button as ever.
@@ -19,11 +23,20 @@ restart = ["R"]
 pause = ["Escape"]
 ui_click = ["Mouse1"]
 ui_focus = ["Tab"]
+# The keyboard's half of a click (§6 M74) — the pause and settings rows were
+# pointer-only, and this game takes the pointer away from the player to aim with.
+ui_press = ["Enter"]
 # The same physical button as `ui_click`, deliberately. A binding table maps a
 # key to *actions*, not to one action, so both verbs arrive together and the
 # game decides which one this tick meant — which is the same fact the host
 # arbitrates the pointer on, arrived at from the other side (§6 M37).
 fire = ["Mouse1"]
+# Begin, and begin again (§6 M76). Both keys are already bound to something,
+# which is the point rather than an accident: a map sends a key to every verb
+# that names it, and each of these two is shared with a verb that has nothing
+# to do on the screen this one is for. `jump` is withheld while a menu is up
+# (it is not in `keep`), and `ui_press` reaches the row the ring is on.
+begin = ["Enter", "Space"]
 
 [game.axes]
 move_right = ["+D", "-A"]
@@ -38,4 +51,4 @@ ui_y = ["PointerY"]
 # interesting row — it shares a physical button with `ui_click`, so the two
 # verbs still arrive together at the host and only one of them crosses.
 [game.modal]
-keep = ["pause", "ui_click", "ui_focus", "ui_x", "ui_y"]
+keep = ["pause", "begin", "ui_click", "ui_focus", "ui_press", "ui_x", "ui_y"]

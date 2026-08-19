@@ -12,6 +12,11 @@ input  = input.toml
 # is one that opens silent, three layers from anything that says so.
 pack   = clips.ggpack
 title  = Falling Blocks
+# What build this is (§6 M73). It reaches the zip's name, the startup log, the
+# crash report and the executable's own version resource — which is the Details
+# tab a player reads and the only one of the four they can reach without opening
+# anything. A demo nobody has released may leave it out; this one is released.
+version = 0.1.0
 # Twice the 640x360 canvas the game lays its board out in, so every widget lands
 # on a whole pixel.
 window = 1280x720

@@ -41,7 +41,7 @@ mod present;
 mod scene;
 mod ui;
 
-pub use audio::{MAX_MS, Sound, wave};
+pub use audio::{FADE_MS, MAX_MS, Sound, wave};
 pub use declare::{Table, assert_protocol_matches_raw, entry, init, layout_of, run, verbs};
 pub use game::{Access, BoundaryData, BoundaryError, Columns, GameWorld};
 pub use host::{SystemZone, host_api, set_logger, set_system_zone};

@@ -12,11 +12,12 @@
 //!
 //! ```text
 //! # every path is relative to this file, so the folder can be moved
-//! game   = tetris.dll
-//! input  = input.toml
-//! pack   = tetris.ggpack
-//! title  = Falling Blocks
-//! window = 1280x720
+//! game    = tetris.dll
+//! input   = input.toml
+//! pack    = tetris.ggpack
+//! title   = Falling Blocks
+//! version = 1.0.0
+//! window  = 1280x720
 //! ```
 //!
 //! The one line a *demo's* manifest leaves out is `game`: a dylib is `.dll` on
@@ -29,6 +30,7 @@
 //! config and a corrupt folder in a manifest. Nobody hand-writes one of these;
 //! `xtask ship` does, beside the executable it built.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// What the manifest is called, beside the executable. One spelling: the shell
@@ -62,6 +64,11 @@ pub struct Project {
     /// required because two names for one game is how a rename loses a player's
     /// saves.
     pub slug: String,
+    /// Which build of the game this is (§6 M73). Optional, and absent is the
+    /// honest answer for a demo nobody has released — what it costs is that
+    /// every artifact then looks alike to the person reporting a bug about one
+    /// of them.
+    pub version: Option<Version>,
     /// The window to open, when the game would rather not have the default.
     pub window: Option<(u32, u32)>,
     /// The picture in the taskbar and the title bar (§6 M46), for a game that
@@ -74,6 +81,80 @@ pub struct Project {
     /// project *is*. Empty from [`Project::parse`], which has no file to be
     /// beside.
     pub dir: PathBuf,
+}
+
+/// What build of a game this is (§6 M73) — the string a player quotes and the
+/// four numbers Windows files it under, parsed once so the two cannot disagree.
+///
+/// **Four `u16`s because that is what the operating system's own record holds.**
+/// `VS_FIXEDFILEINFO` is `major.minor.patch.build` in exactly that shape, and it
+/// is the field Explorer's *Details* tab sorts on and an installer compares — so
+/// a version this format accepted and that file could not hold would be a
+/// version the player's machine disagrees with us about. Missing components are
+/// zero: `1.2` is `1.2.0.0`, which is what everything that reads one assumes.
+///
+/// The text is kept whole and separately, so a **suffix survives**: `0.9.0-rc2`
+/// is a real thing to ship and its numeric head is `0.9.0.0`. That is what every
+/// tool in this space does, and the split is the reason it can — a suffix is for
+/// the human and the quad is for the comparison.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version {
+    text: String,
+    quad: [u16; 4],
+}
+
+impl Version {
+    /// Parse `major[.minor[.patch[.build]]]` with an optional `-suffix`.
+    ///
+    /// # Errors
+    /// [`ProjectError::Version`] for an empty component, a non-digit where a
+    /// number belongs, a number past `u16::MAX`, or more than four of them.
+    pub fn parse(text: &str) -> Result<Version, ProjectError> {
+        let bad = || ProjectError::Version {
+            text: text.to_owned(),
+        };
+        // The suffix is everything from the first `-`; the head is what has to
+        // be numbers. Split before counting, or `1.0-rc2` reads as two fields.
+        let head = text.split('-').next().unwrap_or("");
+        let mut quad = [0u16; 4];
+        let mut seen = 0;
+        for part in head.split('.') {
+            let slot = quad.get_mut(seen).ok_or_else(bad)?;
+            // `parse` accepts a leading `+`, which is not a version component.
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(bad());
+            }
+            *slot = part.parse().map_err(|_| bad())?;
+            seen += 1;
+        }
+        // A lone suffix (`-rc2`) leaves `head` empty, which `split` reports as
+        // one empty part and the loop above refuses. A trailing dot lands there
+        // too. So `seen` is never zero here, and the check is for the reader.
+        (seen > 0)
+            .then(|| Version {
+                text: text.to_owned(),
+                quad,
+            })
+            .ok_or_else(bad)
+    }
+
+    /// As written, suffix and all — what a player quotes in a bug report.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// `major.minor.patch.build`, zero-filled.
+    #[must_use]
+    pub fn quad(&self) -> [u16; 4] {
+        self.quad
+    }
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.text)
+    }
 }
 
 /// Why a manifest was not a project. Path-free: every caller has the path and
@@ -121,6 +202,15 @@ pub enum ProjectError {
         /// The value as written.
         text: String,
     },
+    /// `version` that the operating system's own record could not hold.
+    #[error(
+        "`version = {text}` wants up to four dot-separated numbers under 65536, optionally \
+         followed by `-<suffix>` — it becomes the four the OS files this build under (§6 M73)"
+    )]
+    Version {
+        /// The value as written.
+        text: String,
+    },
     /// The file itself did not read. Path-free like the rest: the caller has it.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -165,7 +255,7 @@ impl Project {
     pub fn parse(text: &str) -> Result<Project, ProjectError> {
         let (mut game, mut input, mut pack) = (None, None, None);
         let (mut title, mut slug, mut window) = (None, None, None);
-        let mut icon = None;
+        let (mut icon, mut version) = (None, None);
         for (n, line) in text.lines().enumerate() {
             let line = line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -184,6 +274,7 @@ impl Project {
                 "slug" => slug.replace(value).is_some(),
                 "window" => window.replace(value).is_some(),
                 "icon" => icon.replace(value).is_some(),
+                "version" => version.replace(value).is_some(),
                 _ => {
                     return Err(ProjectError::Unknown {
                         line: n + 1,
@@ -215,6 +306,7 @@ impl Project {
             pack: pack.map(PathBuf::from),
             title,
             slug,
+            version: version.map(|text| Version::parse(&text)).transpose()?,
             window: window.map(|text| parse_extent(&text)).transpose()?,
             icon: icon.map(PathBuf::from),
             dir: PathBuf::new(),
@@ -364,6 +456,52 @@ window = 1280x720
                 "`{bad}` should not be an extent"
             );
         }
+    }
+
+    /// The quad is what the OS files a build under, so the parse is graded on it
+    /// rather than on the string — and on the two shapes a release actually has:
+    /// short (`1.0` is `1.0.0.0`) and suffixed (a candidate is still a build).
+    #[test]
+    fn a_version_is_four_numbers_and_whatever_a_human_wrote_around_them() {
+        let of = |v: &str| Version::parse(v).unwrap();
+        assert_eq!(of("1.0.0").quad(), [1, 0, 0, 0]);
+        assert_eq!(of("1.0").quad(), [1, 0, 0, 0]);
+        assert_eq!(of("7").quad(), [7, 0, 0, 0]);
+        assert_eq!(of("2.11.3.409").quad(), [2, 11, 3, 409]);
+        assert_eq!(of("65535.65535").quad(), [65535, 65535, 0, 0]);
+        // The suffix rides on the text and never on the numbers, which is what
+        // lets a release candidate be a version at all.
+        assert_eq!(of("0.9.0-rc2").quad(), [0, 9, 0, 0]);
+        assert_eq!(of("0.9.0-rc2").text(), "0.9.0-rc2");
+        assert_eq!(of("1.0.0").to_string(), "1.0.0");
+        for bad in [
+            "",
+            "1.0.0.0.0",
+            "1..0",
+            "1.",
+            ".1",
+            "v1.0",
+            "1.0a",
+            "65536",
+            "1.0 .0",
+            "+1",
+            "-rc2",
+            "1.-2",
+        ] {
+            assert!(
+                matches!(Version::parse(bad), Err(ProjectError::Version { .. })),
+                "`{bad}` should not be a version"
+            );
+        }
+        assert_eq!(
+            Project::parse("title=G\nversion = 3.2.1").unwrap().version,
+            Some(of("3.2.1"))
+        );
+        assert_eq!(Project::parse("title=G").unwrap().version, None);
+        assert!(matches!(
+            Project::parse("title=G\nversion = latest"),
+            Err(ProjectError::Version { .. })
+        ));
     }
 
     #[test]

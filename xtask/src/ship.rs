@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use gg_core::config::project::{MANIFEST, Project};
 
+use crate::notes;
+use crate::rsrc;
 use crate::util::{cargo, dylib_name, run, workspace_root};
 
 /// Where folders are staged. Under `target/`, because a shipped folder is build
@@ -53,8 +55,24 @@ pub fn run_cmd(args: &[&str]) -> Result<()> {
     std::fs::create_dir_all(&folder)?;
 
     let package = package(demo);
-    build(&package)?;
+    // The executable's own picture and version (§6 M73), decided before the link
+    // because that is the only moment they can be put in: a `.rsrc` section is
+    // the linker's output, and adding one afterwards means moving every section
+    // that follows it.
+    let marks = marks(&project)?;
+    let built = resource(&project, &marks)?;
+    build(&package, built.as_ref().map(|(path, _)| path.as_path()))?;
     let exe = stage_exe(&folder, &project.slug)?;
+    if let Some((_, built)) = &built {
+        let bytes = std::fs::read(&exe).with_context(|| format!("reading {}", exe.display()))?;
+        let leaves = rsrc::verify(&bytes, built, &marks)
+            .with_context(|| format!("checking what {} tells Explorer", exe.display()))?;
+        println!(
+            "xtask ship: {} carries {leaves} resources — {} sizes of icon and the version (§6 M73)",
+            file_name(&exe)?,
+            built.icons.len()
+        );
+    }
     // Names, not paths: `Project::open` resolved everything against the source
     // manifest's directory, and what a folder needs is the same file under the
     // same name one directory over. A mismatch is caught by `stage` failing to
@@ -105,6 +123,23 @@ pub fn run_cmd(args: &[&str]) -> Result<()> {
     if scene.is_file() {
         stage(&scene, &folder.join("scene.ggsave"))?;
     }
+    // The two files for reading (§6 M73), rendered from the folder rather than
+    // written once — and the readme's controls come from the *staged* map, so
+    // it describes this folder and not the demo it was assembled from.
+    let map = match &project.input {
+        Some(input) => std::fs::read_to_string(folder.join(file_name(input)?)).ok(),
+        None => None,
+    };
+    std::fs::write(
+        folder.join(notes::README),
+        notes::readme(&project, map.as_deref(), &marks.engine, &file_name(&exe)?),
+    )?;
+    // Last, because it is the slowest thing here and the only one that resolves
+    // a dependency graph.
+    std::fs::write(
+        folder.join(notes::NOTICES),
+        notes::notices(&package, &project.title)?,
+    )?;
 
     // Before the zip, not after: what the folder demands of a stranger's machine
     // is the one property a zip cannot carry and the operator cannot see (§6 M53).
@@ -123,7 +158,14 @@ pub fn run_cmd(args: &[&str]) -> Result<()> {
         bytes as f64 / (1024.0 * 1024.0),
         folder.display()
     );
-    let archive = folder.with_extension("zip");
+    // Built by hand rather than by `with_extension`, which would eat everything
+    // after the first dot in a version. The version is *in* the name because two
+    // downloads called `falling-blocks.zip` are two files a player cannot tell
+    // apart, and itch keys an upload on its file name.
+    let archive = folder.with_file_name(match &project.version {
+        Some(v) => format!("{}-{}.zip", project.slug, v),
+        None => format!("{}.zip", project.slug),
+    });
     let zipped = zip(&folder, &files, &project.slug, &archive, &exe)?;
     println!(
         "xtask ship: {:.1} MiB → {}",
@@ -158,6 +200,9 @@ fn render(project: &Project, dylib: &str) -> String {
         {
             out.push_str(&format!("{key} = {}\n", name.to_string_lossy()));
         }
+    }
+    if let Some(version) = &project.version {
+        out.push_str(&format!("version = {version}\n"));
     }
     if let Some((w, h)) = project.window {
         out.push_str(&format!("window = {w}x{h}\n"));
@@ -254,7 +299,60 @@ fn crc32(bytes: &[u8]) -> u32 {
 /// with it, and every §5.6c gate reads exactly that stream. Here the *code* is
 /// byte-identical to the gated build and one field of the PE header is not,
 /// which is the smallest difference that can exist between them.
-fn build(package: &str) -> Result<()> {
+/// What the executable will say about itself (§6 M73). Everything but the
+/// engine line is the manifest's; the engine line is this tree's, and carries
+/// the commit because that is what a bug report is answered against and the one
+/// fact a player has no other way to read off the file.
+fn marks(project: &Project) -> Result<rsrc::Marks> {
+    let engine = workspace_root().join("crates/gg-runtime/Cargo.toml");
+    let text = std::fs::read_to_string(&engine)
+        .with_context(|| format!("reading {}", engine.display()))?;
+    let version: toml::Value = toml::from_str(&text).context("parsing gg-runtime's manifest")?;
+    let version = version
+        .get("package")
+        .and_then(|p| p.get("version"))
+        .and_then(toml::Value::as_str)
+        .context("gg-runtime declares no version")?;
+    Ok(rsrc::Marks {
+        title: project.title.clone(),
+        version: project.version.clone(),
+        slug: project.slug.clone(),
+        exe: if cfg!(windows) {
+            format!("{}.exe", project.slug)
+        } else {
+            project.slug.clone()
+        },
+        engine: format!("GGEngine {version} ({})", crate::dist::commit()?),
+    })
+}
+
+/// The resource object, written where a *changed* one has a different path.
+///
+/// That is not tidiness. Cargo fingerprints a link argument by its text, so an
+/// object at a fixed path whose bytes changed is an object cargo has no reason
+/// to relink against — a new icon would silently ship the old one, and the gate
+/// downstream would pass because it compares the artifact against what it
+/// re-derives rather than against what it meant. Hashing the bytes into the name
+/// makes a changed resource a changed command line.
+///
+/// `None` off Windows and for a game with no icon: an ELF has no resource
+/// section, and the manifest's own picture is what there is to put in one.
+fn resource(project: &Project, marks: &rsrc::Marks) -> Result<Option<(PathBuf, rsrc::Built)>> {
+    let Some(icon) = project.icon.as_ref().filter(|_| cfg!(windows)) else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(icon).with_context(|| format!("reading {}", icon.display()))?;
+    let built = rsrc::object(&bytes, marks)?;
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(&built.object);
+    let dir = workspace_root().join("target/xtask-cache/rsrc");
+    std::fs::create_dir_all(&dir)?;
+    let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let path = dir.join(format!("{name}.obj"));
+    std::fs::write(&path, &built.object).with_context(|| format!("writing {}", path.display()))?;
+    Ok(Some((path, built)))
+}
+
+fn build(package: &str, resource: Option<&Path>) -> Result<()> {
     let mut shell = cargo();
     shell.args([
         "rustc",
@@ -278,6 +376,12 @@ fn build(package: &str) -> Result<()> {
             "-Clink-arg=/SUBSYSTEM:WINDOWS",
             "-Clink-arg=/ENTRY:mainCRTStartup",
         ]);
+        // An ordinary input object, which is the whole trick: `.rsrc$01` and
+        // `.rsrc$02` sort and merge into one `.rsrc` and the linker fills the
+        // resource data directory from it, exactly as it would for `cvtres`.
+        if let Some(path) = resource {
+            shell.arg(format!("-Clink-arg={}", path.display()));
+        }
     }
     run(
         &mut shell,
@@ -397,6 +501,43 @@ mod tests {
             checked > 0,
             "no demo declares a {MANIFEST} — the walk lost them"
         );
+    }
+
+    /// The version reaches the folder's own manifest and the archive's name
+    /// (§6 M73), which are the two places a *player* can read it without opening
+    /// anything — and the second is the one that stops two downloads from being
+    /// the same file name.
+    ///
+    /// The suffix case is here because it is the one a naive path join gets
+    /// wrong: `with_extension` on `falling-blocks-0.9.0-rc2` truncates at the
+    /// first dot and ships `falling-blocks-0.zip`.
+    #[test]
+    fn a_version_reaches_the_folder_and_the_name_of_the_download() {
+        let of = |text: &str| {
+            Project::parse(&format!("title = Falling Blocks\nversion = {text}\n")).expect("parsed")
+        };
+        let rendered = render(&of("1.2.3"), "game.dll");
+        assert!(rendered.contains("\nversion = 1.2.3\n"), "{rendered}");
+        // A rendered manifest is re-read by the shell beside the executable, so
+        // the round trip is the claim rather than the substring.
+        assert_eq!(
+            Project::parse(&rendered).expect("re-read").version,
+            of("1.2.3").version
+        );
+        let named = |project: &Project| {
+            std::path::Path::new("target/ship/falling-blocks")
+                .with_file_name(match &project.version {
+                    Some(v) => format!("{}-{}.zip", project.slug, v),
+                    None => format!("{}.zip", project.slug),
+                })
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert!(named(&of("1.2.3")).ends_with("falling-blocks-1.2.3.zip"));
+        assert!(named(&of("0.9.0-rc2")).ends_with("falling-blocks-0.9.0-rc2.zip"));
+        let bare = Project::parse("title = Falling Blocks").expect("parsed");
+        assert!(named(&bare).ends_with("falling-blocks.zip"));
+        assert!(!render(&bare, "game.dll").contains("version"));
     }
 
     /// The archive is a function of the folder and of nothing else — no clock,

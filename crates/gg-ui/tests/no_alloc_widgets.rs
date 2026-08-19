@@ -134,6 +134,8 @@ fn tick_of(tick: u64) -> Tick {
         ),
         primary: tick.is_multiple_of(4),
         advance_focus: tick.is_multiple_of(16),
+        // Every third focus advance presses what the ring is on (§6 M74).
+        activate: tick.is_multiple_of(48),
         scroll: i32::from(tick.is_multiple_of(120)),
     }
 }

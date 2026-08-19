@@ -117,6 +117,10 @@ fn frame(
             motion,
             primary: tick.is_multiple_of(4),
             advance_focus: tick.is_multiple_of(16),
+            // Every third focus advance presses what the ring is on (§6 M74),
+            // so the keyboard's path through the router is inside the steady
+            // state this gate measures rather than beside it.
+            activate: tick.is_multiple_of(48),
             // A notch every other second, so a scrolled pane is inside the
             // steady state this gate is measuring and not beside it.
             scroll: i32::from(tick.is_multiple_of(120)),

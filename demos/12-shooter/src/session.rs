@@ -26,13 +26,26 @@
 //!
 //! # The round the stream tells
 //!
-//! Spawn, restart (the one press a fresh session never needs, so the verb is in
-//! the recording), [`HITS_WANTED`] targets taken, and then the bot **stops
-//! shooting**: the course walks its targets off one at a time until the round is
-//! out of misses. A session that only ever fired would print "hit" and never
-//! "escaped"; one that only ever stood still would print "escaped" and never
-//! "hit". [`LOG`]'s five milestones are exactly the two halves plus their
-//! bookends, and each fires once.
+//! Since §6 M76 it is the game's whole shape rather than its middle: the title
+//! screen, left with the key that leaves it; restart (the one press a fresh
+//! session never needs, so the verb is in the recording); [`HITS_WANTED`]
+//! targets taken, which is one more than a wave, so the stream crosses the
+//! difficulty step and not only the first flat stretch of it; then the bot
+//! **stops shooting** and the course walks its targets off one at a time until
+//! the round is out of misses; then the over screen, and the round started
+//! **again from it**, which is the loop closing.
+//!
+//! A session that only ever fired would print "hit" and never "escaped"; one
+//! that only ever stood still would print "escaped" and never "hit"; one that
+//! opened straight into the room would print neither bookend. [`LOG`]'s eight
+//! milestones are those halves plus every edge of the game's shape, and each
+//! fires once.
+//!
+//! Both screens are left by a **game verb** ([`crate::BEGIN`]) rather than by a
+//! button, and that is a constraint rather than a taste: nothing here runs a
+//! host, so `Widget::state` is never written, so a click and `ui_press` alike
+//! land on nothing. A screen a widget was the only way off would be a screen
+//! no gate below the shell could ever leave.
 //!
 //! # No scene, unlike its neighbour
 //!
@@ -61,7 +74,8 @@ use gg_ecs::hash::CanonicalHash;
 use gg_ecs::{AliasError, Entity, Query, RegistryError, World};
 
 use crate::{
-    AIM_X, AIM_Y, FIRE, Gun, RESTART, Range, STATE_OVER, Session, Target, Walker, look_per_count,
+    AIM_X, AIM_Y, BEGIN, FIRE, Gun, PAGE_OVER, RESTART, Range, STATE_OVER, Session, Target, Walker,
+    look_per_count,
 };
 use gg_math::sim;
 
@@ -83,17 +97,29 @@ pub struct Entry {
 
 /// What the shell's log must say, in order, when this session is replayed.
 ///
-/// Five, and the middle three are why the game logs anything but its bookends:
+/// Eight, and the middle ones are why the game logs anything but its bookends:
 /// "ready" and "over" are also what a session that spawned and stood still for
 /// three target-lives would print, and a gate that cannot tell that apart is
 /// checking that the game starts rather than that it was *played*. "hit" is the
-/// half only a shot can reach; "escaped" is the half only patience can.
+/// half only a shot can reach; "escaped" is the half only patience can; "wave"
+/// is the half only a *run* can, since it takes [`crate::WAVE_HITS`] hits in one
+/// round to reach it.
+///
+/// "started" and "again" are §6 M76's, and they are the two edges a room is not
+/// a game without: a session that opens on a title screen and a round that can
+/// be played once more from the screen that reported it. Each is asserted
+/// **once**, which is what makes "again" a claim — a second round is begun and
+/// the stream ends inside it, so the loop is shown to close rather than to
+/// spin.
 pub const LOG: &[&str] = &[
     "shooter: ready",
+    "shooter: started",
     "shooter: restarted",
     "shooter: hit",
+    "shooter: wave",
     "shooter: escaped",
     "shooter: over",
+    "shooter: again",
 ];
 
 /// This session's name in `tests/replays/` — `.ggrp` beside `.hashes`.
@@ -101,16 +127,21 @@ pub const NAME: &str = "demo12-shooter";
 
 /// Targets the bot takes before it stops shooting.
 ///
-/// Three rather than one: a single hit proves the ray reached a box, three
-/// prove the streak pays what [`crate::STREAK_STEP`] says (100, 125, 150) and
-/// that a taken slot is dealt again on the same tick it was freed.
-pub const HITS_WANTED: u32 = 3;
+/// More than one: a single hit proves the ray reached a box, several prove the
+/// streak pays what [`crate::STREAK_STEP`] says and that a taken slot is dealt
+/// again on the same tick it was freed. **One more than
+/// [`crate::WAVE_HITS`]** since §6 M76, which is the number that matters now:
+/// at five the stream would end its shooting exactly on the wave boundary and
+/// never deal a target at the shortened life, so the arc would be in the game
+/// and not in the gate.
+pub const HITS_WANTED: u32 = 6;
 
 /// Full deflection in the fixed-point axis encoding (§4.7's `AXIS_SCALE`).
 const STICK: i32 = 1024;
 
-/// Idle ticks after the round ends. A frozen score that is never ticked again
-/// proves nothing about staying frozen.
+/// Idle ticks after the second round begins. Long enough that the fresh course
+/// is dealt and ticked and short enough that nothing in it escapes, so the
+/// stream holds exactly one of every milestone.
 const TAIL: usize = 30;
 
 /// A ceiling on every drive loop below, not a target: one minute of sim.
@@ -183,8 +214,13 @@ impl core::error::Error for SessionError {}
 pub fn frames(entry: &Entry) -> Result<Vec<InputFrame>, SessionError> {
     let mut bot = Bot::open(entry)?;
 
-    // Tick 0 is `bootstrap`'s: the room, the round, the HUD, and "ready".
+    // Tick 0 is `bootstrap`'s: the room, the round, the HUD, the title screen
+    // and "ready".
     bot.play(idle())?;
+    // Off the title (§6 M76). Nothing has run a tick of the round yet — the
+    // body, the course and the room were all dealt behind the screen — so this
+    // is a screen change and not a second bootstrap.
+    bot.play(press(BEGIN))?;
     // The one press a fresh session never needs, so the verb reaches the
     // recording. It also reseeds the course, which is why every milestone
     // below is measured from here rather than from the opening deal.
@@ -231,6 +267,18 @@ pub fn frames(entry: &Entry) -> Result<Vec<InputFrame>, SessionError> {
         bot.play(idle())?;
         bot.check("the round to end")?;
     }
+    // The panel that reports it is one tick behind the last miss: `menu` reads
+    // the state `targets` wrote, and `targets` is after it in the table. Waited
+    // for rather than counted, so the day that ordering changes this script
+    // still describes a player.
+    while bot.screen()?.page != PAGE_OVER {
+        bot.play(idle())?;
+        bot.check("the over screen")?;
+    }
+    // The loop closing: the round that just ended, played again from the screen
+    // that reported it. The stream ends a moment inside the second round, which
+    // is what makes this an edge rather than a button that lit up.
+    bot.play(press(BEGIN))?;
 
     for _ in 0..TAIL {
         bot.play(idle())?;
@@ -271,6 +319,10 @@ const WATCH: usize = 24;
 pub fn endless(entry: &Entry, ticks: usize) -> Result<Vec<InputFrame>, SessionError> {
     let mut bot = Bot::open(entry)?;
     bot.play(idle())?;
+    // Off the title, as `frames` does (§6 M76) — a fight in progress cannot
+    // begin behind a screen. Every round after this one is restarted with `R`
+    // below, which the over screen also answers to.
+    bot.play(press(BEGIN))?;
     while bot.frames.len() < ticks && bot.walker()?.grounded == 0 {
         bot.play(idle())?;
     }
@@ -407,10 +459,19 @@ pub struct Progress {
     pub shots: u32,
     /// Points.
     pub score: u32,
+    /// The best this session has seen. The one number that crosses a
+    /// restart, which is what makes a second round a *continuation* rather
+    /// than a fresh process (§6 M76).
+    pub best: u32,
     /// Out of misses; the score is frozen.
     pub over: bool,
     /// Targets standing at the end of the tick.
     pub standing: u32,
+    /// A screen is up and the sim is stopped (§6 M76).
+    pub stopped: bool,
+    /// Which screen — one of the `PAGE_*` constants, and meaningless while
+    /// [`Progress::stopped`] is false, where it holds the page to come back to.
+    pub page: u32,
 }
 
 /// [`Progress`] after each of `frames`, through the same table
@@ -424,20 +485,29 @@ pub struct Progress {
 pub fn progress(entry: &Entry, frames: &[InputFrame]) -> Result<Vec<Progress>, SessionError> {
     let range_q = Query::<&Range>::new().map_err(SessionError::Alias)?;
     let target_q = Query::<&Target>::new().map_err(SessionError::Alias)?;
+    let session_q = Query::<&Session>::new().map_err(SessionError::Alias)?;
     drive(entry, frames, |world| {
         let mut out = Progress {
             hits: 0,
             misses: 0,
             shots: 0,
             score: 0,
+            best: 0,
             over: false,
             standing: 0,
+            stopped: false,
+            page: 0,
         };
+        world.each_ref(&session_q, |_, session: &Session| {
+            out.stopped = session.paused != 0;
+            out.page = session.page;
+        });
         world.each_ref(&range_q, |_, range: &Range| {
             out.hits = range.hits;
             out.misses = range.misses;
             out.shots = range.shots;
             out.score = range.score;
+            out.best = range.best.max(range.score);
             out.over = range.state == STATE_OVER;
         });
         world.each_ref(&target_q, |_, _: &Target| out.standing += 1);
@@ -581,6 +651,10 @@ impl Bot {
 
     fn range(&self) -> Result<Range, SessionError> {
         self.one("a round in the world")
+    }
+
+    fn screen(&self) -> Result<Session, SessionError> {
+        self.one("a session in the world")
     }
 
     fn finished(&self) -> Result<bool, SessionError> {

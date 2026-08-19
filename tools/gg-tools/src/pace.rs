@@ -802,12 +802,7 @@ fn measure_editor(hz: f64, noise_us: f64, latched: Latched) -> anyhow::Result<Le
 /// nothing, and the camera has read raw device motion rather than the router's
 /// pointer since §6 M15.2.
 fn editor_ui_tick() -> gg_ui::router::Tick {
-    gg_ui::router::Tick {
-        motion: (0, 0),
-        primary: false,
-        advance_focus: false,
-        scroll: 0,
-    }
+    gg_ui::router::Tick::default()
 }
 
 /// A stopped editor session over a project, which is the only state its camera

@@ -633,6 +633,160 @@ fn restart_clears_the_well_and_deals_again() {
     );
 }
 
+/// The legend has advertised `RESTART` since §6 M18 and the key did nothing
+/// while a game was in progress — read only inside the topped-out branch, so a
+/// player pressing it mid-game got a stuck keyboard (§6 M74).
+///
+/// Graded on the three things a restart owes: the board, the score, and the
+/// table — an abandoned run is a run, and `QUIT TO TITLE` has always filed it.
+#[test]
+fn restart_works_while_a_game_is_still_being_played() {
+    let mut game = Game::load();
+    game.start();
+    // Four pieces down: enough to put something on the board and something on
+    // the clock, and well short of the ceiling — a run this abandons has to be
+    // one that had not ended by itself.
+    for tick in 0..8 {
+        if tick % 2 == 0 {
+            game.hold(HARD_DROP);
+        }
+        game.step();
+    }
+    assert_eq!(game.one::<Play>().over, 0, "this run is not finished");
+    assert!(
+        game.one::<Well>()
+            .cells
+            .iter()
+            .any(|r| r.iter().any(|&c| c != 0)),
+        "nothing was dropped, so there is nothing to abandon"
+    );
+    let scored = game.one::<Play>().score;
+    assert!(scored > 0, "a hard drop scores, so the table has something");
+
+    game.hold(RESTART);
+    game.step();
+    let play = game.one::<Play>();
+    assert_eq!(play.score, 0, "the new game starts at zero");
+    assert_eq!(play.over, 0);
+    assert!(
+        game.one::<Well>()
+            .cells
+            .iter()
+            .all(|r| r.iter().all(|&c| c == 0)),
+        "restart left the abandoned stack on the board"
+    );
+    assert_eq!(
+        game.one::<Best>().top[0],
+        scored,
+        "the abandoned run is not in the table"
+    );
+    assert_eq!(game.screen(), SCREEN_PLAYING, "and it is still playable");
+}
+
+/// A finished game was a keyboard dead end (§6 M74): `pause` and `back` were
+/// gated on a live one, so the only way out of GAME OVER was to start another,
+/// pause it and click QUIT. Escape leaves it now, and the banner says so —
+/// which is the half a test can read.
+#[test]
+fn a_finished_game_can_be_left_with_the_key_the_banner_names() {
+    let mut game = Game::load();
+    game.start();
+    let mut over = false;
+    for tick in 0..2000 {
+        if tick % 2 == 0 {
+            game.hold(HARD_DROP);
+        }
+        game.step();
+        if game.one::<Play>().over != 0 {
+            over = true;
+            break;
+        }
+    }
+    assert!(over, "hard-dropping every piece never filled the well");
+    let filed = game.one::<Best>().top;
+
+    game.hold(BACK);
+    game.step();
+    assert_eq!(game.screen(), SCREEN_TITLE, "escape did not leave");
+    assert_eq!(game.one::<Play>().over, 0, "the title sits on a dead board");
+    assert!(
+        game.one::<Well>()
+            .cells
+            .iter()
+            .all(|r| r.iter().all(|&c| c == 0))
+    );
+    // Filed once by the top-out, and not again on the way out: the same run in
+    // two rows of a five-row table is a table that lies about how it went.
+    assert_eq!(game.one::<Best>().top, filed);
+
+    // The banner names both keys, so neither is a secret. Read off the widget
+    // rather than the constant — a row renamed and not re-laid-out is exactly
+    // the drift this catches.
+    let banner: Vec<String> = game
+        .widgets_with::<demo_10_tetris::Banner>()
+        .into_iter()
+        .map(|(_, w)| w.text().to_owned())
+        .collect();
+    let said = banner.join(" ");
+    assert!(
+        said.contains("R "),
+        "the banner does not name restart: {said:?}"
+    );
+    assert!(
+        said.contains("ESC"),
+        "the banner does not name the way out: {said:?}"
+    );
+}
+
+/// Soft drop was a flat budget rather than a floor on the rate, so past the
+/// level where gravity's own budget drops under `soft_drop_ticks` — 34, with the
+/// shipped table — holding Down made the piece fall **slower** (§6 M74).
+///
+/// Unreachable in any recorded session, which is why no gate had seen it: the
+/// blessed stream tops out in single digits. So the level is set directly, and
+/// the claim is the one a player would make — down is never slower than not
+/// pressing down, at any level.
+#[test]
+fn soft_drop_is_never_slower_than_letting_go() {
+    let rules = Rules::DEFAULT;
+    for level in [1u32, 10, 33, 34, 40, 100] {
+        let gravity = gravity_for(&rules, level);
+        let soft = rules.soft_drop_ticks.max(1).min(gravity);
+        assert!(
+            soft <= gravity,
+            "at level {level} soft drop takes {soft} ticks a cell and gravity {gravity}"
+        );
+    }
+    // The level where the two cross is where the defect started. Found rather
+    // than pinned, so a retuned gravity table moves the number instead of the
+    // claim — and asserted to *exist*, because a table that never got there
+    // would make every line above vacuously true.
+    let crossed = (1..200u32).find(|l| gravity_for(&rules, *l) < rules.soft_drop_ticks);
+    let crossed = crossed.expect("gravity never gets faster than the soft drop");
+    assert!(
+        gravity_for(&rules, crossed - 1) >= rules.soft_drop_ticks,
+        "level {crossed} is not where it first crosses"
+    );
+
+    // Driven, not computed: the same claim through the real systems table at a
+    // level the game will actually reach if somebody is good enough.
+    let mut game = Game::load();
+    game.start();
+    let mut play = game.one::<Play>();
+    play.level = 40;
+    game.put_play(play);
+    let start = game.one::<Piece>().row;
+    let budget = gravity_for(&rules, 40);
+    for _ in 0..budget {
+        game.hold(demo_10_tetris::SOFT_DROP);
+        game.step();
+    }
+    assert!(
+        game.one::<Piece>().row > start,
+        "the piece did not move in the {budget} ticks gravity alone would have taken"
+    );
+}
+
 // ------------------------------------------------------------------- the cues
 //
 // Every claim below is about `Sound` components in the world, which is the whole

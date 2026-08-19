@@ -108,6 +108,11 @@ pub struct Args {
     /// dylib's file stem — which is a developer's name for a game and not a
     /// player's.
     pub title: Option<String>,
+    /// Which build of the game this is (§6 M73), for a project that says. Held
+    /// as the manifest's own text rather than parsed: what this is for is the
+    /// line a bug report quotes, and every comparison happens in the tools that
+    /// wrote it — the archive's name and the executable's version resource.
+    pub version: Option<String>,
     /// The window to open, for a project that asked for one.
     pub window: Option<(u32, u32)>,
     /// The taskbar picture the manifest named, for a project that shipped one
@@ -245,6 +250,15 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
             headless = gg_platform::headless(),
             game = %args.game.display(),
             title = args.title.as_deref().unwrap_or("<no project>"),
+            // The game's own, beside the engine's. Two versions rather than one
+            // because they move independently and a report naming only the
+            // engine's cannot say which build of the game it is about.
+            game_version = args.version.as_deref().unwrap_or("<unversioned>"),
+            // Where this run's saves, settings and log are going (§6 M75).
+            // `None` is a run with no project, which keeps nothing — and a
+            // player who cannot find their scores is the one person this line
+            // is for.
+            data = args.data.as_deref().map_or("<none>", |d| d.to_str().unwrap_or("<path>")),
             "golden runtime online"
         );
         // Game output has nowhere to go until this is set, and two loggers would
@@ -542,6 +556,7 @@ pub fn parse_args(argv: &[String]) -> anyhow::Result<Args> {
         args.data = found.data_dir();
         args.dir = Some(found.dir);
         args.title = Some(found.title);
+        args.version = found.version.map(|v| v.text().to_owned());
         args.window = found.window;
         args.icon = found.icon;
         args.input = args.input.take().or(found.input);

@@ -10,16 +10,18 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use demo_12_shooter::{
-    AIM_X, AIM_Y, ARMS, BUFFER_TICKS, CHART_BALLS, COYOTE_TICKS, CUE_JUMP, CUE_LAND, CUES, Cue,
-    EYE_LIFT, FIRE, FIRE_TICKS, FLASH_TICKS, Gun, HALF_H, HALF_W, HITMARK_TICKS, HUD_MISS,
-    HUD_ROWS, HUD_SPEED, HUD_STATE, Hud, JUMP, JUMP_VELOCITY, LAMPS, MENU_AA, MENU_BACK,
-    MENU_ITEMS, MENU_LOOK, MENU_LOOK_DOWN, MENU_LOOK_UP, MENU_QUIT, MENU_RESTART, MENU_RESUME,
-    MENU_SETTINGS, MENU_TITLE, MENU_VOLUME, MENU_VOLUME_DOWN, MISSES_ALLOWED, MOVE_FORWARD,
-    MOVE_RIGHT, Menu, PAGE_MAIN, PAGE_SETTINGS, PAUSE, RECOIL_KICK, RECOIL_TICKS, RESTART, ROOM,
-    Range, SENS_DEFAULT, SENS_MAX, SENS_MIN, SENS_ONE, SENS_STEP, SHELTER, SHOT_RANGE, SKIN,
-    SPARK_TICKS, SPOTS, START, STATE_OVER, STATE_RUNNING, STEP_HEIGHT, STREAK_STEP, Session, Solid,
-    Spark, TARGET_HALF, TARGET_INK, TARGET_LIFE, TARGET_WORTH, TARGETS_LIVE, Target, WALK_SPEED,
-    Walker, counts_per_turn, look_per_count, session,
+    ACTIONS, AIM_X, AIM_Y, ARMS, AXES, BEGIN, BUFFER_TICKS, CHART_BALLS, COYOTE_TICKS, CUE_JUMP,
+    CUE_LAND, CUES, Cue, EYE_LIFT, FIRE, FIRE_TICKS, FLASH_TICKS, Gun, HALF_H, HALF_W,
+    HITMARK_TICKS, HUD_ROUND, HUD_ROWS, HUD_SPEED, HUD_STATE, Hud, JUMP, JUMP_VELOCITY, LAMPS,
+    LIFE_FLOOR, MENU_AA, MENU_AIM, MENU_BACK, MENU_ITEMS, MENU_LOOK, MENU_LOOK_DOWN, MENU_LOOK_UP,
+    MENU_QUIT, MENU_RESTART, MENU_RESUME, MENU_RULE, MENU_SETTINGS, MENU_START, MENU_TALLY,
+    MENU_TITLE, MENU_TO_TITLE, MENU_VOLUME, MENU_VOLUME_DOWN, MISSES_ALLOWED, MOVE_FORWARD,
+    MOVE_RIGHT, Menu, PAGE_MAIN, PAGE_OVER, PAGE_SETTINGS, PAGE_TITLE, PAUSE, RECOIL_KICK,
+    RECOIL_TICKS, RESTART, ROOM, RULE, Range, SENS_DEFAULT, SENS_MAX, SENS_MIN, SENS_ONE,
+    SENS_STEP, SHELTER, SHOT_RANGE, SKIN, SPARK_TICKS, SPOTS, START, STATE_OVER, STATE_RUNNING,
+    STEP_HEIGHT, STREAK_STEP, Session, Solid, Spark, TARGET_HALF, TARGET_INK, TARGET_LIFE,
+    TARGET_WORTH, TARGETS_LIVE, TITLE_NAME, Target, WALK_SPEED, WAVE_HITS, Walker, accuracy,
+    counts_per_turn, life_for, look_per_count, session, wave_of, worth_for,
 };
 use gg_ecs::boundary::{
     self, AbiInfo, ActionId, AxisId, ComponentsTable, Eye, HostApiV1, InputFrame, Light, Prefs,
@@ -48,6 +50,8 @@ struct Game {
     held: u64,
     previous: u64,
     axes: [i32; boundary::MAX_AXES],
+    /// See [`Game::forgiving`].
+    forgiving: bool,
 }
 
 impl Game {
@@ -80,6 +84,7 @@ impl Game {
             held: 0,
             previous: 0,
             axes: [0; boundary::MAX_AXES],
+            forgiving: false,
         }
     }
 
@@ -109,6 +114,13 @@ impl Game {
         // SAFETY: the table is this binary's own, its entries live for the
         // process, and `ctx` outlives the call.
         unsafe { self.world.run_systems(&self.table, &ctx) }.expect("no system panicked");
+        if self.forgiving {
+            let query = Query::<&mut Range>::new().expect("a round query");
+            self.world.each(&query, |_, range: &mut Range| {
+                range.misses = 0;
+                range.state = STATE_RUNNING;
+            });
+        }
         self.tick += 1;
         self.previous = self.held;
         self.held = 0;
@@ -203,6 +215,49 @@ impl Game {
         self.hold(action);
         self.step();
         self
+    }
+
+    /// Hold the round open under a test that is about the *controller*.
+    ///
+    /// A player who stands still for [`TARGET_LIFE`] loses three targets and
+    /// the round with them — that is the game, and since §6 M76 losing also
+    /// stops the world. So a walk that takes longer than one course now ends
+    /// with a frozen body against an over screen, and a test about jumping
+    /// would be asserting that a menu is up.
+    ///
+    /// This keeps the miss counter at zero after every tick — and the round
+    /// running with it, because the course is dealt in one batch and escapes
+    /// in one, so the counter reaches [`MISSES_ALLOWED`] and the state flips
+    /// inside a single tick. It is the smallest untruth that lets a movement
+    /// test be about movement. It is
+    /// not used by anything that asserts about the round, and
+    /// `three_targets_that_walk_end_the_round` is what says the counter
+    /// otherwise works.
+    fn forgiving(&mut self) -> &mut Self {
+        self.forgiving = true;
+        self
+    }
+
+    /// Leave the title screen (§6 M76): one tick for `bootstrap` to deal the
+    /// world and the screen it opens on, one for the key that leaves it.
+    ///
+    /// Two ticks, deliberately — it is what `steps(2)` used to be, so a test
+    /// that counted from a settled world still counts from the same place.
+    /// The course is dealt on the tick play begins, not behind the screen:
+    /// `targets` is one of the systems the title screen stops.
+    fn begin(&mut self) -> &mut Self {
+        self.step();
+        self.tap(BEGIN);
+        self
+    }
+
+    /// Every HUD widget, rows and crosshair arms alike.
+    fn hud_widgets(&self) -> Vec<Widget> {
+        let query = Query::<(&Hud, &Widget)>::new().unwrap();
+        let mut out = Vec::new();
+        self.world
+            .each_ref(&query, |_, (_, widget): (&Hud, &Widget)| out.push(*widget));
+        out
     }
 
     fn session(&self) -> Session {
@@ -335,8 +390,13 @@ fn one_tick_deals_the_room_the_body_and_the_hud() {
     );
     assert_eq!(
         game.all::<Renderable>().len(),
-        ROOM.len() + CHART_BALLS + TARGETS_LIVE,
-        "the room, the chart, and the course's first three targets"
+        ROOM.len() + CHART_BALLS,
+        "the room and the chart, dealt behind the title screen"
+    );
+    assert!(
+        game.all::<Target>().is_empty(),
+        "and no course: `targets` is one of the systems the screen stops, so \
+         the round is dealt on the tick play begins (§6 M76)"
     );
     assert_eq!(
         game.all::<Sky>().len(),
@@ -351,6 +411,30 @@ fn one_tick_deals_the_room_the_body_and_the_hud() {
         ARMS + HUD_ROWS.len() + MENU_ITEMS.len(),
         "arms, the text rows and the menu"
     );
+    // Nothing of the HUD is on the glass yet: it belongs to the round, and
+    // the round has not started (§6 M76). The reticle is the one that would
+    // be noticed — a crosshair over a title screen aims at a menu.
+    assert!(game.all::<Hud>().iter().all(|_| true), "the rows exist");
+    for widget in game.hud_widgets() {
+        assert_eq!(
+            (widget.rect[2], widget.rect[3]),
+            (0.0, 0.0),
+            "the HUD is put away behind a screen"
+        );
+    }
+
+    // And it all comes back with the round, course included.
+    game.tap(BEGIN);
+    assert_eq!(game.all::<Target>().len(), TARGETS_LIVE);
+    assert_eq!(
+        game.all::<Renderable>().len(),
+        ROOM.len() + CHART_BALLS + TARGETS_LIVE,
+        "the room, the chart, and the course's first three targets"
+    );
+    assert!(
+        game.hud_widgets().iter().all(|w| w.rect[2] > 0.0),
+        "and the HUD is back"
+    );
     assert_eq!(game.hud(HUD_STATE), "GROUND");
 }
 
@@ -359,7 +443,8 @@ fn one_tick_deals_the_room_the_body_and_the_hud() {
 #[test]
 fn bootstrap_run_again_spawns_nothing_new() {
     let mut game = Game::load();
-    game.steps(8);
+    game.begin();
+    game.steps(6);
     assert_eq!(game.all::<Walker>().len(), 1);
     assert_eq!(game.all::<Gun>().len(), 1);
     assert_eq!(game.all::<Range>().len(), 1);
@@ -379,7 +464,8 @@ fn bootstrap_run_again_spawns_nothing_new() {
 #[test]
 fn the_body_rests_exactly_on_the_floor() {
     let mut game = Game::load();
-    game.steps(4);
+    game.begin();
+    game.steps(2);
     let walker = game.walker();
     assert_eq!(walker.position.y, resting_on(top_at(START.x, START.z, 0.5)));
     assert!(walker.grounded());
@@ -390,6 +476,7 @@ fn the_body_rests_exactly_on_the_floor() {
 #[test]
 fn the_eye_rides_the_body() {
     let mut game = Game::load();
+    game.begin();
     game.forward(20);
     let walker = game.walker();
     let eye = game.one::<Eye>();
@@ -403,7 +490,7 @@ fn the_eye_rides_the_body() {
 #[test]
 fn a_kerb_is_stepped_onto_without_leaving_the_ground() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     let kerb = top_at(0.0, 4.5, STEP_HEIGHT);
     assert!(kerb > 0.0, "there is a kerb straight ahead of the spawn");
 
@@ -420,7 +507,7 @@ fn a_kerb_is_stepped_onto_without_leaving_the_ground() {
 #[test]
 fn a_crate_taller_than_the_step_blocks_instead() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     // The crate straight ahead, past the kerb — the first slab on the walk
     // whose top is above STEP_HEIGHT and below the walls.
     let (crate_z, crate_half_z) = ROOM
@@ -452,7 +539,7 @@ fn a_crate_taller_than_the_step_blocks_instead() {
 #[test]
 fn a_wall_stops_the_body_at_its_face() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.drive(MOVE_FORWARD, -1, 120);
     let wall = ROOM
         .iter()
@@ -523,7 +610,7 @@ fn the_shelter_is_lit_over_exactly_the_ground_its_roof_covers() {
 #[test]
 fn the_stairs_are_walked_to_the_top_without_a_jump() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     onto_the_mezzanine(&mut game);
     let walker = game.walker();
     assert!(walker.grounded());
@@ -539,7 +626,8 @@ fn the_stairs_are_walked_to_the_top_without_a_jump() {
 #[test]
 fn a_jump_leaves_at_the_stated_velocity_and_comes_back_down() {
     let mut game = Game::load();
-    game.steps(4);
+    game.begin();
+    game.steps(2);
     let floor = game.walker().feet();
     let quiet = game.cue_seq(CUE_JUMP);
 
@@ -563,7 +651,8 @@ fn a_jump_leaves_at_the_stated_velocity_and_comes_back_down() {
 #[test]
 fn the_apex_clears_the_rise_the_room_asks_for() {
     let mut game = Game::load();
-    game.steps(4);
+    game.begin();
+    game.steps(2);
     let mut apex: f64 = 0.0;
     game.hold(JUMP);
     game.step();
@@ -593,7 +682,7 @@ fn the_apex_clears_the_rise_the_room_asks_for() {
 fn the_coyote_window_is_open_early_and_shut_late() {
     for (delay, expected) in [(COYOTE_TICKS - 3, true), (COYOTE_TICKS + 2, false)] {
         let mut game = Game::load();
-        game.steps(2);
+        game.forgiving().begin();
         // Off the mezzanine's east edge. The kerb would do for the early half
         // and not the late one: a 0.3 m drop is over in eleven ticks, so a
         // press past the window would land inside the *buffer* instead and
@@ -625,7 +714,8 @@ fn a_buffered_press_fires_on_the_landing_tick() {
     // tuning constants, and a test that recomputed it would assert arithmetic.
     let flight = {
         let mut game = Game::load();
-        game.steps(4);
+        game.forgiving().begin();
+        game.steps(2);
         game.hold(JUMP);
         game.step();
         game.until_grounded(600)
@@ -633,7 +723,8 @@ fn a_buffered_press_fires_on_the_landing_tick() {
     assert!(flight > u64::from(BUFFER_TICKS), "room to press inside it");
 
     let mut game = Game::load();
-    game.steps(4);
+    game.forgiving().begin();
+    game.steps(2);
     game.hold(JUMP);
     game.step();
     // Fall to within the buffer window, then press: the edge needs the tick
@@ -668,13 +759,13 @@ fn a_diagonal_is_no_faster_than_a_straight_line() {
     // find scenery. West and north-west are the clear lines out of the spawn.
     let straight = {
         let mut game = Game::load();
-        game.steps(2);
+        game.begin();
         game.drive(MOVE_RIGHT, -1, 20);
         speed(&game)
     };
     let diagonal = {
         let mut game = Game::load();
-        game.steps(2);
+        game.begin();
         for _ in 0..20 {
             game.push(MOVE_FORWARD, 1);
             game.push(MOVE_RIGHT, -1);
@@ -697,7 +788,7 @@ fn a_diagonal_is_no_faster_than_a_straight_line() {
 #[test]
 fn restart_returns_the_body_to_the_start() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.forward(60);
     assert_ne!(game.walker().position.z, START.z);
     game.hold(RESTART);
@@ -717,7 +808,7 @@ fn restart_returns_the_body_to_the_start() {
 #[test]
 fn the_speed_row_reads_the_ground_speed() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     assert_eq!(game.hud(HUD_SPEED), "SPEED 0.0");
     game.drive(MOVE_RIGHT, -1, 20);
     // 0.110 m/tick at 60 Hz is 6.6 m/s, and the row is integer tenths of it.
@@ -732,7 +823,7 @@ fn the_speed_row_reads_the_ground_speed() {
 #[test]
 fn a_playing_session_offers_the_pointer_nothing_to_point_at() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     assert_eq!(game.session().paused, 0);
     for item in MENU_ITEMS {
         let rect = game.menu(item).rect;
@@ -749,7 +840,7 @@ fn a_playing_session_offers_the_pointer_nothing_to_point_at() {
 #[test]
 fn escape_stops_the_world_on_the_tick_it_is_pressed() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.drive(MOVE_FORWARD, 1, 10);
     let moving = game.walker();
     assert_ne!(moving.velocity.z, 0.0);
@@ -777,7 +868,7 @@ fn escape_stops_the_world_on_the_tick_it_is_pressed() {
 #[test]
 fn a_paused_view_does_not_turn_however_hard_the_mouse_moves() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.tap(PAUSE);
     let before = game.walker().yaw;
     for _ in 0..30 {
@@ -794,7 +885,7 @@ fn a_paused_view_does_not_turn_however_hard_the_mouse_moves() {
 #[test]
 fn pausing_raises_the_flag_the_host_withholds_on() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     assert_eq!(game.prefs().modal, 0, "a running game withholds nothing");
     game.tap(PAUSE);
     assert_eq!(game.prefs().modal, 1);
@@ -818,7 +909,7 @@ fn pausing_raises_the_flag_the_host_withholds_on() {
 #[test]
 fn escape_walks_back_one_level_at_a_time() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.tap(PAUSE);
     game.click(MENU_SETTINGS);
     assert_eq!(game.session().page, PAGE_SETTINGS);
@@ -838,7 +929,7 @@ fn escape_walks_back_one_level_at_a_time() {
 #[test]
 fn resume_gives_the_world_and_the_pointer_back() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.tap(PAUSE);
     game.click(MENU_RESUME);
     assert_eq!(game.session().paused, 0);
@@ -852,7 +943,7 @@ fn resume_gives_the_world_and_the_pointer_back() {
 #[test]
 fn each_page_shows_its_own_rows() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.tap(PAUSE);
     assert!(game.menu(MENU_QUIT).rect[3] > 0.0);
     assert_eq!(game.menu(MENU_LOOK_UP).rect[3], 0.0);
@@ -867,13 +958,494 @@ fn each_page_shows_its_own_rows() {
     assert!(game.menu(MENU_QUIT).rect[3] > 0.0);
 }
 
+// ------------------------------------------------------------ the shape ----
+
+/// The session opens on a screen, and the screen is not the room.
+#[test]
+fn a_session_opens_on_the_title_and_not_in_the_room() {
+    let mut game = Game::load();
+    game.step();
+    let session = game.session();
+    assert_eq!((session.paused, session.page), (1, PAGE_TITLE));
+    assert_eq!(game.menu(MENU_TITLE).text(), TITLE_NAME);
+    assert_eq!(game.menu(MENU_RULE).text(), RULE);
+    assert!(
+        game.menu(MENU_START).rect[3] > 0.0,
+        "and it offers a way in"
+    );
+    // Nothing of the round has happened: no course, and a body that has not
+    // taken a tick of gravity.
+    assert!(game.all::<Target>().is_empty());
+    assert!(!game.walker().grounded(), "no physics has run behind it");
+    assert_eq!(game.prefs().modal, 1, "the pointer is the menu's");
+}
+
+/// The title screen's two ways in, and they agree.
+#[test]
+fn the_title_screen_is_left_by_the_key_and_by_the_button() {
+    for by_key in [true, false] {
+        let mut game = Game::load();
+        game.step();
+        match by_key {
+            true => {
+                game.tap(BEGIN);
+            }
+            false => game.click(MENU_START),
+        }
+        let session = game.session();
+        assert_eq!((session.paused, session.page), (0, PAGE_MAIN));
+        assert_eq!(
+            game.all::<Target>().len(),
+            TARGETS_LIVE,
+            "the course is dealt"
+        );
+        assert_eq!(
+            game.prefs().modal,
+            0,
+            "and the pointer goes back to the aim"
+        );
+        assert!(game.menu(MENU_START).rect[3] == 0.0, "the screen is gone");
+    }
+}
+
+/// `R` is refused on the title screen. It has nothing to start over there, and
+/// a restart would deal a course nobody asked to play — the one place the key
+/// the banner advertises does nothing.
+#[test]
+fn the_restart_key_does_nothing_on_the_title_screen() {
+    let mut game = Game::load();
+    game.step();
+    game.tap(RESTART);
+    game.tap(RESTART);
+    let session = game.session();
+    assert_eq!((session.paused, session.page), (1, PAGE_TITLE));
+    assert!(game.all::<Target>().is_empty(), "and no course was dealt");
+}
+
+/// One settings panel, two screens, and [`Session::from`] is what tells them
+/// apart — the claim §6 M44 named and the only thing that proves the return is
+/// a field rather than a hardcoded page.
+#[test]
+fn settings_returns_to_whichever_screen_opened_it() {
+    // From the title.
+    let mut game = Game::load();
+    game.step();
+    game.click(MENU_SETTINGS);
+    assert_eq!(game.session().page, PAGE_SETTINGS);
+    assert_eq!(game.session().from, PAGE_TITLE);
+    game.click(MENU_BACK);
+    assert_eq!(
+        game.session().page,
+        PAGE_TITLE,
+        "back to where it came from"
+    );
+    assert_eq!(game.menu(MENU_TITLE).text(), TITLE_NAME);
+
+    // And from the pause menu, in the same session, which is what stops a
+    // sticky `from` from passing this by accident.
+    game.tap(BEGIN);
+    game.tap(PAUSE);
+    game.click(MENU_SETTINGS);
+    assert_eq!(game.session().from, PAGE_MAIN);
+    game.click(MENU_BACK);
+    assert_eq!(game.session().page, PAGE_MAIN);
+    assert_eq!(game.menu(MENU_TITLE).text(), "PAUSED");
+    assert_eq!(game.session().paused, 1, "the pause menu, not the round");
+}
+
+/// The round ends on a screen that says what it came to, and the body stops
+/// with it. Through §6 M75 the score froze and the player went on walking
+/// around a room that had stopped dealing targets.
+#[test]
+fn the_round_ends_on_a_screen_that_reports_it() {
+    let mut game = Game::load();
+    game.begin();
+    // Stand still: three targets walk off and that is the whole rule.
+    game.steps(u64::from(TARGET_LIFE) + 4);
+    let session = game.session();
+    assert_eq!((session.paused, session.page), (1, PAGE_OVER));
+    assert_eq!(game.menu(MENU_TITLE).text(), "ROUND OVER");
+    assert_eq!(game.menu(MENU_TALLY).text(), "SCORE 0  BEST 0");
+    assert_eq!(game.menu(MENU_AIM).text(), "WAVE 1  ACCURACY 0%");
+    assert_eq!(
+        game.menu(MENU_RESTART).text(),
+        "AGAIN",
+        "the same button, the screen's word"
+    );
+
+    // The body is stopped, not merely scoreless.
+    let before = game.walker().position;
+    game.forward(20);
+    assert_eq!(game.walker().position, before, "the world is held");
+    assert_eq!(game.prefs().modal, 1, "and the pointer is the menu's");
+}
+
+/// AGAIN is a *continuation*: a fresh round that keeps what the last one was
+/// worth. The tick it opens at is what says it came from the over screen and
+/// not from a fresh boot — §6 M48's way of grading, at a game's scale.
+#[test]
+fn the_over_screen_starts_another_round_and_keeps_the_best() {
+    let mut game = Game::load();
+    game.begin();
+    let taken = game.visible_target().position;
+    game.aim_at(taken);
+    game.tap(FIRE);
+    let scored = game.range().score;
+    assert!(scored > 0, "something was on the board");
+
+    game.steps(u64::from(TARGET_LIFE) + 4);
+    assert_eq!(game.session().page, PAGE_OVER);
+
+    game.tap(BEGIN);
+    let session = game.session();
+    assert_eq!((session.paused, session.page), (0, PAGE_MAIN));
+    let range = game.range();
+    assert_eq!(
+        (range.score, range.hits, range.misses),
+        (0, 0, 0),
+        "a fresh round"
+    );
+    assert_eq!(range.best, scored, "carrying what the last one was worth");
+    assert_eq!(range.state, STATE_RUNNING);
+    assert_eq!(
+        game.walker().position.x,
+        START.x,
+        "and the body is back at the start"
+    );
+}
+
+/// The pause menu and the over screen both offer the way back to the title, and
+/// it is the same row on both.
+#[test]
+fn the_title_is_reachable_from_the_pause_menu_and_from_the_over_screen() {
+    let mut game = Game::load();
+    game.begin();
+    game.tap(PAUSE);
+    game.click(MENU_TO_TITLE);
+    assert_eq!(game.session().page, PAGE_TITLE);
+    assert_eq!(game.session().paused, 1);
+
+    game.tap(BEGIN);
+    game.steps(u64::from(TARGET_LIFE) + 4);
+    assert_eq!(game.session().page, PAGE_OVER);
+    game.click(MENU_TO_TITLE);
+    assert_eq!(game.session().page, PAGE_TITLE);
+}
+
+/// Every page reads top to bottom, which is not decoration: `Widget::order` is
+/// the draw order *and* the order the host's focus ring walks (§6 M74), so a
+/// page whose rows are listed out of order is a page whose `Tab` jumps about.
+#[test]
+fn every_page_lists_its_rows_in_reading_order() {
+    let mut game = Game::load();
+    game.step();
+    for (page, reach) in [
+        (PAGE_TITLE, None),
+        (PAGE_MAIN, Some(())),
+        (PAGE_SETTINGS, Some(())),
+        (PAGE_OVER, Some(())),
+    ] {
+        let _ = reach;
+        // Drive the session onto the page rather than calling `page_rows`, which
+        // is private — the claim is about what a player is shown.
+        let mut game2 = Game::load();
+        game2.step();
+        match page {
+            PAGE_TITLE => {}
+            PAGE_SETTINGS => game2.click(MENU_SETTINGS),
+            PAGE_MAIN => {
+                game2.tap(BEGIN);
+                game2.tap(PAUSE);
+            }
+            _ => {
+                game2.tap(BEGIN);
+                game2.steps(u64::from(TARGET_LIFE) + 4);
+            }
+        }
+        assert_eq!(game2.session().page, page);
+        // Only the buttons: the ring is a walk over what the host hit-tests,
+        // and a label is not that (§6 M74). A settings row's readout sits six
+        // units above the `-`/`+` beside it, so including labels would be
+        // asserting about a layout nobody can tab to.
+        let mut rows: Vec<(u32, f32, f32)> = Vec::new();
+        for item in MENU_ITEMS {
+            let widget = game2.menu(item);
+            let shown = widget.rect[2] > 0.0 && widget.rect[3] > 0.0;
+            if shown && widget.kind == boundary::widget::BUTTON {
+                rows.push((widget.order, widget.rect[1], widget.rect[0]));
+            }
+        }
+        assert!(rows.len() >= 3, "page {page} offers something to press");
+        let mut sorted = rows.clone();
+        sorted.sort_by_key(|row| row.0);
+        assert_eq!(rows.len(), sorted.len());
+        // Down the page, then across it: two buttons sharing a row (a `-` and
+        // its `+`) are visited left to right, and only a row that goes back
+        // *up* is a fault.
+        for pair in sorted.windows(2) {
+            let forward =
+                pair[0].1 < pair[1].1 || (pair[0].1 == pair[1].1 && pair[0].2 < pair[1].2);
+            assert!(
+                forward,
+                "page {page}: the ring goes from ({}, {}) back to ({}, {})",
+                pair[0].2, pair[0].1, pair[1].2, pair[1].1
+            );
+        }
+        let _ = &mut game;
+    }
+}
+
+/// A row nobody put on a page draws nowhere. The predecessor of `page_rows` had
+/// a catch-all arm that put every unclaimed row on the *settings* page, so a
+/// menu grew rows it was never shown (§6 M76).
+#[test]
+fn no_page_shows_a_row_that_belongs_to_another() {
+    let mut game = Game::load();
+    game.step();
+    // The title screen: the round's rows are not on it.
+    for item in [
+        MENU_RESUME,
+        MENU_BACK,
+        MENU_LOOK,
+        MENU_AA,
+        MENU_TALLY,
+        MENU_AIM,
+    ] {
+        assert_eq!(
+            game.menu(item).rect[3],
+            0.0,
+            "item {item} is not on the title"
+        );
+    }
+    game.click(MENU_SETTINGS);
+    for item in [
+        MENU_START,
+        MENU_RULE,
+        MENU_TALLY,
+        MENU_AIM,
+        MENU_RESUME,
+        MENU_TO_TITLE,
+    ] {
+        assert_eq!(
+            game.menu(item).rect[3],
+            0.0,
+            "item {item} is not in settings"
+        );
+    }
+}
+
+/// A line that reports something is not a thing to press.
+///
+/// The three summary rows were dealt as *buttons* when they were added — the
+/// arm that makes a label listed three items and the new ones fell past it —
+/// which is a focus ring that stops on a score and an Enter that presses it
+/// (§6 M74's ring walks exactly the host-hit-tested widgets, and that is
+/// exactly the buttons).
+#[test]
+fn a_row_that_reports_something_is_not_a_row_to_press() {
+    let mut game = Game::load();
+    game.step();
+    for item in [
+        MENU_TITLE,
+        MENU_RULE,
+        MENU_TALLY,
+        MENU_AIM,
+        MENU_LOOK,
+        MENU_VOLUME,
+    ] {
+        assert_ne!(
+            game.menu(item).kind,
+            boundary::widget::BUTTON,
+            "item {item} reads something out; it is not a button"
+        );
+    }
+    for item in [
+        MENU_START,
+        MENU_SETTINGS,
+        MENU_QUIT,
+        MENU_RESTART,
+        MENU_TO_TITLE,
+        MENU_BACK,
+    ] {
+        assert_eq!(
+            game.menu(item).kind,
+            boundary::widget::BUTTON,
+            "item {item} does something; it is a button"
+        );
+    }
+}
+
+/// The HUD row that carries the arc. Two facts on one line because they are one
+/// question — how the round is going — and a sixth row would be a sixth thing
+/// to read while aiming.
+#[test]
+fn the_round_row_reads_the_wave_and_the_misses() {
+    let mut game = Game::load();
+    game.begin();
+    assert_eq!(game.hud(HUD_ROUND), "WAVE 1  MISS 0/3");
+    // Take a wave's worth, and the row moves with it.
+    for _ in 0..WAVE_HITS {
+        let taken = game.visible_target().position;
+        game.aim_at(taken);
+        game.tap(FIRE);
+        game.steps(u64::from(FIRE_TICKS) + 1);
+    }
+    assert_eq!(game.hud(HUD_ROUND), "WAVE 2  MISS 0/3");
+}
+
+/// The title screen says the same name the window bar, the shipped folder and
+/// the executable's version resource do (§6 M73, M75). Two files, so the check
+/// is a test rather than a shared constant.
+#[test]
+fn the_title_screen_and_the_manifest_agree_on_the_name() {
+    let manifest = include_str!("../game.ggproj");
+    let title = manifest
+        .lines()
+        .find_map(|line| line.strip_prefix("title"))
+        .and_then(|rest| rest.split_once('='))
+        .map(|(_, value)| value.trim())
+        .expect("the manifest names the game");
+    assert_eq!(
+        title.to_ascii_uppercase(),
+        TITLE_NAME,
+        "the title screen and `game.ggproj` disagree about the name"
+    );
+}
+
+// ------------------------------------------------------------ the arc ------
+
+/// The ramp: shorter every wave, down to a floor, and integer all the way —
+/// demo 10's `gravity_for` in this game's units.
+#[test]
+fn a_target_stands_for_less_every_wave_down_to_a_floor() {
+    assert_eq!(life_for(0), TARGET_LIFE, "the first wave is the constant");
+    let mut last = life_for(0);
+    for wave in 1..40 {
+        let life = life_for(wave);
+        assert!(
+            life <= last,
+            "wave {wave} is not longer than the one before"
+        );
+        assert!(life >= LIFE_FLOOR, "and never under the floor");
+        last = life;
+    }
+    assert_eq!(life_for(40), LIFE_FLOOR, "and it gets there");
+
+    // The floor is a floor and not a wall: taking one target costs a turn, a
+    // trigger and the cooldown, and `TARGETS_LIVE` stand at once, so a life
+    // under that could not be cleared by a shot that never missed. The
+    // inequality rather than the number, so retuning the weapon cannot quietly
+    // make the course impossible.
+    assert!(
+        LIFE_FLOOR >= (FIRE_TICKS + 2) * TARGETS_LIVE as u32,
+        "the floor leaves no time to clear the course"
+    );
+
+    // And the pay rises where the time falls.
+    assert_eq!(worth_for(0), TARGET_WORTH);
+    assert!(worth_for(3) > worth_for(2) && worth_for(2) > worth_for(1));
+    assert_eq!(wave_of(0), 0);
+    assert_eq!(wave_of(WAVE_HITS - 1), 0);
+    assert_eq!(wave_of(WAVE_HITS), 1, "the wave is read off the hits");
+}
+
+/// And the ramp reaches the world: the target dealt after the wave turns over
+/// stands for less than the ones the round opened with.
+#[test]
+fn the_wave_shortens_the_targets_the_round_deals_next() {
+    let mut game = Game::load();
+    game.begin();
+    for target in game.all::<Target>() {
+        assert_eq!(
+            target.life, TARGET_LIFE,
+            "the opening course is the first wave"
+        );
+    }
+    // Take WAVE_HITS targets, which is what turns the wave over.
+    for _ in 0..WAVE_HITS {
+        let taken = game.visible_target().position;
+        game.aim_at(taken);
+        game.tap(FIRE);
+        game.steps(u64::from(FIRE_TICKS) + 1);
+    }
+    let range = game.range();
+    assert_eq!(range.hits, WAVE_HITS, "every round found its target");
+    assert_eq!(wave_of(range.hits), 1);
+    let fresh: Vec<u32> = game
+        .all::<Target>()
+        .iter()
+        .filter(|t| t.age == 0 || t.life != TARGET_LIFE)
+        .map(|t| t.life)
+        .collect();
+    assert!(
+        fresh.iter().any(|life| *life == life_for(1)),
+        "a target dealt into the second wave stands for {} and the course holds {fresh:?}",
+        life_for(1)
+    );
+    assert!(life_for(1) < TARGET_LIFE);
+}
+
+/// The number `Range::shots` has been counted for since §6 M37 and that nothing
+/// showed until there was a screen to show it on.
+#[test]
+fn accuracy_is_hits_over_shots_and_a_round_that_fired_nothing_reads_zero() {
+    let mut game = Game::load();
+    game.step();
+    let mut range = game.range();
+    assert_eq!((range.shots, range.hits), (0, 0));
+    assert_eq!(accuracy(&range), 0, "no shots is not a division");
+    range.shots = 4;
+    range.hits = 1;
+    assert_eq!(accuracy(&range), 25);
+    range.hits = 4;
+    assert_eq!(accuracy(&range), 100);
+}
+
+/// Each verb is where its id says it is. A list read by `gg_game!` and by
+/// `input.toml`, and the only thing keeping the two in step (§4.7).
+#[test]
+fn every_verb_sits_at_the_id_that_names_it() {
+    assert_eq!(ACTIONS.len(), 8);
+    assert_eq!(ACTIONS[JUMP.index()], "jump");
+    assert_eq!(ACTIONS[RESTART.index()], "restart");
+    assert_eq!(ACTIONS[PAUSE.index()], "pause");
+    assert_eq!(ACTIONS[FIRE.index()], "fire");
+    assert_eq!(ACTIONS[BEGIN.index()], "begin");
+    assert_eq!(
+        *ACTIONS.last().unwrap(),
+        "begin",
+        "appended, never inserted"
+    );
+    assert_eq!(AXES.len(), 6);
+    assert_eq!(AXES[AIM_X.index()], "aim_x");
+    assert_eq!(AXES[MOVE_FORWARD.index()], "move_forward");
+
+    // The map declares every one of them, and `begin` crosses while a screen is
+    // up or it could not leave one.
+    let map = include_str!("../input.toml");
+    for verb in ACTIONS {
+        assert!(
+            map.contains(&format!("{verb} = [")),
+            "`{verb}` has no binding"
+        );
+    }
+    let keep = map
+        .lines()
+        .find(|line| line.starts_with("keep = "))
+        .expect("a modal list");
+    assert!(
+        keep.contains("\"begin\""),
+        "a key withheld by the menu cannot start a round"
+    );
+}
+
 /// The look row moves the multiplier, and the multiplier moves the aim.
 /// Asserted through the *angle* and not the field: a setting that changed a
 /// number nothing read would still pass a test on the number.
 #[test]
 fn the_look_row_changes_what_a_mouse_count_is_worth() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.tap(PAUSE);
     game.click(MENU_SETTINGS);
     let opening = game.session().sens;
@@ -901,7 +1473,7 @@ fn the_look_row_changes_what_a_mouse_count_is_worth() {
 #[test]
 fn the_sensitivity_range_holds_at_both_ends() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.tap(PAUSE);
     game.click(MENU_SETTINGS);
     for _ in 0..200 {
@@ -919,7 +1491,7 @@ fn the_sensitivity_range_holds_at_both_ends() {
 #[test]
 fn the_look_row_reports_counts_per_turn() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.tap(PAUSE);
     game.click(MENU_SETTINGS);
     assert_eq!(game.menu(MENU_LOOK).text(), "LOOK 1.50  8377/TURN");
@@ -939,7 +1511,7 @@ fn the_look_row_reports_counts_per_turn() {
 #[test]
 fn the_volume_row_attenuates_and_reads_as_a_percentage() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.tap(PAUSE);
     game.click(MENU_SETTINGS);
     assert_eq!(game.menu(MENU_VOLUME).text(), "VOLUME 100%");
@@ -971,7 +1543,7 @@ fn the_volume_row_attenuates_and_reads_as_a_percentage() {
 #[test]
 fn the_edge_row_names_the_mode_it_is_actually_in() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.tap(PAUSE);
     game.click(MENU_SETTINGS);
     assert_eq!(game.prefs().aa, aa::MSAA_4, "the demo opens antialiased");
@@ -1004,7 +1576,7 @@ fn the_edge_row_names_the_mode_it_is_actually_in() {
 #[test]
 fn the_menu_restart_respawns_without_clearing_the_settings() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.tap(PAUSE);
     game.click(MENU_SETTINGS);
     game.click(MENU_LOOK_DOWN);
@@ -1026,7 +1598,7 @@ fn the_menu_restart_respawns_without_clearing_the_settings() {
 #[test]
 fn quit_asks_the_host_to_end_the_session() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     assert!(!game.prefs().closing());
     game.tap(PAUSE);
     game.click(MENU_QUIT);
@@ -1203,7 +1775,7 @@ fn every_spawn_point_stands_in_the_rooms_clear_air() {
 #[test]
 fn a_shot_takes_the_target_it_is_pointed_at() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     assert_eq!(game.targets().len(), TARGETS_LIVE, "the course opens full");
     let taken = game.visible_target().position;
 
@@ -1244,7 +1816,7 @@ fn a_shot_takes_the_target_it_is_pointed_at() {
 #[test]
 fn a_pillar_between_the_eye_and_a_target_stops_the_bullet() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     let eye = game.one::<Eye>().position;
     let (pillar, half, _) = ROOM
         .iter()
@@ -1289,7 +1861,7 @@ fn a_pillar_between_the_eye_and_a_target_stops_the_bullet() {
 #[test]
 fn the_trigger_answers_at_the_fire_rate_and_not_faster() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     let rounds = 4;
     for _ in 0..u64::from(FIRE_TICKS) * rounds {
         game.hold(FIRE);
@@ -1307,7 +1879,7 @@ fn the_trigger_answers_at_the_fire_rate_and_not_faster() {
 #[test]
 fn the_kick_settles_exactly_where_it_found_the_view() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     let before = game.walker().pitch;
     game.hold(FIRE);
     game.step();
@@ -1324,7 +1896,7 @@ fn the_kick_settles_exactly_where_it_found_the_view() {
 #[test]
 fn the_streak_pays_and_a_shot_into_the_sky_ends_it() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     let mut expected = 0;
     for hit in 0..3 {
         let at = game.visible_target().position;
@@ -1353,7 +1925,7 @@ fn the_streak_pays_and_a_shot_into_the_sky_ends_it() {
 #[test]
 fn three_targets_that_walk_end_the_round() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.steps(u64::from(TARGET_LIFE) + 2);
 
     let range = game.range();
@@ -1369,7 +1941,7 @@ fn three_targets_that_walk_end_the_round() {
         0,
         "a finished round takes no more shots"
     );
-    assert_eq!(game.hud(HUD_MISS), "OVER - R TO RESTART");
+    assert_eq!(game.hud(HUD_ROUND), "OVER - R TO RESTART");
 }
 
 /// A restart reopens the course and keeps the best — the one number a session
@@ -1377,7 +1949,7 @@ fn three_targets_that_walk_end_the_round() {
 #[test]
 fn a_restart_reopens_the_course_and_keeps_the_best() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     let at = game.visible_target().position;
     game.aim_at(at);
     game.hold(FIRE);
@@ -1403,7 +1975,7 @@ fn a_restart_reopens_the_course_and_keeps_the_best() {
 #[test]
 fn the_menu_takes_the_trigger_and_gives_it_back_on_a_release() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     game.tap(PAUSE);
     for _ in 0..u64::from(FIRE_TICKS) * 3 {
         game.hold(FIRE);
@@ -1444,7 +2016,10 @@ fn the_menu_takes_the_trigger_and_gives_it_back_on_a_release() {
 #[test]
 fn every_transient_a_level_shot_deals_dies_inside_the_room() {
     let mut game = Game::load();
-    game.steps(2);
+    // 240 firing ticks outlive a course, and `effects` is one of the systems
+    // an over screen stops — so without this the sparks stop ageing rather
+    // than failing to die, which is a different claim entirely.
+    game.forgiving().begin();
     let (low, high) = room_bounds();
     let mut peak = 0;
     for _ in 0..240 {
@@ -1467,8 +2042,12 @@ fn every_transient_a_level_shot_deals_dies_inside_the_room() {
         }
     }
     assert!(peak > 0, "four seconds of fire dealt something");
+    // A shot bursts and so does an *escape*, and a course held open by
+    // `forgiving` escapes for ever — so the peak now includes a whole set of
+    // three walking off inside one spark's life, which the round ending used
+    // to cut short. Bounded is still the claim; the bound is what moved.
     assert!(
-        peak < 32,
+        peak < 48,
         "and the churn stayed bounded: {peak} at its peak"
     );
 
@@ -1486,7 +2065,7 @@ fn every_transient_a_level_shot_deals_dies_inside_the_room() {
 #[test]
 fn a_shot_at_the_sky_is_the_one_transient_that_leaves() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     let (_, high) = room_bounds();
     let sky = game.one::<Eye>().position + sim::DVec3::new(0.0, 10.0, -0.5);
     game.aim_at(sky);
@@ -1518,7 +2097,7 @@ fn a_shot_at_the_sky_is_the_one_transient_that_leaves() {
 #[test]
 fn the_flash_is_the_nearest_point_light_and_leaves_when_it_dies() {
     let mut game = Game::load();
-    game.steps(2);
+    game.begin();
     let eye = game.one::<Eye>().position;
     let points = |game: &Game| {
         let mut out: Vec<f64> = game
@@ -1571,9 +2150,10 @@ fn entry() -> session::Entry {
     }
 }
 
-/// The recorded session is a whole round: restart, three targets taken, then
-/// hands off while the course walks the rest away — every number here re-pinned
-/// by `xtask replay --bless` when the room, the course or the weapon changes
+/// The recorded session is the game's whole shape (§6 M76): the title screen,
+/// the round, the wave it crosses, the last miss, the screen that reports it
+/// and one more round begun from that screen — every number here re-pinned by
+/// `xtask replay --bless` when the room, the course or the weapon changes
 /// (§6 M37 item 2).
 #[test]
 fn the_recorded_session_plays_a_round_out_to_the_last_miss() {
@@ -1581,28 +2161,61 @@ fn the_recorded_session_plays_a_round_out_to_the_last_miss() {
     let progress = session::progress(&entry(), &frames).unwrap();
     let at =
         |find: &dyn Fn(&session::Progress) -> bool| progress.iter().position(find).unwrap() as u64;
-    let (hit, escaped, over) = (
+
+    // It opens on a screen and not in the room.
+    let first = progress[0];
+    assert!(first.stopped && first.page == PAGE_TITLE);
+    assert_eq!(first.hits + first.misses + first.shots, 0);
+
+    let started = at(&|p| !p.stopped);
+    let (hit, wave, escaped) = (
         at(&|p| p.hits == 1),
+        at(&|p| p.hits == WAVE_HITS),
         at(&|p| p.misses == 1),
-        at(&|p| p.over),
     );
-    // Both halves, in order and each with room between them: a session that
-    // only fired would never reach `escaped`, one that only stood still would
-    // never reach `hit`, and either would still be a legal input stream.
-    assert!(hit < escaped && escaped < over, "the round changed shape");
+    let over = at(&|p| p.page == PAGE_OVER);
+    // The second round: the first tick after the over screen that is playing
+    // again. Searched from `over` rather than from 0, because "playing" is
+    // the state most of this stream is in.
+    let again = over
+        + progress[over as usize..]
+            .iter()
+            .position(|p| !p.stopped)
+            .unwrap() as u64;
+
+    // Every edge in order and each with room between them: a session that only
+    // fired would never reach `escaped`, one that only stood still would never
+    // reach `hit` or `wave`, one that opened in the room would have no
+    // `started`, and one that stopped at the last miss would have no `again` —
+    // and every one of those is still a legal input stream.
+    assert!(
+        started < hit && hit < wave && wave < escaped && escaped < over && over < again,
+        "the round changed shape"
+    );
     assert_eq!(
-        (frames.len(), hit, escaped, over),
-        (288, 14, 211, 257),
+        (frames.len(), started, hit, wave, escaped, over, again),
+        (303, 1, 15, 70, 212, 271, 272),
         "the round changed shape — re-bless"
     );
 
+    // The round that ended: six taken, the course out of misses.
+    let ended = progress[over as usize];
+    assert_eq!(ended.hits, session::HITS_WANTED, "the bot stopped shooting");
+    assert_eq!(ended.misses, MISSES_ALLOWED, "and the course ran out");
+    assert!(ended.over);
+
+    // And the one that followed it: a fresh round carrying the old one's best,
+    // which is the whole difference between playing again and starting the
+    // process again.
     let last = *progress.last().unwrap();
-    assert_eq!(last.hits, session::HITS_WANTED, "the bot stopped shooting");
-    assert_eq!(last.misses, MISSES_ALLOWED, "and the course ran out");
     assert!(
-        last.over,
-        "the tail is played after the round, not during it"
+        !last.stopped && !last.over,
+        "the tail is a round in progress"
     );
+    assert_eq!((last.hits, last.misses, last.score), (0, 0, 0));
+    assert_eq!(last.best, ended.score, "and it remembers what it beat");
+    assert_eq!(last.standing, TARGETS_LIVE as u32, "on a course of its own");
+    let last = ended;
     // Five rounds for three targets. The two that went astray are the policy
     // working, not failing: this room has spots the spawn cannot see, the bot
     // finds them the only way it can — by firing — and never fires at one
@@ -1611,7 +2224,7 @@ fn the_recorded_session_plays_a_round_out_to_the_last_miss() {
     assert!(last.shots > last.hits, "no round ever met the room");
     assert_eq!(
         (last.shots, last.score, last.standing),
-        (5, 325, 2),
+        (8, 800, 2),
         "the room, the course or the streak moved — re-bless"
     );
 }
@@ -1673,7 +2286,7 @@ fn the_endless_fight_keeps_a_round_in_progress() {
     let over = progress.iter().filter(|p| p.over).count();
     assert_eq!(
         (fired.len(), over, gap),
-        (117, 8, 27),
+        (113, 9, 35),
         "the fight changed shape — `xtask reload --retune` reads all three, and the shortest gap          is the window it spends proving the world crossed the swap"
     );
     assert!(
