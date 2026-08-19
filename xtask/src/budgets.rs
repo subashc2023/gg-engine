@@ -315,11 +315,36 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   tree knows both that a frame took nineteen milliseconds and that nobody is
 ///   allowed to act on it.
 ///
+/// - **What the box says, and who is still owed a sentence** (2037 -> 2090, §6
+///   M81): fifty-three lines for two facts, and both are conjunctions the way
+///   every raise above is.
+///
+///   The first is `Exit`. A message box that says "could not start" to a player
+///   who has been playing for ten minutes describes a different event, and the
+///   only thing that knows which event this is, is the thing that owns the loop:
+///   `gg-core` owns the loop's *shape* and has never heard of a message box,
+///   `gg-platform` owns the box and cannot see a session, and `run` is where a
+///   session either began or did not. The type is the flag and its `From`, and
+///   the two words it picks are in `refusal` beside the rest of the wording.
+///
+///   The second is the carried outcome. §6 M54's disk verdict is a statement
+///   about the **process** and a session's failure is a statement about the
+///   **session**; `?` conflated them, so the run most likely to have lost the
+///   player's files was the one run that never said so. Six lines of `loop` and
+///   `break` are what it costs to owe both sentences at once, and there is
+///   nowhere else that sees both.
+///
+///   Not here: everything the audit found that belonged elsewhere. The
+///   field-deletion refusal is `gg-ecs`'s, the contract check is `gg-input`'s,
+///   the three shader watchers are `gg-render`'s, and the six new gates are
+///   `xtask`'s.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session), M45 (the
 /// keys), M46 (the window), M47 (the refusal), M48 (the crash), M63 (the
-/// viewport's pointer), M80 (the frame rate) — each argued the same way.
-const SHELL_BUDGET: usize = 2037;
+/// viewport's pointer), M80 (the frame rate), M81 (the box's first line) — each
+/// argued the same way.
+const SHELL_BUDGET: usize = 2090;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.
@@ -404,10 +429,156 @@ pub fn check() -> anyhow::Result<()> {
     overlay_lines()?;
     widget_provenance()?;
     shader_block_loaders()?;
+    watched_shader_modules()?;
+    fingerprint_scope()?;
+    imported_math_lists()?;
     dependencies()?;
     unused_dependencies()?;
     game_crate_pin()?;
     reference_images()
+}
+
+/// Where the other copy of [`GAME_CRATE_PIN`] lives.
+const FINGERPRINT_SCOPE: &str = "crates/gg-abi/build.rs";
+
+/// The two copies of the boundary crate list are the same list (§4.2.2, §6 M81).
+///
+/// `gg-abi/build.rs`'s own comment says it: "the same list as `xtask`'s
+/// `GAME_CRATE_PIN`, and a divergence between the two is a silent hole rather
+/// than a loud one". It was character-identical and compared by nobody, so the
+/// hole it names was one careless edit away — a crate on the pin and off the
+/// fingerprint is one a game may link and whose changes reload without a
+/// migration.
+fn fingerprint_scope() -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(workspace_root().join(FINGERPRINT_SCOPE))
+        .map_err(|e| anyhow::anyhow!("no {FINGERPRINT_SCOPE}: {e}"))?;
+    let covered = boundary_crates(&text);
+    anyhow::ensure!(
+        covered == GAME_CRATE_PIN,
+        "the fingerprint covers {covered:?} and §3 pins game crates to {GAME_CRATE_PIN:?} \
+         ({FINGERPRINT_SCOPE}) — a crate on one list and not the other is either a reload that \
+         skips its migration or a hash that moves for nothing (§4.2.2)"
+    );
+    println!("xtask: the fingerprint's scope is the game-crate pin, {covered:?} (§4.2.2)");
+    Ok(())
+}
+
+/// The names in `build.rs`'s `BOUNDARY_CRATES`. Split out so `mod tests` can
+/// plant a divergence; the parse is [`crate::ci::names_in_list`]'s, which is the
+/// one both list-comparing gates use.
+fn boundary_crates(text: &str) -> Vec<&str> {
+    crate::ci::names_in_list(text, "BOUNDARY_CRATES")
+}
+
+/// Where the instrument's copy of the math-import list lives.
+const FP_ISA: &str = "tools/gg-tools/src/fp_isa.rs";
+
+/// The gate's math-import list and the instrument's are the same set (§6 M81).
+///
+/// Two copies is the right *shape* — `ci.rs` is a threshold and `fp-isa`
+/// attributes and explains, which is CLAUDE.md's microscope-versus-gate split —
+/// but the argument for leaving them uncompared was that "the C library's math
+/// section is not a set that drifts", and it had: `fma`, the routine §8's qemu
+/// row names by name, was on neither. Order-insensitive, since only membership
+/// is the claim.
+fn imported_math_lists() -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(workspace_root().join(FP_ISA))
+        .map_err(|e| anyhow::anyhow!("no {FP_ISA}: {e}"))?;
+    let mut instrument = crate::ci::names_in_list(&text, "IMPORTED_MATH");
+    let mut gate: Vec<&str> = crate::ci::IMPORTED_MATH.to_vec();
+    anyhow::ensure!(
+        !instrument.is_empty(),
+        "{FP_ISA} declares no `IMPORTED_MATH` this gate can read — the scan found nothing"
+    );
+    instrument.sort_unstable();
+    gate.sort_unstable();
+    anyhow::ensure!(
+        instrument == gate,
+        "the math-import list differs between the gate and the instrument (§4.2.1): \
+         `xtask` has {gate:?}, {FP_ISA} has {instrument:?} — a routine on one and not the other \
+         is one the census cannot see"
+    );
+    println!(
+        "xtask: the gate and `fp-isa` name the same {} math imports (§4.2.1)",
+        gate.len()
+    );
+    Ok(())
+}
+
+/// Where the shader modules and their hot-reload watchers live. Two paths
+/// rather than a feature-gated test, because `hot-reload` is off by default and
+/// a gate nobody runs is what this exists to prevent.
+const SHADER_DIR: &str = "crates/gg-render/shaders";
+const HOT_MODULE_TABLE: &str = "crates/gg-render/src/hot.rs";
+
+/// Every `.slang` module the renderer draws with has a hot-reload watcher
+/// (§4.4, §6 M81).
+///
+/// The failure it names has no other symptom: an unwatched module recompiles
+/// its *neighbours* on every edit and logs "pipelines rebuilt behind the
+/// timeline", so the operator watches a successful hot reload change nothing
+/// and concludes the edit did nothing. Three of eight modules were in that state
+/// for six milestones — `ao`, `debug` and `probe`, the three whose pictures are
+/// exactly what an operator edits a shader to interrogate.
+///
+/// Read off the table in `hot.rs` rather than a list here, so adding a module
+/// fails at the file that has to change.
+fn watched_shader_modules() -> anyhow::Result<()> {
+    let root = workspace_root();
+    let text = std::fs::read_to_string(root.join(HOT_MODULE_TABLE))
+        .map_err(|e| anyhow::anyhow!("no {HOT_MODULE_TABLE}: {e}"))?;
+    let watched = watched_names(&text);
+    anyhow::ensure!(
+        !watched.is_empty(),
+        "{HOT_MODULE_TABLE} declares no `MODULES` table this gate can read — the scan found \
+         nothing, which is how a gate stops being one"
+    );
+    let mut unwatched = Vec::new();
+    let mut modules = 0usize;
+    for entry in std::fs::read_dir(root.join(SHADER_DIR))?.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "slang") {
+            continue;
+        }
+        modules += 1;
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        if !watched.contains(&stem) {
+            unwatched.push(stem);
+        }
+    }
+    anyhow::ensure!(
+        modules > 0,
+        "no `.slang` modules under {SHADER_DIR} — the scan found nothing to check"
+    );
+    anyhow::ensure!(
+        unwatched.is_empty(),
+        "{unwatched:?} under {SHADER_DIR} have no hot-reload watcher in {HOT_MODULE_TABLE} — an \
+         edit to one recompiles the others, swaps nothing, and logs a successful reload (§4.4)"
+    );
+    println!("xtask: all {modules} shader modules are hot-reload watched (§4.4)");
+    Ok(())
+}
+
+/// The quoted names in `hot.rs`'s `MODULES` table. Split out so `mod tests` can
+/// plant a table with a module missing.
+fn watched_names(text: &str) -> Vec<String> {
+    let Some(table) = text
+        .split("const MODULES")
+        .nth(1)
+        .and_then(|t| t.split("];").next())
+    else {
+        return Vec::new();
+    };
+    table
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The template's ceremony, counted (§6 M12).
@@ -1007,6 +1178,38 @@ fn check_one_game_crate(name: &str, root: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both directions on the fingerprint scope: the real file agrees with the
+    /// pin, and a planted divergence is caught. The parse has to step past the
+    /// `[&str; 4]` annotation, which is the mistake this test exists to have
+    /// already made.
+    #[test]
+    fn the_fingerprint_scope_is_read_off_the_build_script_and_a_divergence_is_caught() {
+        let text = std::fs::read_to_string(workspace_root().join(FINGERPRINT_SCOPE)).unwrap();
+        assert_eq!(boundary_crates(&text), GAME_CRATE_PIN);
+        let dropped = text.replace("\"gg-math\"]", "]");
+        assert_ne!(boundary_crates(&dropped), GAME_CRATE_PIN);
+        assert!(boundary_crates("no such constant").is_empty());
+    }
+
+    /// The table parses out of the real file, and a module missing from it is
+    /// named — the planted violation for §6 M81's finding, since the tree is
+    /// green by construction the moment the fix lands.
+    #[test]
+    fn the_hot_reload_table_parses_and_a_missing_module_is_caught() {
+        let text = std::fs::read_to_string(workspace_root().join(HOT_MODULE_TABLE)).unwrap();
+        let watched = watched_names(&text);
+        for module in [
+            "ugly", "post", "scene", "skybox", "ui", "ao", "debug", "probe",
+        ] {
+            assert!(watched.contains(&module.to_owned()), "{module} unwatched");
+        }
+        let cut = text.replace("(\"ao\", Module::Ao),", "");
+        assert!(!watched_names(&cut).contains(&"ao".to_owned()));
+        // And a table this cannot read at all reads as empty, which the gate
+        // refuses rather than passing on zero findings.
+        assert!(watched_names("nothing resembling a table").is_empty());
+    }
 
     /// The real shader, parsed — the same reason the widget scan pins its own
     /// protocol: a block file reformatted into something this cannot read would

@@ -317,6 +317,39 @@ impl Snapshot {
                 }
             }
         }
+        // The allocator's own rules first, because the two checks below read
+        // generations out of this image: "entity 3 is not live" about an image
+        // whose generation array is corrupt names the symptom, not the cause.
+        self.entities.check()?;
+        // One row per entity, across every archetype (§6 M81). The arithmetic
+        // above proves each column is the length its row count claims; this
+        // proves the row counts describe a *world*. `restore_archetype` writes
+        // one location per entity, so a repeated entity leaves the earlier row
+        // in place with nothing pointing at it: invisible to `canonical_hash`,
+        // which walks locations, and visible to every query, which walks
+        // columns — a world whose hash says it is fine and whose systems see a
+        // duplicate.
+        let mut seen: Vec<Entity> = self
+            .archetypes
+            .iter()
+            .flat_map(|a| a.entities.iter().copied())
+            .collect();
+        seen.sort_unstable_by_key(|e| e.to_bits());
+        if let Some(pair) = seen.windows(2).find(|w| w[0] == w[1]) {
+            return bad(format!(
+                "entity {:?} holds a row in more than one place — a restore would leave the \
+                 first one orphaned, hashed by nothing and iterated by everything",
+                pair[0]
+            ));
+        }
+        // And every one of them is live in the captured allocator, for the
+        // mirror-image reason: a row belonging to a despawned entity is a row
+        // `set_location` writes into a generation nothing will ever look up.
+        if let Some(dead) = seen.iter().find(|e| !self.entities.is_live(**e)) {
+            return bad(format!(
+                "entity {dead:?} holds a row and is not live in the captured allocator"
+            ));
+        }
         Ok(())
     }
 
@@ -519,6 +552,10 @@ pub enum ComponentOutcome {
         /// Present in both under different types — zeroed, and the case worth a
         /// warning, because here data was *lost* rather than never present.
         retyped: Vec<String>,
+        /// Present in the old build only — the new row has nowhere to put it, so
+        /// it is discarded. Loss like `retyped`, and reported for the same
+        /// reason: the field-granularity counterpart of [`Self::Dropped`].
+        removed: Vec<String>,
     },
     /// The new build no longer declares this component; its data was dropped.
     Dropped,
@@ -734,6 +771,11 @@ impl World {
 /// Name is the key, never offset or declaration order: reordering a struct's
 /// fields must move the data with them, which is only possible if identity
 /// survives the reorder.
+///
+/// Walks *both* sides. The new build's fields decide what the row receives; the
+/// old build's decide what the image loses, and a walk over the new alone —
+/// which is what this was until §6 M81 — cannot see a deleted field at all, so
+/// the strict half of `save`'s policy had nothing to refuse on.
 fn migrate_fields(old: &[FieldImage], new: &[FieldDesc]) -> (Plan, ComponentOutcome) {
     let mut moves = Vec::new();
     let mut copied = Vec::new();
@@ -752,12 +794,21 @@ fn migrate_fields(old: &[FieldImage], new: &[FieldDesc]) -> (Plan, ComponentOutc
             None => defaulted.push(field.name.to_string()),
         }
     }
+    // Name only, deliberately: a field the new build kept under another type is
+    // `retyped` and must not be counted twice. Removal is "no landing site of
+    // this name", which is the same key the copy is matched on.
+    let removed = old
+        .iter()
+        .filter(|o| !new.iter().any(|n| n.name == o.name))
+        .map(|o| o.name.clone())
+        .collect();
     (
         Plan::Fields(moves),
         ComponentOutcome::Migrated {
             copied,
             defaulted,
             retyped,
+            removed,
         },
     )
 }
@@ -800,5 +851,66 @@ mod tests {
             before,
             "a refusal must leave the world exactly as it found it"
         );
+    }
+
+    /// The arithmetic adds up and the world does not (§6 M81): every column is
+    /// exactly its row count, and one entity holds two rows. `restore_archetype`
+    /// writes one location per entity, so the first row is orphaned —
+    /// `canonical_hash` walks locations and calls the world clean while every
+    /// query walks columns and sees the duplicate.
+    #[test]
+    fn an_entity_holding_two_rows_is_refused_rather_than_orphaning_one() {
+        let mut world = World::new();
+        let victim = world.spawn();
+        let mut snapshot = world.snapshot();
+        let id = ComponentId::of("test.cube");
+        snapshot.components.push(ComponentImage {
+            id,
+            schema: SchemaHash::from_raw(1),
+            declared_id: "test.cube".to_owned(),
+            size: 8,
+            fields: Vec::new(),
+        });
+        for _ in 0..2 {
+            snapshot.archetypes.push(ArchetypeImage {
+                ids: vec![id],
+                strides: vec![8],
+                entities: vec![victim],
+                columns: vec![vec![0u8; 8]],
+            });
+        }
+
+        let before = world.canonical_hash();
+        let err = world.restore(&snapshot).unwrap_err();
+        assert!(err.to_string().contains("more than one place"), "{err}");
+        assert_eq!(world.canonical_hash(), before);
+    }
+
+    /// The mirror image: a row belonging to an entity the captured allocator
+    /// says is dead. `set_location` writes into a generation nothing will ever
+    /// look up, so the row is unreachable and permanent.
+    #[test]
+    fn a_row_belonging_to_a_dead_entity_is_refused() {
+        let mut world = World::new();
+        let ghost = world.spawn();
+        world.despawn(ghost);
+        let mut snapshot = world.snapshot();
+        let id = ComponentId::of("test.cube");
+        snapshot.components.push(ComponentImage {
+            id,
+            schema: SchemaHash::from_raw(1),
+            declared_id: "test.cube".to_owned(),
+            size: 8,
+            fields: Vec::new(),
+        });
+        snapshot.archetypes.push(ArchetypeImage {
+            ids: vec![id],
+            strides: vec![8],
+            entities: vec![ghost],
+            columns: vec![vec![0u8; 8]],
+        });
+
+        let err = world.restore(&snapshot).unwrap_err();
+        assert!(err.to_string().contains("not live"), "{err}");
     }
 }

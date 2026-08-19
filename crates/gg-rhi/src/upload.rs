@@ -118,7 +118,7 @@ impl Uploader {
             Ok(p) => p,
             Err(e) => {
                 destroy_ring(device, ring);
-                return Err(RhiError::Vk(e));
+                return Err(RhiError::vk(e));
             }
         };
         device.set_name(pool, "gg.upload.pool");
@@ -133,7 +133,7 @@ impl Uploader {
                 // SAFETY: the pool was created above and owns no buffers yet.
                 unsafe { device.raw().destroy_command_pool(pool, None) };
                 destroy_ring(device, ring);
-                return Err(RhiError::Vk(e));
+                return Err(RhiError::vk(e));
             }
         };
         let Ok(cmds) = <[vk::CommandBuffer; BATCH_SLOTS]>::try_from(allocated.as_slice()) else {
@@ -363,7 +363,7 @@ impl Uploader {
             return Ok(self.timeline_value);
         }
         // SAFETY: cmd has been recording since `begin`.
-        unsafe { device.raw().end_command_buffer(self.cmd()) }.map_err(RhiError::Vk)?;
+        unsafe { device.raw().end_command_buffer(self.cmd()) }.map_err(RhiError::vk)?;
         self.recording = false;
 
         let signal_value = self.timeline_value + 1;
@@ -381,7 +381,7 @@ impl Uploader {
                 .raw()
                 .queue_submit2(device.transfer.raw, &[submit], vk::Fence::null())
         }
-        .map_err(RhiError::Vk)?;
+        .map_err(RhiError::vk)?;
 
         self.timeline_value = signal_value;
         self.in_flight.push_back(Batch {
@@ -508,13 +508,13 @@ impl Uploader {
             device
                 .raw()
                 .reset_command_buffer(self.cmd(), vk::CommandBufferResetFlags::empty())
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
             let begin = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             device
                 .raw()
                 .begin_command_buffer(self.cmd(), &begin)
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
         }
         self.recording = true;
         Ok(())

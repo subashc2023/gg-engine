@@ -491,6 +491,18 @@ impl Assets {
     }
 
     fn deliver(&mut self, done: Finished) {
+        // Nothing lands in a slot that is gone (§6 M81). `evict_unreferenced`
+        // can retire an id while its load is still in flight, and it walks
+        // `slots` — so a payload inserted here afterwards is unreachable by
+        // every reader and invisible to every later eviction, while
+        // `resident_bytes` counts it for the rest of the process.
+        if !self.slots.contains_key(&done.id) {
+            tracing::debug!(
+                id = %done.id,
+                "asset load completed after its slot was evicted — dropped"
+            );
+            return;
+        }
         let state = match done.result {
             Ok(data) => {
                 self.textures.insert(done.id, data);

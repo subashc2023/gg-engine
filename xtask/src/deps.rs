@@ -35,6 +35,8 @@
 //! Usage:
 //!   cargo xtask deps [--bless]
 
+use anyhow::Context as _;
+
 use crate::util::{cargo, run as exec, workspace_root};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -555,13 +557,25 @@ pub fn check_folder(folder: &Path) -> anyhow::Result<()> {
         })
         .unwrap_or_default();
 
+    let mut read = 0usize;
     for entry in std::fs::read_dir(folder)?.filter_map(Result::ok) {
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !matches!(ext, "exe" | "dll" | "so") && path.extension().is_some() {
+        if !path.is_file() || (!matches!(ext, "exe" | "dll" | "so") && path.extension().is_some()) {
             continue;
         }
-        let Ok(needs) = surface(&path) else { continue };
+        // Propagated, never skipped (§6 M81). This gate's whole subject is what a
+        // stranger's loader will demand, and the artifact it cannot parse is the
+        // one most likely to be malformed — swallowing the error passed the
+        // folder by *reading nothing in it*.
+        let needs = surface(&path).with_context(|| {
+            format!(
+                "cannot read the dependency surface of {} — the one artifact this gate could not \
+                 read is not the one to wave through (§6 M53)",
+                path.display()
+            )
+        })?;
+        read += 1;
         for need in needs {
             let lower = need.lib.to_lowercase();
             anyhow::ensure!(
@@ -574,7 +588,19 @@ pub fn check_folder(folder: &Path) -> anyhow::Result<()> {
             );
         }
     }
-    println!("xtask ship: every library the folder needs is the OS's or its own (§6 M53)");
+    // The vacuity guard every "find and check" gate here carries: a folder whose
+    // executable was renamed past the extension filter would satisfy the loop
+    // above by holding nothing to check.
+    anyhow::ensure!(
+        read >= 2,
+        "xtask ship: only {read} artifact(s) in {} had a dependency surface — a shipped folder \
+         holds at least the shell and the game dylib",
+        folder.display()
+    );
+    println!(
+        "xtask ship: every library the folder's {read} artifacts need is the OS's or its own \
+         (§6 M53)"
+    );
     Ok(())
 }
 
@@ -606,6 +632,37 @@ mod tests {
                 "no libc among {names:?}"
             );
         }
+    }
+
+    /// The planted violation for the skip this replaced (§6 M81): a folder whose
+    /// binary is unreadable must fail, and a `let Ok(..) else { continue }` there
+    /// passed it while reading nothing at all.
+    #[test]
+    fn a_folder_holding_an_unreadable_binary_is_refused_rather_than_skipped() {
+        let dir = std::env::temp_dir().join("gg-deps-unreadable");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Real enough to be staged, malformed enough that no parser reads it:
+        // the PE magic and then nothing a header could live in.
+        std::fs::write(dir.join("game.dll"), b"MZ\0\0truncated").unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), dir.join("game.exe")).unwrap();
+
+        let refusal = check_folder(&dir).expect_err("an unreadable artifact is not a pass");
+        let message = format!("{refusal:#}");
+        assert!(message.contains("game.dll"), "names the file: {message}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// And the vacuity guard on the same loop: a folder with nothing to read is
+    /// not a folder that passed.
+    #[test]
+    fn a_folder_with_no_artifacts_at_all_is_refused() {
+        let dir = std::env::temp_dir().join("gg-deps-empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("readme.txt"), b"controls\n").unwrap();
+        assert!(check_folder(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1466,34 +1466,108 @@ mod tests {
         }
     }
 
+    /// `include/pbr.slang`, read at compile time so the shader's own numbers are
+    /// what the Rust records are graded against.
+    const PBR: &str = include_str!("../shaders/include/pbr.slang");
+
+    /// One `static const uint NAME = <literal>;` out of [`PBR`].
+    ///
+    /// Literals only — the derived ones (`CLUSTER_BASE`, `INDEX_BASE`,
+    /// `PROBE_VIEW_BASE`) are recomputed below from what they are derived from,
+    /// which is what checks the derivation as well as the inputs.
+    fn slang_const(name: &str) -> usize {
+        let needle = format!("static const uint {name} = ");
+        let value = PBR
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(&needle))
+            .unwrap_or_else(|| panic!("`{name}` is not a literal `static const uint` in pbr.slang"))
+            .trim_end_matches(';');
+        value
+            .parse()
+            .unwrap_or_else(|_| panic!("`{name} = {value}` is not a plain literal"))
+    }
+
+    /// The one cross-language contract with no compiler behind it (§6 M81).
+    ///
+    /// HLSL has no `sizeof`, so every stride the shader indexes by is a number
+    /// typed twice — once in `pbr.slang` and once here. This asserted the Rust
+    /// half against *its own* copy of the literals, which is a check that both
+    /// halves are what somebody wrote down and not that they agree: an edit to
+    /// the shader alone left every assertion green and every read off by a field.
+    /// The literals now come out of the shader.
     #[test]
     fn the_gpu_records_are_what_the_shader_strides_by() {
-        // `include/pbr.slang` hardcodes FRAME_STRIDE and LIGHT_STRIDE; this is
-        // the other half of that agreement, the way the vertex assertions are.
-        assert_eq!(core::mem::size_of::<GpuFrame>(), 4440);
-        assert_eq!(core::mem::size_of::<GpuCascade>(), 80);
-        assert_eq!(core::mem::size_of::<GpuLight>(), 48);
+        assert_eq!(
+            core::mem::size_of::<GpuFrame>(),
+            slang_const("FRAME_STRIDE")
+        );
+        assert_eq!(
+            core::mem::size_of::<GpuCascade>(),
+            slang_const("CASCADE_STRIDE")
+        );
+        assert_eq!(
+            core::mem::size_of::<GpuLight>(),
+            slang_const("LIGHT_STRIDE")
+        );
         assert_eq!(core::mem::offset_of!(GpuLight, direction), 16);
         assert_eq!(core::mem::offset_of!(GpuLight, color), 32);
+        assert_eq!(
+            core::mem::offset_of!(GpuFrame, cascades),
+            slang_const("CASCADE_BASE")
+        );
         // And where the froxel arrays begin (§6 M30) — `pbr.slang` derives both
-        // from the three constants above, so these are what the derivation is
-        // checked against.
-        assert_eq!(CLUSTER_BASE, 16920);
-        assert_eq!(INDEX_BASE, 41496);
+        // from the three constants above, so recomputing the derivation here is
+        // what checks the arithmetic as well as its inputs.
+        let cluster_base = (slang_const("FRAME_STRIDE")
+            + slang_const("MAX_LIGHTS") * slang_const("LIGHT_STRIDE"))
+            as u64;
+        assert_eq!(CLUSTER_BASE, cluster_base);
+        assert_eq!(
+            INDEX_BASE,
+            cluster_base
+                + (slang_const("CLUSTER_X")
+                    * slang_const("CLUSTER_Y")
+                    * slang_const("CLUSTER_Z")
+                    * 8) as u64
+        );
         // The lamps (§6 M31): a face is a bare 4x4, so the stride is six of them
         // and `LAMP_BASE` is where the shader starts counting.
-        assert_eq!(core::mem::size_of::<GpuLamp>(), 384);
-        assert_eq!(core::mem::offset_of!(GpuFrame, lamps), 1368);
+        assert_eq!(core::mem::size_of::<GpuLamp>(), slang_const("LAMP_STRIDE"));
+        assert_eq!(
+            core::mem::offset_of!(GpuFrame, lamps),
+            slang_const("LAMP_BASE")
+        );
         // ENV_STRIDE, and the offsets `load_environment` reads past the
         // coefficients (§6 M28).
-        assert_eq!(core::mem::size_of::<GpuEnvironment>(), 192);
+        assert_eq!(
+            core::mem::size_of::<GpuEnvironment>(),
+            slang_const("ENV_STRIDE")
+        );
         assert_eq!(core::mem::offset_of!(GpuEnvironment, offset), 144);
         assert_eq!(core::mem::offset_of!(GpuEnvironment, radiance_texture), 176);
         // §6 M36's eleven words, and where they pushed the arrays to.
         assert_eq!(core::mem::offset_of!(GpuFrame, gi_sh_texture), 220);
         assert_eq!(core::mem::offset_of!(GpuFrame, probe_views), 272);
-        assert_eq!(core::mem::offset_of!(GpuFrame, environments), 280);
-        assert_eq!(core::mem::size_of::<probe::GpuProbeView>(), 400);
+        assert_eq!(
+            core::mem::offset_of!(GpuFrame, environments),
+            slang_const("ENV_BASE")
+        );
+        assert_eq!(
+            core::mem::size_of::<probe::GpuProbeView>(),
+            slang_const("PROBE_SLOT_STRIDE")
+        );
+        // The counts the shader's loops are unrolled over, which is what makes
+        // a mismatch a read past the block rather than a wrong number.
+        assert_eq!(MAX_CASCADES, slang_const("MAX_CASCADES"));
+        assert_eq!(
+            gg_extract::MAX_DIRECTIONAL + gg_extract::MAX_POINT,
+            slang_const("MAX_LIGHTS")
+        );
+        assert_eq!(gg_extract::MAX_SKY, slang_const("MAX_SKY"));
+        assert_eq!(crate::lamp::MAX_LAMPS, slang_const("MAX_LAMPS"));
+        // The parser itself, which is what stops this from silently grading
+        // nothing: a shader reformatted past it must fail here, not pass.
+        assert!(slang_const("FRAME_STRIDE") > 0);
     }
 
     #[test]

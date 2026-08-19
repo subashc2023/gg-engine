@@ -2117,6 +2117,7 @@ mod tests {
                 kind: "migrated",
                 defaulted: vec!["wobble".to_owned()],
                 retyped: Vec::new(),
+                removed: Vec::new(),
             }],
             load_ms: Some(7),
             save_to_swap_ms: Some(180),

@@ -899,6 +899,9 @@ pub gg_ecs::world::save::SaveError::Format
 pub gg_ecs::world::save::SaveError::Format::found: u32
 pub gg_ecs::world::save::SaveError::Magic
 pub gg_ecs::world::save::SaveError::Magic::found: [u8; 4]
+pub gg_ecs::world::save::SaveError::Removed
+pub gg_ecs::world::save::SaveError::Removed::declared: alloc::string::String
+pub gg_ecs::world::save::SaveError::Removed::field: alloc::string::String
 pub gg_ecs::world::save::SaveError::Retyped
 pub gg_ecs::world::save::SaveError::Retyped::declared: alloc::string::String
 pub gg_ecs::world::save::SaveError::Retyped::field: alloc::string::String
@@ -920,6 +923,7 @@ pub gg_ecs::world::snapshot::ComponentOutcome::Dropped
 pub gg_ecs::world::snapshot::ComponentOutcome::Migrated
 pub gg_ecs::world::snapshot::ComponentOutcome::Migrated::copied: alloc::vec::Vec<alloc::string::String>
 pub gg_ecs::world::snapshot::ComponentOutcome::Migrated::defaulted: alloc::vec::Vec<alloc::string::String>
+pub gg_ecs::world::snapshot::ComponentOutcome::Migrated::removed: alloc::vec::Vec<alloc::string::String>
 pub gg_ecs::world::snapshot::ComponentOutcome::Migrated::retyped: alloc::vec::Vec<alloc::string::String>
 pub gg_ecs::world::snapshot::ComponentOutcome::Reused
 pub enum gg_ecs::world::snapshot::SnapshotError
@@ -1010,6 +1014,7 @@ pub gg_ecs::ComponentOutcome::Dropped
 pub gg_ecs::ComponentOutcome::Migrated
 pub gg_ecs::ComponentOutcome::Migrated::copied: alloc::vec::Vec<alloc::string::String>
 pub gg_ecs::ComponentOutcome::Migrated::defaulted: alloc::vec::Vec<alloc::string::String>
+pub gg_ecs::ComponentOutcome::Migrated::removed: alloc::vec::Vec<alloc::string::String>
 pub gg_ecs::ComponentOutcome::Migrated::retyped: alloc::vec::Vec<alloc::string::String>
 pub gg_ecs::ComponentOutcome::Reused
 pub enum gg_ecs::NanSite
@@ -1045,6 +1050,9 @@ pub gg_ecs::SaveError::Format
 pub gg_ecs::SaveError::Format::found: u32
 pub gg_ecs::SaveError::Magic
 pub gg_ecs::SaveError::Magic::found: [u8; 4]
+pub gg_ecs::SaveError::Removed
+pub gg_ecs::SaveError::Removed::declared: alloc::string::String
+pub gg_ecs::SaveError::Removed::field: alloc::string::String
 pub gg_ecs::SaveError::Retyped
 pub gg_ecs::SaveError::Retyped::declared: alloc::string::String
 pub gg_ecs::SaveError::Retyped::field: alloc::string::String

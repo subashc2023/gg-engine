@@ -43,6 +43,17 @@ struct ProgressRetyped {
     _pad: u32,
 }
 
+/// `score` deleted outright. Every remaining field still matches by name, so the
+/// row lands and the migration reads as a success — which is what made this the
+/// silent case until §6 M81.
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
+#[component(id = "demo.progress")]
+#[repr(C)]
+struct ProgressShrunk {
+    level: u32,
+    _pad: u32,
+}
+
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
 #[component(id = "demo.inventory")]
 #[repr(C)]
@@ -177,6 +188,35 @@ fn a_field_that_kept_its_name_and_changed_its_type_is_refused_by_field() {
         ),
         "{refusal}"
     );
+}
+
+#[test]
+fn a_field_this_build_no_longer_declares_is_refused_by_field() {
+    // The field-granularity twin of the dropped-component case, and the one with
+    // no other witness: `level` and `_pad` both match by name, so the row lands,
+    // the load returns `Ok`, and the player's score is gone. Refused by name
+    // instead (§6 M81).
+    let save = Save::decode(&saved()).unwrap();
+    let mut world = World::new();
+    world.register::<ProgressShrunk>().unwrap();
+    world.register::<Inventory>().unwrap();
+
+    let refusal = world.load(&save).unwrap_err();
+    assert!(
+        matches!(
+            &refusal,
+            SaveError::Removed { declared, field } if declared == "demo.progress" && field == "score"
+        ),
+        "{refusal}"
+    );
+    // And the same image through `restore` still migrates, which is what makes
+    // this a policy of the save rather than a limit of the migration.
+    assert!(world.restore(save.snapshot()).is_ok());
+    let q = Query::<&ProgressShrunk>::new().unwrap();
+    let mut levels = Vec::new();
+    world.each(&q, |_, p| levels.push(p.level));
+    levels.sort_unstable();
+    assert_eq!(levels, vec![0, 1, 2, 3, 4, 6, 7]);
 }
 
 #[test]

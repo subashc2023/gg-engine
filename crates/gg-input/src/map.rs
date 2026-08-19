@@ -94,7 +94,12 @@ struct ButtonBinding {
 struct AxisBinding {
     source: AxisSource,
     axis: AxisId,
-    /// `+1` or `-1`; ignored for [`AxisSource::Motion`], which carries its sign.
+    /// `+1` or `-1`, applied to every source alike — motion included, which is
+    /// how a map spells an inverted look without the game knowing (§6 M81
+    /// corrected this comment: it said motion's sign was ignored, and
+    /// [`ActionMap::motion_axes`] has always multiplied by it, so the only
+    /// written record of the convention described a behaviour the code did not
+    /// have).
     sign: i32,
 }
 

@@ -17,18 +17,41 @@ use crate::scene::ScenePass;
 use crate::ui::UiPass;
 use crate::{BoxPass, GpuHost, PipelineDesc, PipelineHandle, shader};
 
-/// The five modules the passes draw with. Every watcher fires on any `.slang`
-/// event under the directory (`include/pbr.slang` is included by two of them),
-/// so one edit recompiles all five — deliberate: per-file dependency tracking
-/// would be a build system, and five in-process compiles fit the half-second
+/// Every module the passes draw with — **all** of them, asserted against the
+/// directory by [`Shaders::new`]. Every watcher fires on any `.slang` event
+/// under the directory (`include/pbr.slang` is included by several of them), so
+/// one edit recompiles all of them — deliberate: per-file dependency tracking
+/// would be a build system, and the in-process compiles fit the half-second
 /// budget with room to spare.
-enum Module {
+///
+/// The list was five long until §6 M81 and the directory held eight: editing
+/// `ao.slang`, `debug.slang` or `probe.slang` recompiled the other five, swapped
+/// nothing, and logged a successful hot reload — the worst shape a missing
+/// feature can take, because it looks like a working one that disagrees with the
+/// picture.
+pub(crate) enum Module {
     Ugly,
     Post,
     Scene,
     Skybox,
     Ui,
+    Ao,
+    Debug,
+    Probe,
 }
+
+/// Every watched module, by the file name it is compiled from. `pub(crate)` so
+/// the gate in `lib.rs` can compare it against the directory.
+pub(crate) const MODULES: [(&str, Module); 8] = [
+    ("ugly", Module::Ugly),
+    ("post", Module::Post),
+    ("scene", Module::Scene),
+    ("skybox", Module::Skybox),
+    ("ui", Module::Ui),
+    ("ao", Module::Ao),
+    ("debug", Module::Debug),
+    ("probe", Module::Probe),
+];
 
 /// The watchers and the save-to-screen clock, held by both renderers.
 pub(crate) struct Shaders {
@@ -48,18 +71,32 @@ impl Shaders {
         let dir = std::env::var("GG_SHADER_SRC")
             .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/shaders").to_string());
         let mut watchers = Vec::new();
-        for (name, module) in [
-            ("ugly", Module::Ugly),
-            ("post", Module::Post),
-            ("scene", Module::Scene),
-            ("skybox", Module::Skybox),
-            ("ui", Module::Ui),
-        ] {
+        for (name, module) in MODULES {
             match ShaderWatcher::new(&dir, name) {
                 Ok(watcher) => watchers.push((module, watcher)),
                 Err(e) => {
                     warn!("shader hot reload disabled: {e}");
                     return None;
+                }
+            }
+        }
+        // The claim the list itself cannot make: a `.slang` file beside the
+        // watched ones is a module nobody reloads, and the only symptom is an
+        // edit that appears to work. A warning rather than a refusal — this is
+        // dev convenience, and `hot_reload_watches_every_shader_module` in
+        // `lib.rs` is where it is a gate.
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if path.extension().is_some_and(|e| e == "slang")
+                    && !MODULES.iter().any(|(name, _)| *name == stem)
+                {
+                    warn!(
+                        module = stem,
+                        "shader hot reload: no watcher — edits to it \
+                          recompile the others and swap nothing"
+                    );
                 }
             }
         }
@@ -79,6 +116,7 @@ impl Shaders {
         pass: &mut BoxPass,
         scene: &mut ScenePass,
         ui: &mut UiPass,
+        integrate: &mut crate::probe::Integrate,
     ) {
         for (module, watcher) in &mut self.watchers {
             let Some(result) = watcher.poll() else {
@@ -97,6 +135,9 @@ impl Shaders {
                 Module::Scene => scene.swap_shaders(rhi, &recompiled.module),
                 Module::Skybox => pass.swap_skybox(rhi, &recompiled.module),
                 Module::Ui => ui.swap_shaders(rhi, &recompiled.module),
+                Module::Ao => pass.swap_ao(rhi, &recompiled.module),
+                Module::Debug => pass.swap_debug(rhi, &recompiled.module),
+                Module::Probe => integrate.swap_shaders(rhi, &recompiled.module),
             };
             match swapped {
                 Ok(()) => {
@@ -290,6 +331,68 @@ impl BoxPass {
                     },
                 ),
             ],
+        )
+    }
+
+    /// Rebuild the occlusion pass and its denoiser from a hot recompile — one
+    /// module, two fragment stages over the same triangle (§6 M81).
+    pub(crate) fn swap_ao(
+        &mut self,
+        rhi: &mut impl GpuHost,
+        module: &CompiledModule,
+    ) -> Result<(), String> {
+        let push = core::mem::size_of::<crate::ao_shader::AoPush>();
+        let (vs_main, fs_main) = pair(module, "vs_main", "fs_main", push)?;
+        let (_, fs_blur) = pair(module, "vs_main", "fs_blur", push)?;
+        swap_all(
+            rhi,
+            &mut [
+                (
+                    &mut self.ao,
+                    PipelineDesc {
+                        vs_spirv: &vs_main.spirv,
+                        vs_entry: &vs_main.spirv_entry,
+                        fs_spirv: &fs_main.spirv,
+                        fs_entry: &fs_main.spirv_entry,
+                        ..crate::ao_desc()
+                    },
+                ),
+                (
+                    &mut self.ao_blur,
+                    PipelineDesc {
+                        vs_spirv: &vs_main.spirv,
+                        vs_entry: &vs_main.spirv_entry,
+                        fs_spirv: &fs_blur.spirv,
+                        fs_entry: &fs_blur.spirv_entry,
+                        ..crate::ao_blur_desc()
+                    },
+                ),
+            ],
+        )
+    }
+
+    /// Rebuild the debug view (§6 M59) from a hot recompile — the one pass whose
+    /// whole job is answering a question about a picture, so an edit to it that
+    /// swapped nothing was the worst of the three (§6 M81).
+    pub(crate) fn swap_debug(
+        &mut self,
+        rhi: &mut impl GpuHost,
+        module: &CompiledModule,
+    ) -> Result<(), String> {
+        let push = core::mem::size_of::<crate::debug_shader::DebugPush>();
+        let (vs_main, fs_main) = pair(module, "vs_main", "fs_main", push)?;
+        swap_all(
+            rhi,
+            &mut [(
+                &mut self.debug,
+                PipelineDesc {
+                    vs_spirv: &vs_main.spirv,
+                    vs_entry: &vs_main.spirv_entry,
+                    fs_spirv: &fs_main.spirv,
+                    fs_entry: &fs_main.spirv_entry,
+                    ..crate::debug_desc()
+                },
+            )],
         )
     }
 }

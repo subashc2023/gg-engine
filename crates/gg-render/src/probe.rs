@@ -1295,6 +1295,56 @@ impl Integrate {
         rhi.destroy_pipeline(self.sh)?;
         rhi.destroy_pipeline(self.moments)
     }
+
+    /// Rebuild both records from a hot recompile of `probe.slang` (§6 M81).
+    ///
+    /// The field is the one subsystem here whose look is *integrated* rather
+    /// than shaded, so an edit whose effect never reached the screen was the
+    /// hardest of the three to notice: the picture keeps changing as the grid
+    /// re-gathers, just never for the reason the operator thinks.
+    #[cfg(feature = "hot-reload")]
+    pub(crate) fn swap_shaders(
+        &mut self,
+        rhi: &mut impl GpuHost,
+        module: &gg_shaders::CompiledModule,
+    ) -> Result<(), String> {
+        let push = core::mem::size_of::<probe_shader::ProbePush>();
+        let (vs_main, fs_sh) = crate::hot::pair(module, "vs_main", "fs_sh", push)?;
+        let (_, fs_moments) = crate::hot::pair(module, "vs_main", "fs_moments", push)?;
+        crate::hot::swap_all(
+            rhi,
+            &mut [
+                (
+                    &mut self.sh,
+                    PipelineDesc {
+                        vs_spirv: &vs_main.spirv,
+                        vs_entry: &vs_main.spirv_entry,
+                        fs_spirv: &fs_sh.spirv,
+                        fs_entry: &fs_sh.spirv_entry,
+                        ..record_desc(
+                            "probe.sh",
+                            probe_shader::FS_SH_SPIRV,
+                            probe_shader::FS_SH_ENTRY,
+                        )
+                    },
+                ),
+                (
+                    &mut self.moments,
+                    PipelineDesc {
+                        vs_spirv: &vs_main.spirv,
+                        vs_entry: &vs_main.spirv_entry,
+                        fs_spirv: &fs_moments.spirv,
+                        fs_entry: &fs_moments.spirv_entry,
+                        ..record_desc(
+                            "probe.moments",
+                            probe_shader::FS_MOMENTS_SPIRV,
+                            probe_shader::FS_MOMENTS_ENTRY,
+                        )
+                    },
+                ),
+            ],
+        )
+    }
 }
 
 /// One record's pipeline: the fullscreen triangle, no depth, into an `Rgba16F`

@@ -333,7 +333,7 @@ impl Sampler {
             .address_mode_w(mode)
             .max_lod(vk::LOD_CLAMP_NONE);
         // SAFETY: device is live; info is fully initialized above.
-        unsafe { device.raw().create_sampler(&info, None) }.map_err(RhiError::Vk)
+        unsafe { device.raw().create_sampler(&info, None) }.map_err(RhiError::vk)
     }
 }
 
@@ -613,7 +613,7 @@ impl Resources {
             .usage(usage)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         // SAFETY: device is live; info is fully initialized above.
-        let raw = unsafe { device.raw().create_image(&info, None) }.map_err(RhiError::Vk)?;
+        let raw = unsafe { device.raw().create_image(&info, None) }.map_err(RhiError::vk)?;
         device.set_name(raw, desc.name);
 
         // SAFETY: image is live.
@@ -641,7 +641,7 @@ impl Resources {
             let _ = device.free(alloc);
             // SAFETY: as above — the image is unbound and unused.
             unsafe { device.raw().destroy_image(raw, None) };
-            return Err(RhiError::Vk(e));
+            return Err(RhiError::vk(e));
         }
 
         let view_info = vk::ImageViewCreateInfo::default()
@@ -661,7 +661,7 @@ impl Resources {
                 let _ = device.free(alloc);
                 // SAFETY: as above.
                 unsafe { device.raw().destroy_image(raw, None) };
-                return Err(RhiError::Vk(e));
+                return Err(RhiError::vk(e));
             }
         };
         device.set_name(view, &format!("{}.view", desc.name));
@@ -848,7 +848,7 @@ pub(crate) fn create_raw_buffer_in(
         .usage(usage)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
     // SAFETY: device is live; info is fully initialized above.
-    let raw = unsafe { device.raw().create_buffer(&info, None) }.map_err(RhiError::Vk)?;
+    let raw = unsafe { device.raw().create_buffer(&info, None) }.map_err(RhiError::vk)?;
     device.set_name(raw, name);
     // SAFETY: buffer is live.
     let requirements = unsafe { device.raw().get_buffer_memory_requirements(raw) };
@@ -875,7 +875,7 @@ pub(crate) fn create_raw_buffer_in(
         let _ = device.free(alloc);
         // SAFETY: as above — the buffer is unbound and unused.
         unsafe { device.raw().destroy_buffer(raw, None) };
-        return Err(RhiError::Vk(e));
+        return Err(RhiError::vk(e));
     }
     Ok(Buffer {
         raw,

@@ -167,8 +167,20 @@ pub enum RhiError {
     #[error("{0}")]
     Loader(String),
     /// A Vulkan call failed.
-    #[error("vulkan: {0:?}")]
-    Vk(vk::Result),
+    ///
+    /// The code and its spec name, never `ash`'s type (§6 M81). §3 bans `ash::`
+    /// and `vk::` tokens everywhere but this crate and the public-api baseline
+    /// held `ash::vk::enums::Result` anyway — the one place the containment seam
+    /// leaked, and a caller matching on it would be reading this crate's private
+    /// dependency out of its own surface. The `i32` is the specification's own
+    /// numbering, so a caller that genuinely needs to branch still can.
+    #[error("vulkan: {name} ({code})")]
+    Vk {
+        /// `VkResult` as the specification numbers it.
+        code: i32,
+        /// The code's spec name, e.g. `ERROR_DEVICE_LOST`.
+        name: String,
+    },
     /// The device was lost. Separate from [`RhiError::Vk`] because the code
     /// itself says nothing: what is worth reporting is the pass the breadcrumbs
     /// caught in flight and whatever `VK_EXT_device_fault` saw (§4.8), and this
@@ -193,6 +205,18 @@ pub enum RhiError {
     /// GPU allocator failure.
     #[error("allocator: {0}")]
     Allocator(String),
+}
+
+impl RhiError {
+    /// Wrap a Vulkan result. The one constructor for [`RhiError::Vk`], so the
+    /// `ash` type stops at this crate's edge — `map_err(RhiError::vk)` is the
+    /// drop-in every call site uses.
+    pub(crate) fn vk(code: vk::Result) -> RhiError {
+        RhiError::Vk {
+            code: code.as_raw(),
+            name: format!("{code:?}"),
+        }
+    }
 }
 
 /// What a [`Rhi::execute`] call did.
@@ -897,12 +921,12 @@ impl Rhi {
         unsafe {
             device
                 .reset_command_pool(pool, vk::CommandPoolResetFlags::empty())
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
             let begin = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             device
                 .begin_command_buffer(cmd, &begin)
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
 
             // SAFETY: cmd records on the graphics family and this submit waits
             // on the transfer timeline value the releases signaled.
@@ -916,7 +940,7 @@ impl Rhi {
                 backbuffer,
                 instruments,
             );
-            device.end_command_buffer(cmd).map_err(RhiError::Vk)?;
+            device.end_command_buffer(cmd).map_err(RhiError::vk)?;
         }
         Ok(())
     }

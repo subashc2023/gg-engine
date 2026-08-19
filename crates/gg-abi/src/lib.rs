@@ -96,7 +96,9 @@ include!(concat!(env!("OUT_DIR"), "/fingerprint.rs"));
 pub struct AbiInfo {
     /// The [`HOST_API_VERSION`] the dylib was compiled against.
     pub host_api_version: u32,
-    /// Content hash of the boundary crates (`gg-abi`, `gg-ecs`, `gg-math`) plus
+    /// Content hash of the boundary crates (`gg-abi`, `gg-ecs`,
+    /// `gg-ecs-derive`, `gg-math` — `build.rs`'s `BOUNDARY_CRATES`, which is
+    /// four and was written here as three until §6 M81) plus
     /// the toolchain version — defense-in-depth for semantic drift the version
     /// number cannot see, such as a changed component invariant or a resized
     /// math type behind an unchanged API. Deliberately scoped to those crates: a

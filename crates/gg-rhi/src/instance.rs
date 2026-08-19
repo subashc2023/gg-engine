@@ -177,7 +177,7 @@ impl Instance {
         // debug_utils one after it.
         let mut extensions = match presentation {
             Presentation::Window(display) => ash_window::enumerate_required_extensions(display)
-                .map_err(RhiError::Vk)?
+                .map_err(RhiError::vk)?
                 .to_vec(),
             Presentation::Headless => vec![
                 ash::khr::surface::NAME.as_ptr(),
@@ -233,7 +233,7 @@ impl Instance {
             // not the run CI promised, so fail loudly instead of degrading.
             // SAFETY: entry is live.
             let layers =
-                unsafe { entry.enumerate_instance_layer_properties() }.map_err(RhiError::Vk)?;
+                unsafe { entry.enumerate_instance_layer_properties() }.map_err(RhiError::vk)?;
             let have = layers.iter().any(|l| {
                 l.layer_name_as_c_str()
                     .is_ok_and(|n| n == c"VK_LAYER_KHRONOS_validation")
@@ -294,7 +294,7 @@ impl Instance {
                 "Vulkan is installed on this machine, but it could not be started.",
                 e_name(e),
             ),
-            other => RhiError::Vk(other),
+            other => RhiError::vk(other),
         })?;
 
         // No layer, no messenger: `VK_EXT_debug_utils` is only in `extensions`
@@ -318,7 +318,7 @@ impl Instance {
                 .pfn_user_callback(Some(debug_callback));
             // SAFETY: instance is live; callback is 'static.
             let messenger = unsafe { fns.create_debug_utils_messenger(&messenger_info, None) }
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
             Some((fns, messenger))
         };
 

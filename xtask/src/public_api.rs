@@ -71,6 +71,7 @@ fn render(krate: &str) -> anyhow::Result<String> {
 
 /// Compare each gated crate's rendered surface against its baseline.
 pub fn check() -> anyhow::Result<()> {
+    contained()?;
     for krate in GATED {
         let path = baseline_path(krate);
         let expected = std::fs::read_to_string(&path)
@@ -93,6 +94,48 @@ pub fn check() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Crate names a public surface may not mention (§3's containment seam, §6
+/// M81). One entry, and the whole point is that the first *second* entry should
+/// be argued for rather than added.
+///
+/// The §3 grep bans `ash::`/`vk::` tokens outside `gg-rhi`, which says nothing
+/// about `gg-rhi`'s own *surface* — and that is where the leak was:
+/// `RhiError::Vk(ash::vk::enums::Result)` put the backend's type in the API
+/// every consumer matches on, so containment held everywhere but the one place
+/// it was about. Read off the baselines rather than the source, because a
+/// baseline is what a caller can actually reach.
+const BANNED_IN_SURFACE: &[&str] = &["ash::"];
+
+/// No baseline names a contained dependency's type.
+///
+/// Cheap and toolchain-free: it reads the checked-in files, so it runs wherever
+/// `check` does and costs nothing when the nightly is the slow part.
+fn contained() -> anyhow::Result<()> {
+    for krate in GATED {
+        let path = baseline_path(krate);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("no public-api baseline at {}: {e}", path.display()))?;
+        for (lineno, line) in text.lines().enumerate() {
+            // Whole-segment, for the reason `ci::contains_path` documents:
+            // `gg_ecs::hash::ComponentId` ends in `ash::` and is not the crate.
+            if let Some(banned) = BANNED_IN_SURFACE
+                .iter()
+                .find(|b| crate::ci::contains_path(line, b))
+            {
+                anyhow::bail!(
+                    "{}:{}: `{banned}` in a public surface (§3) — the containment seam is about \
+                     what a caller can reach, and a baseline that names it is the seam leaking:\n  \
+                     {line}",
+                    path.display(),
+                    lineno + 1
+                );
+            }
+        }
+    }
+    println!("xtask public-api: no gated surface names a contained dependency (§3)");
+    Ok(())
+}
+
 /// Rewrite the baselines. Deliberate, like a golden `bless`.
 pub fn bless() -> anyhow::Result<()> {
     for krate in GATED {
@@ -101,7 +144,9 @@ pub fn bless() -> anyhow::Result<()> {
         std::fs::write(&path, &rendered)?;
         println!("xtask public-api: blessed {}", path.display());
     }
-    Ok(())
+    // After the write, not before: blessing is how a surface changes, and the
+    // containment rule is the one change a bless may not wave through.
+    contained()
 }
 
 pub fn run(args: &[&str]) -> anyhow::Result<()> {

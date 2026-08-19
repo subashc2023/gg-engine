@@ -13,11 +13,12 @@
 //! # A save may gain, never lose
 //!
 //! [`World::restore`] tolerates loss on purpose: a component the new build
-//! stopped declaring is `Dropped`, and a field that changed type is zeroed and
+//! stopped declaring is `Dropped`, a field that changed type is zeroed and
+//! reported, and a field the new build no longer declares is discarded and
 //! reported. That is right for a reload, where the developer just deleted the
 //! thing and is watching the log. It is wrong for a save, where the same event
-//! silently deletes someone's afternoon. [`World::load`] therefore refuses both,
-//! **by name**, before the world is touched — while migrating everything a
+//! silently deletes someone's afternoon. [`World::load`] therefore refuses all
+//! three, **by name**, before the world is touched — while migrating everything a
 //! reload would: fields matched by name, reordered fields moved with their data,
 //! new fields defaulted, new components simply absent from the image.
 //!
@@ -124,6 +125,20 @@ pub enum SaveError {
         /// The component's declared id.
         declared: String,
         /// The field within it.
+        field: String,
+    },
+    /// A field the save holds and this build no longer declares. The
+    /// field-granularity twin of [`SaveError::Dropped`] and refused on the same
+    /// grounds — the row lands, so nothing else here would ever notice.
+    #[error(
+        "save holds \"{declared}.{field}\", which this build no longer declares — the rest of \
+         that component would migrate cleanly and this field's data would be gone, which is a \
+         loss and not a migration"
+    )]
+    Removed {
+        /// The component's declared id.
+        declared: String,
+        /// The field within it that has nowhere to land.
         field: String,
     },
     /// The image inside the container was refused on its own terms.
@@ -294,10 +309,16 @@ impl World {
             match outcome {
                 ComponentOutcome::Dropped => return Err(SaveError::Dropped { declared }),
                 // `defaulted` is a field this build *added* — the gaining half of
-                // the policy, and the whole point of migrating forward.
-                ComponentOutcome::Migrated { retyped, .. } => {
+                // the policy, and the whole point of migrating forward. The other
+                // two are the losing half, and both are refused by name.
+                ComponentOutcome::Migrated {
+                    retyped, removed, ..
+                } => {
                     if let Some(field) = retyped.into_iter().next() {
                         return Err(SaveError::Retyped { declared, field });
+                    }
+                    if let Some(field) = removed.into_iter().next() {
+                        return Err(SaveError::Removed { declared, field });
                     }
                 }
                 ComponentOutcome::Reused => {}

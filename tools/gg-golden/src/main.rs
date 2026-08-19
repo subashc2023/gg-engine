@@ -76,13 +76,16 @@ struct Scene {
     render: fn() -> Render,
 }
 
-/// The roster. Twenty-eight scenes — seven demos (demo 10 at five, one per
-/// screen, since a menu is a picture nothing else can gate), the engine's own v1
-/// pass list, two replay-driven captures, the UI layer, and three the harness
-/// builds itself to put a lighting feature on its own against nothing else
-/// (§6 M26-M28) — each
-/// with its own policy, because "how strictly" is a property of what the frame
-/// contains and not of the harness (§4.10 per-test config).
+/// The roster — demos (demo 10 at five, one per screen, since a menu is a
+/// picture nothing else can gate), the engine's own v1 pass list, replay-driven
+/// captures, the UI layer, and the ones the harness builds itself to put a
+/// lighting feature on its own against nothing else (§6 M26-M28) — each with its
+/// own policy, because "how strictly" is a property of what the frame contains
+/// and not of the harness (§4.10 per-test config).
+///
+/// No count here: it said "twenty-eight" while the roster held thirty-two for
+/// several milestones, which is what a number in prose does (§6 M81). What the
+/// count is worth saying about is checked instead — `the_roster_is_a_set` below.
 const SCENES: &[Scene] = &[
     Scene {
         name: "triangle",
@@ -3639,79 +3642,84 @@ fn run(filter: Option<&str>) -> anyhow::Result<()> {
             continue;
         }
         ran += 1;
-        let Capture {
-            pixels: actual,
-            extent,
-            ..
-        } = (scene.render)()?;
-        let reference_path = root.join(format!("{}.png", scene.name));
-        if !reference_path.exists() {
-            failures.push(format!(
-                "{}: no reference for backend `{backend}` at {} — render verified clean; \
+        // Per scene, and never `?` out of the loop (§6 M81): a scene whose
+        // render or reference cannot be read is one scene's failure, and the `?`
+        // this replaced abandoned every scene after it — a broken precondition in
+        // scene 8 reported one error and left 9 through 32 unrun and unnamed.
+        let one = (|| -> anyhow::Result<()> {
+            let Capture {
+                pixels: actual,
+                extent,
+                ..
+            } = (scene.render)()?;
+            let reference_path = root.join(format!("{}.png", scene.name));
+            if !reference_path.exists() {
+                failures.push(format!(
+                    "{}: no reference for backend `{backend}` at {} — render verified clean; \
                  run `gg-golden bless {}` on this machine and review the image into the PR",
-                scene.name,
-                reference_path.display(),
-                scene.name
-            ));
-            continue;
-        }
-        let (reference, ref_extent) = png_io::read(&reference_path)?;
-        if ref_extent != extent {
-            failures.push(format!(
-                "{}: reference is {}x{}, render is {}x{}",
-                scene.name, ref_extent.0, ref_extent.1, extent.0, extent.1
-            ));
-            continue;
-        }
-        let comparison = compare::compare(&actual, &reference, extent, scene.policy)?;
-        let heatmap = compare::heatmap(&comparison, scene.policy.tolerance);
-        let panel = |status, headline: String| -> anyhow::Result<report::Entry> {
-            Ok(report::Entry {
-                scene: scene.name.to_string(),
-                status,
-                headline,
-                numbers: numbers(&comparison, scene.policy),
-                images: vec![
-                    ("reference", png_io::encode(&reference, extent)?),
-                    ("actual", png_io::encode(&actual, extent)?),
-                    ("heatmap", png_io::encode(&heatmap, extent)?),
-                ],
-            })
-        };
+                    scene.name,
+                    reference_path.display(),
+                    scene.name
+                ));
+                return Ok(());
+            }
+            let (reference, ref_extent) = png_io::read(&reference_path)?;
+            if ref_extent != extent {
+                failures.push(format!(
+                    "{}: reference is {}x{}, render is {}x{}",
+                    scene.name, ref_extent.0, ref_extent.1, extent.0, extent.1
+                ));
+                return Ok(());
+            }
+            let comparison = compare::compare(&actual, &reference, extent, scene.policy)?;
+            let heatmap = compare::heatmap(&comparison, scene.policy.tolerance);
+            let panel = |status, headline: String| -> anyhow::Result<report::Entry> {
+                Ok(report::Entry {
+                    scene: scene.name.to_string(),
+                    status,
+                    headline,
+                    numbers: numbers(&comparison, scene.policy),
+                    images: vec![
+                        ("reference", png_io::encode(&reference, extent)?),
+                        ("actual", png_io::encode(&actual, extent)?),
+                        ("heatmap", png_io::encode(&heatmap, extent)?),
+                    ],
+                })
+            };
 
-        match comparison.verdict(scene.policy) {
-            Verdict::Pass => tracing::info!(
-                scene = scene.name,
-                diff_pixels = comparison.diff_pixels,
-                max_delta = comparison.max_delta,
-                dssim = comparison.dssim_worst,
-                "golden pass"
-            ),
-            // Recorded, not swallowed (§4.10): the suite stays green and the
-            // drift arrives in the report with its numbers attached, so a
-            // reviewer decides whether to re-bless rather than never hearing.
-            Verdict::BenignDrift => {
-                entries.push(panel(
-                    "DRIFT",
-                    format!(
-                        "over the exact gate's pixel budget, but no channel moved more than {} \
+            match comparison.verdict(scene.policy) {
+                Verdict::Pass => tracing::info!(
+                    scene = scene.name,
+                    diff_pixels = comparison.diff_pixels,
+                    max_delta = comparison.max_delta,
+                    dssim = comparison.dssim_worst,
+                    "golden pass"
+                ),
+                // Recorded, not swallowed (§4.10): the suite stays green and the
+                // drift arrives in the report with its numbers attached, so a
+                // reviewer decides whether to re-bless rather than never hearing.
+                Verdict::BenignDrift => {
+                    entries.push(panel(
+                        "DRIFT",
+                        format!(
+                            "over the exact gate's pixel budget, but no channel moved more than {} \
                          and the worst window's DSSIM is {:.5} — precision drift, not a \
                          regression",
-                        comparison.max_delta, comparison.dssim_worst
-                    ),
-                )?);
-                drifted.push(scene.name);
-            }
-            Verdict::Fail => {
-                // On-disk artifacts as well as the report: the PNGs are what an
-                // image viewer, a diff tool or the next agent reaches for.
-                let out_dir = artifacts_root().join(scene.name);
-                let actual_path = out_dir.join("actual.png");
-                let heatmap_path = out_dir.join("diff-heatmap.png");
-                png_io::write(&actual_path, &actual, extent)?;
-                png_io::write(&heatmap_path, &heatmap, extent)?;
-                let structural = comparison.dssim_worst > scene.policy.max_dssim;
-                entries.push(panel(
+                            comparison.max_delta, comparison.dssim_worst
+                        ),
+                    )?);
+                    drifted.push(scene.name);
+                }
+                Verdict::Fail => {
+                    // On-disk artifacts as well as the report: the PNGs are what an
+                    // image viewer, a diff tool or the next agent reaches for.
+                    let out_dir = artifacts_root().join(scene.name);
+                    let actual_path = out_dir.join("actual.png");
+                    let heatmap_path = out_dir.join("diff-heatmap.png");
+                    png_io::write(&actual_path, &actual, extent)?;
+                    png_io::write(&heatmap_path, &heatmap, extent)?;
+                    let structural = comparison.dssim_worst > scene.policy.max_dssim;
+                    entries.push(panel(
                     "FAIL",
                     if structural {
                         format!(
@@ -3742,7 +3750,7 @@ fn run(filter: Option<&str>) -> anyhow::Result<()> {
                         )
                     },
                 )?);
-                failures.push(format!(
+                    failures.push(format!(
                     "{}: {} differing pixel(s), max channel delta {}, worst-window DSSIM {:.5}, \
                      mean signed error {:+.4}, worst region {:+.4} against {}/{}, {:.5} and \
                      ±{:.4} — see {} and {}",
@@ -3759,7 +3767,15 @@ fn run(filter: Option<&str>) -> anyhow::Result<()> {
                     actual_path.display(),
                     heatmap_path.display(),
                 ));
+                }
             }
+            Ok(())
+        })();
+        if let Err(err) = one {
+            failures.push(format!(
+                "{}: the scene could not be graded — {err:#}",
+                scene.name
+            ));
         }
     }
 
@@ -3974,4 +3990,36 @@ const BENCH_FRAMES: usize = 300;
 fn flag(args: &[String], name: &str) -> Option<usize> {
     let at = args.iter().position(|a| a == name)?;
     args.get(at + 1)?.parse().ok()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::SCENES;
+
+    /// The roster is a *set*, and every name in it is a filename (§6 M81).
+    ///
+    /// Two failures with no other witness: a duplicated name means two scenes
+    /// write and compare one reference, so one of them is graded against the
+    /// other's picture; and a name with a path separator or a `.` in it lands a
+    /// reference somewhere nothing looks for it. Neither shows up as a red
+    /// gate — the first shows up as a scene that never fails.
+    #[test]
+    fn the_roster_is_a_set_of_names_a_file_can_be_called() {
+        let mut names: Vec<&str> = SCENES.iter().map(|s| s.name).collect();
+        let total = names.len();
+        assert!(total > 0, "a suite with no scenes is not a suite");
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "two scenes share a name: {names:?}");
+        for name in names {
+            assert!(
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "`{name}` is not a file name a reference can be written under"
+            );
+        }
+    }
 }

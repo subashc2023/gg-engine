@@ -322,7 +322,7 @@ impl Swapchain {
         // SAFETY: surface is live; old_swapchain (possibly null) is retired,
         // never used again, and destroyed via the deletion queue below.
         let new_raw = unsafe { device.swapchain_fns().create_swapchain(&info, None) }
-            .map_err(RhiError::Vk)?;
+            .map_err(RhiError::vk)?;
 
         // Retire the outgoing swapchain at the caller's timeline value.
         if self.raw != vk::SwapchainKHR::null() {
@@ -344,7 +344,7 @@ impl Swapchain {
 
         // SAFETY: swapchain is live.
         self.images = unsafe { device.swapchain_fns().get_swapchain_images(new_raw) }
-            .map_err(RhiError::Vk)?;
+            .map_err(RhiError::vk)?;
         self.views = Vec::with_capacity(self.images.len());
         self.render_done = Vec::with_capacity(self.images.len());
         for (i, &image) in self.images.iter().enumerate() {
@@ -366,7 +366,7 @@ impl Swapchain {
                 );
             // SAFETY: image belongs to the live swapchain.
             let view = unsafe { device.raw().create_image_view(&view_info, None) }
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
             device.set_name(
                 view,
                 &format!("gg.swapchain.gen{}.view{i}", self.generation),
@@ -376,7 +376,7 @@ impl Swapchain {
             let semaphore_info = vk::SemaphoreCreateInfo::default();
             // SAFETY: device is live.
             let semaphore = unsafe { device.raw().create_semaphore(&semaphore_info, None) }
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
             device.set_name(
                 semaphore,
                 &format!("gg.swapchain.gen{}.render_done{i}", self.generation),
@@ -402,7 +402,7 @@ impl Swapchain {
         } {
             Ok((index, suboptimal)) => Ok(Acquired::Image { index, suboptimal }),
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Ok(Acquired::OutOfDate),
-            Err(err) => Err(RhiError::Vk(err)),
+            Err(err) => Err(RhiError::vk(err)),
         }
     }
 

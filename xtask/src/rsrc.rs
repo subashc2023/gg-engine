@@ -143,34 +143,46 @@ pub struct Built {
     pub version: Vec<u8>,
 }
 
-/// Build the object for `icon` (a [`icon`](gg_core::config::icon) file) and
-/// `marks`.
+/// Build the object for `icon` (a [`icon`](gg_core::config::icon) file, or
+/// `None` for a manifest that declares a version and no picture) and `marks`.
+///
+/// The icon is optional and the version record is not: a build with neither has
+/// no reason to be here, and a build with only a version still owes Explorer a
+/// *Details* tab (§6 M81 — before it, an iconless manifest silently dropped the
+/// version too, and with it the only check that covers the linker).
 ///
 /// # Errors
 /// If the icon file is not one, or its side is not divisible by every entry in
 /// [`SIDES`] — the second is a tree-level mistake rather than a runtime one, and
 /// it fails here rather than shipping a stretched picture.
-pub fn object(icon: &[u8], marks: &Marks) -> Result<Built> {
-    let (side, rgba) = gg_core::config::icon::parse(icon).context("reading the icon to ship")?;
+pub fn object(icon: Option<&[u8]>, marks: &Marks) -> Result<Built> {
     let mut icons = Vec::new();
-    for want in SIDES {
-        ensure!(
-            want <= side && side.is_multiple_of(want),
-            "an icon {side}px square cannot become {want}px by an integer box filter — either \
-             the source side or `SIDES` moved (§6 M73)"
-        );
-        icons.push((want, image(want, &reduce(side, &rgba, want))));
+    if let Some(icon) = icon {
+        let (side, rgba) =
+            gg_core::config::icon::parse(icon).context("reading the icon to ship")?;
+        for want in SIDES {
+            ensure!(
+                want <= side && side.is_multiple_of(want),
+                "an icon {side}px square cannot become {want}px by an integer box filter — either \
+                 the source side or `SIDES` moved (§6 M73)"
+            );
+            icons.push((want, image(want, &reduce(side, &rgba, want))));
+        }
     }
     let version = version_info(marks);
 
     // Leaves, in the order the directory will list them: every `RT_ICON` id
-    // ascending, then the group, then the version.
+    // ascending, then the group, then the version. An iconless build writes the
+    // version leaf alone — a group with no members is a picture Explorer would
+    // ask for and not find.
     let mut leaves: Vec<(u32, u32, &[u8])> = Vec::new();
     for (i, (_, bytes)) in icons.iter().enumerate() {
         leaves.push((RT_ICON, i as u32 + 1, bytes));
     }
     let group = group(&icons);
-    leaves.push((RT_GROUP_ICON, 1, &group));
+    if !icons.is_empty() {
+        leaves.push((RT_GROUP_ICON, 1, &group));
+    }
     leaves.push((RT_VERSION, 1, &version));
 
     let (directory, blobs, fixups) = tree(&leaves);
@@ -636,25 +648,30 @@ fn walk(
 /// directory at all — each by name.
 pub fn verify(exe: &[u8], built: &Built, marks: &Marks) -> Result<usize> {
     let found = read(exe)?;
-    let group = found.of(RT_GROUP_ICON, 1).context(
-        "no RT_GROUP_ICON id 1: Explorer asks for the lowest-numbered group and would \
+    // Only what went in is looked for: an iconless build carries the version
+    // alone (§6 M81), and demanding a group there would fail a link that did
+    // exactly what it was asked.
+    if !built.icons.is_empty() {
+        let group = found.of(RT_GROUP_ICON, 1).context(
+            "no RT_GROUP_ICON id 1: Explorer asks for the lowest-numbered group and would \
                   find none",
-    )?;
-    ensure!(
-        group == self::group(&built.icons),
-        "the icon directory in the executable is not the one that went in: {}",
-        differ(group, &self::group(&built.icons))
-    );
-    for (i, (side, want)) in built.icons.iter().enumerate() {
-        let id = i as u32 + 1;
-        let have = found
-            .of(RT_ICON, id)
-            .with_context(|| format!("no RT_ICON id {id} — the {side}px image did not survive"))?;
+        )?;
         ensure!(
-            have == want.as_slice(),
-            "RT_ICON id {id} ({side}px) is not the image that went in: {}",
-            differ(have, want)
+            group == self::group(&built.icons),
+            "the icon directory in the executable is not the one that went in: {}",
+            differ(group, &self::group(&built.icons))
         );
+        for (i, (side, want)) in built.icons.iter().enumerate() {
+            let id = i as u32 + 1;
+            let have = found.of(RT_ICON, id).with_context(|| {
+                format!("no RT_ICON id {id} — the {side}px image did not survive")
+            })?;
+            ensure!(
+                have == want.as_slice(),
+                "RT_ICON id {id} ({side}px) is not the image that went in: {}",
+                differ(have, want)
+            );
+        }
     }
     let version = found
         .of(RT_VERSION, 1)
@@ -846,7 +863,7 @@ mod tests {
             gg_core::config::icon::SIDE,
             &source(gg_core::config::icon::SIDE),
         );
-        let built = object(&icon, &marks()).unwrap();
+        let built = object(Some(&icon), &marks()).unwrap();
         let obj = &built.object;
         assert_eq!(&obj[..2], &0x8664u16.to_le_bytes(), "AMD64");
         assert_eq!(u16::from_le_bytes([obj[2], obj[3]]), 2, "two sections");
@@ -899,7 +916,7 @@ mod tests {
             &source(gg_core::config::icon::SIDE),
         );
         let marks = marks();
-        let built = object(&icon, &marks).unwrap();
+        let built = object(Some(&icon), &marks).unwrap();
         let obj = dir.join("marks.obj");
         std::fs::write(&obj, &built.object).unwrap();
         let main = dir.join("main.rs");
@@ -937,6 +954,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(refused.contains("no resource directory"), "{refused}");
+
+        // And the iconless manifest through the same linker (§6 M81): the
+        // version leaf alone, which is what a `version` with no `icon` used to
+        // drop on the floor along with this whole check.
+        let only = object(None, &marks).unwrap();
+        assert!(only.icons.is_empty());
+        let obj = dir.join("version-only.obj");
+        std::fs::write(&obj, &only.object).unwrap();
+        let exe = dir.join("version-only.exe");
+        let out = std::process::Command::new("rustc")
+            .arg(&main)
+            .arg("-o")
+            .arg(&exe)
+            .arg(format!("-Clink-arg={}", obj.display()))
+            .output()
+            .expect("rustc");
+        assert!(
+            out.status.success(),
+            "the linker refused the iconless object:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let found = verify(&std::fs::read(&exe).unwrap(), &only, &marks)
+            .expect("a version record with no picture beside it");
+        assert_eq!(found, 1, "the version leaf and nothing else");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -946,15 +987,15 @@ mod tests {
     fn an_object_is_a_function_of_its_input() {
         // A 4px source cannot make the chain, and says which size stopped it.
         let icon = gg_core::config::icon::encode(4, &source(4));
-        let refused = object(&icon, &marks()).unwrap_err().to_string();
+        let refused = object(Some(&icon), &marks()).unwrap_err().to_string();
         assert!(refused.contains("16px"), "{refused}");
         let whole = gg_core::config::icon::encode(
             gg_core::config::icon::SIDE,
             &source(gg_core::config::icon::SIDE),
         );
         assert_eq!(
-            object(&whole, &marks()).unwrap().object,
-            object(&whole, &marks()).unwrap().object
+            object(Some(&whole), &marks()).unwrap().object,
+            object(Some(&whole), &marks()).unwrap().object
         );
     }
 }

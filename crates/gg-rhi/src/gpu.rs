@@ -133,7 +133,7 @@ impl Gpu {
     /// entirely, and the breadcrumbs are the only record of where.
     pub fn explain(&self, err: vk::Result) -> RhiError {
         if err != vk::Result::ERROR_DEVICE_LOST {
-            return RhiError::Vk(err);
+            return RhiError::vk(err);
         }
         let report = crash::report(
             self.device.marker_mechanism(),
@@ -152,7 +152,10 @@ impl Gpu {
     /// present — and only this crate can turn that code into the report.
     pub fn detail(&self, err: RhiError) -> RhiError {
         match err {
-            RhiError::Vk(code) => self.explain(code),
+            // Back through `ash`'s type, inside the crate that owns it: the
+            // variant carries the spec's own numbering precisely so this
+            // round trip needs no second field (§6 M81).
+            RhiError::Vk { code, .. } => self.explain(vk::Result::from_raw(code)),
             other => other,
         }
     }

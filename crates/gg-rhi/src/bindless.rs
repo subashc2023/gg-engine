@@ -149,7 +149,7 @@ impl Bindless {
                 .raw()
                 .create_descriptor_set_layout(&layout_info, None)
         }
-        .map_err(RhiError::Vk)?;
+        .map_err(RhiError::vk)?;
         device.set_name(layout, "gg.bindless.layout");
 
         let sizes = [
@@ -175,7 +175,7 @@ impl Bindless {
             Err(e) => {
                 // SAFETY: the layout was created above and is unused.
                 unsafe { device.raw().destroy_descriptor_set_layout(layout, None) };
-                return Err(RhiError::Vk(e));
+                return Err(RhiError::vk(e));
             }
         };
         device.set_name(pool, "gg.bindless.pool");
@@ -194,7 +194,7 @@ impl Bindless {
                     device.raw().destroy_descriptor_pool(pool, None);
                     device.raw().destroy_descriptor_set_layout(layout, None);
                 }
-                return Err(RhiError::Vk(e));
+                return Err(RhiError::vk(e));
             }
         };
         let Some(set) = set else {

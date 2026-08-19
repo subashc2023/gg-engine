@@ -128,7 +128,7 @@ impl OffscreenRhi {
             .queue_family_index(device.graphics.family);
         // SAFETY: device is live.
         let pool =
-            unsafe { device.raw().create_command_pool(&pool_info, None) }.map_err(RhiError::Vk)?;
+            unsafe { device.raw().create_command_pool(&pool_info, None) }.map_err(RhiError::vk)?;
         device.set_name(pool, "gg.offscreen.pool");
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(pool)
@@ -136,7 +136,7 @@ impl OffscreenRhi {
             .command_buffer_count(1);
         // SAFETY: pool is live.
         let cmd = unsafe { device.raw().allocate_command_buffers(&alloc_info) }
-            .map_err(RhiError::Vk)?
+            .map_err(RhiError::vk)?
             .into_iter()
             .next()
             .ok_or_else(|| RhiError::Loader("no command buffer allocated".into()))?;
@@ -329,12 +329,12 @@ impl OffscreenRhi {
         unsafe {
             device
                 .reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
             let begin = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             device
                 .begin_command_buffer(self.cmd, &begin)
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
             // SAFETY: cmd records on the graphics family and this submit waits
             // on the transfer timeline value the releases signaled.
             crate::upload::Uploader::record_acquires(&self.gpu.device, self.cmd, &acquires);
@@ -347,7 +347,7 @@ impl OffscreenRhi {
                 backbuffer,
                 graph::Instruments { stamps, crumbs },
             );
-            device.end_command_buffer(self.cmd).map_err(RhiError::Vk)?;
+            device.end_command_buffer(self.cmd).map_err(RhiError::vk)?;
         }
         self.submit_and_wait()?;
         // The wait is inside submit_and_wait, so by here the timestamps are
@@ -388,16 +388,16 @@ impl OffscreenRhi {
         unsafe {
             device
                 .reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
             let begin = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             device
                 .begin_command_buffer(self.cmd, &begin)
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
         }
         record(&self.gpu, self.cmd)?;
         // SAFETY: the buffer has been recording since the begin above.
-        unsafe { device.end_command_buffer(self.cmd) }.map_err(RhiError::Vk)?;
+        unsafe { device.end_command_buffer(self.cmd) }.map_err(RhiError::vk)?;
         self.submit_and_wait()
     }
 

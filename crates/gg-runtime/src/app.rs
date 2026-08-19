@@ -348,7 +348,7 @@ impl App {
         drive.open_segment(0, lib.code_hash());
         // SAFETY: `lib` is verified and never unloaded.
         let (verbs, extra) = unsafe { verbs_for(&lib, args.editor) };
-        let input = bind(&format!("{bindings}{extra}"), &rebinds, &drive, verbs)?;
+        let input = bind(&format!("{bindings}{extra}"), &rebinds, &drive, verbs, hz)?;
         let ui_binding = binding(&verbs);
         // Before the struct literal takes `input`.
         let input_looks = input.looks();
@@ -939,6 +939,15 @@ impl App {
     /// exit over it would be worse than that — but the *directory* it could not
     /// write is the player's, and that is a sentence somebody owes them (§6 M54).
     pub fn write_settings(&self, path: &Path) {
+        // The ordering rule stated on `checkpoint_stop`, as a machine: this is an
+        // exit write and a live prefs checkpoint targets the same path, so one
+        // still in flight lands on top of these bytes. Every reload leg runs
+        // under `tier-dev`, which is where a debug assertion fires.
+        debug_assert!(
+            self.prefs_checkpoint.is_none(),
+            "settings written with the prefs checkpoint still running — call \
+             `checkpoint_stop` first (§6 M48)"
+        );
         let prefs = self.prefs();
         let write =
             crate::player::replace(path, gg_ecs::boundary::settings::encode(&prefs).as_bytes());
@@ -1152,6 +1161,7 @@ impl App {
             &self.rebinds,
             &self.drive,
             verbs,
+            self.hz,
         )
         .map_err(|e| reloaded.lib.refuse(e))?;
         // SAFETY: both dylibs are verified and never unloaded.
@@ -1284,18 +1294,23 @@ impl App {
                     .iter()
                     .filter(|(_, o)| !matches!(o, ComponentOutcome::Reused))
                     .map(|(component, outcome)| {
-                        let (kind, defaulted, retyped) = match outcome {
-                            ComponentOutcome::Reused => ("reused", Vec::new(), Vec::new()),
-                            ComponentOutcome::Dropped => ("dropped", Vec::new(), Vec::new()),
+                        let none = &Vec::new();
+                        let (kind, defaulted, retyped, removed) = match outcome {
+                            ComponentOutcome::Reused => ("reused", none, none, none),
+                            ComponentOutcome::Dropped => ("dropped", none, none, none),
                             ComponentOutcome::Migrated {
-                                defaulted, retyped, ..
-                            } => ("migrated", defaulted.clone(), retyped.clone()),
+                                defaulted,
+                                retyped,
+                                removed,
+                                ..
+                            } => ("migrated", defaulted, retyped, removed),
                         };
                         gg_agent::Change {
                             component: component.clone(),
                             kind,
-                            defaulted,
-                            retyped,
+                            defaulted: defaulted.clone(),
+                            retyped: retyped.clone(),
+                            removed: removed.clone(),
                         }
                     })
                     .collect()
@@ -1831,8 +1846,13 @@ fn bind(
     rebinds: &str,
     drive: &Drive,
     verbs: gg_ecs::boundary::Verbs,
+    hz: u32,
 ) -> anyhow::Result<Input> {
     if let Some(replay) = drive.replay() {
+        // The header's own two numbers first, then the verb space (§6 M81): a
+        // contract or a tick rate that moved makes every id in the file mean the
+        // right verb at the wrong arithmetic, which no verb check can see.
+        replay.check_environment(gg_math::DETERMINISM_CONTRACT, hz)?;
         replay.check_verbs(verbs.actions, verbs.axes)?;
     }
     let mut input = Input::new(ActionMap::parse(bindings, verbs.actions, verbs.axes)?);

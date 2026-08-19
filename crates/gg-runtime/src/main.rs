@@ -13,13 +13,13 @@ fn main() -> std::process::ExitCode {
     // here has neither a log file nor a title to put on the box.
     let args = match gg_runtime::parse_args(&argv) {
         Ok(args) => args,
-        Err(error) => return gg_runtime::refuse(None, None, &error),
+        Err(error) => return gg_runtime::refuse(None, None, &error.into()),
     };
     // Copied out because `run` takes the args: what the box says and where the
     // log is are the two things a refusal needs and the session owns.
     let (title, data) = (args.title.clone(), args.data.clone());
     match gg_runtime::run(args, &argv) {
         Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) => gg_runtime::refuse(title.as_deref(), data.as_deref(), &error),
+        Err(exit) => gg_runtime::refuse(title.as_deref(), data.as_deref(), &exit),
     }
 }

@@ -1152,11 +1152,16 @@ fn aarch64_leg() -> anyhow::Result<()> {
 /// transcendentals to avoid, since glibc's `sin` is not correctly rounded and
 /// differs by version.
 ///
-/// A second copy of `gg-tools fp-isa`'s list, deliberately. The two answer
+/// A second copy of `gg-tools fp-isa`'s list, deliberately: the two answer
 /// different questions — the instrument attributes and explains an import, this
-/// is a threshold — which is CLAUDE.md's split between a microscope and a gate,
-/// and the C library's math section is not a set that drifts.
-const IMPORTED_MATH: &[&str] = &[
+/// is a threshold — which is CLAUDE.md's split between a microscope and a gate.
+///
+/// Its own comment used to add "and the C library's math section is not a set
+/// that drifts", which was the argument for leaving two copies uncompared. It
+/// drifted at §6 M81, when `fma` — the routine §8's qemu row names by name —
+/// turned out to be on neither. `budgets::imported_math_lists` now compares
+/// them, so the copies stay a *split of roles* rather than a hole.
+pub(crate) const IMPORTED_MATH: &[&str] = &[
     "sin",
     "cos",
     "tan",
@@ -1187,6 +1192,14 @@ const IMPORTED_MATH: &[&str] = &[
     "sincos",
     "ldexp",
     "frexp",
+    "fma",
+    "fdim",
+    "nearbyint",
+    "rint",
+    "round",
+    "trunc",
+    "scalbn",
+    "modf",
 ];
 
 /// Whether `binary` was built from the sources it currently depends on, read out
@@ -1443,6 +1456,32 @@ fn weekly() -> anyhow::Result<()> {
 struct All;
 trait CrateSet {
     fn args(&self) -> Vec<String>;
+
+    /// The same selection, split into invocations that can each link — see
+    /// [`SEPARATE`]. Only the test runner needs this: `clippy` builds no test
+    /// binary and never links the exports that collide.
+    fn test_runs(&self) -> Vec<Vec<String>> {
+        let args = self.args();
+        let alone = |name: &str| vec!["-p".to_string(), name.to_string()];
+        if args.iter().any(|a| a == "--workspace") {
+            let mut rest = vec!["--workspace".to_string()];
+            for name in SEPARATE {
+                rest.push("--exclude".to_string());
+                rest.push((*name).to_string());
+            }
+            return core::iter::once(rest)
+                .chain(SEPARATE.iter().map(|name| alone(name)))
+                .collect();
+        }
+        let (separate, together): (Vec<Vec<String>>, Vec<Vec<String>>) = args
+            .chunks(2)
+            .map(<[String]>::to_vec)
+            .partition(|pair| pair.get(1).is_some_and(|c| SEPARATE.contains(&c.as_str())));
+        core::iter::once(together.concat())
+            .chain(separate)
+            .filter(|run| !run.is_empty())
+            .collect()
+    }
 }
 impl CrateSet for All {
     fn args(&self) -> Vec<String> {
@@ -1467,11 +1506,31 @@ fn clippy(crates: &dyn CrateSet) -> anyhow::Result<()> {
     exec(&mut cmd, "cargo clippy -D warnings")
 }
 
+/// The crates that each link one demo with its `game` feature on, and therefore
+/// cannot share a cargo invocation with each other (§6 M81).
+///
+/// `gg_game!` exports four **fixed** `extern "C"` names, so a binary may hold
+/// one game and no more — which each of these three manifests says, and each is
+/// right about itself: `gg-golden` needs demo 04's, `gg-tools` needs demo 13's,
+/// `xtask` needs demo 10's, and every other demo they link sits at
+/// `default-features = false` for exactly this reason. What none of them can
+/// say is the cross-binary half: cargo unifies features **per package per
+/// invocation**, so building two of them together turns the feature on for a
+/// demo the third took without it, and the link fails with several screens of
+/// `LNK2005` nowhere near whatever was edited.
+///
+/// One invocation each, therefore. `clippy` is unaffected — it emits metadata
+/// and links no binary, which is why `--workspace --all-targets` has always
+/// worked while `nextest run --workspace` never could.
+const SEPARATE: &[&str] = &["gg-golden", "gg-tools", "xtask"];
+
 fn tests(crates: &dyn CrateSet) -> anyhow::Result<()> {
-    let mut cmd = cargo();
-    cmd.args(["nextest", "run", "--no-tests=pass"])
-        .args(crates.args());
-    exec(&mut cmd, "cargo nextest run")
+    for args in crates.test_runs() {
+        let mut cmd = cargo();
+        cmd.args(["nextest", "run", "--no-tests=pass"]).args(args);
+        exec(&mut cmd, "cargo nextest run")?;
+    }
+    Ok(())
 }
 
 /// §5.6c, as far as this milestone can take it: the replay determinism tests
@@ -1545,6 +1604,16 @@ fn crates_touched(paths: &[String]) -> BTreeSet<String> {
         }
         if p.starts_with("xtask/") {
             crates.insert("xtask".to_string());
+        } else if let Some(name) = package_at(p) {
+            // `tools/` and `apps/`, whose names are not their directories
+            // (`apps/gg-editor` is `gg-editor-app`), so the manifest answers
+            // rather than a second table (§6 M81). Falling through to `*` here
+            // escalated an edit to one instrument into `nextest --workspace`,
+            // which cannot link at all: every demo exports the same fixed
+            // `gg_game_*` symbols and feature unification puts more than one of
+            // them in `xtask`'s test binary. So the fast tier went red on a
+            // green tree, for a reason nowhere near the edit.
+            crates.insert(name);
         } else {
             // Workspace-level file (Cargo.toml, deny.toml, clippy.toml, ...):
             // everything is potentially affected.
@@ -1554,6 +1623,18 @@ fn crates_touched(paths: &[String]) -> BTreeSet<String> {
     crates
 }
 
+/// The package name declared by the `Cargo.toml` at `<first>/<second>/`, if that
+/// is where the file lives and there is one.
+fn package_at(path: &str) -> Option<String> {
+    let (first, rest) = path.split_once('/')?;
+    let (second, _) = rest.split_once('/')?;
+    let manifest = workspace_root().join(first).join(second).join("Cargo.toml");
+    let text = std::fs::read_to_string(manifest).ok()?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("name").and_then(|r| r.split('"').nth(1)))
+        .map(str::to_owned)
+}
+
 // ---- gate 1 extras: greps, cross-checks, budgets (§3) -------------------
 
 /// `needle` as a whole path segment, not as a suffix of a longer identifier.
@@ -1561,7 +1642,26 @@ fn crates_touched(paths: &[String]) -> BTreeSet<String> {
 /// The distinction is not pedantry: `gg_ecs::hash::` ends in `ash::`, and a
 /// plain substring search reports every file in the crate. The gate means the
 /// *crate* `ash`, so a preceding identifier character disqualifies the hit.
-fn contains_path(text: &str, needle: &str) -> bool {
+/// The quoted names in a `const NAME: <ty> = [ ... ];` declaration, for the
+/// gates that compare one source file's list against another's.
+///
+/// Past the `=` and then the first `[`, which reads both spellings the tree
+/// uses — `&[&str] = &[…]` and `[&str; N] = […]` — and steps over the `]` a
+/// type annotation carries.
+pub(crate) fn names_in_list<'t>(text: &'t str, name: &str) -> Vec<&'t str> {
+    let Some(list) = text
+        .split(&format!("{name}: "))
+        .nth(1)
+        .and_then(|t| t.split_once('='))
+        .and_then(|(_, t)| t.split_once('['))
+        .and_then(|(_, t)| t.split("];").next())
+    else {
+        return Vec::new();
+    };
+    list.split('"').skip(1).step_by(2).collect()
+}
+
+pub(crate) fn contains_path(text: &str, needle: &str) -> bool {
     let bytes = text.as_bytes();
     text.match_indices(needle)
         .any(|(at, _)| at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_'))
@@ -1777,6 +1877,32 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
             ));
         }
 
+        // The §1.4 membrane, as a grep (§6 M81). `gg_math::render` is SIMD
+        // `glam` and is re-exported by `gg-math`, which is on the game-crate pin
+        // — so a game or a sim-side crate computing through `glam` and storing
+        // the result into a `sim::Vec3` tripped no gate at all, and the whole
+        // determinism argument rests on that not happening. `f32x4` arithmetic
+        // is not `libm`'s and is not promised to agree across targets.
+        //
+        // The allowlist is the membrane itself, its downstream, and the tools:
+        // `gg-extract` is the one crate allowed both halves by charter, and
+        // anything below it in §3's ordering has no business with either.
+        if !RENDER_MATH_TREES
+            .iter()
+            .any(|tree| rel_str.starts_with(tree))
+            && !RENDER_MATH_SITES.contains(&rel_str.as_str())
+            && !spells_the_bans
+            && let Some(tok) = ["gg_math::render", "glam::"]
+                .into_iter()
+                .find(|t| contains_path(&text, t))
+        {
+            violations.push(format!(
+                "{rel_str}: `{tok}` outside the render half (§1.4) — sim state is \
+                 `gg_math::sim`, whose transcendentals are `libm`'s and whose results are the \
+                 same on every target; narrowing happens in gg-extract and nowhere else"
+            ));
+        }
+
         // Hand-written barriers (§4.5, §6 M6): every `synchronization2` barrier
         // in the engine is *derived* by the render graph, so the tokens that
         // spell one live in the graph's execution layer and in the staging
@@ -1866,6 +1992,37 @@ fn strip_visibility(line: &str) -> &str {
 /// from growing the per-file exception list that ends with the field it was
 /// written for exempted. `xtask/` is additionally here because this file must
 /// spell the planted declarations literally in order to *be* the gate.
+/// Where SIMD `glam` may be named (§1.4, §6 M81).
+///
+/// `gg-math` because it is where the split is declared; `gg-extract` because it
+/// is the membrane and the only crate allowed both halves; `gg-render` because
+/// everything it holds has already crossed; and `tools/` because a compiler and
+/// a reference harness are downstream of every tick they will ever be asked
+/// about. Notably absent: `demos/`, `gg-ecs`, `gg-input`, `gg-core` — the four
+/// places a `glam` result could reach a hashed component.
+const RENDER_MATH_TREES: [&str; 4] = [
+    "crates/gg-extract/",
+    "crates/gg-math/",
+    "crates/gg-render/",
+    "tools/",
+];
+
+/// Files that must spell `gg_math::render` in order to *be* the ban — the
+/// `vk::` gate's `spells_the_bans` carve-out, as an explicit list because these
+/// are three files rather than a tree.
+///
+/// `state_hash.rs` carries the `#[diagnostic::on_unimplemented]` note that
+/// refuses those types, `reject.rs` is the derive's own refusal, and the
+/// compile-fail fixture beside it is a test *about* that refusal. `gg-scene`'s
+/// module docs cite the absence as a placement argument, which is prose the
+/// rule exists to produce rather than prose that breaks it.
+const RENDER_MATH_SITES: [&str; 4] = [
+    "crates/gg-ecs/src/state_hash.rs",
+    "crates/gg-ecs/tests/reject/bare_enum_field.rs",
+    "crates/gg-ecs-derive/src/reject.rs",
+    "crates/gg-scene/src/lib.rs",
+];
+
 const NON_SIM_TREES: [&str; 5] = [
     "crates/gg-debug/",
     "crates/gg-render/",
@@ -2161,6 +2318,78 @@ fn allowlist_crosscheck() -> anyhow::Result<()> {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    /// Each game-linking crate gets an invocation of its own (§6 M81): their
+    /// manifests disagree about which demo carries the `game` feature, cargo
+    /// unifies features per invocation, and two of them together do not link.
+    #[test]
+    fn the_test_runner_keeps_every_game_linker_in_an_invocation_of_its_own() {
+        use super::CrateSet as _;
+        let picked: std::collections::BTreeSet<String> =
+            ["gg-tools", "xtask", "gg-golden", "gg-ecs", "gg-rhi"]
+                .iter()
+                .map(|c| (*c).to_string())
+                .collect();
+        let runs = picked.test_runs();
+        assert_eq!(runs.len(), 4, "one shared run and one each: {runs:?}");
+        for name in super::SEPARATE {
+            assert!(
+                runs.iter().any(|r| r == &["-p", name]),
+                "{name} is not alone: {runs:?}"
+            );
+        }
+        let shared = runs.iter().find(|r| r.len() > 2).expect("the shared run");
+        assert!(
+            super::SEPARATE
+                .iter()
+                .all(|n| !shared.contains(&(*n).to_string())),
+            "{shared:?}"
+        );
+        // A selection holding none of them is still one invocation, and a
+        // whole-workspace run excludes them rather than dropping them.
+        let plain: std::collections::BTreeSet<String> =
+            ["gg-ecs".to_string()].into_iter().collect();
+        assert_eq!(
+            plain.test_runs(),
+            vec![vec!["-p".to_string(), "gg-ecs".to_string()]]
+        );
+        let all = super::All.test_runs();
+        assert_eq!(all.len(), super::SEPARATE.len() + 1, "{all:?}");
+        assert_eq!(
+            all[0].iter().filter(|a| *a == "--exclude").count(),
+            super::SEPARATE.len(),
+            "{all:?}"
+        );
+    }
+
+    /// Every home a crate has, mapped to its package (§6 M81). The interesting
+    /// rows are the two that are not their directory name and the one that must
+    /// still escalate — a `tools/` path falling through to `*` is what put the
+    /// fast tier on `nextest --workspace`, which does not link.
+    #[test]
+    fn every_crate_home_maps_to_its_package_and_only_the_root_escalates() {
+        for (path, package) in [
+            ("crates/gg-ecs/src/lib.rs", "gg-ecs"),
+            ("demos/10-tetris/src/lib.rs", "demo-10-tetris"),
+            ("xtask/src/ci.rs", "xtask"),
+            ("tools/gg-golden/src/main.rs", "gg-golden"),
+            ("tools/gg-tools/src/main.rs", "gg-tools"),
+            ("apps/gg-editor/src/main.rs", "gg-editor-app"),
+        ] {
+            let touched = super::crates_touched(&[path.to_owned()]);
+            assert!(
+                touched.contains(package),
+                "{path} maps to {touched:?}, not `{package}`"
+            );
+            assert!(!touched.contains("*"), "{path} escalated to the workspace");
+        }
+        for path in ["Cargo.toml", "deny.toml", "rust-toolchain.toml"] {
+            assert!(
+                super::crates_touched(&[path.to_owned()]).contains("*"),
+                "{path} is workspace-level and must escalate"
+            );
+        }
+    }
+
     /// The line-ending gate, planted red and green. The real listing this was
     /// written against had 42 offenders and one of them was a shader, which is
     /// how the checked-in codegen came to be a fixed point of one machine.
@@ -2447,6 +2676,36 @@ mod tests {
         let found = violations(&root);
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].starts_with("crates/gg-render/"), "{found:?}");
+    }
+
+    /// The §1.4 membrane (§6 M81): SIMD `glam` is the render half's, and a game
+    /// crate reaching it through `gg_math`'s re-export is how a `f32x4` result
+    /// lands in a hashed component. Both sides planted, because the allowlist is
+    /// the whole gate — a rule that rejected `gg-extract` would be switched off.
+    #[test]
+    fn render_math_outside_the_membrane_is_rejected() {
+        let root = plant(
+            "render-math",
+            &[
+                ("demos/10-tetris/src/lib.rs", "let v = glam::Vec3::ZERO;\n"),
+                ("crates/gg-input/src/map.rs", "use gg_math::render::Vec3;\n"),
+                (
+                    "crates/gg-extract/src/lib.rs",
+                    "use gg_math::render::Vec3;\n",
+                ),
+                (
+                    "crates/gg-render/src/scene.rs",
+                    "let v = glam::Vec3::ZERO;\n",
+                ),
+            ],
+        );
+        let found = violations(&root);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().any(|v| v.starts_with("demos/")), "{found:?}");
+        assert!(
+            found.iter().any(|v| v.starts_with("crates/gg-input/")),
+            "{found:?}"
+        );
     }
 
     /// The whole-segment rule the gate is built on: `gg_ecs::hash::` ends in

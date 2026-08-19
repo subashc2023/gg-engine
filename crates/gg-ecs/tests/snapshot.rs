@@ -140,10 +140,12 @@ fn an_added_field_defaults_and_the_rest_survives() {
             copied,
             defaulted,
             retyped,
+            removed,
         } => {
             assert_eq!(copied, &["x", "y"]);
             assert_eq!(defaulted, &["z"]);
             assert!(retyped.is_empty());
+            assert!(removed.is_empty(), "the new build kept every old field");
         }
         other => panic!("expected a migration, got {other:?}"),
     }
@@ -181,6 +183,49 @@ fn a_reorder_moves_data_with_the_name_and_a_retype_defaults_it() {
         }
         other => panic!("expected a migration, got {other:?}"),
     }
+}
+
+#[test]
+fn a_field_the_new_build_deleted_is_named_rather_than_vanishing() {
+    // The reverse of the append case, and the one a walk over the *new* build's
+    // fields alone cannot see: every surviving field copies, the row lands, and
+    // nothing in the report would have mentioned `z` (§6 M81). `restore`
+    // tolerates the loss; `World::load` refuses it, which is `save`'s test.
+    let mut world = World::new();
+    world.register::<PositionV2>().unwrap();
+    let e = world.spawn();
+    world
+        .insert(
+            e,
+            PositionV2 {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            },
+        )
+        .unwrap();
+    let snapshot = world.snapshot();
+
+    let mut next = World::new();
+    next.register::<PositionV1>().unwrap();
+    let report = next.restore(&snapshot).unwrap();
+
+    let p = next.get::<PositionV1>(e).expect("the entity survived");
+    assert_eq!((p.x, p.y), (1.0, 2.0), "the surviving fields still copied");
+    match &report.components[0].1 {
+        ComponentOutcome::Migrated {
+            copied,
+            defaulted,
+            retyped,
+            removed,
+        } => {
+            assert_eq!(copied, &["x", "y"]);
+            assert_eq!(removed, &["z"]);
+            assert!(defaulted.is_empty() && retyped.is_empty());
+        }
+        other => panic!("expected a migration, got {other:?}"),
+    }
+    assert!(!report.is_clean(), "a deleted field is not a clean reload");
 }
 
 #[test]

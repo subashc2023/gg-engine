@@ -57,5 +57,8 @@ fn main() -> anyhow::Result<()> {
             ),
         }
     }
-    gg_runtime::run(args, &argv)
+    // The launcher is a dev tool run from a console, so the failure goes back up
+    // as an ordinary error: `Exit::started` picks the wording of a *message box*
+    // and there is nobody standing in front of one here (§6 M81).
+    gg_runtime::run(args, &argv).map_err(|exit| exit.error)
 }

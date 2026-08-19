@@ -215,6 +215,39 @@ pub enum ReplayError {
         /// How many this build has.
         expected: usize,
     },
+    /// A channel's ticks go backwards. Every lookup here is a binary search,
+    /// which on an unsorted slice returns the wrong frame rather than failing.
+    #[error(
+        "replay's {channel} channel is out of order: record {index} is at tick {tick}, after \
+         {previous} — every lookup in this file is a binary search, so a stream in this shape \
+         replays the wrong input rather than refusing"
+    )]
+    Unordered {
+        /// Which channel: `segment`, `input`, `text` or `knob`.
+        channel: &'static str,
+        /// The record that goes backwards.
+        index: usize,
+        /// Its tick.
+        tick: u64,
+        /// The tick before it.
+        previous: u64,
+    },
+    /// The file was recorded under a different Determinism Contract, or at a
+    /// different tick rate — either one means the ticks this stream drives are
+    /// not the ticks it recorded.
+    #[error(
+        "replay says {field} {found}, this build is {running} — the reproduction environment the \
+         header exists to describe is not this one, and replaying anyway diverges silently \
+         (§4.2.1)"
+    )]
+    Environment {
+        /// `"Determinism Contract"` or `"tick rate"`.
+        field: &'static str,
+        /// What the file says.
+        found: u32,
+        /// What this build is.
+        running: u32,
+    },
 }
 
 impl Replay {
@@ -315,6 +348,29 @@ impl Replay {
     pub fn check_verbs(&self, actions: &[&str], axes: &[&str]) -> Result<(), ReplayError> {
         check_list("action", &self.meta.actions, actions)?;
         check_list("axis", &self.meta.axes, axes)
+    }
+
+    /// Check that the reproduction environment in the header is the one running.
+    ///
+    /// The header has carried both numbers since the format's first version and
+    /// nothing compared them until §6 M81, which made the self-describing header
+    /// a *record* rather than a check: a stream recorded under an older contract
+    /// replayed clean and diverged, which is the exact failure it exists to
+    /// prevent. Refused by name and number, like every other header mismatch.
+    pub fn check_environment(&self, contract: u32, tick_hz: u32) -> Result<(), ReplayError> {
+        for (field, found, running) in [
+            ("Determinism Contract", self.meta.contract, contract),
+            ("tick rate", self.meta.tick_hz, tick_hz),
+        ] {
+            if found != running {
+                return Err(ReplayError::Environment {
+                    field,
+                    found,
+                    running,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Encode to bytes. Little-endian throughout: it is the byte order of every
@@ -444,6 +500,17 @@ impl Replay {
             surface = (r.u32()?, r.u32()?);
         }
 
+        // Every lookup on this file is a `partition_point`, which answers a
+        // question about a *sorted* slice and answers it wrongly, silently and
+        // in bounds on an unsorted one (§6 M81). A recorder cannot write one out
+        // of order; a corrupt or hand-made file can, and this format's whole
+        // safety argument is loud refusal. Checked once at decode rather than
+        // per lookup, because a decoded `Replay` is then sorted by construction.
+        ordered("segment", segments.iter().map(|s| s.first_tick))?;
+        ordered("input", changes.iter().map(|&(t, _)| t))?;
+        ordered("text", text.iter().map(|&(t, _)| t))?;
+        ordered("knob", knobs.iter().map(|&(t, ..)| t))?;
+
         Ok(Replay {
             meta: ReplayMeta {
                 engine_commit,
@@ -462,6 +529,28 @@ impl Replay {
             knobs,
         })
     }
+}
+
+/// Refuse a channel whose ticks do not ascend.
+///
+/// Non-strict: the knob channel legitimately carries several records at one
+/// tick (`knobs_at` returns the contiguous run), and so may text. What is
+/// refused is a tick that goes *backwards*, which is the only thing a binary
+/// search cannot survive.
+fn ordered(channel: &'static str, ticks: impl Iterator<Item = u64>) -> Result<(), ReplayError> {
+    let mut previous = None;
+    for (index, tick) in ticks.enumerate() {
+        if previous.is_some_and(|p| tick < p) {
+            return Err(ReplayError::Unordered {
+                channel,
+                index,
+                tick,
+                previous: previous.unwrap_or_default(),
+            });
+        }
+        previous = Some(tick);
+    }
+    Ok(())
 }
 
 /// Builds a [`Replay`] one tick at a time.
@@ -745,6 +834,61 @@ mod tests {
                 "a replay cut at {cut} decoded anyway"
             );
         }
+    }
+
+    /// A file whose input records go backwards is refused at decode (§6 M81).
+    /// Built by hand, because a `Recorder` cannot produce one — which is exactly
+    /// why nothing checked.
+    #[test]
+    fn a_stream_whose_ticks_go_backwards_is_refused_rather_than_binary_searched() {
+        let mut rec = Recorder::new(meta());
+        rec.record(2, frame(0, 0));
+        rec.record(5, frame(1, 0));
+        let clean = rec.finish().encode();
+        let mut bytes = clean.clone();
+        // The second change record's tick, found by looking for the 5 that
+        // follows the first record — rewritten to 1, which is before it.
+        let at = bytes
+            .windows(8)
+            .rposition(|w| w == 5u64.to_le_bytes())
+            .expect("the second record's tick");
+        bytes[at..at + 8].copy_from_slice(&1u64.to_le_bytes());
+        let err = Replay::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ReplayError::Unordered { channel, tick: 1, previous: 2, .. } if *channel == "input"
+            ),
+            "{err}"
+        );
+        // And the file it was made from still decodes, which is what says the
+        // check is reading the corruption rather than refusing every stream.
+        assert!(Replay::decode(&clean).is_ok());
+    }
+
+    /// The header's two environment numbers, checked rather than merely carried
+    /// (§6 M81). Both directions, because a header that agreed with everything
+    /// would pass this by never comparing.
+    #[test]
+    fn a_stream_from_another_contract_or_tick_rate_is_refused_by_number() {
+        let replay = recorded();
+        assert!(replay.check_environment(1, 60).is_ok());
+        let err = replay.check_environment(2, 60).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ReplayError::Environment { field, found: 1, running: 2 } if *field == "Determinism Contract"
+            ),
+            "{err}"
+        );
+        let err = replay.check_environment(1, 120).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ReplayError::Environment { field, found: 60, running: 120 } if *field == "tick rate"
+            ),
+            "{err}"
+        );
     }
 
     #[test]

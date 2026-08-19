@@ -332,6 +332,20 @@ const IMPORTED_MATH: &[&str] = &[
     "sincos",
     "ldexp",
     "frexp",
+    // The fused multiply-add, added at §6 M81 and the omission that mattered
+    // most: it is the *precise* case §8's qemu row names. An `fma` compiled in
+    // is one instruction the ISA defines exactly; an `fma` **imported** is
+    // libm's, and libm's answer on a target without the instruction is a
+    // software emulation whose rounding is the library's to choose. A binary
+    // calling `fma@GLIBC` reads as a clean instruction census.
+    "fma",
+    "fdim",
+    "nearbyint",
+    "rint",
+    "round",
+    "trunc",
+    "scalbn",
+    "modf",
 ];
 
 /// Undefined dynamic symbols that name a math routine — see [`IMPORTED_MATH`].
@@ -774,6 +788,23 @@ mod tests {
         // The defined `pow` at .text is the same name in the same table and is
         // *not* an import; only the *UND* line counts.
         assert_eq!(found.iter().filter(|s| *s == "pow").count(), 1);
+    }
+
+    /// The routine §8's qemu row names by name, and the one the census omitted
+    /// until §6 M81: a fused multiply-add compiled in is an instruction the ISA
+    /// defines exactly, and one *imported* is libm's software emulation, whose
+    /// rounding is the library's to choose. `fmaf` reaches the list through the
+    /// same `f`-suffix strip every other single-precision spelling does.
+    #[test]
+    fn an_imported_fused_multiply_add_is_found() {
+        let table = "\
+0000000000000000      DF *UND*\t0000000000000000  GLIBC_2.17  fma
+0000000000000000      DF *UND*\t0000000000000000  GLIBC_2.17  fmaf
+";
+        assert_eq!(
+            imported_math(table),
+            vec!["fma".to_string(), "fmaf".to_string()]
+        );
     }
 
     /// Lines that are not instructions — the header, blank lines, the section

@@ -168,7 +168,7 @@ impl PipelineStore {
         // vkGetPipelineCacheData blob — the driver validates its own header
         // and falls back to empty on mismatch.
         let cache =
-            unsafe { device.raw().create_pipeline_cache(&info, None) }.map_err(RhiError::Vk)?;
+            unsafe { device.raw().create_pipeline_cache(&info, None) }.map_err(RhiError::vk)?;
         device.set_name(cache, "gg.pipeline-cache");
         tracing::info!(
             path = %cache_path.display(),
@@ -301,7 +301,7 @@ impl PipelineStore {
         }
         // SAFETY: device is live; ranges outlive the call.
         let layout = unsafe { device.raw().create_pipeline_layout(&layout_info, None) }
-            .map_err(RhiError::Vk)?;
+            .map_err(RhiError::vk)?;
         device.set_name(layout, &format!("gg.pipeline.{}.layout", desc.name));
 
         let vs_entry = std::ffi::CString::new(desc.vs_entry)
@@ -403,7 +403,7 @@ impl PipelineStore {
             Err((_, e)) => {
                 // SAFETY: layout was created above and is now orphaned.
                 unsafe { device.raw().destroy_pipeline_layout(layout, None) };
-                return Err(RhiError::Vk(e));
+                return Err(RhiError::vk(e));
             }
         };
         device.set_name(pipeline, &format!("gg.pipeline.{}", desc.name));
@@ -637,5 +637,5 @@ fn create_shader_module(
     }
     let info = vk::ShaderModuleCreateInfo::default().code(&words);
     // SAFETY: device is live; code outlives the call.
-    unsafe { device.raw().create_shader_module(&info, None) }.map_err(RhiError::Vk)
+    unsafe { device.raw().create_shader_module(&info, None) }.map_err(RhiError::vk)
 }

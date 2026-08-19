@@ -175,6 +175,27 @@ fn loading_one_name_twice_is_one_asset_and_two_references() {
 }
 
 #[test]
+fn a_load_that_lands_after_its_eviction_is_dropped_rather_than_leaked() {
+    // The one order nothing else here exercises (§6 M81): the handle is
+    // released and the slot evicted while the decompression is still in flight,
+    // so the payload arrives with nowhere to belong. Inserted anyway it is
+    // unreachable — every reader goes through a slot — and invisible to every
+    // later eviction, which walks slots too, so it is resident for the life of
+    // the process.
+    let mut assets = assets();
+    let handle = assets.load::<asset::Texture>("tex/a").unwrap();
+    drop(handle);
+    assert_eq!(
+        assets.evict_unreferenced(),
+        1,
+        "the slot went while loading"
+    );
+    assets.pump_until_idle();
+    assert_eq!(assets.resident_bytes(), 0, "the late payload was dropped");
+    assert_eq!(assets.tracked(), 0);
+}
+
+#[test]
 fn a_handles_type_is_checked_against_the_pack_once_at_load() {
     let mut assets = assets();
     let err = assets.load::<asset::Mesh>("tex/a").unwrap_err().to_string();

@@ -139,6 +139,9 @@ fn rule(text: &str) -> String {
 /// game's declared verb list to resolve ids against — and this file has no ids
 /// in it. What a reader wants is the two columns the file already is.
 fn controls(text: &str) -> Vec<(String, String)> {
+    if wrapped_array(text).is_some() {
+        return Vec::new();
+    }
     let Ok(doc) = toml::from_str::<toml::Value>(text) else {
         return Vec::new();
     };
@@ -163,6 +166,27 @@ fn controls(text: &str) -> Vec<(String, String)> {
                 .then(|| (verb.replace('_', " "), keys.join(", ")))
         })
         .collect()
+}
+
+/// The line an array opens on and does not close on, if there is one (§6 M74,
+/// §6 M81).
+///
+/// An action map is a *subset* of TOML and `gg-input` has no `toml` dependency:
+/// an array must be on one line, and a formatter that wraps a long one produces
+/// a file that is valid TOML and is not a map. This file parses with the full
+/// `toml` crate, so without this the readme happily described a control scheme
+/// the game would refuse to load — the readme's whole claim being that its
+/// controls *are* the staged map.
+///
+/// Textual and deliberately so: reusing `ActionMap::parse` needs the game's
+/// declared verb list, which is exactly what this side does not have.
+pub fn wrapped_array(text: &str) -> Option<usize> {
+    text.lines().enumerate().find_map(|(at, line)| {
+        let line = line.split('#').next().unwrap_or(line);
+        let (_, rest) = line.split_once('=')?;
+        let rest = rest.trim();
+        (rest.starts_with('[') && !rest.ends_with(']')).then_some(at + 1)
+    })
 }
 
 /// Every crate this artifact links, with the licence it carries.
@@ -318,5 +342,29 @@ mod tests {
             controls("[game.actions]\njump = [\"Space\"]\n"),
             vec![("jump".to_owned(), "Space".to_owned())]
         );
+    }
+
+    /// The one map that is valid TOML and is not an action map (§6 M74, §6
+    /// M81): a formatter wrapped the array, so the engine refuses it and the
+    /// full-`toml` parse here read it happily. The readme must not describe a
+    /// scheme the game will not load, and `xtask ship` refuses the folder.
+    #[test]
+    fn a_wrapped_array_is_found_by_the_line_it_opens_on() {
+        const WRAPPED: &str = "[game.actions]\nlook = [\n  \"Tab\",\n  \"Escape\",\n]\n";
+        assert_eq!(wrapped_array(WRAPPED), Some(2));
+        assert!(controls(WRAPPED).is_empty(), "and no section is rendered");
+        // The one-line spelling of the same intent is untouched, which is what
+        // says the check is about the wrapping and not about the length.
+        assert_eq!(
+            wrapped_array("[game.actions]\nlook = [\"Tab\", \"Escape\"]\n"),
+            None
+        );
+        // A `]` inside a comment on the opening line is still an open array.
+        assert_eq!(
+            wrapped_array("[game.actions]\nlook = [\"Tab\", # ]\n  \"Escape\"]\n"),
+            Some(2)
+        );
+        // And a section header is not an assignment.
+        assert_eq!(wrapped_array("[game.actions]\n"), None);
     }
 }

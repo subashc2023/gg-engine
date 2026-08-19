@@ -168,7 +168,7 @@ impl Timings {
             .query_type(vk::QueryType::TIMESTAMP)
             .query_count(QUERIES_PER_SLOT * slots as u32);
         // SAFETY: device is live; info is fully initialized.
-        let pool = unsafe { device.raw().create_query_pool(&info, None) }.map_err(RhiError::Vk)?;
+        let pool = unsafe { device.raw().create_query_pool(&info, None) }.map_err(RhiError::vk)?;
         device.set_name(pool, "gg.timings.pool");
         Ok(Some(Self {
             pool,

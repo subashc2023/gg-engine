@@ -72,6 +72,11 @@ pub fn run_cmd(args: &[&str]) -> Result<()> {
             file_name(&exe)?,
             built.icons.len()
         );
+    } else if cfg!(windows) {
+        println!(
+            "xtask ship: WARNING — {demo} declares neither an icon nor a version, so Explorer \
+             shows the default picture and a blank Details tab (§6 M73)"
+        );
     }
     // Names, not paths: `Project::open` resolved everything against the source
     // manifest's directory, and what a folder needs is the same file under the
@@ -130,6 +135,18 @@ pub fn run_cmd(args: &[&str]) -> Result<()> {
         Some(input) => std::fs::read_to_string(folder.join(file_name(input)?)).ok(),
         None => None,
     };
+    // Before the readme is written from it (§6 M81): an action map is a subset
+    // of TOML and a wrapped array is valid TOML the engine refuses, so this is a
+    // folder whose game starts with no bindings at all. The readme would have
+    // described the scheme anyway, because it parses with the full `toml` crate.
+    if let Some(line) = map.as_deref().and_then(notes::wrapped_array) {
+        bail!(
+            "the staged action map opens an array on line {line} and does not close it there — \
+             `gg-input` reads a subset of TOML in which an array is on one line (§6 M74), so \
+             this folder ships a game with no bindings. A formatter did this; put the array back \
+             on one line."
+        );
+    }
     std::fs::write(
         folder.join(notes::README),
         notes::readme(&project, map.as_deref(), &marks.engine, &file_name(&exe)?),
@@ -338,11 +355,19 @@ fn marks(project: &Project) -> Result<rsrc::Marks> {
 /// `None` off Windows and for a game with no icon: an ELF has no resource
 /// section, and the manifest's own picture is what there is to put in one.
 fn resource(project: &Project, marks: &rsrc::Marks) -> Result<Option<(PathBuf, rsrc::Built)>> {
-    let Some(icon) = project.icon.as_ref().filter(|_| cfg!(windows)) else {
+    // A version with no icon is a resource too (§6 M81). Until then the icon was
+    // the only trigger, so such a manifest shipped a blank *Details* tab and —
+    // worse — skipped `rsrc::verify`, which is the only check that covers what
+    // the linker did with any of this.
+    if !cfg!(windows) || (project.icon.is_none() && project.version.is_none()) {
         return Ok(None);
-    };
-    let bytes = std::fs::read(icon).with_context(|| format!("reading {}", icon.display()))?;
-    let built = rsrc::object(&bytes, marks)?;
+    }
+    let icon = project
+        .icon
+        .as_ref()
+        .map(|icon| std::fs::read(icon).with_context(|| format!("reading {}", icon.display())))
+        .transpose()?;
+    let built = rsrc::object(icon.as_deref(), marks)?;
     let digest = <sha2::Sha256 as sha2::Digest>::digest(&built.object);
     let dir = workspace_root().join("target/xtask-cache/rsrc");
     std::fs::create_dir_all(&dir)?;

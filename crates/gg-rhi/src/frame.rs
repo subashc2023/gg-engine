@@ -31,7 +31,7 @@ impl Frames {
                 .queue_family_index(device.graphics.family);
             // SAFETY: device is live.
             let pool = unsafe { device.raw().create_command_pool(&pool_info, None) }
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
             device.set_name(pool, &format!("gg.frame{i}.pool"));
 
             let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -40,7 +40,7 @@ impl Frames {
                 .command_buffer_count(1);
             // SAFETY: pool is live.
             let cmd = unsafe { device.raw().allocate_command_buffers(&alloc_info) }
-                .map_err(RhiError::Vk)?
+                .map_err(RhiError::vk)?
                 .into_iter()
                 .next()
                 .ok_or_else(|| RhiError::Loader("no command buffer allocated".into()))?;
@@ -49,7 +49,7 @@ impl Frames {
             let semaphore_info = vk::SemaphoreCreateInfo::default();
             // SAFETY: device is live.
             let acquire = unsafe { device.raw().create_semaphore(&semaphore_info, None) }
-                .map_err(RhiError::Vk)?;
+                .map_err(RhiError::vk)?;
             device.set_name(acquire, &format!("gg.frame{i}.acquire"));
 
             slots.push(FrameSlot { pool, cmd, acquire });

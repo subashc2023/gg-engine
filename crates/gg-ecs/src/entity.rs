@@ -167,6 +167,70 @@ impl Entities {
     /// one index, or as a wrapped generation reviving every stale handle.
     /// Nothing is written until every check has passed.
     pub(crate) fn restore(&mut self, image: &EntitiesImage) -> Result<(), crate::SnapshotError> {
+        image.check()?;
+        self.generations.clone_from(&image.generations);
+        self.free.clone_from(&image.free);
+        self.live = image.live;
+        Ok(())
+    }
+
+    /// Fold allocator state into the canonical hash (§4.2.1).
+    ///
+    /// The freelist is hashed too, deliberately: two worlds with identical live
+    /// entities but different freelists hand out *different ids next tick*, so
+    /// they are not the same state. Omitting it would let a divergence hide for
+    /// exactly one spawn.
+    pub fn hash_into(&self, h: &mut StateHasher) {
+        h.u32(self.live);
+        h.u64(self.generations.len() as u64);
+        for &g in &self.generations {
+            h.u32(g);
+        }
+        h.u64(self.free.len() as u64);
+        for &i in &self.free {
+            h.u32(i);
+        }
+    }
+}
+
+/// Allocator state as a snapshot carries it (§4.8).
+///
+/// Public because [`Snapshot`](crate::Snapshot) is, but opaque: the fields are
+/// the allocation contract's private business, and a caller that could edit them
+/// could hand out a live id twice.
+#[derive(Clone, Debug)]
+pub struct EntitiesImage {
+    pub(crate) generations: Vec<u32>,
+    pub(crate) free: Vec<u32>,
+    pub(crate) live: u32,
+}
+
+impl EntitiesImage {
+    /// Live entities in the captured world.
+    #[must_use]
+    pub fn live(&self) -> u32 {
+        self.live
+    }
+
+    /// [`Entities::is_alive`] against the *captured* allocator, for the
+    /// consistency check a restore runs before it touches the world (§6 M81).
+    pub(crate) fn is_live(&self, entity: Entity) -> bool {
+        entity.generation() % 2 == 1
+            && self
+                .generations
+                .get(entity.index() as usize)
+                .is_some_and(|&g| g == entity.generation())
+    }
+
+    /// The allocation contract, against the image alone (§6 M81).
+    ///
+    /// Split out of [`Entities::restore`] so a snapshot's *structural* check can
+    /// run it first: the row checks beside it read generations out of this
+    /// image, and reporting "entity 3 is not live" about an image whose
+    /// generation array is itself corrupt names the symptom instead of the
+    /// cause.
+    pub(crate) fn check(&self) -> Result<(), crate::SnapshotError> {
+        let image = self;
         let bad = |detail: String| crate::SnapshotError::Allocator { detail };
         let mut live: u32 = 0;
         for (index, &generation) in image.generations.iter().enumerate() {
@@ -216,49 +280,7 @@ impl Entities {
                 )));
             }
         }
-
-        self.generations.clone_from(&image.generations);
-        self.free.clone_from(&image.free);
-        self.live = image.live;
         Ok(())
-    }
-
-    /// Fold allocator state into the canonical hash (§4.2.1).
-    ///
-    /// The freelist is hashed too, deliberately: two worlds with identical live
-    /// entities but different freelists hand out *different ids next tick*, so
-    /// they are not the same state. Omitting it would let a divergence hide for
-    /// exactly one spawn.
-    pub fn hash_into(&self, h: &mut StateHasher) {
-        h.u32(self.live);
-        h.u64(self.generations.len() as u64);
-        for &g in &self.generations {
-            h.u32(g);
-        }
-        h.u64(self.free.len() as u64);
-        for &i in &self.free {
-            h.u32(i);
-        }
-    }
-}
-
-/// Allocator state as a snapshot carries it (§4.8).
-///
-/// Public because [`Snapshot`](crate::Snapshot) is, but opaque: the fields are
-/// the allocation contract's private business, and a caller that could edit them
-/// could hand out a live id twice.
-#[derive(Clone, Debug)]
-pub struct EntitiesImage {
-    pub(crate) generations: Vec<u32>,
-    pub(crate) free: Vec<u32>,
-    pub(crate) live: u32,
-}
-
-impl EntitiesImage {
-    /// Live entities in the captured world.
-    #[must_use]
-    pub fn live(&self) -> u32 {
-        self.live
     }
 }
 

@@ -42,9 +42,17 @@ use gg_assets::{TextureFormat, texture};
 use gg_math::render::Vec3;
 // `sim`'s transcendentals and not `std`'s, and here the §3 ban earns more than
 // it does in the engine: `libm` is correctly rounded and identical on every
-// host, so a pack compiled on this desk and one compiled in WSL agree *byte for
-// byte* rather than agreeing only with themselves. §4.6's reproducibility gate
-// builds twice on one machine and could never have caught the difference.
+// host, so the SH projection and the prefilter *this file computes* are the same
+// bytes on this desk and in WSL rather than agreeing only with themselves.
+// §4.6's reproducibility gate builds twice on one machine and could never have
+// caught the difference.
+//
+// **The claim stops at this file** (§6 M81 narrowed it; it read "a pack compiled
+// on this desk and one compiled in WSL agree byte for byte", full stop). The
+// prefiltered chain then goes through `bc6h`, which is the same CPUID-dispatched
+// ISPC encoder §8's cross-host row already names for BC7/BC5/BC4 — so the
+// across-host guarantee for a `.hdr` is exactly the one those formats have,
+// which is none. The cache key was always honest about it; the sentence was not.
 use gg_math::sim;
 use intel_tex_2::{RgbaSurface, bc6h};
 

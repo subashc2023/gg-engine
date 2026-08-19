@@ -68,6 +68,10 @@ fn main() {
 }
 
 fn usage() -> anyhow::Result<()> {
+    // The reload legs come off `shell::LEGS` rather than a second list: the two
+    // drifted three flags apart before §6 M81, and a usage text that omits a leg
+    // is how a leg stops being run.
+    let legs = shell::leg_flags();
     anyhow::bail!(
         "usage: cargo xtask <command>\n\
          \n\
@@ -79,7 +83,7 @@ fn usage() -> anyhow::Result<()> {
          shaders [--check]                                offline shader build + codegen (in-process Slang)\n\
          dist                                             dist gate: build+run tier-dist, symbol absence, crash symbolization (§5.8)\n\
          ship <demo>                                      manual: assemble the folder a player unzips, from the demo's game.ggproj (§6 M41)\n\
-         reload [--cross-tier|--segments|--chaos|--latency|--ui|--save|--editor|--launcher|--knob|--tetris|--menu|--platformer|--shooter|--orbit|--epoch|--node|--rules|--feel|--retune|--burn|--best|--settings|--progress|--keys|--window|--refuse|--crash|--away|--agent]  the gates that need the shell over a game dylib; no flag runs the set\n\
+         reload [{legs}]  the gates that need the shell over a game dylib; no flag runs the set\n\
          fresh [--clone|--canary]                         the weekly repository gates on demand: pristine-clone rebuild, cargo update canary (§5, §9)\n\
          replay [--bless]                                 §5.6 determinism material: the curated replay's hashes vs its baseline; --bless re-authors both\n\
          public-api [--bless]                             §5.10 surface gate for the five frozen crates, on the pinned nightly\n\

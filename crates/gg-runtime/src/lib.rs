@@ -221,6 +221,33 @@ const PROGRESS: &str = "progress.ggsave";
 /// choosing a different working directory anyway.
 const CONFIG: &str = "gg.cfg";
 
+/// Why the shell stopped, and whether a player saw a game first (§6 M81).
+///
+/// The flag is not diagnostics: it picks the first line of the box. "could not
+/// start" is what a stranger reads when the folder is short its dylib, and it is
+/// the wrong sentence entirely for a session that played for ten minutes and
+/// then failed to write a save — a player told the former goes looking for a
+/// broken download.
+#[derive(Debug)]
+pub struct Exit {
+    /// The failure, with its whole chain.
+    pub error: anyhow::Error,
+    /// `false` for everything up to the first tick — argument parsing,
+    /// observability, the config file, the loader.
+    pub started: bool,
+}
+
+impl From<anyhow::Error> for Exit {
+    /// Everything reached by `?` inside [`run`] is startup: the loop's own
+    /// failure is built by hand and is the only one that sets the flag.
+    fn from(error: anyhow::Error) -> Exit {
+        Exit {
+            error,
+            started: false,
+        }
+    }
+}
+
 /// Boot, then sessions until nothing asks for another.
 ///
 /// `argv` is what `gg_core::config` reads its own flags out of; `args` is what
@@ -229,7 +256,11 @@ const CONFIG: &str = "gg.cfg";
 /// **The loop is one pass in every ordinary run.** A session ends by asking to
 /// open a project (§6 M15.1 item 4) and nothing else does that, so a shell
 /// pointed at a game runs exactly once and returns.
-pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
+///
+/// The error carries [`Exit::started`] because a box that says "could not start"
+/// to a player who has been playing for ten minutes is describing a different
+/// event (§6 M81).
+pub fn run(mut args: Args, argv: &[String]) -> Result<(), Exit> {
     // Bound to a named local, not `_`: the guard *is* the Tracy client's
     // lifetime, and `let _ = ..` would drop it here (see `Observability`).
     // Dist has no guard to hold, so the binding is a unit there and the lint is
@@ -242,7 +273,9 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
     #[cfg(feature = "fp-assert")]
     gg_math::fpenv::assert_fp_env();
 
-    {
+    // One closure, so everything reached by `?` here is `anyhow` and lands on
+    // `Exit`'s `From` as startup rather than as a session that began.
+    (|| -> anyhow::Result<()> {
         let _startup = info_span!("startup").entered();
         info!(
             version = env!("CARGO_PKG_VERSION"),
@@ -289,11 +322,25 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
         // happened to name.
         let config = args.dir.as_deref().unwrap_or(Path::new(".")).join(CONFIG);
         gg_core::config::boot(&config, player_file(&args, CONFIG).as_deref(), argv)?;
-    }
+        Ok(())
+    })()?;
 
-    while let Some(next) = session(&args)? {
-        args = next;
-    }
+    // The loop's failure is carried rather than raised (§6 M81): a `?` here
+    // jumped straight past the verdict below, so the session most likely to have
+    // lost the player's disk was the one session that never said so. Whatever
+    // went wrong, the sentence about their files is still owed.
+    let outcome = loop {
+        match session(&args) {
+            Ok(Some(next)) => args = next,
+            Ok(None) => break Ok(()),
+            Err(error) => {
+                break Err(Exit {
+                    error,
+                    started: true,
+                });
+            }
+        }
+    };
     // After every session and once per process (§6 M54). A game whose disk
     // refused exits 0 — it played, and the exit code is about the session — so
     // this is the only place the fact reaches anyone but a log reader. `alert`
@@ -310,7 +357,7 @@ pub fn run(mut args: Args, argv: &[String]) -> anyhow::Result<()> {
         );
         gg_platform::alert(title, &body);
     }
-    Ok(())
+    outcome
 }
 
 /// One session: a world over a game, driven to the end of its loop.
@@ -432,6 +479,14 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
         play::play(&mut app, &title, target, args.window, icon)?
     };
 
+    // First of everything after the loop, because every line below it either
+    // writes a player file or leaves the process: the last tick has run, so
+    // nothing further will be offered, and bytes still in flight would land on
+    // top of an exit write and roll the session back an interval (§6 M48). The
+    // rejuvenation restart is the same hazard one step further out — the
+    // successor opens these files, and a writer from this process outliving the
+    // exec would overwrite what it reads.
+    app.checkpoint_stop();
     // The window is down and the GPU is accounted for (§4.3), which is the only
     // point a session may be handed on. Never returns on success.
     if let Some(handoff) = app.handoff() {
@@ -458,9 +513,6 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     // game, because the game got no tick in which to decide otherwise. A
     // failure here is counted, never fatal: the process is already leaving, and
     // what it says about the disk is `player::note`'s and is said once (§6 M54).
-    // Ahead of the write and not after it: a checkpoint still in flight would
-    // land on top of these bytes and roll the session back an interval (§6 M48).
-    app.checkpoint_stop();
     if let Some(path) = progress.filter(|_| keep_progress) {
         let _ = app.write_save(&path);
     }
@@ -649,8 +701,16 @@ fn log_path(data: Option<&Path>) -> Option<PathBuf> {
 ///
 /// Separate from — and public alongside — [`refuse`] because it is the only
 /// half a test can read: the box is the operator's and stderr is a stream.
-pub fn refusal(title: &str, error: &anyhow::Error, log: Option<&Path>) -> String {
-    let mut body = format!("{title} could not start.\n\n{error}");
+/// `started` picks the first line and is the whole of §6 M81's half of this: a
+/// failure after the loop began did not fail to *start*, and telling a player it
+/// did sends them looking for a broken download.
+pub fn refusal(title: &str, error: &anyhow::Error, log: Option<&Path>, started: bool) -> String {
+    let opening = if started {
+        "stopped and could not continue"
+    } else {
+        "could not start"
+    };
+    let mut body = format!("{title} {opening}.\n\n{error}");
     for cause in error.chain().skip(1) {
         body.push_str(&format!("\n\ncaused by: {cause}"));
     }
@@ -729,16 +789,18 @@ pub fn unsaved(title: &str, dir: Option<&Path>, verdict: &player::Verdict) -> St
 /// global and outlives `run`'s guard, so the log line lands for every failure
 /// that got as far as opening one — the ones that did not are exactly
 /// `parse_args`'s, which is what the other two are for.
-pub fn refuse(
-    title: Option<&str>,
-    data: Option<&Path>,
-    error: &anyhow::Error,
-) -> std::process::ExitCode {
-    tracing::error!(error = %format!("{error:#}"), "refused to start");
+pub fn refuse(title: Option<&str>, data: Option<&Path>, exit: &Exit) -> std::process::ExitCode {
+    let error = &exit.error;
+    let said = if exit.started {
+        "the session ended early"
+    } else {
+        "refused to start"
+    };
+    tracing::error!(error = %format!("{error:#}"), "{said}");
     eprintln!("Error: {error:?}");
     let title = title.unwrap_or(env!("CARGO_PKG_NAME"));
     let log = log_path(data);
-    gg_platform::alert(title, &refusal(title, error, log.as_deref()));
+    gg_platform::alert(title, &refusal(title, error, log.as_deref(), exit.started));
     std::process::ExitCode::FAILURE
 }
 

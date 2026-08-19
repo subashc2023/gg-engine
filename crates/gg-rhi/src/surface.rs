@@ -35,7 +35,7 @@ impl Surface {
                 None,
             )
         }
-        .map_err(RhiError::Vk)?;
+        .map_err(RhiError::vk)?;
         Ok(Self {
             fns: ash::khr::surface::Instance::new(instance.entry(), instance.raw()),
             raw,
@@ -54,7 +54,7 @@ impl Surface {
         let info = vk::HeadlessSurfaceCreateInfoEXT::default();
         // SAFETY: instance is live and enabled VK_EXT_headless_surface; the
         // create-info holds no pointers.
-        let raw = unsafe { fns.create_headless_surface(&info, None) }.map_err(RhiError::Vk)?;
+        let raw = unsafe { fns.create_headless_surface(&info, None) }.map_err(RhiError::vk)?;
         Ok(Self {
             fns: ash::khr::surface::Instance::new(instance.entry(), instance.raw()),
             raw,
@@ -84,7 +84,7 @@ impl Surface {
             self.fns
                 .get_physical_device_surface_capabilities(pd, self.raw)
         }
-        .map_err(RhiError::Vk)
+        .map_err(RhiError::vk)
     }
 
     pub(crate) fn formats(
@@ -92,7 +92,7 @@ impl Surface {
         pd: vk::PhysicalDevice,
     ) -> Result<Vec<vk::SurfaceFormatKHR>, RhiError> {
         // SAFETY: surface and pd are live.
-        unsafe { self.fns.get_physical_device_surface_formats(pd, self.raw) }.map_err(RhiError::Vk)
+        unsafe { self.fns.get_physical_device_surface_formats(pd, self.raw) }.map_err(RhiError::vk)
     }
 
     pub(crate) fn present_modes(
@@ -104,7 +104,7 @@ impl Surface {
             self.fns
                 .get_physical_device_surface_present_modes(pd, self.raw)
         }
-        .map_err(RhiError::Vk)
+        .map_err(RhiError::vk)
     }
 
     pub(crate) fn destroy(&mut self) {

@@ -84,7 +84,9 @@ pub gg_rhi::RhiError::Loader(alloc::string::String)
 pub gg_rhi::RhiError::MissingLayer(alloc::string::String)
 pub gg_rhi::RhiError::NoSuitableDevice(alloc::string::String)
 pub gg_rhi::RhiError::NoVulkan(alloc::string::String)
-pub gg_rhi::RhiError::Vk(ash::vk::enums::Result)
+pub gg_rhi::RhiError::Vk
+pub gg_rhi::RhiError::Vk::code: i32
+pub gg_rhi::RhiError::Vk::name: alloc::string::String
 pub enum gg_rhi::Sampler
 pub gg_rhi::Sampler::LinearClamp
 pub gg_rhi::Sampler::LinearRepeat

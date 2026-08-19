@@ -25,7 +25,7 @@ fn layered() -> anyhow::Error {
 #[test]
 fn the_box_names_the_game_the_whole_chain_and_where_the_log_is() {
     let log = std::path::Path::new("C:/Users/p/AppData/Roaming/falling-blocks/log.txt");
-    let body = gg_runtime::refusal("Falling Blocks", &layered(), Some(log));
+    let body = gg_runtime::refusal("Falling Blocks", &layered(), Some(log), false);
     assert!(
         body.starts_with("Falling Blocks could not start."),
         "{body}"
@@ -116,7 +116,7 @@ fn a_session_that_saved_some_of_itself_says_so() {
 /// missing line: a path that is not there reads as a file the player deleted.
 #[test]
 fn with_nowhere_to_point_it_points_nowhere() {
-    let body = gg_runtime::refusal("gg-runtime", &layered(), None);
+    let body = gg_runtime::refusal("gg-runtime", &layered(), None, false);
     assert!(!body.contains("The full log"), "{body}");
     assert!(
         body.contains("not there"),
@@ -139,7 +139,7 @@ fn a_paragraph_from_below_reaches_the_box_unbroken() {
     let paragraph = "Vulkan is not installed on this machine.\n\n\
                      This game needs a graphics card with Vulkan 1.3 support.\n\n\
                      (LoadLibraryExW failed)";
-    let body = gg_runtime::refusal("Falling Blocks", &anyhow::anyhow!(paragraph), None);
+    let body = gg_runtime::refusal("Falling Blocks", &anyhow::anyhow!(paragraph), None, false);
     assert_eq!(
         body,
         format!("Falling Blocks could not start.\n\n{paragraph}"),
@@ -149,4 +149,20 @@ fn a_paragraph_from_below_reaches_the_box_unbroken() {
     // bring-up refusal has no chain — the day something adds context to it, this
     // says so rather than the player finding the paragraph pushed down the box.
     assert!(!body.contains("caused by:"), "{body}");
+}
+
+/// The same failure after the loop began is not a failure to *start* (§6 M81).
+/// A session that ran for ten minutes and then could not write its save used to
+/// tell the player the game could not start, which sends them looking for a
+/// broken download instead of at their disk.
+#[test]
+fn a_failure_after_the_first_tick_does_not_say_the_game_never_started() {
+    let body = gg_runtime::refusal("Falling Blocks", &layered(), None, true);
+    assert!(
+        body.starts_with("Falling Blocks stopped and could not continue."),
+        "{body}"
+    );
+    assert!(!body.contains("could not start"), "{body}");
+    // The chain is the same either way — only the first line moves.
+    assert!(body.contains("not there"), "{body}");
 }

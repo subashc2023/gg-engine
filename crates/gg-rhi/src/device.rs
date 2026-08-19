@@ -332,7 +332,7 @@ impl Device {
         let inst = instance.raw();
         // SAFETY: instance is live.
         let physical_devices =
-            unsafe { inst.enumerate_physical_devices() }.map_err(RhiError::Vk)?;
+            unsafe { inst.enumerate_physical_devices() }.map_err(RhiError::vk)?;
 
         let mut candidates = Vec::new();
         let mut chosen: Option<(vk::PhysicalDevice, u32, usize)> = None;
@@ -501,7 +501,7 @@ impl Device {
             .push_next(&mut features2);
 
         // SAFETY: all pointed-to arrays outlive the call; pd is valid.
-        let raw = unsafe { inst.create_device(pd, &device_info, None) }.map_err(RhiError::Vk)?;
+        let raw = unsafe { inst.create_device(pd, &device_info, None) }.map_err(RhiError::vk)?;
         let swapchain_fns = ash::khr::swapchain::Device::new(inst, &raw);
         let calibrated =
             wants_calibration.then(|| ash::ext::calibrated_timestamps::Device::new(inst, &raw));
@@ -524,7 +524,7 @@ impl Device {
                 .initial_value(0);
             let info = vk::SemaphoreCreateInfo::default().push_next(&mut type_info);
             // SAFETY: device is live; info valid.
-            unsafe { device.create_semaphore(&info, None) }.map_err(RhiError::Vk)
+            unsafe { device.create_semaphore(&info, None) }.map_err(RhiError::vk)
         };
         let graphics_timeline = make_timeline(&raw)?;
         let transfer_timeline = make_timeline(&raw)?;
@@ -841,14 +841,14 @@ impl Device {
             .semaphores(&semaphores)
             .values(&values);
         // SAFETY: semaphore is live and a timeline.
-        unsafe { self.raw.wait_semaphores(&info, u64::MAX) }.map_err(RhiError::Vk)
+        unsafe { self.raw.wait_semaphores(&info, u64::MAX) }.map_err(RhiError::vk)
     }
 
     /// The graphics timeline's completed value — the deletion queue's clock.
     pub(crate) fn graphics_timeline_value(&self) -> Result<u64, RhiError> {
         // SAFETY: semaphore is live and a timeline.
         unsafe { self.raw.get_semaphore_counter_value(self.graphics.timeline) }
-            .map_err(RhiError::Vk)
+            .map_err(RhiError::vk)
     }
 
     /// Block until the transfer timeline reaches `value` — the staging ring's
@@ -860,7 +860,7 @@ impl Device {
             .semaphores(&semaphores)
             .values(&values);
         // SAFETY: semaphore is live and a timeline.
-        unsafe { self.raw.wait_semaphores(&info, u64::MAX) }.map_err(RhiError::Vk)
+        unsafe { self.raw.wait_semaphores(&info, u64::MAX) }.map_err(RhiError::vk)
     }
 
     /// Wait the graphics queue idle. Swapchain recreation only: presentation
@@ -891,7 +891,7 @@ impl Device {
     /// it — the queue it idles has just been waited to completion.
     pub(crate) fn check_alive(&self) -> Result<(), RhiError> {
         // SAFETY: device is live or lost; both are legal receivers here.
-        unsafe { self.raw.device_wait_idle() }.map_err(RhiError::Vk)
+        unsafe { self.raw.device_wait_idle() }.map_err(RhiError::vk)
     }
 
     /// Allocate GPU memory. Every byte in the engine flows through here so

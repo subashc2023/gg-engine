@@ -1532,105 +1532,85 @@ fn build_variant(kind: &Kind, name: &str) -> anyhow::Result<PathBuf> {
 
 // ---- the gates ----------------------------------------------------------
 
+/// §5.6c across tiers plus the dist records the same builds carry — one leg,
+/// because the second reads what the first produced.
+fn cross_tier_and_records() -> anyhow::Result<()> {
+    cross_tier()?;
+    dist_records()
+}
+
+/// One leg of `xtask reload`: the flag that selects it and what it runs.
+pub type Leg = (&'static str, fn() -> anyhow::Result<()>);
+
+/// Every leg, in run order.
+///
+/// A table rather than a chain of `if`s because it is the *inventory*: the usage
+/// text is printed off it and an unrecognized flag is refused against it (§6
+/// M81). The chain it replaced accepted any argument and silently matched none,
+/// so a typo ran zero legs and printed `green` — the one path in this crate
+/// where a gate could report success without running.
+pub const LEGS: &[Leg] = &[
+    ("--cross-tier", cross_tier_and_records),
+    ("--segments", segments),
+    ("--chaos", chaos_reload),
+    ("--latency", latency),
+    ("--ui", ui),
+    ("--save", save),
+    ("--editor", editor),
+    ("--launcher", launcher),
+    ("--knob", knob),
+    ("--tetris", tetris),
+    ("--menu", tetris_menu),
+    ("--progress", progress),
+    ("--keys", keys),
+    ("--window", window),
+    ("--refuse", refuse),
+    ("--crash", crash),
+    ("--away", away),
+    ("--soak", soak),
+    ("--disk", disk),
+    ("--platformer", platformer),
+    ("--shooter", shooter),
+    ("--orbit", orbit),
+    ("--epoch", epoch),
+    ("--node", node),
+    ("--rules", rules),
+    ("--feel", feel),
+    ("--retune", retune),
+    ("--burn", burn),
+    ("--best", best),
+    ("--settings", settings),
+    ("--agent", agent),
+];
+
+/// The leg flags as the usage line spells them, `|`-separated.
+pub fn leg_flags() -> String {
+    LEGS.iter()
+        .map(|(flag, _)| *flag)
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 /// `cargo xtask reload` — every M5 gate that needs the shell driving a game
 /// dylib, in one command. The nightly tier calls the same functions
 /// individually; this exists so a human can run the set after touching the
 /// boundary without waiting out a whole nightly.
 pub fn gates(args: &[&str]) -> anyhow::Result<()> {
-    let only = |name: &str| args.is_empty() || args.contains(&name);
-    if only("--cross-tier") {
-        cross_tier()?;
-        dist_records()?;
+    if let Some(unknown) = args
+        .iter()
+        .find(|arg| !LEGS.iter().any(|(flag, _)| flag == *arg))
+    {
+        anyhow::bail!(
+            "xtask reload: no leg named `{unknown}`. Running nothing and reporting green is the \
+             one thing a gate may not do, so this is a failure rather than an empty set.\n\
+             legs: {}",
+            leg_flags()
+        );
     }
-    if only("--segments") {
-        segments()?;
-    }
-    if only("--chaos") {
-        chaos_reload()?;
-    }
-    if only("--latency") {
-        latency()?;
-    }
-    if only("--ui") {
-        ui()?;
-    }
-    if only("--save") {
-        save()?;
-    }
-    if only("--editor") {
-        editor()?;
-    }
-    if only("--launcher") {
-        launcher()?;
-    }
-    if only("--knob") {
-        knob()?;
-    }
-    if only("--tetris") {
-        tetris()?;
-    }
-    if only("--menu") {
-        tetris_menu()?;
-    }
-    if only("--progress") {
-        progress()?;
-    }
-    if only("--keys") {
-        keys()?;
-    }
-    if only("--window") {
-        window()?;
-    }
-    if only("--refuse") {
-        refuse()?;
-    }
-    if only("--crash") {
-        crash()?;
-    }
-    if only("--away") {
-        away()?;
-    }
-    if only("--soak") {
-        soak()?;
-    }
-    if only("--disk") {
-        disk()?;
-    }
-    if only("--platformer") {
-        platformer()?;
-    }
-    if only("--shooter") {
-        shooter()?;
-    }
-    if only("--orbit") {
-        orbit()?;
-    }
-    if only("--epoch") {
-        epoch()?;
-    }
-    if only("--node") {
-        node()?;
-    }
-    if only("--rules") {
-        rules()?;
-    }
-    if only("--feel") {
-        feel()?;
-    }
-    if only("--retune") {
-        retune()?;
-    }
-    if only("--burn") {
-        burn()?;
-    }
-    if only("--best") {
-        best()?;
-    }
-    if only("--settings") {
-        settings()?;
-    }
-    if only("--agent") {
-        agent()?;
+    for (flag, leg) in LEGS {
+        if args.is_empty() || args.contains(flag) {
+            leg()?;
+        }
     }
     println!("xtask reload: green");
     Ok(())
@@ -7501,4 +7481,35 @@ fn dir_bytes(dir: &Path) -> anyhow::Result<Vec<(String, u64)>> {
     }
     out.sort();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The silent-green path this table replaced (§6 M81): the chain of `if`s
+    /// matched nothing on a misspelled flag, ran no leg, and printed `green`.
+    #[test]
+    fn a_flag_no_leg_answers_to_is_refused_rather_than_running_nothing() {
+        let refusal = gates(&["--tetrsi"]).expect_err("a typo must not report green");
+        let message = refusal.to_string();
+        assert!(message.contains("--tetrsi"), "names the flag: {message}");
+        assert!(
+            message.contains("--tetris"),
+            "and lists the real ones: {message}"
+        );
+    }
+
+    /// Flags are unique and spelled as flags — the table is the inventory the
+    /// usage line is printed from, so a duplicate would hide a leg from a reader
+    /// and a bare word would be unreachable from the command line.
+    #[test]
+    fn every_leg_flag_is_distinct_and_looks_like_a_flag() {
+        let mut seen: Vec<&str> = LEGS.iter().map(|(flag, _)| *flag).collect();
+        let count = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), count, "a duplicated leg flag: {seen:?}");
+        assert!(seen.iter().all(|f| f.starts_with("--") && f.len() > 2));
+    }
 }

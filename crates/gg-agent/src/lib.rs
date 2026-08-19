@@ -69,6 +69,10 @@ pub struct Change {
     /// *lost* rather than never present, and the one an agent should be told
     /// about without being asked.
     pub retyped: Vec<String>,
+    /// Present in the old build only — discarded. Loss like `retyped`, kept in
+    /// its own list because the repair differs: a retype is a type to restore,
+    /// a removal is a field to put back.
+    pub removed: Vec<String>,
 }
 
 /// One crossing of the §4.2.2 seam.
@@ -307,6 +311,8 @@ fn push_seam_json(out: &mut String, seam: &Seam) {
         push_list_json(out, &change.defaulted);
         out.push_str(", \"retyped\": ");
         push_list_json(out, &change.retyped);
+        out.push_str(", \"removed\": ");
+        push_list_json(out, &change.removed);
         out.push('}');
     }
     if !seam.changes.is_empty() {

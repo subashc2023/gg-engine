@@ -684,7 +684,13 @@ impl Renderer {
         // on the handles they recorded (§4.4).
         #[cfg(feature = "hot-reload")]
         if let Some(hot) = &mut self.hot {
-            hot.poll(&mut self.rhi, &mut self.pass, &mut self.scene, &mut self.ui);
+            hot.poll(
+                &mut self.rhi,
+                &mut self.pass,
+                &mut self.scene,
+                &mut self.ui,
+                &mut self.integrate,
+            );
         }
         // Before `begin_frame`, not inside it: uploads go to the transfer queue
         // through the staging ring and belong to no frame slot (§4.3). Above the
@@ -1419,7 +1425,13 @@ impl OffscreenRenderer {
         // below there is never anything in flight to race the swap.
         #[cfg(feature = "hot-reload")]
         if let Some(hot) = &mut self.hot {
-            hot.poll(&mut self.rhi, &mut self.pass, &mut self.scene, &mut self.ui);
+            hot.poll(
+                &mut self.rhi,
+                &mut self.pass,
+                &mut self.scene,
+                &mut self.ui,
+                &mut self.integrate,
+            );
         }
         gg_core::zone!("render.frame");
         {
