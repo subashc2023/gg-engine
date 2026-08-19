@@ -20,7 +20,12 @@ use crate::map::{ActionId, ActionMap, AxisId, ContextId, MAX_AXES, Source};
 pub use gg_abi::{AXIS_SCALE, InputFrame};
 
 /// Mouse buttons tracked as held state. Bit `n` is button number `n + 1`.
-const TRACKED_BUTTONS: u8 = 16;
+///
+/// The number itself is [`MouseButton::TRACKED`], where a *name* can be refused
+/// against it (§6 M81) — the guard below still stands, because
+/// [`MouseButton::Extra`] arrives from a platform's own numbering as well as
+/// from a config line.
+const TRACKED_BUTTONS: u8 = MouseButton::TRACKED;
 
 /// Action state for the current tick, plus the previous one for edges.
 #[derive(Debug)]

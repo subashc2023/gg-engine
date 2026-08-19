@@ -81,7 +81,7 @@ fn a_write_that_fails_leaves_the_old_file_whole() {
 fn a_checkpoint_lands_and_says_a_session_is_being_kept() {
     let dir = scratch("checkpoint");
     let path = dir.join("progress.ggsave");
-    let checkpoint = player::Checkpoint::new(path.clone());
+    let checkpoint = player::Checkpoint::new(path.clone(), player::PROGRESS);
     assert!(
         !player::checkpointing(),
         "a writer that has written nothing is promising a player a file that does not exist"
@@ -146,7 +146,7 @@ fn a_verdict_is_per_file_and_not_the_last_write_to_happen() {
 fn offers_a_disk_cannot_keep_up_with_are_dropped_and_never_spliced() {
     let dir = scratch("flood");
     let path = dir.join("progress.ggsave");
-    let checkpoint = player::Checkpoint::new(path.clone());
+    let checkpoint = player::Checkpoint::new(path.clone(), player::PROGRESS);
     let offered: Vec<Vec<u8>> = (0..64u32)
         .map(|tick| format!("the session at tick {tick}").into_bytes())
         .collect();

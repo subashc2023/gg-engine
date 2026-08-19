@@ -165,13 +165,28 @@ impl MouseButton {
         }
     }
 
-    /// The button with that number, inverse of [`MouseButton::number`].
+    /// Mouse buttons a held state can be kept for — the width of
+    /// `Input::buttons_held`, and the ceiling every spelling of a button is
+    /// checked against (§6 M81).
+    ///
+    /// Here rather than beside the bitmask because a number this crate cannot
+    /// track has to be refused where a **name** is read: `Mouse17` parsed,
+    /// bound, and was then dropped at the edge by a bounds check that is not
+    /// wrong and cannot say anything, so an operator's `bindings.cfg` line did
+    /// nothing at all and the file it was in was accepted (§6 M45's "a file
+    /// made only of lines this build refuses moves nothing" — which needs the
+    /// line to *be* refused).
+    pub const TRACKED: u8 = 16;
+
+    /// The button with that number, inverse of [`MouseButton::number`], and
+    /// `None` past [`MouseButton::TRACKED`].
     pub const fn from_number(n: u8) -> Option<Self> {
         Some(match n {
             1 => MouseButton::Left,
             2 => MouseButton::Right,
             3 => MouseButton::Middle,
             0 => return None,
+            n if n > Self::TRACKED => return None,
             n => MouseButton::Extra(n - 4),
         })
     }

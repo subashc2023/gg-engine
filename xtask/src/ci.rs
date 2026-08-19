@@ -749,17 +749,133 @@ fn render_graph_dump() -> anyhow::Result<()> {
     cmd.args(["run", "-q", "-p", "gg-golden", "--", "graph"]);
     lavapipe_env(&mut cmd)?;
     let dump = run_capture(&mut cmd, "gg-golden graph")?;
-    for expected in ["forward-opaque", "readback", "frame-end", "barrier"] {
-        anyhow::ensure!(
-            dump.contains(expected),
-            "the render-graph dump names no `{expected}` — §4.5's dump must be readable and \
-             complete:\n{dump}"
-        );
+    let scenes = parse_dump(&dump);
+    // A dump that produced no scenes is a parser that stopped matching, which
+    // reads exactly like a graph with nothing wrong in it (§5.8).
+    anyhow::ensure!(
+        scenes.len() >= 8,
+        "the render-graph dump parsed as {} scene(s) — §4.5's dump must be readable, and a \
+         reader that stops matching is indistinguishable from a clean graph:\n{dump}",
+        scenes.len()
+    );
+    let barriers: usize = scenes.iter().map(|s| s.barriers.len()).sum();
+    for scene in &scenes {
+        check_dumped(scene)?;
     }
     println!(
-        "xtask: render-graph dump readable ({} lines)",
-        dump.lines().count()
+        "xtask: render-graph dump: {} scene(s), {barriers} barrier(s), every chain tiles (§4.5)",
+        scenes.len()
     );
+    Ok(())
+}
+
+/// One scene's dump, reduced to what a gate can check.
+#[derive(Default)]
+pub(crate) struct Dumped {
+    scene: String,
+    resources: Vec<String>,
+    passes: Vec<String>,
+    /// `(resource, from, to)` in execution order, across every pass.
+    barriers: Vec<(String, String, String)>,
+}
+
+/// Read `gg-golden graph`'s output back into scenes.
+///
+/// Lines it does not recognise are skipped rather than refused: the dump shares
+/// stdout with whatever the harness logs, and a gate that fell over on a stray
+/// line would be a gate nobody could keep green. The vacuity guard in
+/// [`render_graph_dump`] is what stops that tolerance from becoming silence.
+pub(crate) fn parse_dump(text: &str) -> Vec<Dumped> {
+    let (mut out, mut listing): (Vec<Dumped>, bool) = (Vec::new(), false);
+    for line in text.lines().map(str::trim) {
+        if let Some(scene) = line
+            .strip_prefix("=== ")
+            .and_then(|l| l.strip_suffix(" ==="))
+        {
+            out.push(Dumped {
+                scene: scene.to_owned(),
+                ..Dumped::default()
+            });
+            listing = false;
+            continue;
+        }
+        // The two section headers, which is what says whether a `name (kind)`
+        // line is a resource — `passes (execution order)` reads as one
+        // otherwise, and did.
+        if line == "resources" || line.starts_with("passes (") {
+            listing = line == "resources";
+            continue;
+        }
+        let Some(current) = out.last_mut() else {
+            continue;
+        };
+        if let Some(rest) = line.strip_prefix("barrier ")
+            && let Some((resource, states)) = rest.split_once(": ")
+            && let Some((from, to)) = states.split_once(" -> ")
+        {
+            current
+                .barriers
+                .push((resource.to_owned(), from.to_owned(), to.to_owned()));
+        } else if let Some((index, name)) = line.split_once(". ")
+            && index.parse::<usize>().is_ok()
+        {
+            current.passes.push(name.to_owned());
+        } else if listing
+            && let Some((name, _)) = line.split_once(" (")
+            && line.ends_with(')')
+        {
+            current.resources.push(name.to_owned());
+        }
+    }
+    out
+}
+
+/// What §4.5 says a dump *means*, as checks rather than as substrings (§6 M81).
+///
+/// The four-substring containment this replaced would pass on a graph with one
+/// pass in it, on barriers whose transitions contradict each other, and on a
+/// frame that never ended — which is most of what the dump exists to show. The
+/// load-bearing one is the **chain**: a barrier states the layout it is moving
+/// a resource *from*, so within one frame those have to tile, and a `from` that
+/// disagrees with the previous `to` is a barrier that is either redundant or
+/// wrong about the contents it is preserving. Nothing else in the tree checks
+/// it — validation sees each barrier alone, and a wrong-but-legal transition
+/// renders a picture that is merely different.
+pub(crate) fn check_dumped(scene: &Dumped) -> anyhow::Result<()> {
+    let name = &scene.scene;
+    anyhow::ensure!(!scene.passes.is_empty(), "`{name}` dumped no passes");
+    anyhow::ensure!(
+        scene.passes.last().map(String::as_str) == Some("frame-end"),
+        "`{name}`'s last pass is {:?} rather than `frame-end` — a frame that does not end is \
+         one whose last resource states nobody declared",
+        scene.passes.last()
+    );
+    let mut state: Vec<(&str, &str)> = Vec::new();
+    for (resource, from, to) in &scene.barriers {
+        anyhow::ensure!(
+            scene.resources.iter().any(|r| r == resource),
+            "`{name}` moves `{resource}` and never declared it"
+        );
+        match state.iter_mut().find(|(seen, _)| seen == resource) {
+            None => {
+                anyhow::ensure!(
+                    from == "None",
+                    "`{name}` first touches `{resource}` from `{from}` — a frame's first \
+                     barrier on a resource has nothing to preserve and must come from `None`"
+                );
+                state.push((resource, to));
+            }
+            Some((_, last)) => {
+                anyhow::ensure!(
+                    *last == from,
+                    "`{name}` moves `{resource}` from `{from}` when the frame last left it in \
+                     `{last}` — the chain does not tile, so one of the two is wrong about what \
+                     the image holds"
+                );
+                *last = to;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2317,6 +2433,74 @@ fn allowlist_crosscheck() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+
+    /// A dump the graph could actually produce, and the four ways §6 M81's
+    /// checks are made to fail from it. The healthy leg is the parser's own
+    /// test: three resources, four passes and a barrier chain that tiles.
+    #[test]
+    fn a_render_graph_dump_is_read_and_every_way_it_can_lie_is_caught() {
+        const HEALTHY: &str = "\
+=== hall ===
+render graph
+  resources
+    backbuffer (backbuffer)
+    scene.color (attachment)
+    scene.depth (attachment)
+  passes (execution order)
+    0. depth-prepass
+       barrier scene.depth: None -> DepthWrite
+       12 draw(s)
+    1. forward-opaque
+       barrier scene.color: None -> ColorWrite
+       barrier scene.depth: DepthWrite -> DepthRead
+       12 draw(s)
+    2. post
+       barrier backbuffer: None -> ColorWrite
+       barrier scene.color: ColorWrite -> SampledRead
+       1 draw(s)
+    3. frame-end
+";
+        let scenes = super::parse_dump(HEALTHY);
+        assert_eq!(scenes.len(), 1);
+        let hall = &scenes[0];
+        assert_eq!(hall.scene, "hall");
+        assert_eq!(hall.resources.len(), 3, "{:?}", hall.resources);
+        assert_eq!(hall.passes.len(), 4, "{:?}", hall.passes);
+        assert_eq!(hall.barriers.len(), 5);
+        super::check_dumped(hall).unwrap();
+
+        let broken = |from: &str, to: &str| {
+            let text = HEALTHY.replace(from, to);
+            assert_ne!(text, HEALTHY, "the plant `{from}` did not apply");
+            super::check_dumped(&super::parse_dump(&text)[0])
+                .expect_err(&format!("`{from}` -> `{to}` passed"))
+                .to_string()
+        };
+        // The chain: the depth buffer is read as if the prepass had never run.
+        assert!(
+            broken(
+                "scene.depth: DepthWrite -> DepthRead",
+                "scene.depth: None -> DepthRead"
+            )
+            .contains("must come from `None`")
+                || broken(
+                    "scene.depth: DepthWrite -> DepthRead",
+                    "scene.depth: SampledRead -> DepthRead"
+                )
+                .contains("does not tile")
+        );
+        assert!(broken("DepthWrite -> DepthRead", "SampledRead -> DepthRead").contains("tile"));
+        // A resource moved and never declared.
+        assert!(
+            broken(
+                "scene.color: None -> ColorWrite",
+                "scene.mist: None -> ColorWrite"
+            )
+            .contains("never declared")
+        );
+        // A frame with no end.
+        assert!(broken("    3. frame-end\n", "").contains("frame-end"));
+    }
 
     /// Each game-linking crate gets an invocation of its own (§6 M81): their
     /// manifests disagree about which demo carries the `game` feature, cargo

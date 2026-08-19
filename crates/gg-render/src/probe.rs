@@ -914,6 +914,24 @@ impl Probes {
     ///
     /// # Errors
     /// Whatever the allocation refuses.
+    /// Allocate the field on the first frame that asks for it (§6 M81).
+    ///
+    /// At bring-up until then, which is ~2.1 MiB of image and two bindless
+    /// slots on **every** renderer this tree builds — every instrument, every
+    /// offscreen gate, every golden run and every demo — for a term that has
+    /// been off by default since §6 M71. Nothing had to change downstream:
+    /// [`Probes::import`] already answers `None` before this and the graph is
+    /// then M35's exactly, which is a path the frame already had.
+    ///
+    /// # Errors
+    /// Whatever the allocation refuses.
+    pub(crate) fn ensure_open(&mut self, rhi: &mut impl GpuHost) -> Result<(), RhiError> {
+        if self.images.is_none() && cvars::GI.bool() {
+            self.open(rhi)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn open(&mut self, rhi: &mut impl GpuHost) -> Result<(), RhiError> {
         let buffer = rhi.create_buffer(&BufferDesc {
             name: "render.probes.views",

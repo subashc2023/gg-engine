@@ -860,17 +860,89 @@ fn widget_kinds(text: &str) -> Vec<(String, Vec<String>)> {
     kinds
 }
 
-/// `(code, total)` lines: code is non-blank and not a `//` comment.
+/// `(code, total)` lines: code is non-blank, not a `//` comment, and not under
+/// a `#[cfg(test)]` (§6 M81).
+///
+/// The last of those is a change to the *definition* of §3's budget rather than
+/// to its number, and it is worth its sentence. §3's phrase is "thin in code",
+/// and a test is not the shell getting fatter — it is the shell becoming
+/// checkable. Counting them made those two rules fight, and the way that fight
+/// resolves is by not writing the test: the audit found `gg-runtime` at 2080
+/// counted lines with **no unit tests at all**, the largest crate in the tree
+/// with none. The number does not move here, because there were none to
+/// subtract.
+///
+/// Textual and deliberately narrow — the attribute alone on its line, then the
+/// item it opens, closed by brace depth — because the alternative is parsing
+/// Rust in a gate. A `#[cfg(test)] mod name;` closes on its own line and is
+/// [`shell_lines`]' business, since the lines are in another file.
 fn count_code(text: &str) -> (usize, usize) {
+    // `None` outside a test item; `Some(0)` after the attribute and before the
+    // item's brace opens, which is where a `mod name;` declaration ends.
+    let mut skip: Option<usize> = None;
     let (mut code, mut total) = (0usize, 0usize);
-    for line in text.lines() {
+    for raw in text.lines() {
         total += 1;
-        let line = line.trim_start();
-        if !line.is_empty() && !line.starts_with("//") {
-            code += 1;
+        let mut line = raw.trim_start();
+        if skip.is_none() {
+            // The attribute and its item routinely share a line, and the tail
+            // is what says which of the two forms this is.
+            match line.strip_prefix("#[cfg(test)]") {
+                Some(rest) => (skip, line) = (Some(0), rest.trim_start()),
+                None => {
+                    if !line.is_empty() && !line.starts_with("//") {
+                        code += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+        let Some(depth) = &mut skip else { continue };
+        *depth += line.matches('{').count();
+        if *depth == 0 {
+            // Still before any body: a `;` ends a declaration, and anything
+            // else here is a doc line or a blank between the two.
+            if line.ends_with(';') {
+                skip = None;
+            }
+        } else {
+            *depth -= line.matches('}').count().min(*depth);
+            if *depth == 0 {
+                skip = None;
+            }
         }
     }
     (code, total)
+}
+
+/// The files a crate's own sources exempt by declaring them under
+/// `#[cfg(test)]`, as sibling paths (§6 M81).
+///
+/// `#[cfg(test)] mod tests;` puts the lines in another file, and a gate that
+/// exempted the inline spelling and not this one would be a gate that has an
+/// opinion about where a test lives.
+fn declared_test_modules(file: &Path, text: &str) -> Vec<std::path::PathBuf> {
+    let Some(dir) = file.parent() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut armed = false;
+    for raw in text.lines().map(str::trim_start) {
+        let line = match raw.strip_prefix("#[cfg(test)]") {
+            Some(rest) => rest.trim_start(),
+            None => raw,
+        };
+        if (armed || line != raw)
+            && let Some(name) = line.strip_prefix("mod ").and_then(|r| r.strip_suffix(';'))
+        {
+            out.push(dir.join(format!("{name}.rs")));
+            out.push(dir.join(name).join("mod.rs"));
+        }
+        // The attribute alone on its line arms the next one; with an item after
+        // it the line has already been read.
+        armed = raw.starts_with("#[cfg(test)]") && line.is_empty();
+    }
+    out
 }
 
 /// Every declared dependency must appear in the crate that declares it.
@@ -1021,18 +1093,41 @@ fn reference_images() -> anyhow::Result<()> {
 fn shell_lines() -> anyhow::Result<()> {
     let mut files = Vec::new();
     walk_rs(&workspace_root().join("crates/gg-runtime/src"), &mut files);
-    let (mut code, mut total) = (0usize, 0usize);
-    for text in files.iter().filter_map(|f| std::fs::read_to_string(f).ok()) {
-        let (c, t) = count_code(&text);
+    let read: Vec<_> = files
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok().map(|t| (f.clone(), t)))
+        .collect();
+    let exempt: Vec<_> = read
+        .iter()
+        .flat_map(|(f, text)| declared_test_modules(f, text))
+        .collect();
+    let (mut code, mut total, mut tested) = (0usize, 0usize, 0usize);
+    for (_, text) in read.iter().filter(|(f, _)| !exempt.contains(f)) {
+        let (c, t) = count_code(text);
+        // The same count with the exemption off, so what it bought is a number
+        // rather than an argument.
+        let bare = text
+            .lines()
+            .map(str::trim_start)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .count();
         code += c;
         total += t;
+        tested += bare - c;
     }
     anyhow::ensure!(
         code <= SHELL_BUDGET,
         "gg-runtime is {code} code lines against a {SHELL_BUDGET}-line budget (§3) — \
          raising the budget is a PR, not a drift"
     );
-    println!("xtask: gg-runtime line budget {code}/{SHELL_BUDGET} code lines ({total} total)");
+    // Printed rather than merely subtracted: a brace miscounted in
+    // `count_code` exempts the tail of a file, and the only symptom of that is
+    // a number here that has stopped looking like the tests.
+    println!(
+        "xtask: gg-runtime line budget {code}/{SHELL_BUDGET} code lines ({total} total, \
+         {tested} exempt under #[cfg(test)], {} in another file)",
+        exempt.iter().filter(|f| f.exists()).count()
+    );
     Ok(())
 }
 
@@ -1178,6 +1273,62 @@ fn check_one_game_crate(name: &str, root: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The §3 budget's exemption, in the four spellings a test module is
+    /// written in and in the one that must **not** be exempted (§6 M81). The
+    /// hazard the last two cover is the only way this can go wrong quietly: a
+    /// brace miscounted runs the skip to end of file, and every line after a
+    /// test module stops being counted.
+    #[test]
+    fn cfg_test_items_leave_the_budget_and_nothing_else_does() {
+        let code = |t: &str| count_code(t).0;
+        assert_eq!(code("fn a() {}\nfn b() {}"), 2);
+        assert_eq!(
+            code("fn a() {}\n#[cfg(test)]\nmod t {\n    fn x() {}\n}"),
+            1
+        );
+        // The attribute and its item on one line, both forms.
+        assert_eq!(code("fn a() {}\n#[cfg(test)] mod t;\nfn b() {}"), 2);
+        assert_eq!(
+            code("fn a() {}\n#[cfg(test)] mod t { fn x() {} }\nfn b() {}"),
+            2
+        );
+        // A blank and a doc line between the attribute and the item.
+        assert_eq!(
+            code("#[cfg(test)]\n\n/// doc\nmod t {\n    fn x() {}\n}\nfn a() {}"),
+            1
+        );
+        // Nested braces, and the item after the module still counted — the
+        // planted violation for a skip that runs away.
+        let nested = "#[cfg(test)]\nmod t {\n    fn x() {\n        if y {}\n    }\n}\nfn real() {}";
+        assert_eq!(code(nested), 1);
+        // A `cfg` that is not `test` is code, and so is a string that looks
+        // like the attribute.
+        assert_eq!(code("#[cfg(feature = \"test\")]\nfn a() {}"), 2);
+    }
+
+    /// A test module in its own file is exempt too, in both spellings a `mod`
+    /// resolves to and in both places the attribute can sit.
+    #[test]
+    fn a_test_module_in_another_file_is_named_as_exempt() {
+        let file = Path::new("crates/gg-runtime/src/lib.rs");
+        let named = |t: &str| {
+            declared_test_modules(file, t)
+                .iter()
+                .map(|p| p.display().to_string().replace('\\', "/"))
+                .collect::<Vec<_>>()
+        };
+        let expected = [
+            "crates/gg-runtime/src/tests.rs",
+            "crates/gg-runtime/src/tests/mod.rs",
+        ];
+        assert_eq!(named("#[cfg(test)]\nmod tests;"), expected);
+        assert_eq!(named("#[cfg(test)] mod tests;"), expected);
+        // An ordinary module is not exempt, and neither is an inline one —
+        // those lines are `count_code`'s and would otherwise be dropped twice.
+        assert!(named("mod app;").is_empty());
+        assert!(named("#[cfg(test)]\nmod tests {\n}").is_empty());
+    }
 
     /// Both directions on the fingerprint scope: the real file agrees with the
     /// pin, and a planted divergence is caught. The parse has to step past the

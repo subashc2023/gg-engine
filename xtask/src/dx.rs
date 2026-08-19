@@ -39,10 +39,10 @@ use crate::util::{cargo, run as exec, run_capture, workspace_root};
 /// Where scratch copies live. Under `target/`, never checked in, rewritten on
 /// every run.
 ///
-/// No scenario changes a checked-in byte. One — `add-a-render-pass` — rewrites
-/// `gg-render/src/graph.rs` with its own identical contents, because cargo keys
-/// an incremental rebuild on mtime and there is no other way to measure the
-/// rebuild a developer actually waits on. `git status` stays clean.
+/// **No scenario touches a checked-in file at all**, since §6 M81. One —
+/// `add-a-render-pass` — used to rewrite `gg-render/src/graph.rs` with its own
+/// identical contents; `git status` stayed clean and that was never the whole
+/// question, because a watcher fires on the write and not on the diff.
 fn scratch() -> PathBuf {
     workspace_root().join("target/dx")
 }
@@ -472,10 +472,19 @@ fn add_a_render_pass() -> anyhow::Result<Measured> {
     let graph = workspace_root().join("crates/gg-render/src/graph.rs");
     let source = std::fs::read_to_string(&graph)?;
     let lines = declaration_lines(&source, "pub fn readback_pass")?;
+    // The same work as saving the file, without writing to the tree (§6 M81).
+    // Rewriting `graph.rs` with its own bytes was the old spelling and it was a
+    // real edit to a real source file: `xtask run --watch` and the shell's own
+    // artifact watcher both key on the *event*, not on the contents, so a
+    // nightly reloaded whatever the operator happened to be playing. Cargo
+    // recompiles a crate whose mtime moved and one whose artifacts are gone by
+    // the same path — recompile `gg-render`, relink its dependents — so this is
+    // the latency a developer waits on, measured off nothing they own.
+    exec(
+        cargo().args(["clean", "-p", "gg-render"]),
+        "dx: retire the renderer's artifacts",
+    )?;
     let started = Instant::now();
-    // Rewriting the file is what a save does; cargo keys on mtime. Identical
-    // bytes, so the tree is unchanged and the build is a real incremental one.
-    std::fs::write(&graph, &source)?;
     exec(
         cargo().args(["build", "-p", "gg-render", "-p", "gg-runtime"]),
         "dx: rebuild the renderer and the shell",

@@ -96,6 +96,13 @@ pub(crate) struct Breadcrumbs {
     /// place rather than rebuilt: this runs in every tier, including the one
     /// that must not allocate per frame.
     pending: Vec<Vec<String>>,
+    /// Per slot, how many passes the frame declared beyond what the buffer
+    /// tracks (§6 M81). Kept because the alternative is silence in exactly the
+    /// tier where this report is the only diagnostic there is: the truncation
+    /// is a `take` in [`Breadcrumbs::prepare`], and a graph that outgrows
+    /// [`MAX_TRACKED_PASSES`] would otherwise produce a report that looks
+    /// complete and stops before the suspect.
+    dropped: Vec<usize>,
     /// The slot the most recently recorded frame used — the one a report reads.
     last: usize,
 }
@@ -123,6 +130,7 @@ impl Breadcrumbs {
             raw: resources.buffer(buffer)?.raw,
             buffer,
             pending: vec![Vec::new(); slots],
+            dropped: vec![0; slots],
             last: 0,
         })
     }
@@ -145,7 +153,15 @@ impl Breadcrumbs {
         resources.mapped_mut(self.buffer)?[region].fill(0);
         let pending = &mut self.pending[slot];
         pending.clear();
-        pending.extend(names.take(MAX_TRACKED_PASSES).map(str::to_owned));
+        let mut dropped = 0usize;
+        for (at, name) in names.enumerate() {
+            if at < MAX_TRACKED_PASSES {
+                pending.push(name.to_owned());
+            } else {
+                dropped += 1;
+            }
+        }
+        self.dropped[slot] = dropped;
         self.last = slot;
         Ok(Crumbs {
             buffer: self.raw,
@@ -165,7 +181,7 @@ impl Breadcrumbs {
             .chunks_exact(4)
             .map(|b| u32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
             .collect();
-        format_marks(names, &marks)
+        format_marks(names, &marks, self.dropped[self.last])
     }
 }
 
@@ -182,7 +198,12 @@ fn fate(begun: bool, ended: bool) -> &'static str {
 
 /// The breadcrumb half of a device-lost report: every pass the frame declared,
 /// what became of it, and the first one that never closed named as the suspect.
-fn format_marks(names: &[String], marks: &[u32]) -> String {
+///
+/// `dropped` is what the frame declared past [`MAX_TRACKED_PASSES`], and it is
+/// said rather than assumed away: a reader who cannot tell a complete list from
+/// a truncated one will read "no pass was in flight" off a frame whose suspect
+/// was never in the list.
+fn format_marks(names: &[String], marks: &[u32], dropped: usize) -> String {
     if names.is_empty() {
         return "breadcrumbs: no frame had been recorded".into();
     }
@@ -196,10 +217,20 @@ fn format_marks(names: &[String], marks: &[u32]) -> String {
         }
         out.push_str(&format!("\n  {:<16} {}", name, fate(begun, ended)));
     }
+    if dropped > 0 {
+        out.push_str(&format!(
+            "\n  {dropped} further pass(es) were declared and are not tracked — \
+             MAX_TRACKED_PASSES is {MAX_TRACKED_PASSES}"
+        ));
+    }
     let headline = match suspect {
         Some(name) => format!("breadcrumbs: pass `{name}` was in flight when the device was lost"),
         // Every pass closed, or none opened: the frame is not where the fault
-        // is, and saying so is more useful than naming the last pass anyway.
+        // is — unless the list is short, in which case the suspect may simply
+        // not be in it and this must not claim otherwise.
+        None if dropped > 0 => {
+            "breadcrumbs: no *tracked* pass was in flight, and the frame was truncated".into()
+        }
         None => "breadcrumbs: no pass was in flight — the loss is not this frame's graph".into(),
     };
     headline + &out
@@ -289,7 +320,7 @@ mod tests {
     fn the_pass_that_opened_and_never_closed_is_the_suspect() {
         let names = names(&["depth", "forward", "ui"]);
         // depth done, forward opened, ui never reached.
-        let report = format_marks(&names, &[1, 1, 1, 0, 0, 0]);
+        let report = format_marks(&names, &[1, 1, 1, 0, 0, 0], 0);
         assert!(report.contains("pass `forward` was in flight"), "{report}");
         assert!(report.contains("depth            completed"), "{report}");
         assert!(report.contains("ui               not reached"), "{report}");
@@ -297,7 +328,7 @@ mod tests {
 
     #[test]
     fn a_frame_that_finished_names_no_suspect() {
-        let report = format_marks(&names(&["depth", "ui"]), &[1, 1, 1, 1]);
+        let report = format_marks(&names(&["depth", "ui"]), &[1, 1, 1, 1], 0);
         assert!(report.contains("no pass was in flight"), "{report}");
         assert!(!report.contains("IN FLIGHT"), "{report}");
     }
@@ -306,14 +337,34 @@ mod tests {
     /// read as zero, which is "not reached".
     #[test]
     fn missing_marks_read_as_not_reached() {
-        let report = format_marks(&names(&["depth", "ui"]), &[1, 1]);
+        let report = format_marks(&names(&["depth", "ui"]), &[1, 1], 0);
         assert!(report.contains("ui               not reached"), "{report}");
         assert!(report.contains("no pass was in flight"), "{report}");
     }
 
     #[test]
     fn a_report_before_any_frame_says_so() {
-        assert!(format_marks(&[], &[]).contains("no frame had been recorded"));
+        assert!(format_marks(&[], &[], 0).contains("no frame had been recorded"));
+    }
+
+    /// A frame longer than the buffer says so rather than reading complete (§6
+    /// M81). The headline is the load-bearing half: "no pass was in flight" off
+    /// a list that stops before the suspect is a report that sends a reader to
+    /// the wrong place, and it is *only* reachable in a tier without a
+    /// debugger, since that is the whole point of §4.8.
+    #[test]
+    fn a_frame_longer_than_the_buffer_does_not_read_as_complete() {
+        let report = format_marks(&names(&["depth", "ui"]), &[1, 1, 1, 1], 3);
+        assert!(report.contains("3 further pass(es)"), "{report}");
+        assert!(report.contains("truncated"), "{report}");
+        assert!(
+            !report.contains("the loss is not this frame's graph"),
+            "{report}"
+        );
+        // A named suspect still leads, since the list did reach it.
+        let found = format_marks(&names(&["depth", "ui"]), &[1, 1, 1, 0], 3);
+        assert!(found.contains("`ui` was in flight"), "{found}");
+        assert!(found.contains("3 further pass(es)"), "{found}");
     }
 
     #[test]
@@ -342,7 +393,7 @@ mod tests {
     /// the frame reached rather than nothing at all.
     #[test]
     fn a_driver_without_the_extension_still_reports_breadcrumbs() {
-        let crumbs = format_marks(&names(&["ui"]), &[1, 0]);
+        let crumbs = format_marks(&names(&["ui"]), &[1, 0], 0);
         let report = report("cmd_fill_buffer", &crumbs, None);
         assert!(report.contains("pass `ui` was in flight"), "{report}");
         assert!(report.contains("VK_EXT_device_fault absent"), "{report}");

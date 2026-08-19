@@ -1841,6 +1841,17 @@ fn format_ms(d: std::time::Duration) -> String {
     format!("{:.3} ms", d.as_secs_f64() * 1e3)
 }
 
+/// A process-global this scope borrowed, put back down every path out of it —
+/// the `?` and the early return included, which is what a hand-written restore
+/// after the last statement misses (§6 M62, §6 M81).
+struct Restore<T: Copy, F: FnMut(T)>(T, F);
+
+impl<T: Copy, F: FnMut(T)> Drop for Restore<T, F> {
+    fn drop(&mut self) {
+        (self.1)(self.0);
+    }
+}
+
 /// `gg-golden load [pack]` — time a pack from mapped to fully resident (§4.6).
 ///
 /// Windowless by linkage like everything else here, which is the only reason
@@ -1867,6 +1878,15 @@ fn load(pack: Option<&str>) -> anyhow::Result<()> {
     // measuring the wrong thing. The instrumented coverage of those shaders is
     // not lost: the two `bench` legs above this one in `xtask gpuav` render the
     // same pass list with them on.
+    // Restored on the way out, on §6 M62's argument one command over: a CVar is
+    // process-global and nothing here promises this subcommand is the only one
+    // a process ever runs. `run` and `load` are separate invocations today, so
+    // this cost nothing — which is exactly the shape of the `GI_RATE` bug when
+    // it was written, and the reason that one was only found three milestones
+    // later (§6 M81).
+    let _ao = Restore(gg_render::cvars::AO.bool(), |was| {
+        gg_render::cvars::AO.set_bool(was);
+    });
     gg_render::cvars::AO.set_bool(false);
     let mut renderer = gg_render::OffscreenRenderer::new((64, 64))?;
     tracing::info!(device = %renderer.device().chosen, "offscreen device");
@@ -3629,6 +3649,67 @@ fn rounding_noise(pixels: &[u8], amount: i16) -> Vec<u8> {
         .collect()
 }
 
+/// Every reference directory, against the scene roster — checked whichever
+/// backend is running (§6 M81).
+///
+/// Two failures no per-scene compare can see, because a compare only ever looks
+/// at the *one* backend it is running on. A scene added and blessed on lavapipe
+/// leaves the 4090 set short, and nobody finds out until somebody runs `xtask
+/// gpu` by hand, which is manual and may be weeks. And a scene *renamed* or
+/// deleted leaves its old `.png` behind in all three directories, inside §4.10's
+/// size budget, looking exactly like a reference — the only thing that would
+/// ever have noticed is the budget eventually going red for no stated reason.
+///
+/// Named rather than fatal for the one honest case: a machine that has never
+/// run a backend has no directory for it, and demanding one here would mean a
+/// fresh clone could not go green.
+fn reference_roster() -> anyhow::Result<Vec<String>> {
+    let root = references_root();
+    let mut wrong = Vec::new();
+    let Ok(dirs) = std::fs::read_dir(&root) else {
+        return Ok(wrong);
+    };
+    let mut backends: Vec<PathBuf> = dirs
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .collect();
+    backends.sort();
+    for dir in backends {
+        let backend = dir.file_name().unwrap_or_default().to_string_lossy();
+        let mut held: Vec<String> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.strip_suffix(".png").map(str::to_owned)
+            })
+            .collect();
+        held.sort();
+        for scene in SCENES {
+            if !held.iter().any(|h| h == scene.name) {
+                wrong.push(format!(
+                    "`{backend}` has no reference for `{}` — a scene is blessed on every \
+                     backend that runs the suite or that backend's next run fails with \"no \
+                     reference\", which on the real GPU is a manual run away",
+                    scene.name
+                ));
+            }
+        }
+        for orphan in held
+            .iter()
+            .filter(|h| !SCENES.iter().any(|s| s.name == **h))
+        {
+            wrong.push(format!(
+                "`{backend}` holds `{orphan}.png`, which no scene is called — a renamed or \
+                 deleted scene leaves its reference behind, and nothing but §4.10's size \
+                 budget would ever have said so"
+            ));
+        }
+    }
+    Ok(wrong)
+}
+
 fn run(filter: Option<&str>) -> anyhow::Result<()> {
     let backend = backend_id()?;
     let root = references_root().join(&backend);
@@ -3786,6 +3867,12 @@ fn run(filter: Option<&str>) -> anyhow::Result<()> {
     }
 
     anyhow::ensure!(ran > 0, "no scene matched the filter");
+    // Only on a full run: a filtered run is a question about one scene, and
+    // answering it with every other backend's bookkeeping would make the
+    // narrow spelling useless for the thing it exists for.
+    if filter.is_none() {
+        failures.extend(reference_roster()?);
+    }
     anyhow::ensure!(
         failures.is_empty(),
         "golden suite failed:\n{}",

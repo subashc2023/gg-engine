@@ -9,7 +9,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 
 use tracing::{debug, warn};
 
@@ -167,40 +167,74 @@ pub struct Checkpoint {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Set once a writer exists, read by the panic hook — which is installed before
-/// there is a session to ask and must not promise a player a file that this run
-/// was never going to write (§6 M48).
-static RUNNING: AtomicBool = AtomicBool::new(false);
+/// Writers of the player's **progress** whose *last* write reached the disk
+/// (§6 M81).
+///
+/// Scoped to progress and counted rather than latched, and both halves are the
+/// same finding. Two `Checkpoint`s share this module — the session's and the
+/// preferences' — and one `LANDED` flag between them could not tell "the save
+/// landed" from "the preferences beside it did", which is precisely the
+/// accident of ordering [`OUTCOMES`] already refuses for the exit verdict (§6
+/// M54), reaching the crash box four milestones later. Its `RUNNING` half was
+/// written at *construction* by whichever writer was built last, so a session
+/// with a save and no preferences file, or the reverse, answered about the
+/// wrong one.
+///
+/// A count and not a flag because a writer can be replaced while another is
+/// still retiring, and because the transitions are what make it a verdict on
+/// the last write rather than a latch on the first.
+///
+/// Not locked: the reader is a panic hook, and a `Mutex` there deadlocks
+/// whenever the panicking thread is the one holding it.
+static PROGRESS_LANDED: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether a checkpoint has actually reached the disk, and the last one still
-/// did. A thread that spawned is not a file that exists (§6 M54).
-static LANDED: AtomicBool = AtomicBool::new(false);
-
-/// Whether this session is checkpointing — meaning bytes have landed, not that
-/// a writer exists.
+/// Whether the player's progress is on their disk as of this session's last
+/// checkpoint — bytes that landed, not a writer that exists.
 ///
 /// The distinction is the one sentence in the crash box a player acts on
 /// ([`crate::crashed`]): on a disk that refuses, "your progress was saved up to
 /// about five seconds before this" is false, and it is false in the direction
-/// that stops them from doing anything about it.
+/// that stops them from doing anything about it. **Preferences do not count** —
+/// a `settings.cfg` that landed says nothing about a game a player lost. A
+/// *retired* writer does: the bytes it wrote are still there, which is why the
+/// count survives the thread and only a later failure takes it back.
 #[must_use]
 pub fn checkpointing() -> bool {
-    RUNNING.load(Relaxed) && LANDED.load(Relaxed)
+    PROGRESS_LANDED.load(Relaxed) > 0
 }
 
+/// [`Checkpoint::new`]'s second argument, named at the call site: the player's
+/// session, which is the file [`checkpointing`] answers about.
+pub const PROGRESS: bool = true;
+
+/// The other one — their preferences. Counted by [`note`] like every other
+/// write, and deliberately invisible to [`checkpointing`].
+pub const PREFERENCES: bool = false;
+
 impl Checkpoint {
-    /// Start the writer for `path`. Failing to spawn is not fatal — the session
-    /// then behaves as every session did before M48, and the exit write still
-    /// lands.
+    /// Start the writer for `path`, keeping [`PROGRESS`] or [`PREFERENCES`].
+    /// Failing to spawn is not fatal — the session then behaves as every
+    /// session did before M48, and the exit write still lands.
     #[must_use]
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf, progress: bool) -> Self {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
         let thread = std::thread::Builder::new()
             .name("gg-checkpoint".to_owned())
             .spawn(move || {
+                // This writer's own contribution, adjusted on transitions so
+                // the counter stays a population rather than becoming a tally
+                // of every write ever made.
+                let mut counted = false;
                 while let Ok(bytes) = rx.recv() {
                     let wrote = replace(&path, &bytes);
-                    LANDED.store(wrote.is_ok(), Relaxed);
+                    if progress && wrote.is_ok() != counted {
+                        counted = wrote.is_ok();
+                        if counted {
+                            PROGRESS_LANDED.fetch_add(1, Relaxed);
+                        } else {
+                            PROGRESS_LANDED.fetch_sub(1, Relaxed);
+                        }
+                    }
                     note(&path, &wrote);
                     // `debug`, not `info`, and the level is the whole point (§6
                     // M51). This fires every `CHECKPOINT_SECONDS` for as long as
@@ -221,7 +255,6 @@ impl Checkpoint {
                 |e| warn!(error = %e, "no checkpoint thread — this session is exit-write only"),
             )
             .ok();
-        RUNNING.store(thread.is_some(), std::sync::atomic::Ordering::Relaxed);
         Self {
             tx: thread.is_some().then_some(tx),
             thread,
@@ -246,5 +279,114 @@ impl Drop for Checkpoint {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+/// The first unit tests in this crate (§6 M81), and what made them writable is
+/// §3's budget no longer counting a `#[cfg(test)]` item.
+///
+/// All four are about [`checkpointing`], which is one `bool` reaching one
+/// sentence in the crash box, and which no other gate can reach: `xtask reload
+/// --crash` grades the *file* a killed process left behind, and this is what
+/// the box says while the process is still dying.
+///
+/// The state is process-global and nextest gives each test its own process, so
+/// these need no ordering between them. `cargo test` would thread them and they
+/// would fight; the tree's runner is nextest everywhere.
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// A directory this test owns, named for it so a failure leaves evidence
+    /// rather than a collision.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gg-player-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Spin until the writer has caught up, or give up. There is nothing to
+    /// wait *on*: a checkpoint's whole point is that no caller blocks on the
+    /// disk, and `drop` is the only join there is.
+    fn settles(done: impl Fn() -> bool) -> bool {
+        (0..2000).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            done()
+        })
+    }
+
+    /// The promise itself, which is what most of these are waiting for.
+    fn settles_at(want: bool) -> bool {
+        settles(|| checkpointing() == want)
+    }
+
+    /// The dangerous direction, and the reason the counter is scoped: a
+    /// `settings.cfg` that landed is not a game that was saved. One flag
+    /// between the two writers said it was.
+    #[test]
+    fn preferences_landing_is_not_progress_being_saved() {
+        let dir = scratch("prefs");
+        let prefs = Checkpoint::new(dir.join("settings.cfg"), PREFERENCES);
+        prefs.offer(b"prefs".to_vec());
+        drop(prefs); // Joins, so the write has happened by here.
+        assert!(!checkpointing(), "preferences promised a saved game");
+        // And a progress writer in the same session does say so.
+        let session = Checkpoint::new(dir.join("progress.ggsave"), PROGRESS);
+        session.offer(b"session".to_vec());
+        assert!(settles_at(true), "a landed save said nothing");
+    }
+
+    /// The same defect with its sign flipped: `RUNNING` was written at
+    /// construction by whichever writer was built last, so a session whose
+    /// preferences write failed reported a saved game as lost.
+    #[test]
+    fn a_preferences_writer_neither_gives_nor_takes_the_promise() {
+        let dir = scratch("both");
+        let session = Checkpoint::new(dir.join("progress.ggsave"), PROGRESS);
+        session.offer(b"session".to_vec());
+        assert!(settles_at(true));
+        let blocked = dir.join("wall");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let prefs = Checkpoint::new(blocked.join("settings.cfg"), PREFERENCES);
+        prefs.offer(b"prefs".to_vec());
+        drop(prefs);
+        assert!(checkpointing(), "a refused settings file unsaved the game");
+    }
+
+    /// The refusal M54 is about, at the one place M54 did not reach: a writer
+    /// whose last write the disk refused must promise nothing. The parent is a
+    /// **file**, which is a real OS error on both hosts and needs no
+    /// privileges.
+    #[test]
+    fn a_refused_write_promises_nothing() {
+        let dir = scratch("refused");
+        let blocked = dir.join("wall");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let session = Checkpoint::new(blocked.join("progress.ggsave"), PROGRESS);
+        session.offer(b"session".to_vec());
+        drop(session);
+        assert!(!checkpointing(), "a refused disk promised a saved game");
+        assert!(verdict().is_some(), "the refusal reached no verdict");
+    }
+
+    /// And a writer that recovers is believed again — a population and not a
+    /// latch, which is [`note`]'s own rule one level up.
+    #[test]
+    fn a_writer_that_recovers_is_believed_again() {
+        let dir = scratch("recovers");
+        let blocked = dir.join("wall");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let session = Checkpoint::new(blocked.join("progress.ggsave"), PROGRESS);
+        session.offer(b"first".to_vec());
+        // Waiting on the *refusal*, not on the promise: the promise is already
+        // false before the first write and waiting for it would prove nothing.
+        assert!(settles(|| verdict().is_some()), "the write never failed");
+        assert!(!checkpointing());
+        std::fs::remove_file(&blocked).unwrap();
+        session.offer(b"second".to_vec());
+        assert!(settles_at(true), "a recovered disk was still disbelieved");
     }
 }

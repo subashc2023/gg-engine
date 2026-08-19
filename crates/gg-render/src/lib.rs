@@ -342,11 +342,11 @@ impl Renderer {
         let ui = ui::UiPass::new(&mut rhi)?;
         let lighting = lighting::Lighting::new(&mut rhi)?;
         let luminance = luminance::Luminance::new(&mut rhi)?;
-        // The field's images and view buffer, once for the renderer's life
-        // (§6 M36): both are sized by the grid's ceiling rather than by the
-        // grid, so a refit costs no allocation and races no frame in flight.
-        let mut probes = probe::Probes::default();
-        probes.open(&mut rhi)?;
+        // The field's images and view buffer are sized by the grid's ceiling
+        // rather than by the grid, so a refit costs no allocation and races no
+        // frame in flight (§6 M36) — and are allocated by the first frame that
+        // wants the term rather than here (§6 M81, `Probes::ensure_open`).
+        let probes = probe::Probes::default();
         let integrate = probe::Integrate::new(&mut rhi)?;
         // Every pipeline a launch compiles exists by now, so this is the moment
         // the next launch's warm cache is worth writing (§6 M52). Before this it
@@ -696,6 +696,9 @@ impl Renderer {
         // through the staging ring and belong to no frame slot (§4.3). Above the
         // retry as well, so a second attempt re-acquires without re-streaming.
         stream(&mut self.content, &mut self.rhi, extracted)?;
+        // Beside `stream` for its reason: an allocation belongs to no frame slot
+        // and must not happen inside `begin_frame` (§4.3, §6 M81).
+        self.probes.ensure_open(&mut self.rhi)?;
         // An out-of-date acquire is ordinary while a window is being dragged:
         // the surface moves faster than a frame can be built. Retried *here*
         // rather than left to the next frame, because during a Win32 modal
@@ -1181,11 +1184,11 @@ impl OffscreenRenderer {
         let ui = ui::UiPass::new(&mut rhi)?;
         let lighting = lighting::Lighting::new(&mut rhi)?;
         let luminance = luminance::Luminance::new(&mut rhi)?;
-        // The field's images and view buffer, once for the renderer's life
-        // (§6 M36): both are sized by the grid's ceiling rather than by the
-        // grid, so a refit costs no allocation and races no frame in flight.
-        let mut probes = probe::Probes::default();
-        probes.open(&mut rhi)?;
+        // The field's images and view buffer are sized by the grid's ceiling
+        // rather than by the grid, so a refit costs no allocation and races no
+        // frame in flight (§6 M36) — and are allocated by the first frame that
+        // wants the term rather than here (§6 M81, `Probes::ensure_open`).
+        let probes = probe::Probes::default();
         let integrate = probe::Integrate::new(&mut rhi)?;
         // As the windowed constructor, and for the same reason (§6 M52) — an
         // instrument or a harness that is interrupted should not cost the next
@@ -1438,6 +1441,8 @@ impl OffscreenRenderer {
             gg_core::zone!("render.stream");
             stream(&mut self.content, &mut self.rhi, extracted)?;
         }
+        // Beside `stream` for its reason (§4.3, §6 M81).
+        self.probes.ensure_open(&mut self.rhi)?;
         // One slot and a blocking submit per frame here, so nothing is in
         // flight to race either write.
         let frame_address = self.lighting.slot_address(0);

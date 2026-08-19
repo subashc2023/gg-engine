@@ -862,6 +862,37 @@ mod tests {
         ActionMap::parse(MAP, ACTIONS, AXES).unwrap()
     }
 
+    /// A button past what a held state is kept for is refused at the **name**,
+    /// where a line number exists to name it (§6 M81).
+    ///
+    /// It parsed and bound until then, and was dropped at the edge by a bounds
+    /// check that had nothing to say — so `Mouse17` in a player's own
+    /// `bindings.cfg` was a line that did nothing, in a file that was accepted.
+    /// The boundary is exercised from both sides because an off-by-one here
+    /// silently costs a real button instead.
+    #[test]
+    fn a_button_no_state_is_kept_for_is_refused_by_name() {
+        assert!(MouseButton::from_name("Mouse16").is_some(), "the last one");
+        assert!(MouseButton::from_name("Mouse17").is_none());
+        let line = |token| format!("[game.actions]\nspawn = [\"{token}\"]\n");
+        assert!(ActionMap::parse(&line("Mouse16"), ACTIONS, AXES).is_ok());
+        let refused = ActionMap::parse(&line("Mouse17"), ACTIONS, AXES);
+        assert!(
+            matches!(&refused, Err(MapError::UnknownSource { token, .. }) if token == "Mouse17"),
+            "{refused:?}"
+        );
+        // And every number the map hands back is one the state layer keeps, so
+        // the two spellings cannot drift apart.
+        for n in 1..=MouseButton::TRACKED {
+            let button = MouseButton::from_number(n).unwrap();
+            assert_eq!(button.number(), n);
+            assert_eq!(
+                MouseButton::from_name(&spell(Source::Button(button))),
+                Some(button)
+            );
+        }
+    }
+
     #[test]
     fn bindings_resolve_to_declared_verbs() {
         let m = map();

@@ -428,8 +428,13 @@ fn primitive_geometry(
         .collect();
     match normals.is_none() {
         // Derived from the winding, so they agree with it by construction and
-        // there is nothing here to check.
-        true => flat_normals(&mut vertices, &indices),
+        // there is nothing for `check_winding` to compare (§6 M81: which is
+        // exactly why the *geometric* check exists — a source with no normals
+        // imports self-consistently wrong and nothing above notices).
+        true => {
+            flat_normals(&mut vertices, &indices);
+            check_orientation(&vertices, &indices, name)?;
+        }
         false => check_winding(&vertices, &indices, name)?,
     }
     if tangents.is_none() {
@@ -506,6 +511,74 @@ fn check_winding(vertices: &[Vertex], indices: &[u32], name: &str) -> Result<()>
              inside-out (§6 M64)."
         );
     }
+    Ok(())
+}
+
+/// Refuse a *closed* primitive whose triangles wind inward, for a source that
+/// authored no normals (§6 M81).
+///
+/// [`check_winding`] is the same defect graded against the artist's own
+/// normals, and it cannot see this one: glTF makes NORMAL optional, a source
+/// that omits it gets [`flat_normals`], and those are derived *from* the
+/// winding — so a reversed mesh agrees with itself perfectly and imports clean.
+/// The witness has to be the geometry, and for a closed surface it is: the
+/// divergence theorem makes the signed volume of the triangle soup positive
+/// exactly when the faces point outward, translation-invariant, and needing no
+/// reference implementation to argue with.
+///
+/// **Only a closed, consistently-wound surface is graded.** "Outward" is not
+/// defined for an open sheet, and demo 11's floor is one — so a mesh whose
+/// directed edges are not a perfect pairing is returned as no evidence rather
+/// than as a pass or a failure. That is the whole of the check's scope, and it
+/// is stated here because a reader will otherwise expect it to catch a flipped
+/// plane, which nothing can.
+fn check_orientation(vertices: &[Vertex], indices: &[u32], name: &str) -> Result<()> {
+    // Welded by position, which is not an optimization: glTF spells flat
+    // shading with **unshared** vertices, so a source with no NORMAL is exactly
+    // the source whose corners are duplicated per face — and an index-level
+    // pairing would never close for the only meshes this grades. Exact bits,
+    // since the duplicates are one exporter writing one corner several times;
+    // anything less exact reads as open, which is the harmless answer.
+    let corner = |i: u32| {
+        vertices[i as usize]
+            .position
+            // `-0.0` and `0.0` are the same corner and different bits.
+            .map(|c| if c == 0.0 { 0f32 } else { c }.to_bits())
+    };
+    let mut welded: Vec<[u32; 3]> = indices.iter().map(|i| corner(*i)).collect();
+    welded.sort_unstable();
+    welded.dedup();
+    let id = |i: u32| welded.binary_search(&corner(i)).unwrap_or(usize::MAX) as u32;
+    let mut directed: Vec<(u32, u32)> = Vec::with_capacity(indices.len());
+    for t in indices.chunks_exact(3) {
+        let (a, b, c) = (id(t[0]), id(t[1]), id(t[2]));
+        directed.extend([(a, b), (b, c), (c, a)]);
+    }
+    directed.sort_unstable();
+    // A repeated directed edge is two triangles agreeing about a side, which a
+    // consistently wound manifold never does; a missing reverse is a boundary.
+    // Either way the surface is not closed and there is nothing to say.
+    let closed = !directed.is_empty()
+        && !directed.windows(2).any(|w| w[0] == w[1])
+        && directed
+            .iter()
+            .all(|(a, b)| directed.binary_search(&(*b, *a)).is_ok());
+    if !closed {
+        return Ok(());
+    }
+    let at = |i: u32| DVec3::from(vertices[i as usize].position.map(f64::from));
+    let volume: f64 = indices
+        .chunks_exact(3)
+        .map(|t| at(t[0]).dot(at(t[1]).cross(at(t[2]))))
+        .sum();
+    anyhow::ensure!(
+        volume >= 0.0,
+        "{name} is a closed surface wound inside-out — its signed volume is {:.6}, and a mesh \
+         whose faces point outward has a positive one. The source authored no normals, so the \
+         ones this import derived agree with the reversed winding and nothing downstream can \
+         tell: it renders correctly until a pass asks which side of a face it is on (§6 M81).",
+        volume / 6.0
+    );
     Ok(())
 }
 
@@ -905,6 +978,69 @@ mod tests {
     fn degenerate_triangles_do_not_vote() {
         let (vertices, _) = quad([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
         assert!(check_winding(&vertices, &[0, 1, 1], "sliver").is_ok());
+    }
+
+    /// A closed surface with no authored normals, graded on its own geometry
+    /// (§6 M81) — the hole M64's check had, since a source that omits NORMAL
+    /// gets normals derived from the very winding under suspicion.
+    ///
+    /// A tetrahedron because it is the smallest closed surface there is, and
+    /// its own signed volume is arithmetic: the three edge vectors from the
+    /// origin corner are the unit axes, so the volume is 1/6.
+    #[test]
+    fn a_closed_surface_wound_inside_out_is_refused_without_any_normals() {
+        let corner = |position: [f32; 3]| Vertex {
+            position,
+            normal: [0.0; 3],
+            uv: [0.0; 2],
+            tangent: [0.0; 4],
+        };
+        let shared = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        // Outward-facing, right-handed: every face's winding is CCW seen from
+        // outside the solid.
+        let faces: [[usize; 3]; 4] = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+        // **Unshared**, which is what a source with no NORMAL looks like — and
+        // is why the check welds by position before it looks for a closed
+        // surface at all.
+        let mut vertices = Vec::new();
+        for face in faces {
+            vertices.extend(face.map(|i| corner(shared[i])));
+        }
+        let out: Vec<u32> = (0..12).collect();
+        assert!(check_orientation(&vertices, &out, "tetra").is_ok());
+        let inside: Vec<u32> = out
+            .chunks_exact(3)
+            .flat_map(|t| [t[0], t[2], t[1]])
+            .collect();
+        let Err(error) = check_orientation(&vertices, &inside, "tetra") else {
+            panic!("a closed mesh wound inside-out imported clean");
+        };
+        let error = error.to_string();
+        assert!(error.contains("inside-out"), "{error}");
+        assert!(error.contains("-0.166"), "{error}");
+        // And the normals this import derives from that winding agree with it
+        // perfectly, which is the whole reason the check had to be geometric.
+        let mut derived = vertices.clone();
+        flat_normals(&mut derived, &inside);
+        assert!(check_winding(&derived, &inside, "tetra").is_ok());
+    }
+
+    /// An open sheet has no outward, so it is no evidence either way — demo
+    /// 11's floor is one, and a check that guessed would refuse half the tree.
+    #[test]
+    fn an_open_sheet_is_not_graded_in_either_direction() {
+        let (vertices, indices) = quad([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        let flipped: Vec<u32> = indices
+            .chunks_exact(3)
+            .flat_map(|t| [t[0], t[2], t[1]])
+            .collect();
+        assert!(check_orientation(&vertices, &indices, "floor").is_ok());
+        assert!(check_orientation(&vertices, &flipped, "floor").is_ok());
     }
 
     #[test]

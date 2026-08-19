@@ -449,8 +449,10 @@ impl App {
         session: Option<std::path::PathBuf>,
         prefs: Option<std::path::PathBuf>,
     ) {
-        self.checkpoint = session.map(crate::player::Checkpoint::new);
-        self.prefs_checkpoint = prefs.map(crate::player::Checkpoint::new);
+        self.checkpoint =
+            session.map(|p| crate::player::Checkpoint::new(p, crate::player::PROGRESS));
+        self.prefs_checkpoint =
+            prefs.map(|p| crate::player::Checkpoint::new(p, crate::player::PREFERENCES));
     }
 
     /// Stop checkpointing and wait for the last one to land. **Before the exit
