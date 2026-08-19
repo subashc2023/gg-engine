@@ -270,7 +270,7 @@ pub struct Renderer {
     viewport: Option<Viewport>,
     /// The player's own answer to `r.scale` when a game offers one (§6 M78);
     /// `None` leaves the knob alone, which is every game with no video menu.
-    scale: Option<f64>,
+    scale: Scale,
     /// What the last frame actually rendered at — see [`Renderer::samples`].
     /// Held so the clamp logs when it *changes* rather than every frame.
     samples: Samples,
@@ -365,7 +365,7 @@ impl Renderer {
             integrate,
             content: None,
             viewport: None,
-            scale: None,
+            scale: Scale::UNASKED,
             samples: Samples::X1,
             #[cfg(feature = "hot-reload")]
             hot: hot::Shaders::new(),
@@ -598,7 +598,23 @@ impl Renderer {
     /// pool already treats a changed extent as a resize (the old set retires
     /// after the frames in flight have passed, exactly as a window drag does).
     pub fn set_scale(&mut self, asked: Option<f64>) {
-        self.scale = asked;
+        self.scale.asked = asked;
+    }
+
+    /// The host's own automatic correction to that scale (§6 M80), as a factor
+    /// in `0.25..=1.0`. `1.0` is off and is what every caller that does not run
+    /// a governor passes — or never calls this at all.
+    ///
+    /// Separate from [`set_scale`](Self::set_scale) rather than folded into it
+    /// because the two answer different questions and compose: that one is what
+    /// was *chosen*, by a player through `Prefs` or by an operator through
+    /// `r.scale`, and this is what the machine turned out to be able to do. A
+    /// governor that wrote the choice would have to read it back, and a
+    /// preference the host overwrites is one a player cannot keep.
+    ///
+    /// Free to call every frame, for [`set_scale`](Self::set_scale)'s reason.
+    pub fn set_scale_governor(&mut self, factor: f64) {
+        self.scale.governor = factor.clamp(SCALE_RANGE.0, 1.0);
     }
 
     /// Ask the swapchain for a present mode (§6 M46). `asked` is the player's
@@ -1122,7 +1138,7 @@ pub struct OffscreenRenderer {
     viewport: Option<Viewport>,
     /// The player's own answer to `r.scale` when a game offers one (§6 M78);
     /// `None` leaves the knob alone, which is every game with no video menu.
-    scale: Option<f64>,
+    scale: Scale,
     /// As [`Renderer::samples`] — see [`OffscreenRenderer::samples`].
     samples: Samples,
     /// As [`Renderer`]'s: here as well because the offscreen path is the only
@@ -1183,7 +1199,7 @@ impl OffscreenRenderer {
         // Sized from the *scene attachment*, which `r.scale` may have made
         // larger than the surface — supersampling is the one case where the
         // picture being read back is bigger than the one presented (§6 M78).
-        let captured = scaled(extent, None);
+        let captured = scaled(extent, Scale::UNASKED);
         let radiance = rhi.create_buffer(&BufferDesc {
             name: "render.offscreen.radiance",
             size: u64::from(captured.0) * u64::from(captured.1) * 8,
@@ -1205,7 +1221,7 @@ impl OffscreenRenderer {
             extent,
             content: None,
             viewport: None,
-            scale: None,
+            scale: Scale::UNASKED,
             samples: Samples::X1,
             #[cfg(feature = "hot-reload")]
             hot: hot::Shaders::new(),
@@ -3836,7 +3852,7 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
 /// extent from the swapchain — `gg-rhi` derives every render area from the
 /// attachment it was handed. So a render scale is this multiply and a sampler
 /// filter, and nothing else.
-fn view_extent(viewport: Option<Viewport>, surface: (u32, u32), asked: Option<f64>) -> (u32, u32) {
+fn view_extent(viewport: Option<Viewport>, surface: (u32, u32), asked: Scale) -> (u32, u32) {
     let destination = match viewport.map(|v| v.clamped(surface)) {
         // A zero-width viewport allocates nothing and draws nothing; the
         // attachment pool refuses a zero extent, so fall back to the surface
@@ -3860,27 +3876,51 @@ const SCALE_RANGE: (f64, f64) = (0.25, 2.0);
 /// Both axes take the *same* factor, which is what keeps the aspect — and
 /// therefore the projection, the culling frustum and `debug_fit`'s letterbox —
 /// exactly what it was at scale 1.
-fn scaled(extent: (u32, u32), asked: Option<f64>) -> (u32, u32) {
+fn scaled(extent: (u32, u32), asked: Scale) -> (u32, u32) {
     let scale = wanted_scale(asked);
     let axis = |n: u32| ((f64::from(n) * scale).round() as u32).max(1);
     (axis(extent.0), axis(extent.1))
 }
 
-/// The fraction in force: the player's own choice when a game offers one, and
-/// `r.scale` otherwise.
+/// What the scene's resolution is a **product** of (§6 M80): what was chosen,
+/// and what the machine turned out to be able to do.
+///
+/// One value rather than two parameters because every site that reads it reads
+/// both, and because the pair is the whole of the composition rule — a
+/// governor scales whichever of the player and the operator won, and cannot
+/// overwrite either.
+#[derive(Clone, Copy, Debug)]
+struct Scale {
+    /// The player's own choice as a ratio, or `None` for `r.scale`.
+    asked: Option<f64>,
+    /// The host's automatic factor. `1.0` is off.
+    governor: f64,
+}
+
+impl Scale {
+    /// Nobody has asked for anything: the knob, at face value. What every
+    /// offscreen context and every instrument runs at.
+    const UNASKED: Self = Self {
+        asked: None,
+        governor: 1.0,
+    };
+}
+
+/// The fraction in force: the player's own choice when a game offers one and
+/// `r.scale` otherwise, times whatever the governor is holding.
 ///
 /// [`wanted_present`]'s shape and for its reason — the player's answer reaches
 /// the renderer *without consulting the knob at all*, so an operator's `gg.cfg`
-/// and a game's video menu cannot end up in a fight neither can win. Clamped
-/// here rather than at either caller, so there is one place the range is true.
-fn wanted_scale(asked: Option<f64>) -> f64 {
-    asked
-        .unwrap_or_else(|| cvars::SCALE.float())
+/// and a game's video menu cannot end up in a fight neither can win. The
+/// governor multiplies the winner rather than joining the argument. Clamped
+/// here rather than at any caller, so there is one place the range is true.
+fn wanted_scale(asked: Scale) -> f64 {
+    (asked.asked.unwrap_or_else(|| cvars::SCALE.float()) * asked.governor)
         .clamp(SCALE_RANGE.0, SCALE_RANGE.1)
 }
 
 /// Whether the post pass is resizing rather than copying — see [`scaled`].
-fn resampling(asked: Option<f64>) -> bool {
+fn resampling(asked: Scale) -> bool {
     wanted_scale(asked) != 1.0
 }
 
@@ -4375,6 +4415,64 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// The choice and the correction **multiply**, and the product is the only
+    /// thing downstream ever sees (§6 M80).
+    ///
+    /// Arithmetic rather than a rendered frame on purpose: what a governed frame
+    /// *looks* like is `tests/scale.rs`'s byte-identity claim one input over, and
+    /// it already holds for every extent this can produce. What is worth pinning
+    /// here is that there is no third behaviour — a governor at `1.0` is exactly
+    /// the pre-M80 renderer, and a governor at `f` over a choice of `c` is
+    /// indistinguishable from a choice of `c * f`.
+    #[test]
+    fn a_governed_scale_is_a_chosen_one_of_the_same_size() {
+        let extent = (1920, 1080);
+        let chosen = |c: f64| Scale {
+            asked: Some(c),
+            governor: 1.0,
+        };
+        let governed = |c: f64, f: f64| Scale {
+            asked: Some(c),
+            governor: f,
+        };
+
+        assert_eq!(
+            scaled(extent, governed(1.0, 1.0)),
+            scaled(extent, chosen(1.0)),
+            "an idle governor is not a behaviour"
+        );
+        assert_eq!(
+            scaled(extent, governed(1.0, 0.5)),
+            scaled(extent, chosen(0.5)),
+            "half of the whole window"
+        );
+        assert_eq!(
+            scaled(extent, governed(1.5, 0.5)),
+            scaled(extent, chosen(0.75)),
+            "and half of a supersampled one is still the product"
+        );
+        assert!(
+            !resampling(governed(1.0, 1.0)) && resampling(governed(1.0, 0.5)),
+            "the post pass filters exactly when the product is not one"
+        );
+
+        // The range is the *product's*, not either factor's: a player asking for
+        // twice the window on a machine the host has taken to a quarter is
+        // asking for half of it, and the clamp must not read either number
+        // alone. Below the floor it clamps, which is the same guard `Governor`
+        // holds one crate over and is deliberately held twice — this is the one
+        // that is true whatever wrote the factor.
+        assert_eq!(
+            scaled(extent, governed(2.0, 0.25)),
+            scaled(extent, chosen(0.5))
+        );
+        assert_eq!(
+            scaled(extent, governed(0.5, 0.1)),
+            scaled(extent, chosen(SCALE_RANGE.0)),
+            "a product under the floor is the floor and never a zero attachment"
+        );
+    }
 
     /// The two directions `r.hdr` is read in have to be each other's inverse.
     /// They are written as separate matches — one before the swapchain exists

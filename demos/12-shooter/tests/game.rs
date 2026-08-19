@@ -10,18 +10,19 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use demo_12_shooter::{
-    ACTIONS, AIM_X, AIM_Y, ARMS, AXES, BEGIN, BUFFER_TICKS, CHART_BALLS, COYOTE_TICKS, CUE_JUMP,
-    CUE_LAND, CUES, Cue, EYE_LIFT, FIRE, FIRE_TICKS, FLASH_TICKS, Gun, HALF_H, HALF_W,
-    HITMARK_TICKS, HUD_ROUND, HUD_ROWS, HUD_SPEED, HUD_STATE, Hud, JUMP, JUMP_VELOCITY, LAMPS,
-    LIFE_FLOOR, MENU_AA, MENU_AIM, MENU_BACK, MENU_ITEMS, MENU_LOOK, MENU_LOOK_DOWN, MENU_LOOK_UP,
-    MENU_QUIT, MENU_RESTART, MENU_RESUME, MENU_RULE, MENU_SCALE, MENU_SETTINGS, MENU_START,
-    MENU_TALLY, MENU_TITLE, MENU_TO_TITLE, MENU_VOLUME, MENU_VOLUME_DOWN, MISSES_ALLOWED,
-    MOVE_FORWARD, MOVE_RIGHT, Menu, PAGE_MAIN, PAGE_OVER, PAGE_SETTINGS, PAGE_TITLE, PAUSE,
-    RECOIL_KICK, RECOIL_TICKS, RESTART, ROOM, RULE, Range, SCALE_DEFAULT, SENS_DEFAULT, SENS_MAX,
-    SENS_MIN, SENS_ONE, SENS_STEP, SHELTER, SHOT_RANGE, SKIN, SPARK_TICKS, SPOTS, START,
-    STATE_OVER, STATE_RUNNING, STEP_HEIGHT, STREAK_STEP, Session, Solid, Spark, TARGET_HALF,
-    TARGET_INK, TARGET_LIFE, TARGET_WORTH, TARGETS_LIVE, TITLE_NAME, Target, WALK_SPEED, WAVE_HITS,
-    Walker, accuracy, counts_per_turn, life_for, look_per_count, session, wave_of, worth_for,
+    ACTIONS, AIM_X, AIM_Y, ARMS, AUTO_DEFAULT, AXES, BEGIN, BUFFER_TICKS, CHART_BALLS,
+    COYOTE_TICKS, CUE_JUMP, CUE_LAND, CUES, Cue, EYE_LIFT, FIRE, FIRE_TICKS, FLASH_TICKS, Gun,
+    HALF_H, HALF_W, HITMARK_TICKS, HUD_ROUND, HUD_ROWS, HUD_SPEED, HUD_STATE, Hud, JUMP,
+    JUMP_VELOCITY, LAMPS, LIFE_FLOOR, MENU_AA, MENU_AIM, MENU_AUTO, MENU_BACK, MENU_ITEMS,
+    MENU_LOOK, MENU_LOOK_DOWN, MENU_LOOK_UP, MENU_QUIT, MENU_RESTART, MENU_RESUME, MENU_RULE,
+    MENU_SCALE, MENU_SETTINGS, MENU_START, MENU_TALLY, MENU_TITLE, MENU_TO_TITLE, MENU_VOLUME,
+    MENU_VOLUME_DOWN, MISSES_ALLOWED, MOVE_FORWARD, MOVE_RIGHT, Menu, PAGE_MAIN, PAGE_OVER,
+    PAGE_SETTINGS, PAGE_TITLE, PAUSE, RECOIL_KICK, RECOIL_TICKS, RESTART, ROOM, RULE, Range,
+    SCALE_DEFAULT, SENS_DEFAULT, SENS_MAX, SENS_MIN, SENS_ONE, SENS_STEP, SHELTER, SHOT_RANGE,
+    SKIN, SPARK_TICKS, SPOTS, START, STATE_OVER, STATE_RUNNING, STEP_HEIGHT, STREAK_STEP, Session,
+    Solid, Spark, TARGET_HALF, TARGET_INK, TARGET_LIFE, TARGET_WORTH, TARGETS_LIVE, TITLE_NAME,
+    Target, WALK_SPEED, WAVE_HITS, Walker, accuracy, counts_per_turn, life_for, look_per_count,
+    session, wave_of, worth_for,
 };
 use gg_ecs::boundary::{
     self, AbiInfo, ActionId, AxisId, ComponentsTable, Eye, HostApiV1, InputFrame, Light, Prefs,
@@ -1612,6 +1613,42 @@ fn the_render_row_names_the_fraction_the_room_is_drawn_at() {
         SCALE_DEFAULT,
         "the lap came back to where it started"
     );
+}
+
+/// The rate row, and the one thing about it that is not the row above: **zero
+/// is on the ladder**. `Prefs::scale_auto`'s zero means "never touch it", which
+/// is a real answer to what this row asks rather than a deferral to the host,
+/// so unlike `RENDER` this one offers every value the field can hold.
+#[test]
+fn the_auto_row_offers_off_because_off_is_an_answer() {
+    let mut game = Game::load();
+    game.begin();
+    game.tap(PAUSE);
+    game.click(MENU_SETTINGS);
+    assert_eq!(
+        game.prefs().scale_auto,
+        AUTO_DEFAULT,
+        "the shipped game protects a rate without being asked to"
+    );
+    assert_ne!(AUTO_DEFAULT, 0, "and the rate it protects is not `off`");
+
+    let lap = [(60, "AUTO  60 HZ"), (0, "AUTO    OFF"), (30, "AUTO  30 HZ")];
+    assert_eq!(game.menu(MENU_AUTO).text(), "AUTO  30 HZ");
+    for (hz, text) in lap {
+        game.click(MENU_AUTO);
+        assert_eq!(game.prefs().scale_auto, hz);
+        assert_eq!(game.menu(MENU_AUTO).text(), text);
+    }
+    assert_eq!(
+        game.prefs().scale_auto,
+        AUTO_DEFAULT,
+        "the lap came back to where it started"
+    );
+
+    // The two rows are independent knobs and not one: the rate the host may
+    // protect says nothing about the fraction the player chose, and a game that
+    // let one write the other would have a menu that argues with itself.
+    assert_eq!(game.prefs().scale, SCALE_DEFAULT);
 }
 
 /// Restarting from the menu puts the body back *and* returns to the game — and

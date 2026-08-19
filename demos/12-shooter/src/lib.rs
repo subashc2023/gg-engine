@@ -697,9 +697,11 @@ pub const MENU_TALLY: u32 = 34;
 pub const MENU_AIM: u32 = 35;
 /// What fraction of the window the room is drawn at, cycled by clicking it.
 pub const MENU_SCALE: u32 = 36;
+/// The frame rate the host may soften the picture to protect (§6 M80).
+pub const MENU_AUTO: u32 = 37;
 /// Every menu widget. Deal order only — where a row *sits*, and in what
 /// order the ring visits it, is [`page_rows`]'s and differs per page.
-pub const MENU_ITEMS: [u32; 21] = [
+pub const MENU_ITEMS: [u32; 22] = [
     MENU_SCRIM,
     MENU_PANEL,
     MENU_TITLE,
@@ -721,6 +723,7 @@ pub const MENU_ITEMS: [u32; 21] = [
     MENU_VOLUME_UP,
     MENU_AA,
     MENU_SCALE,
+    MENU_AUTO,
 ];
 
 /// Where the menu's draw order starts. Above [`HUD_CROSS`] and the [`ARMS`]
@@ -761,15 +764,16 @@ fn page_rows(page: u32) -> &'static [(u32, [f32; 4])] {
             (MENU_SCRIM, [0.0, 0.0, 640.0, 360.0]),
             (MENU_PANEL, [200.0, 60.0, 240.0, 240.0]),
             (MENU_TITLE, [216.0, 76.0, 208.0, 12.0]),
-            (MENU_LOOK, [216.0, 116.0, 150.0, 12.0]),
-            (MENU_LOOK_DOWN, [370.0, 110.0, 24.0, 24.0]),
-            (MENU_LOOK_UP, [400.0, 110.0, 24.0, 24.0]),
-            (MENU_VOLUME, [216.0, 156.0, 150.0, 12.0]),
-            (MENU_VOLUME_DOWN, [370.0, 150.0, 24.0, 24.0]),
-            (MENU_VOLUME_UP, [400.0, 150.0, 24.0, 24.0]),
-            (MENU_AA, [216.0, 184.0, 208.0, 26.0]),
-            (MENU_SCALE, [216.0, 214.0, 208.0, 26.0]),
-            (MENU_BACK, [216.0, 250.0, 208.0, 26.0]),
+            (MENU_LOOK, [216.0, 112.0, 150.0, 12.0]),
+            (MENU_LOOK_DOWN, [370.0, 106.0, 24.0, 24.0]),
+            (MENU_LOOK_UP, [400.0, 106.0, 24.0, 24.0]),
+            (MENU_VOLUME, [216.0, 148.0, 150.0, 12.0]),
+            (MENU_VOLUME_DOWN, [370.0, 142.0, 24.0, 24.0]),
+            (MENU_VOLUME_UP, [400.0, 142.0, 24.0, 24.0]),
+            (MENU_AA, [216.0, 176.0, 208.0, 26.0]),
+            (MENU_SCALE, [216.0, 204.0, 208.0, 26.0]),
+            (MENU_AUTO, [216.0, 232.0, 208.0, 26.0]),
+            (MENU_BACK, [216.0, 264.0, 208.0, 26.0]),
         ],
         PAGE_OVER => &[
             (MENU_SCRIM, [0.0, 0.0, 640.0, 360.0]),
@@ -1395,6 +1399,7 @@ pub fn bootstrap(world: &mut GameWorld) {
             // reads a number while the field means "ask the host" is a row
             // that lies, and this game draws the row.
             scale: SCALE_DEFAULT,
+            scale_auto: AUTO_DEFAULT,
             ..Default::default()
         },
     );
@@ -1853,6 +1858,7 @@ pub fn menu(world: &mut GameWorld) {
         // host" is a row that lies whenever `r.aa` or `r.msaa` is on.
         MENU_AA => prefs.aa = next_aa(prefs.aa),
         MENU_SCALE => prefs.scale = next_scale(prefs.scale),
+        MENU_AUTO => prefs.scale_auto = next_auto(prefs.scale_auto),
         _ => {}
     }
 
@@ -2008,6 +2014,15 @@ fn dress(item: u32, session: Session, prefs: Prefs, range: Range, widget: &mut W
             0 => widget.set_text("RENDER  HOST"),
             percent => {
                 let _ = write!(line, "RENDER  {percent}%");
+                widget.set_text(line.as_str());
+            }
+        },
+        MENU_AUTO => match prefs.scale_auto {
+            // Zero *is* offered here, unlike the row above: off is a real answer
+            // to "what should the host protect", and it is the engine's default.
+            0 => widget.set_text("AUTO    OFF"),
+            hz => {
+                let _ = write!(line, "AUTO  {hz} HZ");
                 widget.set_text(line.as_str());
             }
         },
@@ -2453,6 +2468,34 @@ pub const SCALE_DEFAULT: u32 = SCALE_STEPS[2];
 fn next_scale(percent: u32) -> u32 {
     let at = SCALE_STEPS.iter().position(|p| *p == percent);
     SCALE_STEPS[at.map_or(0, |i| (i + 1) % SCALE_STEPS.len())]
+}
+
+/// The rates this game offers to protect, and off (§6 M80).
+///
+/// Unlike [`SCALE_STEPS`], zero **is** on the ladder: `Prefs::scale_auto`'s zero
+/// means "never touch it", which is a real answer to what the row asks rather
+/// than a deferral to somewhere else, and it is the engine's own default.
+const AUTO_STEPS: [u32; 3] = [0, 30, 60];
+
+/// What a fresh session opens at, and it is not off.
+///
+/// Thirty rather than sixty, deliberately. A target the machine cannot reach
+/// even at the floor is one the host chases all the way down for nothing — and
+/// with vsync the frame clock is quantised to the refresh, so aiming at the
+/// panel's own rate is aiming at a number the measurement can only just hit.
+/// Thirty is the rate below which this game stops being playable, and on the
+/// integrated Radeon it costs about a quarter of the picture's width to hold
+/// (§6 M79's plant: 53.7 ms at full scale, 30.6 at 0.75).
+///
+/// Public for [`SCALE_DEFAULT`]'s reason — the golden harness draws this menu
+/// without running the game.
+pub const AUTO_DEFAULT: u32 = AUTO_STEPS[1];
+
+/// The next rate along, wrapping — [`next_scale`]'s rule, including what it
+/// does with a value no build offers.
+fn next_auto(hz: u32) -> u32 {
+    let at = AUTO_STEPS.iter().position(|p| *p == hz);
+    AUTO_STEPS[at.map_or(0, |i| (i + 1) % AUTO_STEPS.len())]
 }
 
 /// The next mode along, wrapping. An unknown one — a save from a build with

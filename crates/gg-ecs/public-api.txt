@@ -224,6 +224,7 @@ pub gg_ecs::boundary::Prefs::modal: u32
 pub gg_ecs::boundary::Prefs::present: u32
 pub gg_ecs::boundary::Prefs::quiet: u32
 pub gg_ecs::boundary::Prefs::scale: u32
+pub gg_ecs::boundary::Prefs::scale_auto: u32
 pub gg_ecs::boundary::Prefs::unfocused: u32
 impl gg_ecs::boundary::Prefs
 pub fn gg_ecs::boundary::Prefs::antialias(&self) -> core::option::Option<bool>

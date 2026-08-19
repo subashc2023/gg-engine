@@ -1456,6 +1456,7 @@ fn shooter_menu(
     let prefs = Prefs {
         aa: gg_ecs::boundary::aa::MSAA_4,
         scale: shooter::SCALE_DEFAULT,
+        scale_auto: shooter::AUTO_DEFAULT,
         ..Prefs::default()
     };
     let mut world = World::new();

@@ -3709,7 +3709,34 @@ const RULES_TICKS: usize = 8_000;
 /// the trigger was re-anchored, 400 ms of full-speed replay being half the
 /// stream). More than one because a swap landing on a clearing tick is
 /// uninformative — see the loop in [`rules`].
+///
+/// Only the **first** of these is used as written. The replay races on while the
+/// sighting crosses a pipe, and how far is the machine's business: 282 ticks on
+/// an idle desk, 2,178 under a loaded nightly. The later attempts are therefore
+/// aimed from what the earlier one *raced* and from the clear map this gate
+/// already holds, rather than at a number chosen before either was known — see
+/// [`rules`].
 const RULES_SWAPS: [u64; 3] = [1_200, 2_000, 2_800];
+
+/// Ticks of *clear-free agreement* the swap has to be followed by before this
+/// gate will grade the run.
+///
+/// One is not enough, and that is the subtle half. The gate proves the stack
+/// crossed intact by watching the two runs agree through the swap tick, and
+/// proves the new rule ran by watching them part at the next clear. A swap that
+/// damaged the world would part at `swap + 1` — so if the next clear *is*
+/// `swap + 1`, "the new table scored differently" and "the stack did not
+/// survive" produce the same observation and the gate cannot tell them apart.
+/// Two is the minimum that leaves one tick the new build ran, changed nothing,
+/// and was watched doing it. Found by reading a green run: `swap 1459, clear
+/// 1460, and the 0 after it`.
+const RULES_SETTLE: usize = 2;
+
+/// Clear-free ticks a re-aimed swap wants after it lands. The race varies
+/// between attempts on exactly the machine that made it large, so the target is
+/// a *gap* rather than a tick — land anywhere inside one and this gate has
+/// something to measure.
+const RULES_MARGIN: usize = 12;
 
 /// The schema edit: `Best` gains a field.
 ///
@@ -3882,8 +3909,50 @@ fn rules_once() -> anyhow::Result<u128> {
     // difference — including a world that did not survive — shows in the same
     // place and the two cannot be told apart. The gate takes another swing at a
     // different moment instead of asserting something it did not observe.
+    // Where a clear-free stretch of at least `RULES_MARGIN` ticks starts, at or
+    // after `from`. The clear map is the untouched run's own and is known before
+    // any swap is attempted, so a re-aim is a lookup rather than a guess.
+    let gap_at = |from: usize| {
+        (from..RULES_TICKS / 2).find(|&i| {
+            i > 0
+                && (i..(i + RULES_MARGIN).min(progress.len()))
+                    .all(|j| progress[j].lines == progress[j - 1].lines)
+        })
+    };
+
     let mut taken = None;
-    for aim in RULES_SWAPS {
+    let mut raced = 0u64;
+    for (attempt, planned) in RULES_SWAPS.into_iter().enumerate() {
+        // The first attempt aims where this gate always did, so an idle desk
+        // behaves exactly as it used to. A later one aims at the earliest tick
+        // this machine can still *reach* — its own measured race plus one —
+        // moved forward to the start of a clear-free gap, then set back by the
+        // race so the landing arrives inside it. Compensating without the gap
+        // lookup cannot work: a machine that raced 2,178 ticks cannot land at
+        // 1,200 however it is aimed, and deep in the game rows clear every few
+        // ticks, which is why all three aims used to fail at once.
+        let aim = match attempt {
+            0 => planned,
+            _ => {
+                let floor = usize::try_from(raced).unwrap_or(0) + 1;
+                let want = floor.max(usize::try_from(planned).unwrap_or(0));
+                let target = gap_at(want).or_else(|| gap_at(floor)).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no {RULES_MARGIN}-tick clear-free stretch after tick {floor}, which is \
+                         where a machine racing {raced} ticks can first land"
+                    )
+                })?;
+                let aim = u64::try_from(target)
+                    .unwrap_or(0)
+                    .saturating_sub(raced)
+                    .max(1);
+                println!(
+                    "xtask: the last swap raced {raced} ticks past its aim — re-aiming at tick \
+                     {aim} so it lands in the clear-free stretch at {target}"
+                );
+                aim
+            }
+        };
         std::fs::copy(&before, &game)?;
         let marker = format!("tick={aim} hash=");
         let log = reload_after(&game, &after, &["--replay", &stream], &marker, 0)?;
@@ -3917,11 +3986,12 @@ fn rules_once() -> anyhow::Result<u128> {
         let clear = (swap..progress.len())
             .find(|&i| i > 0 && progress[i].lines > progress[i - 1].lines)
             .ok_or_else(|| anyhow::anyhow!("no row was cleared after the swap at tick {swap}"))?;
-        if clear == swap {
+        if clear < swap + RULES_SETTLE {
             println!(
-                "xtask: the swap landed on tick {swap}, which is itself a clearing tick — \
-                 swinging again"
+                "xtask: the swap landed on tick {swap} and the next row goes at {clear} — too \
+                 close to tell a changed rule from a broken stack (§6 M80) — swinging again"
             );
+            raced = u64::try_from(swap).unwrap_or(0).saturating_sub(aim);
             continue;
         }
         taken = Some((swap, swap_ms, clear, swapped));

@@ -149,3 +149,82 @@ fn a_graph_deeper_than_the_pool_is_timed_as_far_as_the_pool_reaches() {
     let report = rhi.shutdown();
     assert!(report.clean(), "unclean: {report:?}");
 }
+
+/// The per-pass readings **tile**: each pass opens no earlier than the previous
+/// one closed, so the column sums to the frame rather than to more than it
+/// (§6 M79).
+///
+/// This is what a `TOP_OF_PIPE` opening stamp gets wrong, and it is worth a
+/// structural assertion rather than a threshold because the failure is not
+/// "slow", it is *arithmetic*: a top-of-pipe stamp fires when the command
+/// processor reaches the pass, which on a device that runs ahead across a
+/// barrier is while the previous pass is still executing. Every interval then
+/// contains its predecessor's tail. On the desk's integrated Radeon that read
+/// `ao-blur` at 20.5 ms for work worth 3.8 and summed the table to 46 % more
+/// than the frame it described.
+///
+/// It does **not** fire on every device, and that is the point rather than a
+/// weakness: lavapipe and the 4090 both stalled at the barrier and reported
+/// almost the right answer, which is why this table read fine from §6 M8, where
+/// it was written, to M79.
+/// The assertion is true everywhere and only *provable* where the hardware
+/// misbehaves — `gg-tools frame --attribute` is the empirical half, on a real
+/// device, and it is manual for that reason.
+#[test]
+fn a_passs_time_does_not_include_the_pass_before_it() {
+    init_tracing();
+    let mut rhi = OffscreenRhi::new((64, 64)).unwrap();
+    common::render(&mut rhi, [0.0, 0.5, 0.0, 1.0], &[]).unwrap();
+
+    let timings = rhi.pass_timings();
+    assert!(timings.len() > 1, "one pass cannot overlap anything");
+    // Raw device ticks, masked. A counter wrap inside one frame would read as a
+    // descent here and is the one false failure available — it cannot happen:
+    // Vulkan guarantees at least 36 valid bits on a queue that timestamps at
+    // all, which is 687 seconds even at the coarsest period on this desk (10 ns
+    // on the Radeon iGPU), against a frame measured in microseconds.
+    for pair in timings.windows(2) {
+        let (before, after) = (&pair[0], &pair[1]);
+        assert!(
+            after.begin >= before.end,
+            "{} opened at {} before {} closed at {} — the two readings overlap, \
+             so {}'s {} ms contains work that is not its own",
+            after.name,
+            after.begin,
+            before.name,
+            before.end,
+            after.name,
+            after.gpu_ms
+        );
+    }
+
+    // The same claim as a duration, which is the one a reader of the table acts
+    // on: what every pass claims, against the span the whole frame occupied.
+    // Tiling makes this an identity minus whatever gaps the queue sat idle for,
+    // so the bound is one-sided.
+    let claimed: f32 = timings.iter().map(|t| t.gpu_ms).sum();
+    let span = span_ms(timings);
+    assert!(
+        claimed <= span * 1.001 + 1e-4,
+        "the passes claim {claimed} ms of a frame that spanned {span} ms"
+    );
+
+    let report = rhi.shutdown();
+    assert!(report.clean(), "unclean: {report:?}");
+}
+
+/// The frame's whole span in milliseconds, in the same units the rows report —
+/// derived from one pass's own ticks-to-ms ratio rather than from the device
+/// period, which this crate does not hand out.
+fn span_ms(timings: &[gg_rhi::PassTiming]) -> f32 {
+    let scale = timings
+        .iter()
+        .find(|t| t.end > t.begin && t.gpu_ms > 0.0)
+        .map(|t| t.gpu_ms / (t.end - t.begin) as f32);
+    match (scale, timings.first(), timings.last()) {
+        (Some(scale), Some(first), Some(last)) => (last.end - first.begin) as f32 * scale,
+        // Every pass landed inside one tick: nothing to compare, and the
+        // ordering assertion above has already done the real work.
+        _ => f32::INFINITY,
+    }
+}

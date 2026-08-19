@@ -197,6 +197,14 @@ pub struct App {
     /// What [`Stages::suspended`] last answered, so the transition is logged once
     /// rather than sixty times a second.
     waiting: bool,
+    /// The automatic render scale (§6 M80) and the clock it reads.
+    ///
+    /// Host state, in no archetype and in no save, for the editor camera's
+    /// reason one field over: it is driven by a wall clock, and a wall clock in
+    /// the world is a replay that reproduces only on the machine it was recorded
+    /// on. What a *player* owns is `Prefs::scale_auto`, which is hashed like
+    /// every other preference; what this holds is only the response to it.
+    governor: gg_core::governor::Governor,
 }
 
 impl App {
@@ -366,6 +374,7 @@ impl App {
         Ok(Self {
             world,
             lib,
+            governor: gg_core::governor::Governor::new(),
             rejuvenate: Rejuvenator::new(args.leak_budget),
             extent: gg_ecs::boundary::CANVAS,
             hz,
@@ -674,6 +683,37 @@ impl App {
     /// [`Prefs::modal`] documents, and the same one the picture came from.
     pub fn fullscreen(&self) -> Option<bool> {
         self.prefs().fullscreen()
+    }
+
+    /// This frame's automatic render-scale factor (§6 M80), and the wall clock
+    /// that feeds it.
+    ///
+    /// **Refused outright on a session being written down or read back**, on
+    /// `toggle_fullscreen`'s argument one milestone over (§6 M79): the factor
+    /// moves the extent the extract culls against, so a recording whose machine
+    /// stuttered would replay against a different frustum on a machine that did
+    /// not. Nothing in the *world* would differ — this reaches no component — but
+    /// "the picture a replay produces is the picture that was recorded" is worth
+    /// more than a governor is on a session nobody is playing.
+    ///
+    /// The clock is taken here rather than handed down from `gg_core::FrameLoop`
+    /// because this is the only stage that wants it: `frame(stages, elapsed)`
+    /// consumes `elapsed` into the tick clock and keeps no duration, and adding a
+    /// wall time to `Due` would put a host measurement in the one place the sim
+    /// reads.
+    fn govern(&mut self) -> f64 {
+        if self.drive.scripted() {
+            return 1.0;
+        }
+        let hz = self.ui.prefs().scale_auto;
+        if self.governor.observe(hz) {
+            tracing::info!(
+                factor = self.governor.factor(),
+                hz,
+                "render scale moved to keep up"
+            );
+        }
+        self.governor.factor()
     }
 
     /// The player's own way in and out, for the window rather than for the game
@@ -2249,9 +2289,11 @@ impl Stages for App {
         // be set *before* `view_extent` is read below — the frustum the extract
         // culls against is built from the extent this moves.
         let scale = self.ui.prefs().render_scale();
+        let governor = self.govern();
         if let Some(renderer) = self.gpu.as_mut() {
             renderer.set_present(present);
             renderer.set_scale(scale);
+            renderer.set_scale_governor(governor);
         }
         let Some(renderer) = &self.gpu else {
             return Ok(());

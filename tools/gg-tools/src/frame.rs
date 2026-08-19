@@ -81,6 +81,16 @@ pub fn run(args: &[String]) -> Result<()> {
     if args.iter().any(|a| a == "--sweep") {
         return sweep(frames);
     }
+    if args.iter().any(|a| a == "--emit") {
+        return emit(extent, frames);
+    }
+    if args.iter().any(|a| a == "--attribute") {
+        return attribute(extent, frames);
+    }
+    if let Some(i) = args.iter().position(|a| a == "--devices") {
+        let list = args.get(i + 1).map_or("", String::as_str);
+        return devices(list, args);
+    }
 
     let measured = measure(extent, frames)?;
     println!(
@@ -359,33 +369,10 @@ fn extract(world: &gg_ecs::World, extent: (u32, u32)) -> Result<Extracted> {
 /// Sorted by cost rather than by graph order on purpose — the question is where
 /// the time is, and a reader who wants the order has `gg-golden graph`.
 fn passes(frames: &[Vec<(String, f32)>]) {
-    let mut names: Vec<&str> = frames
-        .iter()
-        .flat_map(|f| f.iter().map(|(n, _)| n.as_str()))
-        .collect();
-    names.sort_unstable();
-    names.dedup();
-    let mut rows: Vec<(&str, f64)> = names
-        .iter()
-        .map(|name| {
-            // Summed within a frame before the median is taken across frames:
-            // the graph declares one name per shadow slice and per probe face,
-            // so a per-row median would report one slice and call it the pass.
-            let per_frame: Vec<u64> = frames
-                .iter()
-                .map(|f| {
-                    let sum: f64 = f
-                        .iter()
-                        .filter(|(n, _)| n == name)
-                        .map(|(_, ms)| f64::from(*ms))
-                        .sum();
-                    (sum * 1e6) as u64
-                })
-                .collect();
-            (*name, median_ms(&per_frame))
-        })
-        .collect();
-    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+    // Summed within a frame before the median is taken across frames: the graph
+    // declares one name per shadow slice and per probe face, so a per-row median
+    // would report one slice and call it the pass. `by_pass` is that reduction.
+    let rows = by_pass(frames);
     let total: f64 = rows.iter().map(|(_, ms)| ms).sum();
     println!("  device                                gpu ms    share");
     for (name, ms) in &rows {
@@ -470,4 +457,318 @@ fn parse_extent(text: &str) -> Result<(u32, u32)> {
         .split_once('x')
         .ok_or_else(|| anyhow::anyhow!("--extent wants `<w>x<h>`, got {text:?}"))?;
     Ok((w.parse()?, h.parse()?))
+}
+
+/// Every pass's median in one list, sorted by cost. Factored out of [`passes`]
+/// because two of the modes below compare these rather than print one.
+fn by_pass(device: &[Vec<(String, f32)>]) -> Vec<(String, f64)> {
+    let mut names: Vec<&str> = device
+        .iter()
+        .flat_map(|f| f.iter().map(|(n, _)| n.as_str()))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut rows: Vec<(String, f64)> = names
+        .iter()
+        .map(|name| ((*name).to_owned(), pass_ms(device, name)))
+        .collect();
+    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+    rows
+}
+
+/// The switches `--attribute` throws, and the value each is put back to. Two
+/// that remove one pass, one that removes a pair, and one that *adds* several —
+/// the inverse direction is the same claim and exercises the arithmetic's sign.
+const SWITCHES: [(&str, &str, &str); 4] = [
+    ("r.ao_blur", "0", "1"),
+    ("r.ao", "0", "1"),
+    ("r.lamp_shadows", "0", "1"),
+    ("r.gi", "1", "0"),
+];
+
+/// The instrument that grades the instrument (§6 M79).
+///
+/// A per-pass table is a set of claims about a frame, and every one of them is
+/// falsifiable the same way: switch the pass off, and the frame must lose
+/// exactly what its row said it would. Nothing here needed writing until a row
+/// was found wrong by five times — `ao-blur` read 20.5 ms on the desk's
+/// integrated Radeon for work worth 3.8, and the whole table summed to 46 %
+/// more than the frame it described, because a `TOP_OF_PIPE` opening stamp
+/// fires when the command processor *reaches* a pass rather than when the one
+/// before it drained.
+///
+/// Three columns and not two, because switching a pass off does not only remove
+/// that pass: `r.ao=0` also stops the depth buffer being sampled, so the prepass
+/// changes shape. **claimed** is what the rows that appeared or vanished say the
+/// change is worth, **elsewhere** is what the surviving rows did, and
+/// **residual** is what neither explains. A residual near zero is the table
+/// telling the truth; the pre-M79 readings put sixteen milliseconds in it.
+fn attribute(extent: (u32, u32), frames: usize) -> Result<()> {
+    let base = measure(extent, frames)?;
+    let base_rows = by_pass(&base.device);
+    let base_total: f64 = base_rows.iter().map(|(_, ms)| ms).sum();
+    println!(
+        "demo 12's room at {}x{} on {} — median of {frames} frames after {WARMUP}, {} codegen\n",
+        extent.0,
+        extent.1,
+        base.name,
+        profile()
+    );
+    // The headline, and the one line that needed no switch thrown: the passes'
+    // own sum against the blocking submit that contains them. The offscreen path
+    // submits and waits, so `render.execute` is record + submit + the whole
+    // device, and a declared total *above* it is a table describing more work
+    // than the frame did. Before §6 M79 this read 79.8 against 54.5.
+    let base_wall = zone_ms(&base.host, "render.execute");
+    println!(
+        "  the frame as declared: {base_total:.3} ms over {} passes, inside a {base_wall:.3} ms \
+         submit\n",
+        base_rows.len()
+    );
+    println!(
+        "  switch                moved                       claimed  elsewhere   device Δ  \
+         submit Δ   residual"
+    );
+    for (name, value, restore) in SWITCHES {
+        let cvar =
+            gg_core::cvar::find(name).ok_or_else(|| anyhow::anyhow!("no cvar named {name:?}"))?;
+        cvar.set_from_str(value, gg_core::cvar::CVarSource::Cli)?;
+        let variant = measure(extent, frames)?;
+        cvar.set_from_str(restore, gg_core::cvar::CVarSource::Cli)?;
+
+        let rows = by_pass(&variant.device);
+        let total: f64 = rows.iter().map(|(_, ms)| ms).sum();
+        let held = |set: &[(String, f64)], want: &str| set.iter().any(|(n, _)| n == want);
+        // Signed the way `observed` is: a row that was there and is gone counts
+        // positive, one that appeared counts negative, so a switch that *adds*
+        // work reads as a negative claim against a negative observation.
+        let gone: f64 = base_rows
+            .iter()
+            .filter(|(n, _)| !held(&rows, n))
+            .map(|(_, ms)| ms)
+            .sum();
+        let came: f64 = rows
+            .iter()
+            .filter(|(n, _)| !held(&base_rows, n))
+            .map(|(_, ms)| ms)
+            .sum();
+        let claimed = gone - came;
+        let elsewhere: f64 = base_rows
+            .iter()
+            .filter_map(|(n, ms)| rows.iter().find(|(m, _)| m == n).map(|(_, was)| ms - was))
+            .sum();
+        // `device` is arithmetic over the same rows `claimed` and `elsewhere`
+        // came from, so those three are an identity and prove nothing on their
+        // own — it is printed because it is what a reader would otherwise work
+        // out by hand. `submit` is the independent measurement: a CPU clock
+        // around a blocking submit, which knows nothing about passes. The
+        // **residual between them** is the only column here that can be wrong.
+        let device = base_total - total;
+        let submit = base_wall - zone_ms(&variant.host, "render.execute");
+        let mut moved: Vec<&str> = base_rows
+            .iter()
+            .filter(|(n, _)| !held(&rows, n))
+            .map(|(n, _)| n.as_str())
+            .chain(
+                rows.iter()
+                    .filter(|(n, _)| !held(&base_rows, n))
+                    .map(|(n, _)| n.as_str()),
+            )
+            .collect();
+        moved.sort_unstable();
+        moved.dedup();
+        println!(
+            "  {:<20}  {:<26}  {claimed:>7.3}  {elsewhere:>9.3}  {device:>9.3}  {submit:>8.3}  \
+             {:>9.3}",
+            format!("{name}={value}"),
+            elide(&moved.join(" "), 26),
+            submit - device
+        );
+    }
+    Ok(())
+}
+
+/// Longest prefix that fits, so one long list of pass names cannot push every
+/// number on the line out of its column.
+fn elide(text: &str, width: usize) -> String {
+    match text.len() > width {
+        true => format!("{}…", &text[..width.saturating_sub(1)]),
+        false => text.to_owned(),
+    }
+}
+
+/// One device's reading as tab-separated lines, for a parent [`devices`] run to
+/// read back. Not a report — a human wants the tables above, and a parser wants
+/// a format that does not move when a column is widened.
+fn emit(extent: (u32, u32), frames: usize) -> Result<()> {
+    let measured = measure(extent, frames)?;
+    println!("device\t{}", measured.name);
+    for (name, ms) in by_pass(&measured.device) {
+        println!("pass\t{name}\t{ms:.6}");
+    }
+    Ok(())
+}
+
+/// The two-device table (§6 M79).
+///
+/// A pass's cost on one machine is not a fact about the pass — it is a fact
+/// about that machine — so the column that means anything is the **ratio**, and
+/// the column that means the most is the ratio against the *frame's own* ratio.
+/// A pass slower than the frame is slower by a number; a pass slower than the
+/// frame's own ratio is one the slow device dislikes **specifically**, and only
+/// that one is worth looking at rather than merely paying.
+///
+/// A process per device, deliberately. `GG_ADAPTER` is read once at
+/// `Device::new`, and mutating the environment under a live driver's threads is
+/// not something an instrument gets to do; a child also gets a device of its
+/// own, which is §6 M67's lesson and `bounce`'s. Every other argument is
+/// forwarded verbatim, so `--set` reaches both halves and a knob can be graded
+/// across two devices in one run.
+fn devices(list: &str, args: &[String]) -> Result<()> {
+    let wanted: Vec<&str> = list
+        .split(',')
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .collect();
+    anyhow::ensure!(
+        wanted.len() >= 2,
+        "--devices takes two or more GG_ADAPTER substrings, comma separated \
+         (`--devices 4090,radeon`)"
+    );
+    let exe = std::env::current_exe()?;
+    // Everything but the flag and its value, so `--extent`, `--frames` and every
+    // `--set` reach the children unchanged.
+    let mut forwarded: Vec<String> = vec!["frame".to_owned(), "--emit".to_owned()];
+    let mut skip = false;
+    for arg in args {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if arg == "--devices" {
+            skip = true;
+            continue;
+        }
+        forwarded.push(arg.clone());
+    }
+
+    let mut columns: Vec<(String, Vec<(String, f64)>)> = Vec::new();
+    for want in &wanted {
+        let out = std::process::Command::new(&exe)
+            .args(&forwarded)
+            .env("GG_ADAPTER", want)
+            // A pinned software rasterizer would be the only device the instance
+            // can see, so every name here would match nothing. `--devices` means
+            // real hardware by construction, the way `xtask gpu` does.
+            .env_remove("VK_DRIVER_FILES")
+            .output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "GG_ADAPTER={want} did not run:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        columns.push(parse_emit(&String::from_utf8_lossy(&out.stdout))?);
+    }
+
+    let totals: Vec<f64> = columns
+        .iter()
+        .map(|(_, rows)| rows.iter().map(|(_, ms)| ms).sum())
+        .collect();
+    // The fastest column is the denominator, whichever it was named in: a ratio
+    // wants a reference a reader can hold still.
+    let base = totals
+        .iter()
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(b.1))
+        .map_or(0, |(i, _)| i);
+    let frame_ratio = |i: usize| match totals[base] {
+        t if t > 0.0 => totals[i] / t,
+        _ => 0.0,
+    };
+    println!(
+        "demo 12's room, a process per device, {} codegen\n",
+        profile()
+    );
+    for (i, (name, _)) in columns.iter().enumerate() {
+        println!(
+            "  {}{name} — {:.3} ms, {:.0}x",
+            if i == base { "* " } else { "  " },
+            totals[i],
+            frame_ratio(i)
+        );
+    }
+    print!("\n  pass                          {:>10}", "ms");
+    for _ in columns.iter().skip(1) {
+        print!("{:>10}{:>8}{:>10}", "ms", "ratio", "vs frame");
+    }
+    println!();
+    let at = |i: usize, name: &str| {
+        columns[i]
+            .1
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(0.0, |(_, ms)| *ms)
+    };
+    let mut names: Vec<&str> = columns
+        .iter()
+        .flat_map(|(_, rows)| rows.iter().map(|(n, _)| n.as_str()))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names.sort_by(|a, b| at(base, b).total_cmp(&at(base, a)));
+    for name in names {
+        print!("  {name:<28}  {:>10.3}", at(base, name));
+        for i in (0..columns.len()).filter(|i| *i != base) {
+            let ratio = match at(base, name) {
+                m if m > 0.0 => at(i, name) / m,
+                _ => 0.0,
+            };
+            let against = match frame_ratio(i) {
+                f if f > 0.0 => ratio / f,
+                _ => 0.0,
+            };
+            print!("{:>10.3}{ratio:>7.0}x{against:>9.2}x", at(i, name));
+        }
+        println!();
+    }
+    println!(
+        "\n  `vs frame` is the column that names a defect rather than a price: 1.00x is a pass\
+         \n  costing the slow device exactly what the whole frame costs it, and well above that\
+         \n  is work that device dislikes specifically."
+    );
+    Ok(())
+}
+
+/// `device` and `pass` lines back into a column. A line this does not recognise
+/// is an error rather than a skip: the child is this same binary, so a line it
+/// cannot read means the two halves disagree about the format.
+fn parse_emit(text: &str) -> Result<(String, Vec<(String, f64)>)> {
+    let mut name = String::new();
+    let mut rows = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        // `--set` prints a line of its own before the table: a report to a human,
+        // not part of this format.
+        if line.starts_with("  set ") {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("device"), Some(device), None) => name = device.to_owned(),
+            (Some("pass"), Some(pass), Some(ms)) => rows.push((pass.to_owned(), ms.parse()?)),
+            _ => anyhow::bail!("a child emitted a line this cannot read: {line:?}"),
+        }
+    }
+    anyhow::ensure!(!rows.is_empty(), "a child emitted no passes at all");
+    Ok((name, rows))
+}
+
+/// One CPU zone's median across the timed frames. The independent clock
+/// `--attribute` grades the device table against: it is measured by
+/// `gg_core::zone` on the host and knows nothing about which pass is which.
+fn zone_ms(frames: &[Vec<zone::Sample>], want: &str) -> f64 {
+    let per_frame: Vec<u64> = frames
+        .iter()
+        .map(|f| f.iter().filter(|s| s.name == want).map(|s| s.nanos).sum())
+        .collect();
+    median_ms(&per_frame)
 }

@@ -45,6 +45,7 @@ pub mod config;
 pub mod cvar;
 pub mod event;
 pub mod frame;
+pub mod governor;
 pub mod reload;
 pub mod zone;
 

@@ -80,8 +80,29 @@ impl Stamps {
     /// # Safety
     /// `cmd` must be recording and `index` must satisfy [`Stamps::covers`].
     pub(crate) unsafe fn begin(&self, device: &Device, cmd: vk::CommandBuffer, index: usize) {
+        // `BOTTOM_OF_PIPE` and **not** `TOP_OF_PIPE` (§6 M79). A top-of-pipe
+        // timestamp is signalled when the command processor *reaches* the pass,
+        // which is almost immediately — it does not wait for the previous pass
+        // to drain. So every interval swallowed its predecessor's tail: on the
+        // desk's integrated Radeon `ao-blur` read 20.5 ms for work worth 3.9,
+        // the whole table summed to 46 % more than the frame it described, and
+        // the error was largest for a cheap pass behind an expensive one, which
+        // is the profile of every denoiser and every post pass there is.
+        //
+        // Both stamps at the drain point makes the intervals *tile*: this one
+        // is "everything before me is done", the next pass's is the same event,
+        // and a pass's reading is its own incremental contribution. It inserts
+        // no barrier and stalls nothing — a timestamp write orders the query,
+        // not the queue.
         // SAFETY: caller contract.
-        unsafe { self.write(device, cmd, vk::PipelineStageFlags2::TOP_OF_PIPE, index * 2) };
+        unsafe {
+            self.write(
+                device,
+                cmd,
+                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                index * 2,
+            )
+        };
     }
 
     /// # Safety

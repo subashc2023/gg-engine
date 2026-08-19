@@ -41,7 +41,15 @@
 //!                                   which is a crease's own number (§6 M69)
 //!   gg-tools frame [--extent WxH]   where a frame's milliseconds go: the
 //!                                   per-pass device table against the host's
-//!                                   own zones (§6 M58)
+//!                                   own zones (§6 M58). `--sweep` is the
+//!                                   ms/Mpx table `r.scale` is read off (M78);
+//!                                   `--attribute` grades this command's own
+//!                                   rows by switching each pass off, and
+//!                                   `--devices a,b` prices a pass on two
+//!                                   machines at once (M79)
+//!   gg-tools governor               does the automatic render scale settle:
+//!                                   the shipped controller and the obvious
+//!                                   one, over five traces (§6 M80)
 //!   gg-tools banding                what the 8-bit output does to a smooth
 //!                                   gradient, swept over `r.dither`
 //!   gg-tools pace [--editor]        what a display rate does to a turn the hand
@@ -74,6 +82,7 @@ mod field;
 mod fp_isa;
 mod frame;
 mod furnace;
+mod governor;
 mod hash_scale;
 mod icon;
 mod lamps;
@@ -131,6 +140,7 @@ fn main() -> anyhow::Result<()> {
         "field" => field::run(rest),
         "facets" => facets::run(rest),
         "frame" => frame::run(rest),
+        "governor" => governor::run(rest),
         "views" => views::run(rest),
         "banding" => banding::run(rest),
         "pace" => pace::run(rest),
@@ -147,7 +157,7 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
                  shadow-flat, shadow-sweep, shadow-edge, shadow-reach, lights, lamps, cull, furnace, \
-                 split-sum, ao, bounce, field, facets, frame, views, banding, pace, hash-scale, orbit, map, \
+                 split-sum, ao, bounce, field, facets, frame, governor, views, banding, pace, hash-scale, orbit, map, \
                  panorama, icon, timbre, clicks, transfer, fp-isa, mcp. A new instrument is a new \
                  subcommand here, not a new crate"
             )

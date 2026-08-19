@@ -297,11 +297,29 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   change rather than being copied here, which is the part that makes this a
 ///   raise of fifty lines instead of sixty.
 ///
+/// - **The frame rate nobody chose** (2025 -> 2037, §6 M80): twelve lines, and
+///   what is *not* here is the argument for them. The controller — the window,
+///   the median, the dead band, the proportional step and the one rule that
+///   makes it settle — is `gg_core::governor`, ninety lines with its own tests
+///   and its own instrument, because none of it is about a window.
+///
+///   Twelve lines is what is left once that is somewhere else, and each is a
+///   fact only the shell holds. The wall clock is one: `FrameLoop::frame`
+///   consumes `elapsed` into the tick clock and keeps no duration, and putting a
+///   wall time on `Due` would hand the sim a host measurement it must never read
+///   — so the interval is taken where the decision is used and nowhere else. The
+///   **refusal** is the other, and it is the whole of why this is not free:
+///   `Drive::scripted()` is the shell's own predicate (§6 M78, M79), and a
+///   session being written down or read back must produce the picture it
+///   recorded whatever the machine was doing that afternoon. Nothing else in the
+///   tree knows both that a frame took nineteen milliseconds and that nobody is
+///   allowed to act on it.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session), M45 (the
 /// keys), M46 (the window), M47 (the refusal), M48 (the crash), M63 (the
-/// viewport's pointer) — each argued the same way.
-const SHELL_BUDGET: usize = 2025;
+/// viewport's pointer), M80 (the frame rate) — each argued the same way.
+const SHELL_BUDGET: usize = 2037;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.

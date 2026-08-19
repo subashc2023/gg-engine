@@ -284,6 +284,7 @@ pub fn gg_render::Renderer::samples(&self) -> gg_rhi::resource::Samples
 pub fn gg_render::Renderer::scenes(&self) -> &dyn gg_extract::Scenes
 pub fn gg_render::Renderer::set_present(&mut self, core::option::Option<u32>)
 pub fn gg_render::Renderer::set_scale(&mut self, core::option::Option<f64>)
+pub fn gg_render::Renderer::set_scale_governor(&mut self, f64)
 pub fn gg_render::Renderer::set_ui_atlas(&mut self, &gg_render::ui::Coverage<'_>) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_render::Renderer::set_viewport(&mut self, core::option::Option<gg_rhi::graph::Viewport>)
 pub fn gg_render::Renderer::shadow_cull(&self) -> gg_render::ShadowCull

@@ -191,14 +191,34 @@ pub struct Prefs {
     /// A percentage rather than a float because [`Prefs`] is `Pod` and flat, and
     /// because a menu row moves it in steps a player can read back. It is the
     /// one preference here whose right value is a property of the *machine*
-    /// rather than of taste: demo 12's room is 79.4 ms a frame at 1920x1080 on
-    /// an integrated Radeon and 34.0 at 1280x720, which is the difference
-    /// between twelve frames a second and twenty-nine.
+    /// rather than of taste: demo 12's room is 53.7 ms a frame at 1920x1080 on
+    /// an integrated Radeon and 23.8 at 1280x720, which is the difference
+    /// between nineteen frames a second and forty-two (§6 M79's corrected
+    /// numbers — M78 quoted 79.4 and 34.0, off a table that over-counted).
     ///
     /// It reaches the scene and **not the UI** — the HUD, the menus and the
     /// pointer are drawn in their own pass at the window's own size — so a game
     /// offering this is not offering to make its own text unreadable.
     pub scale: u32,
+    /// The frame rate the host may lower [`scale`](Self::scale) to protect, in
+    /// Hz, or `0` to never touch it (§6 M80).
+    ///
+    /// Zero is off, which is [`Prefs`]'s law — a migration that zeroes this
+    /// field must leave a game doing exactly what the engine does anyway, and a
+    /// host quietly softening the picture is not that.
+    ///
+    /// A **rate** and not a percentage, because it is the only unit a player
+    /// has an opinion about. What the host does with it is its own business and
+    /// is deliberately not describable here: it is a control loop over the wall
+    /// clock, its state is host state, and none of it reaches the world. The one
+    /// thing that does is this number, which is a choice and is hashed like
+    /// every other preference.
+    ///
+    /// It composes with [`scale`](Self::scale) rather than replacing it: the
+    /// player's percentage is the ceiling and this may hold the picture below
+    /// it, so `scale 150, scale_auto 60` is "supersample when you can afford
+    /// to" and means what it says.
+    pub scale_auto: u32,
     /// One of [`display`]'s constants. Unknown values are
     /// [`display::DEFAULT`].
     pub display: u32,
@@ -366,11 +386,12 @@ pub mod settings {
     /// with its controls already withheld. A field added to [`Prefs`] is not
     /// persisted until it is added here, which is the review this table forces.
     #[allow(clippy::type_complexity)]
-    const KEYS: [(&str, fn(&Prefs) -> u32, fn(&mut Prefs, u32)); 7] = [
+    const KEYS: [(&str, fn(&Prefs) -> u32, fn(&mut Prefs, u32)); 8] = [
         ("cursor", |p| p.cursor, |p, v| p.cursor = v),
         ("quiet", |p| p.quiet, |p, v| p.quiet = v),
         ("aa", |p| p.aa, |p, v| p.aa = v),
         ("scale", |p| p.scale, |p, v| p.scale = v),
+        ("scale_auto", |p| p.scale_auto, |p, v| p.scale_auto = v),
         ("display", |p| p.display, |p, v| p.display = v),
         ("present", |p| p.present, |p, v| p.present = v),
         ("unfocused", |p| p.unfocused, |p, v| p.unfocused = v),
@@ -423,7 +444,7 @@ mod tests {
     fn the_protocol_type_is_flat_and_padding_free() {
         // `Pod` already refuses padding; this pins the number so a field added
         // is a visible edit rather than a silent layout move.
-        assert_eq!(size_of::<Prefs>(), 36);
+        assert_eq!(size_of::<Prefs>(), 40);
         assert_eq!(align_of::<Prefs>(), 4);
     }
 
@@ -454,6 +475,10 @@ mod tests {
             zeroed.render_scale(),
             None,
             "nor one drawing its room at a quarter of the window"
+        );
+        assert_eq!(
+            zeroed.scale_auto, 0,
+            "nor one whose host is quietly softening the picture"
         );
         assert!(
             zeroed.pauses_unfocused(),
@@ -564,6 +589,7 @@ mod tests {
             quiet: 512,
             aa: aa::MSAA_4,
             scale: 75,
+            scale_auto: 30,
             display: display::FULLSCREEN,
             present: frame::IMMEDIATE,
             unfocused: unfocused::RUN,
