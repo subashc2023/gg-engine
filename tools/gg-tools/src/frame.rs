@@ -78,24 +78,55 @@ pub fn run(args: &[String]) -> Result<()> {
          `gg-render/cpu-timings` for the host table to exist at all"
     );
 
-    let world = field::world()?;
-    let mut renderer = OffscreenRenderer::new(extent)?;
+    if args.iter().any(|a| a == "--sweep") {
+        return sweep(frames);
+    }
+
+    let measured = measure(extent, frames)?;
     println!(
         "demo 12's room at {}x{} on {} — median of {frames} frames after {WARMUP}, \
          {} codegen\n",
         extent.0,
         extent.1,
-        renderer.device().chosen,
-        // The tier the operator's window runs is the debug profile too
-        // (`xtask run` builds `-p gg-runtime` with no `--release`), so a
-        // debug-profile reading here is the comparable one — and a release
-        // reading is what says how much of the frame is the profile.
-        if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        }
+        measured.name,
+        profile()
     );
+    let wall = median_ms(&measured.wall_ns);
+    passes(&measured.device);
+    zones(&measured.host, &measured.extract_ns, wall);
+    Ok(())
+}
+
+/// The tier the operator's window runs is the debug profile too (`xtask run`
+/// builds `-p gg-runtime` with no `--release`), so a debug-profile reading is
+/// the comparable one — and a release reading says how much of the frame is the
+/// profile.
+fn profile() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
+}
+
+/// What one extent cost, kept per frame rather than reduced here: every table
+/// below takes a median, and one stalled frame is not the frame.
+struct Measured {
+    name: String,
+    device: Vec<Vec<(String, f32)>>,
+    host: Vec<Vec<zone::Sample>>,
+    extract_ns: Vec<u64>,
+    wall_ns: Vec<u64>,
+}
+
+/// A device per extent, deliberately — [`OffscreenRenderer`] takes its extent at
+/// bring-up, so a sweep has to rebuild anyway, and a renderer carrying the
+/// previous row's transients would price this row's allocation as the last
+/// one's (§6 M67's lesson, one instrument over).
+fn measure(extent: (u32, u32), frames: usize) -> Result<Measured> {
+    let world = field::world()?;
+    let mut renderer = OffscreenRenderer::new(extent)?;
+    let name = renderer.device().chosen.clone();
 
     let mut host: Vec<Vec<zone::Sample>> = Vec::new();
     let mut device: Vec<Vec<(String, f32)>> = Vec::new();
@@ -130,13 +161,181 @@ pub fn run(args: &[String]) -> Result<()> {
         );
     }
 
-    let wall = median_ms(&wall_ns);
-    passes(&device);
-    zones(&host, extract_ns.as_slice(), wall);
-
     let report = renderer.shutdown();
     anyhow::ensure!(report.clean(), "unclean render: {report:?}");
+    Ok(Measured {
+        name,
+        device,
+        host,
+        extract_ns,
+        wall_ns,
+    })
+}
+
+/// Sixteen-by-nine from a play resolution down to an eighth of its pixels. Real
+/// presented sizes rather than fractions of the first, so a reader finds their
+/// own panel in the left column instead of doing arithmetic to reach it.
+const SWEEP: [(u32, u32); 5] = [
+    (1920, 1080),
+    (1600, 900),
+    (1280, 720),
+    (960, 540),
+    (640, 360),
+];
+
+/// The sweep: one row per extent on **one** device, which is the only way to ask
+/// whether a frame is *fill-bound* — a single reading cannot, and two readings
+/// on two machines answer a different question (this room costs 0.94 ms on a
+/// 4090 and 79.4 on the integrated Radeon beside it, so the desk that develops
+/// the renderer is the one that cannot feel its cost).
+///
+/// The column that answers is **ms/Mpx**: flat means every millisecond is
+/// fragments and a render scale buys the lot; falling as the extent grows means
+/// a fixed cost is being amortised and the scale buys less than the pixel ratio
+/// suggests.
+fn sweep(frames: usize) -> Result<()> {
+    let mut rows: Vec<Row> = Vec::new();
+    for extent in SWEEP {
+        let measured = measure(extent, frames)?;
+        rows.push(Row {
+            extent,
+            name: measured.name,
+            device: measured.device,
+        });
+    }
+    let name = rows.first().map_or("", |row| row.name.as_str());
+    println!(
+        "demo 12's room on {name} — median of {frames} frames after {WARMUP}, {} codegen\n",
+        profile()
+    );
+
+    let totals: Vec<(f64, f64)> = rows
+        .iter()
+        .map(|row| (mpx(row.extent), total_ms(&row.device)))
+        .collect();
+    let full = totals.first().map_or(0.0, |(_, ms)| *ms);
+    println!("  extent          Mpx   device ms   ms/Mpx   against full");
+    for (row, (px, ms)) in rows.iter().zip(&totals) {
+        // Against the first row rather than against the ideal: what a reader
+        // wants is what the knob buys them, and the ideal is the next column's
+        // job.
+        let against = match full {
+            f if f > 0.0 => format!("{:>6.2}x", f / ms),
+            _ => "     -".to_owned(),
+        };
+        let per = match px {
+            p if *p > 0.0 => ms / px,
+            _ => 0.0,
+        };
+        println!(
+            "  {:>4}x{:<9} {px:>5.3}   {ms:>9.3}   {per:>6.2}   {against}",
+            row.extent.0, row.extent.1
+        );
+    }
+    let (floor, per) = fit(&totals);
+    println!(
+        "\n  fill {per:.2} ms/Mpx, floor {floor:.3} ms — {:.0}% of the frame at {}x{} is \
+         fragments\n",
+        match full {
+            f if f > 0.0 => 100.0 * (f - floor) / f,
+            _ => 0.0,
+        },
+        SWEEP[0].0,
+        SWEEP[0].1
+    );
+
+    // Per pass, the same two numbers — and they fail in opposite directions: a
+    // pass with no floor is bought outright by a render scale, one with no
+    // slope is untouched by it and stays whatever it was.
+    let mut names: Vec<&str> = rows
+        .iter()
+        .flat_map(|row| {
+            row.device
+                .iter()
+                .flat_map(|f| f.iter().map(|(n, _)| n.as_str()))
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut per_pass: Vec<(&str, f64, f64, f64)> = names
+        .iter()
+        .map(|name| {
+            let points: Vec<(f64, f64)> = rows
+                .iter()
+                .map(|row| (mpx(row.extent), pass_ms(&row.device, name)))
+                .collect();
+            let (floor, per) = fit(&points);
+            (*name, points.first().map_or(0.0, |(_, ms)| *ms), floor, per)
+        })
+        .collect();
+    per_pass.sort_by(|a, b| b.1.total_cmp(&a.1));
+    println!("  pass                              at full   ms/Mpx    floor   fill");
+    for (name, at_full, floor, per) in &per_pass {
+        let share = match at_full {
+            f if *f > 0.0 => format!("{:>5.0}%", 100.0 * (f - floor).max(0.0) / f),
+            _ => "    -".to_owned(),
+        };
+        println!("  {name:<32}  {at_full:>7.3}   {per:>6.2}   {floor:>6.3}   {share}");
+    }
     Ok(())
+}
+
+/// One extent's reading, kept whole so the two tables below read the same rows.
+struct Row {
+    extent: (u32, u32),
+    name: String,
+    device: Vec<Vec<(String, f32)>>,
+}
+
+/// Megapixels, the axis every fit here runs against — a fragment-bound pass
+/// costs its pixel *count* and not its width.
+fn mpx(extent: (u32, u32)) -> f64 {
+    f64::from(extent.0) * f64::from(extent.1) / 1e6
+}
+
+fn total_ms(device: &[Vec<(String, f32)>]) -> f64 {
+    let per_frame: Vec<u64> = device
+        .iter()
+        .map(|f| (f.iter().map(|(_, ms)| f64::from(*ms)).sum::<f64>() * 1e6) as u64)
+        .collect();
+    median_ms(&per_frame)
+}
+
+fn pass_ms(device: &[Vec<(String, f32)>], name: &str) -> f64 {
+    let per_frame: Vec<u64> = device
+        .iter()
+        .map(|f| {
+            let sum: f64 = f
+                .iter()
+                .filter(|(n, _)| n == name)
+                .map(|(_, ms)| f64::from(*ms))
+                .sum();
+            (sum * 1e6) as u64
+        })
+        .collect();
+    median_ms(&per_frame)
+}
+
+/// Least squares of `ms = floor + per * mpx`. Reported as two numbers rather
+/// than as one goodness-of-fit, because the two are what a reader acts on and a
+/// correlation coefficient is what they would have to interpret.
+fn fit(points: &[(f64, f64)]) -> (f64, f64) {
+    let n = points.len() as f64;
+    if n < 2.0 {
+        return (points.first().map_or(0.0, |(_, y)| *y), 0.0);
+    }
+    let mean_x = points.iter().map(|(x, _)| x).sum::<f64>() / n;
+    let mean_y = points.iter().map(|(_, y)| y).sum::<f64>() / n;
+    let spread: f64 = points.iter().map(|(x, _)| (x - mean_x).powi(2)).sum();
+    if spread <= 0.0 {
+        return (mean_y, 0.0);
+    }
+    let cross: f64 = points
+        .iter()
+        .map(|(x, y)| (x - mean_x) * (y - mean_y))
+        .sum();
+    let per = cross / spread;
+    (mean_y - per * mean_x, per)
 }
 
 /// The shell's extract order (`App::extract`), the one `field` restates for the

@@ -125,6 +125,7 @@ pub static gg_render::cvars::NEAR: gg_core::cvar::CVar
 pub static gg_render::cvars::ORTHO_FAR: gg_core::cvar::CVar
 pub static gg_render::cvars::PAPER_WHITE: gg_core::cvar::CVar
 pub static gg_render::cvars::PEAK_NITS: gg_core::cvar::CVar
+pub static gg_render::cvars::SCALE: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_BLEND: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_CASCADES: gg_core::cvar::CVar
 pub static gg_render::cvars::SHADOW_CULL: gg_core::cvar::CVar
@@ -282,6 +283,7 @@ pub fn gg_render::Renderer::resize(&mut self, u32, u32)
 pub fn gg_render::Renderer::samples(&self) -> gg_rhi::resource::Samples
 pub fn gg_render::Renderer::scenes(&self) -> &dyn gg_extract::Scenes
 pub fn gg_render::Renderer::set_present(&mut self, core::option::Option<u32>)
+pub fn gg_render::Renderer::set_scale(&mut self, core::option::Option<f64>)
 pub fn gg_render::Renderer::set_ui_atlas(&mut self, &gg_render::ui::Coverage<'_>) -> core::result::Result<(), gg_rhi::RhiError>
 pub fn gg_render::Renderer::set_viewport(&mut self, core::option::Option<gg_rhi::graph::Viewport>)
 pub fn gg_render::Renderer::shadow_cull(&self) -> gg_render::ShadowCull

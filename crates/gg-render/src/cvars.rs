@@ -646,6 +646,34 @@ pub static AA: CVar = CVar::new_bool("r.aa", false, "antialias the finished pict
 /// [`Renderer::samples`]: crate::Renderer::samples
 pub static MSAA: CVar = CVar::new_int("r.msaa", 1, "scene-pass samples per pixel (1, 2, 4, 8)");
 
+/// What fraction of the window the *scene* is drawn at, before the post pass
+/// puts it on the screen (§6 M78). Clamped to `[0.25, 2.0]`; `1.0` is off and is
+/// exactly the frame this renderer drew before the knob existed.
+///
+/// It is the only knob here whose value is read off a measurement rather than a
+/// look, and the measurement is `gg-tools frame --sweep`: demo 12's room is
+/// **99.7 % fragments** on the integrated Radeon in this desk — 37.7 ms per
+/// megapixel with a floor of 0.2 — so the frame is very nearly proportional to
+/// the pixel count and nothing else. 79.4 ms at 1920x1080 is 34.0 at 1280x720,
+/// which is twelve frames a second becoming twenty-nine on a machine that
+/// changed nothing but this.
+///
+/// **What it does not touch is the point.** The UI, the HUD and the pointer are
+/// a separate pass into the backbuffer at the window's own size, so text stays
+/// exactly as sharp as it was — which is what makes this a knob a player will
+/// actually leave turned down. Nor does it reach the shadow maps, the lamp
+/// atlas or the probe atlas: those are sized by their own knobs, and the sweep's
+/// per-pass table reads 1–37 % fill on them for that reason.
+///
+/// Above `1.0` it is supersampling, and composes with [`MSAA`] rather than
+/// competing with it — at exactly `2.0` the post pass's bilinear tap lands
+/// between four texels and is an exact box filter.
+pub static SCALE: CVar = CVar::new_float(
+    "r.scale",
+    1.0,
+    "scene resolution, as a fraction of the window",
+);
+
 /// Shadow map edge in texels, clamped to `[256, 4096]`. A quality knob and a
 /// memory one at once: 2048² of `D32_SFLOAT` is 16 MiB.
 pub static SHADOW_SIZE: CVar = CVar::new_int("r.shadow_size", 2048, "shadow map edge, texels");
@@ -1003,6 +1031,7 @@ pub fn register() -> Result<(), CVarError> {
         &HISTOGRAM,
         &AA,
         &MSAA,
+        &SCALE,
         &SHADOW_SIZE,
         &SHADOW_DISTANCE,
         &SHADOW_CASCADES,

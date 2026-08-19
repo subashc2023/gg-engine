@@ -147,6 +147,25 @@ impl Drive {
         matches!(self, Drive::Live(None))
     }
 
+    /// Whether this session is a **determinism artifact** — written down or
+    /// read back — rather than a player at a keyboard.
+    ///
+    /// The same condition [`survives_restart`](Self::survives_restart) tests
+    /// and a different claim, which is why it is its own name: that one is
+    /// about a rejuvenation losing a recorder's ticks, this one is about what a
+    /// *host chord* is allowed to do.
+    ///
+    /// What wants it: Alt+Enter writes `Prefs::display`, which is hashed world
+    /// state, from a window event that never reaches [`Drive::frame`] and is
+    /// therefore in no recording. A recorded session an operator happened to
+    /// resize would replay to a different hash, with nothing in the file to say
+    /// why — the divergence is real, and it was only ever unreachable because
+    /// §1.5 keeps every gate out of the windowed loop (§6 M78).
+    #[must_use]
+    pub fn scripted(&self) -> bool {
+        !matches!(self, Drive::Live(None))
+    }
+
     /// The recording, once the run is over. `None` for a replay, which has
     /// nothing to write.
     #[must_use]
@@ -155,5 +174,35 @@ impl Drive {
             Drive::Live(recorder) => recorder,
             Drive::Replay(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::ReplayMeta;
+
+    /// A player at a keyboard is the *only* arm that is not an artifact — a
+    /// recording in progress is one as surely as a replay is, and it is the arm
+    /// a reader is most likely to think of as "live".
+    #[test]
+    fn only_an_unwritten_live_session_is_the_players_own() {
+        let meta = ReplayMeta {
+            engine_commit: String::new(),
+            contract: 0,
+            tier: String::new(),
+            tick_hz: 60,
+            seed: 0,
+            actions: Vec::new(),
+            axes: Vec::new(),
+            surface: (0, 0),
+        };
+        assert!(!Drive::Live(None).scripted(), "a player at a keyboard");
+        assert!(
+            Drive::Live(Some(Box::new(Recorder::new(meta)))).scripted(),
+            "a recording in progress is a file being written"
+        );
     }
 }

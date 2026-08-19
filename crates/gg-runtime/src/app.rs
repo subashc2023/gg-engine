@@ -687,6 +687,15 @@ impl App {
     /// thing it must be — the game's to persist — and so a menu drawn next tick
     /// shows what the window actually is.
     pub fn toggle_fullscreen(&mut self) -> anyhow::Result<()> {
+        // Refused outright while the session is a determinism artifact: this
+        // writes hashed state from an event no recording carries, so a recorded
+        // run an operator resized would replay to a different hash and the file
+        // would hold no clue why (§6 M78). Silent for the operator would be
+        // worse than useless, so it says so.
+        if self.drive.scripted() {
+            tracing::info!("fullscreen is the window's, and this session is being written down");
+            return Ok(());
+        }
         let want = match self.fullscreen() {
             // No preference yet: the toggle is against what the window *is*,
             // which the caller knows and this side does not.
@@ -2236,8 +2245,13 @@ impl Stages for App {
         // viewport's reason and at the viewport's price: the renderer compares
         // it and recreates nothing on the frames it did not move.
         let present = self.ui.prefs().present_mode();
+        // The same rule for the scene's own resolution (§6 M78), and it has to
+        // be set *before* `view_extent` is read below — the frustum the extract
+        // culls against is built from the extent this moves.
+        let scale = self.ui.prefs().render_scale();
         if let Some(renderer) = self.gpu.as_mut() {
             renderer.set_present(present);
+            renderer.set_scale(scale);
         }
         let Some(renderer) = &self.gpu else {
             return Ok(());

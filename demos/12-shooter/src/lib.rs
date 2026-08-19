@@ -695,9 +695,11 @@ pub const MENU_TO_TITLE: u32 = 33;
 pub const MENU_TALLY: u32 = 34;
 /// [`PAGE_OVER`]'s second: how far it got and how straight it shot.
 pub const MENU_AIM: u32 = 35;
+/// What fraction of the window the room is drawn at, cycled by clicking it.
+pub const MENU_SCALE: u32 = 36;
 /// Every menu widget. Deal order only — where a row *sits*, and in what
 /// order the ring visits it, is [`page_rows`]'s and differs per page.
-pub const MENU_ITEMS: [u32; 20] = [
+pub const MENU_ITEMS: [u32; 21] = [
     MENU_SCRIM,
     MENU_PANEL,
     MENU_TITLE,
@@ -718,6 +720,7 @@ pub const MENU_ITEMS: [u32; 20] = [
     MENU_VOLUME_DOWN,
     MENU_VOLUME_UP,
     MENU_AA,
+    MENU_SCALE,
 ];
 
 /// Where the menu's draw order starts. Above [`HUD_CROSS`] and the [`ARMS`]
@@ -764,8 +767,9 @@ fn page_rows(page: u32) -> &'static [(u32, [f32; 4])] {
             (MENU_VOLUME, [216.0, 156.0, 150.0, 12.0]),
             (MENU_VOLUME_DOWN, [370.0, 150.0, 24.0, 24.0]),
             (MENU_VOLUME_UP, [400.0, 150.0, 24.0, 24.0]),
-            (MENU_AA, [216.0, 188.0, 208.0, 26.0]),
-            (MENU_BACK, [216.0, 248.0, 208.0, 26.0]),
+            (MENU_AA, [216.0, 184.0, 208.0, 26.0]),
+            (MENU_SCALE, [216.0, 214.0, 208.0, 26.0]),
+            (MENU_BACK, [216.0, 250.0, 208.0, 26.0]),
         ],
         PAGE_OVER => &[
             (MENU_SCRIM, [0.0, 0.0, 640.0, 360.0]),
@@ -1387,6 +1391,10 @@ pub fn bootstrap(world: &mut GameWorld) {
         globals,
         Prefs {
             aa: aa::MSAA_4,
+            // Stated rather than left at zero for `aa`'s reason: a row that
+            // reads a number while the field means "ask the host" is a row
+            // that lies, and this game draws the row.
+            scale: SCALE_DEFAULT,
             ..Default::default()
         },
     );
@@ -1844,6 +1852,7 @@ pub fn menu(world: &mut GameWorld) {
         // Never `DEFAULT`: a row that reads OFF while the field means "ask the
         // host" is a row that lies whenever `r.aa` or `r.msaa` is on.
         MENU_AA => prefs.aa = next_aa(prefs.aa),
+        MENU_SCALE => prefs.scale = next_scale(prefs.scale),
         _ => {}
     }
 
@@ -1993,6 +2002,15 @@ fn dress(item: u32, session: Session, prefs: Prefs, range: Range, widget: &mut W
             widget.set_text(line.as_str());
         }
         MENU_AA => widget.set_text(aa_label(prefs.aa)),
+        MENU_SCALE => match prefs.scale {
+            // Only a file reaches this — the row never offers it — and what it
+            // means is not a size, so it is spelled rather than printed as 0%.
+            0 => widget.set_text("RENDER  HOST"),
+            percent => {
+                let _ = write!(line, "RENDER  {percent}%");
+                widget.set_text(line.as_str());
+            }
+        },
         _ => {}
     }
 }
@@ -2411,6 +2429,31 @@ pub fn counts_per_turn(sens: u32) -> u32 {
 /// said out loud in the log; the row keeps reading what was *asked* for, which
 /// is the only thing this world knows.
 const AA_MODES: [u32; 5] = [aa::OFF, aa::FXAA, aa::MSAA_2, aa::MSAA_4, aa::MSAA_8];
+
+/// What the render row offers, as percentages of the window (§6 M78). Ascending
+/// so a click is "more", and `100` is deliberately not the last: a machine with
+/// room to spare should find the step *up* by the same button that finds the
+/// steps down, since supersampling is the same knob past one.
+///
+/// [`Prefs::scale`]'s zero — "leave `r.scale` alone" — is not offered here, for
+/// [`AA_MODES`]' reason: a row reading a percentage while the field means "ask
+/// the host" is a row that lies.
+const SCALE_STEPS: [u32; 4] = [50, 75, 100, 150];
+
+/// What a fresh session opens at — the whole window. Public for
+/// [`SENS_DEFAULT`]'s reason: the golden harness draws this game's menus
+/// without running it, and a reference rendered from a second opinion about the
+/// defaults is a picture of a screen no player opens on.
+pub const SCALE_DEFAULT: u32 = SCALE_STEPS[2];
+
+/// The next step along, wrapping. A value no build of this game offers — an
+/// operator's own `settings.cfg`, or a save from a build with a finer ladder —
+/// lands on the first rather than sticking, which is [`next_aa`]'s rule and is
+/// what keeps a hand-edited file from freezing the row.
+fn next_scale(percent: u32) -> u32 {
+    let at = SCALE_STEPS.iter().position(|p| *p == percent);
+    SCALE_STEPS[at.map_or(0, |i| (i + 1) % SCALE_STEPS.len())]
+}
 
 /// The next mode along, wrapping. An unknown one — a save from a build with
 /// more modes than this — lands on the first rather than sticking.

@@ -14,14 +14,14 @@ use demo_12_shooter::{
     CUE_LAND, CUES, Cue, EYE_LIFT, FIRE, FIRE_TICKS, FLASH_TICKS, Gun, HALF_H, HALF_W,
     HITMARK_TICKS, HUD_ROUND, HUD_ROWS, HUD_SPEED, HUD_STATE, Hud, JUMP, JUMP_VELOCITY, LAMPS,
     LIFE_FLOOR, MENU_AA, MENU_AIM, MENU_BACK, MENU_ITEMS, MENU_LOOK, MENU_LOOK_DOWN, MENU_LOOK_UP,
-    MENU_QUIT, MENU_RESTART, MENU_RESUME, MENU_RULE, MENU_SETTINGS, MENU_START, MENU_TALLY,
-    MENU_TITLE, MENU_TO_TITLE, MENU_VOLUME, MENU_VOLUME_DOWN, MISSES_ALLOWED, MOVE_FORWARD,
-    MOVE_RIGHT, Menu, PAGE_MAIN, PAGE_OVER, PAGE_SETTINGS, PAGE_TITLE, PAUSE, RECOIL_KICK,
-    RECOIL_TICKS, RESTART, ROOM, RULE, Range, SENS_DEFAULT, SENS_MAX, SENS_MIN, SENS_ONE,
-    SENS_STEP, SHELTER, SHOT_RANGE, SKIN, SPARK_TICKS, SPOTS, START, STATE_OVER, STATE_RUNNING,
-    STEP_HEIGHT, STREAK_STEP, Session, Solid, Spark, TARGET_HALF, TARGET_INK, TARGET_LIFE,
-    TARGET_WORTH, TARGETS_LIVE, TITLE_NAME, Target, WALK_SPEED, WAVE_HITS, Walker, accuracy,
-    counts_per_turn, life_for, look_per_count, session, wave_of, worth_for,
+    MENU_QUIT, MENU_RESTART, MENU_RESUME, MENU_RULE, MENU_SCALE, MENU_SETTINGS, MENU_START,
+    MENU_TALLY, MENU_TITLE, MENU_TO_TITLE, MENU_VOLUME, MENU_VOLUME_DOWN, MISSES_ALLOWED,
+    MOVE_FORWARD, MOVE_RIGHT, Menu, PAGE_MAIN, PAGE_OVER, PAGE_SETTINGS, PAGE_TITLE, PAUSE,
+    RECOIL_KICK, RECOIL_TICKS, RESTART, ROOM, RULE, Range, SCALE_DEFAULT, SENS_DEFAULT, SENS_MAX,
+    SENS_MIN, SENS_ONE, SENS_STEP, SHELTER, SHOT_RANGE, SKIN, SPARK_TICKS, SPOTS, START,
+    STATE_OVER, STATE_RUNNING, STEP_HEIGHT, STREAK_STEP, Session, Solid, Spark, TARGET_HALF,
+    TARGET_INK, TARGET_LIFE, TARGET_WORTH, TARGETS_LIVE, TITLE_NAME, Target, WALK_SPEED, WAVE_HITS,
+    Walker, accuracy, counts_per_turn, life_for, look_per_count, session, wave_of, worth_for,
 };
 use gg_ecs::boundary::{
     self, AbiInfo, ActionId, AxisId, ComponentsTable, Eye, HostApiV1, InputFrame, Light, Prefs,
@@ -1567,6 +1567,49 @@ fn the_edge_row_names_the_mode_it_is_actually_in() {
     assert_eq!(
         game.prefs().aa,
         aa::MSAA_4,
+        "the lap came back to where it started"
+    );
+}
+
+/// The render row cycles the fractions it offers, names each one, and hands the
+/// host a ratio it can multiply an extent by (§6 M78).
+///
+/// Three columns rather than one, because they fail in different ways: the field
+/// is what a `settings.cfg` round-trips, the text is what a player reads, and
+/// `render_scale` is the only one of the three the renderer ever sees. A row
+/// that moved the field and not the accessor would read correctly and change
+/// nothing.
+#[test]
+fn the_render_row_names_the_fraction_the_room_is_drawn_at() {
+    let mut game = Game::load();
+    game.begin();
+    game.tap(PAUSE);
+    game.click(MENU_SETTINGS);
+    assert_eq!(
+        game.prefs().scale,
+        SCALE_DEFAULT,
+        "the demo opens at the whole window"
+    );
+
+    // One full lap, ascending, starting where `bootstrap` left it. 150 is on it
+    // on purpose: past one the same knob is supersampling, and a machine with
+    // room to spare should find it by the button that finds the steps down.
+    let lap = [
+        (150, "RENDER  150%", Some(1.5)),
+        (50, "RENDER  50%", Some(0.5)),
+        (75, "RENDER  75%", Some(0.75)),
+        (100, "RENDER  100%", Some(1.0)),
+    ];
+    assert_eq!(game.menu(MENU_SCALE).text(), "RENDER  100%");
+    for (percent, text, ratio) in lap {
+        game.click(MENU_SCALE);
+        assert_eq!(game.prefs().scale, percent);
+        assert_eq!(game.menu(MENU_SCALE).text(), text);
+        assert_eq!(game.prefs().render_scale(), ratio);
+    }
+    assert_eq!(
+        game.prefs().scale,
+        SCALE_DEFAULT,
         "the lap came back to where it started"
     );
 }

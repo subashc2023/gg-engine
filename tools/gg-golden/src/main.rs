@@ -1455,6 +1455,7 @@ fn shooter_menu(
     // player opens on: full volume, and the 4x the game asks for (§6 M37).
     let prefs = Prefs {
         aa: gg_ecs::boundary::aa::MSAA_4,
+        scale: shooter::SCALE_DEFAULT,
         ..Prefs::default()
     };
     let mut world = World::new();

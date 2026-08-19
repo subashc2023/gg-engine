@@ -268,6 +268,9 @@ pub struct Renderer {
     content: Option<Content>,
     /// Where the frame lands in the window. See [`Renderer::set_viewport`].
     viewport: Option<Viewport>,
+    /// The player's own answer to `r.scale` when a game offers one (§6 M78);
+    /// `None` leaves the knob alone, which is every game with no video menu.
+    scale: Option<f64>,
     /// What the last frame actually rendered at — see [`Renderer::samples`].
     /// Held so the clamp logs when it *changes* rather than every frame.
     samples: Samples,
@@ -362,6 +365,7 @@ impl Renderer {
             integrate,
             content: None,
             viewport: None,
+            scale: None,
             samples: Samples::X1,
             #[cfg(feature = "hot-reload")]
             hot: hot::Shaders::new(),
@@ -548,13 +552,17 @@ impl Renderer {
     }
 
     /// The extent the next frame's projection will be built from: the viewport's
-    /// when one is set, the surface's otherwise.
+    /// when one is set, the surface's otherwise, and either of those through
+    /// `r.scale` (§6 M78).
     ///
     /// A shell culling against [`View::frustum`] must pass *this*, not
     /// [`Renderer::extent`] — a frustum built from the window while the picture
     /// is composed for a narrower rectangle culls objects that are on screen.
+    /// The scale is in it for the same reason and costs the caller nothing: both
+    /// axes take one factor, so the aspect a frustum is built from is the aspect
+    /// the projection was built from whatever the knob says.
     pub fn view_extent(&self) -> (u32, u32) {
-        view_extent(self.viewport, self.rhi.swapchain_extent())
+        view_extent(self.viewport, self.rhi.swapchain_extent(), self.scale)
     }
 
     /// The MSAA count the last frame actually used (§6 M21) — [`View::samples`]
@@ -579,6 +587,18 @@ impl Renderer {
     /// host restates it from the new extent on the tick that follows.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.rhi.resize(width, height);
+    }
+
+    /// Ask for a scene resolution as a fraction of the window (§6 M78). `asked`
+    /// is the player's own choice — `gg_ecs::boundary::Prefs::render_scale` —
+    /// or `None` to leave `r.scale` alone, which is what a game with no video
+    /// menu passes.
+    ///
+    /// Free to call every frame: it moves an attachment size, and the transient
+    /// pool already treats a changed extent as a resize (the old set retires
+    /// after the frames in flight have passed, exactly as a window drag does).
+    pub fn set_scale(&mut self, asked: Option<f64>) {
+        self.scale = asked;
     }
 
     /// Ask the swapchain for a present mode (§6 M46). `asked` is the player's
@@ -720,7 +740,7 @@ impl Renderer {
         // `view_extent`, and both attachments below. The window's own extent is
         // left to the two things that really are the window's — the UI layer,
         // and where the post pass puts the result.
-        let view_extent = view_extent(self.viewport, extent);
+        let view_extent = view_extent(self.viewport, extent, self.scale);
         // After `view_extent`, because a cascade is fitted to the frustum the
         // game is composed for and the window's aspect is not that frustum.
         let sun = {
@@ -807,9 +827,13 @@ impl Renderer {
         if let Some(atlas) = att.probe_atlas.and_then(|id| frame.texture(id)) {
             self.integrate.build(&self.probes, frame_address, atlas);
         }
-        let post_push = self
-            .pass
-            .post_push(&frame, att.scene, view_extent, view.aa)?;
+        let post_push = self.pass.post_push(
+            &frame,
+            att.scene,
+            view_extent,
+            view.aa,
+            resampling(self.scale),
+        )?;
         let ao_push = att
             .ao_raw
             .and(att.ao_source)
@@ -915,7 +939,7 @@ impl Renderer {
         // The sun as the *last* frame planned it, like the UI pass below: what
         // the next frame's lights will be is not knowable here.
         let sun = self.lighting.sun();
-        let view_extent = view_extent(self.viewport, extent);
+        let view_extent = view_extent(self.viewport, extent, self.scale);
         // Before the frame takes the RHI; the buffer below is named, never
         // written — nothing here is submitted.
         let slot = GraphContext::frame_slot(&self.rhi);
@@ -949,9 +973,13 @@ impl Renderer {
         )?;
         // The CVar rather than a `View` this has none of: FXAA is a push
         // constant, so what it changes is invisible here by construction.
-        let post_push = self
-            .pass
-            .post_push(&frame, att.scene, view_extent, cvars::AA.bool())?;
+        let post_push = self.pass.post_push(
+            &frame,
+            att.scene,
+            view_extent,
+            cvars::AA.bool(),
+            resampling(self.scale),
+        )?;
         // The CVars again, for `post_push`'s reason: this holds no `View`, and
         // what a dump says about the occlusion pass is that it exists and what
         // it writes into — the push bytes are read by no GPU.
@@ -1092,6 +1120,9 @@ pub struct OffscreenRenderer {
     extent: (u32, u32),
     content: Option<Content>,
     viewport: Option<Viewport>,
+    /// The player's own answer to `r.scale` when a game offers one (§6 M78);
+    /// `None` leaves the knob alone, which is every game with no video menu.
+    scale: Option<f64>,
     /// As [`Renderer::samples`] — see [`OffscreenRenderer::samples`].
     samples: Samples,
     /// As [`Renderer`]'s: here as well because the offscreen path is the only
@@ -1149,9 +1180,13 @@ impl OffscreenRenderer {
         // renderer even when nothing asks for it, for the buffer above's reason and
         // one more: a first frame that allocated it would be the only frame in a
         // sweep that did, and `bounce`'s rows are compared against each other.
+        // Sized from the *scene attachment*, which `r.scale` may have made
+        // larger than the surface — supersampling is the one case where the
+        // picture being read back is bigger than the one presented (§6 M78).
+        let captured = scaled(extent, None);
         let radiance = rhi.create_buffer(&BufferDesc {
             name: "render.offscreen.radiance",
-            size: u64::from(extent.0) * u64::from(extent.1) * 8,
+            size: u64::from(captured.0) * u64::from(captured.1) * 8,
             kind: BufferKind::Readback,
         })?;
         Ok(OffscreenRenderer {
@@ -1170,6 +1205,7 @@ impl OffscreenRenderer {
             extent,
             content: None,
             viewport: None,
+            scale: None,
             samples: Samples::X1,
             #[cfg(feature = "hot-reload")]
             hot: hot::Shaders::new(),
@@ -1239,7 +1275,7 @@ impl OffscreenRenderer {
     /// [`Renderer::view_extent`].
     #[must_use]
     pub fn view_extent(&self) -> (u32, u32) {
-        view_extent(self.viewport, self.extent)
+        view_extent(self.viewport, self.extent, self.scale)
     }
 
     /// Map a pack — see [`Renderer::open_pack`].
@@ -1377,7 +1413,7 @@ impl OffscreenRenderer {
         // One slot and a blocking submit per frame here, so nothing is in
         // flight to race either write.
         let frame_address = self.lighting.slot_address(0);
-        let view_extent = view_extent(self.viewport, self.extent);
+        let view_extent = view_extent(self.viewport, self.extent, self.scale);
         let sun = {
             gg_core::zone!("render.plan-sun");
             self.lighting.plan(extracted, view, view_extent)
@@ -1458,9 +1494,13 @@ impl OffscreenRenderer {
         if let Some(atlas) = att.probe_atlas.and_then(|id| frame.texture(id)) {
             self.integrate.build(&self.probes, frame_address, atlas);
         }
-        let post_push = self
-            .pass
-            .post_push(&frame, att.scene, view_extent, view.aa)?;
+        let post_push = self.pass.post_push(
+            &frame,
+            att.scene,
+            view_extent,
+            view.aa,
+            resampling(self.scale),
+        )?;
         let ao_push = att
             .ao_raw
             .and(att.ao_source)
@@ -1581,8 +1621,26 @@ impl OffscreenRenderer {
             Some(_) => {
                 gg_core::zone!("render.readback-radiance");
                 let bytes = self.rhi.map_buffer(self.radiance)?;
-                let stride = self.extent.0 as usize;
+                // The rows are the *source image's*, and the source is
+                // `att.scene` — allocated at `view_extent`, copied tightly
+                // packed at its own extent by `readback_pass`. This read
+                // `self.extent` until §6 M78 and was wrong for any frame whose
+                // scene attachment is not the whole surface: latent while a
+                // viewport was the only way to make that true, and on the
+                // default path the moment `r.scale` existed.
+                let stride = view_extent.0 as usize;
                 let (w, h) = (view_extent.0 as usize, view_extent.1 as usize);
+                // The buffer was sized at bring-up, so a scale turned *up* mid
+                // run is asking for rows that were never allocated. Named
+                // rather than indexed into, because the alternative is a panic
+                // inside a slice one frame later.
+                if bytes.len() < stride * h * 8 {
+                    return Err(RhiError::Loader(format!(
+                        "the radiance readback holds {} bytes and this frame's scene is \
+                         {w}x{h} — `r.scale` moved after bring-up",
+                        bytes.len()
+                    )));
+                }
                 let mut out = Vec::with_capacity(w * h * 4);
                 for y in 0..h {
                     let row = &bytes[y * stride * 8..][..w * 8];
@@ -3160,18 +3218,26 @@ impl BoxPass {
     ///
     /// The sampler is part of the mode, not a second knob: resolving one texel
     /// per pixel must not filter (a blur nobody asked for), and FXAA's corner
-    /// taps sit between texels and are *meant* to be the mean of four.
+    /// taps sit between texels and are *meant* to be the mean of four. Under a
+    /// render scale (§6 M78) there is no one-texel-per-pixel case left, so it
+    /// filters whatever `aa` says — a nearest upscale is pixel art nobody asked
+    /// for, which is the same argument the other way around.
     fn post_push(
         &self,
         frame: &graph::Frame<'_>,
         scene: graph::ResourceId,
         extent: (u32, u32),
         aa: bool,
+        resample: bool,
     ) -> Result<post_shader::PostPush, RhiError> {
         let index = frame.texture(scene).ok_or_else(|| {
             RhiError::Loader("the scene attachment has no bindless slot to sample".into())
         })?;
-        let sampler = match aa {
+        // Read off the knob rather than by comparing the two extents, and the
+        // difference only shows for a scale that rounds back to the extent it
+        // started at — where the blit is 1:1 and a linear tap on the texel
+        // centre is the identity, so both answers are the same picture.
+        let sampler = match aa || resample {
             true => Sampler::LinearClamp,
             false => Sampler::NearestClamp,
         };
@@ -3761,14 +3827,61 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
 /// surface it presents into. One function because both renderers and the
 /// shell's culling have to agree on it exactly — a frustum and a projection
 /// built from different aspects is geometry that pops in at the frame edge.
-fn view_extent(viewport: Option<Viewport>, surface: (u32, u32)) -> (u32, u32) {
-    match viewport.map(|v| v.clamped(surface)) {
+///
+/// Since §6 M78 this is the *destination* rectangle through `r.scale`, and the
+/// two are no longer the same number. What did not have to change to make that
+/// true is the interesting part: the post pass already read this attachment
+/// through a sampler and already wrote the backbuffer, the UI already went into
+/// its own pass at the window's own size, and no pass in the graph ever took an
+/// extent from the swapchain — `gg-rhi` derives every render area from the
+/// attachment it was handed. So a render scale is this multiply and a sampler
+/// filter, and nothing else.
+fn view_extent(viewport: Option<Viewport>, surface: (u32, u32), asked: Option<f64>) -> (u32, u32) {
+    let destination = match viewport.map(|v| v.clamped(surface)) {
         // A zero-width viewport allocates nothing and draws nothing; the
         // attachment pool refuses a zero extent, so fall back to the surface
         // and let the scissor discard the frame instead.
         Some(v) if v.width > 0 && v.height > 0 => (v.width, v.height),
         _ => surface,
-    }
+    };
+    scaled(destination, asked)
+}
+
+/// The narrowest and widest `r.scale` will go. A quarter is an eighth of the
+/// fragments and is where a picture stops being worth presenting; two is
+/// supersampling and four times the memory, which is a ceiling on the attachment
+/// pool as much as on taste.
+const SCALE_RANGE: (f64, f64) = (0.25, 2.0);
+
+/// `r.scale` applied to an extent. Rounded rather than truncated, so a half
+/// scale of an odd width is the nearer pixel and not always the smaller one, and
+/// floored at one texel because the attachment pool refuses a zero extent.
+///
+/// Both axes take the *same* factor, which is what keeps the aspect — and
+/// therefore the projection, the culling frustum and `debug_fit`'s letterbox —
+/// exactly what it was at scale 1.
+fn scaled(extent: (u32, u32), asked: Option<f64>) -> (u32, u32) {
+    let scale = wanted_scale(asked);
+    let axis = |n: u32| ((f64::from(n) * scale).round() as u32).max(1);
+    (axis(extent.0), axis(extent.1))
+}
+
+/// The fraction in force: the player's own choice when a game offers one, and
+/// `r.scale` otherwise.
+///
+/// [`wanted_present`]'s shape and for its reason — the player's answer reaches
+/// the renderer *without consulting the knob at all*, so an operator's `gg.cfg`
+/// and a game's video menu cannot end up in a fight neither can win. Clamped
+/// here rather than at either caller, so there is one place the range is true.
+fn wanted_scale(asked: Option<f64>) -> f64 {
+    asked
+        .unwrap_or_else(|| cvars::SCALE.float())
+        .clamp(SCALE_RANGE.0, SCALE_RANGE.1)
+}
+
+/// Whether the post pass is resizing rather than copying — see [`scaled`].
+fn resampling(asked: Option<f64>) -> bool {
+    wanted_scale(asked) != 1.0
 }
 
 /// What surrounds a viewport that does not cover the backbuffer. Opaque black

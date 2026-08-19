@@ -223,6 +223,7 @@ pub gg_ecs::boundary::Prefs::display: u32
 pub gg_ecs::boundary::Prefs::modal: u32
 pub gg_ecs::boundary::Prefs::present: u32
 pub gg_ecs::boundary::Prefs::quiet: u32
+pub gg_ecs::boundary::Prefs::scale: u32
 pub gg_ecs::boundary::Prefs::unfocused: u32
 impl gg_ecs::boundary::Prefs
 pub fn gg_ecs::boundary::Prefs::antialias(&self) -> core::option::Option<bool>
@@ -232,6 +233,7 @@ pub fn gg_ecs::boundary::Prefs::hardware_cursor(&self) -> bool
 pub fn gg_ecs::boundary::Prefs::modal(&self) -> bool
 pub fn gg_ecs::boundary::Prefs::pauses_unfocused(&self) -> bool
 pub fn gg_ecs::boundary::Prefs::present_mode(&self) -> core::option::Option<u32>
+pub fn gg_ecs::boundary::Prefs::render_scale(&self) -> core::option::Option<f64>
 pub fn gg_ecs::boundary::Prefs::samples(&self) -> core::option::Option<u32>
 pub fn gg_ecs::boundary::Prefs::volume(&self) -> f32
 impl bytemuck::pod::Pod for gg_ecs::boundary::Prefs

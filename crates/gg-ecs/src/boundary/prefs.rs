@@ -183,6 +183,22 @@ pub struct Prefs {
     pub quiet: u32,
     /// One of [`aa`]'s constants. Unknown values are [`aa::DEFAULT`].
     pub aa: u32,
+    /// What percentage of the window the *scene* is drawn at before it is put
+    /// on the screen (§6 M78) — `100` is the whole thing, `50` is a quarter of
+    /// the fragments, and the host clamps to `25..=200`. Zero is
+    /// [`aa::DEFAULT`]'s answer to the same overlap: leave `r.scale` alone.
+    ///
+    /// A percentage rather than a float because [`Prefs`] is `Pod` and flat, and
+    /// because a menu row moves it in steps a player can read back. It is the
+    /// one preference here whose right value is a property of the *machine*
+    /// rather than of taste: demo 12's room is 79.4 ms a frame at 1920x1080 on
+    /// an integrated Radeon and 34.0 at 1280x720, which is the difference
+    /// between twelve frames a second and twenty-nine.
+    ///
+    /// It reaches the scene and **not the UI** — the HUD, the menus and the
+    /// pointer are drawn in their own pass at the window's own size — so a game
+    /// offering this is not offering to make its own text unreadable.
+    pub scale: u32,
     /// One of [`display`]'s constants. Unknown values are
     /// [`display::DEFAULT`].
     pub display: u32,
@@ -273,6 +289,22 @@ impl Prefs {
         }
     }
 
+    /// The fraction of the window the scene should be drawn at, or `None` to
+    /// leave `r.scale` alone (§6 M78).
+    ///
+    /// A ratio rather than [`scale`](Self::scale)'s percentage because that is
+    /// what the renderer multiplies by, and dividing here means the conversion
+    /// exists once. Out-of-range values are handed over as asked and clamped by
+    /// the host, which is where the range is true — a boundary that clamped
+    /// would be a second opinion about it.
+    #[must_use]
+    pub fn render_scale(&self) -> Option<f64> {
+        match self.scale {
+            0 => None,
+            percent => Some(f64::from(percent) / 100.0),
+        }
+    }
+
     /// Which of [`frame`]'s constants the player asked for, or `None` to
     /// leave `r.vsync` alone. The constant rather than a host type: the swapchain
     /// is three crates away and the boundary may not name it (§3).
@@ -334,10 +366,11 @@ pub mod settings {
     /// with its controls already withheld. A field added to [`Prefs`] is not
     /// persisted until it is added here, which is the review this table forces.
     #[allow(clippy::type_complexity)]
-    const KEYS: [(&str, fn(&Prefs) -> u32, fn(&mut Prefs, u32)); 6] = [
+    const KEYS: [(&str, fn(&Prefs) -> u32, fn(&mut Prefs, u32)); 7] = [
         ("cursor", |p| p.cursor, |p, v| p.cursor = v),
         ("quiet", |p| p.quiet, |p, v| p.quiet = v),
         ("aa", |p| p.aa, |p, v| p.aa = v),
+        ("scale", |p| p.scale, |p, v| p.scale = v),
         ("display", |p| p.display, |p, v| p.display = v),
         ("present", |p| p.present, |p, v| p.present = v),
         ("unfocused", |p| p.unfocused, |p, v| p.unfocused = v),
@@ -390,13 +423,14 @@ mod tests {
     fn the_protocol_type_is_flat_and_padding_free() {
         // `Pod` already refuses padding; this pins the number so a field added
         // is a visible edit rather than a silent layout move.
-        assert_eq!(size_of::<Prefs>(), 32);
+        assert_eq!(size_of::<Prefs>(), 36);
         assert_eq!(align_of::<Prefs>(), 4);
     }
 
     /// The property `World::restore` needs: zeroed is the default, in every
     /// field, so a migration cannot flip a cursor, mute a game, un-antialias it,
-    /// close it, take its controls away, seize a monitor or tear its frame.
+    /// close it, take its controls away, seize a monitor, tear its frame or
+    /// render it at a quarter of the window.
     #[test]
     fn a_zeroed_prefs_is_the_default_in_every_field() {
         let zeroed: Prefs = bytemuck::Zeroable::zeroed();
@@ -415,6 +449,11 @@ mod tests {
             zeroed.present_mode(),
             None,
             "nor one that unlocked the frame"
+        );
+        assert_eq!(
+            zeroed.render_scale(),
+            None,
+            "nor one drawing its room at a quarter of the window"
         );
         assert!(
             zeroed.pauses_unfocused(),
@@ -524,6 +563,7 @@ mod tests {
             cursor: cursor::HARDWARE,
             quiet: 512,
             aa: aa::MSAA_4,
+            scale: 75,
             display: display::FULLSCREEN,
             present: frame::IMMEDIATE,
             unfocused: unfocused::RUN,
