@@ -10,11 +10,22 @@
 //! idle-only or priority, and those are the politeness half of the contract,
 //! not decoration. WSL uses systemd user timers.
 //!
-//! What this module answers is *is a tier installed*. Whether it has actually
-//! **run** is `record.rs`, and §6 M82 is the milestone that found those to be
-//! different questions: these two tasks were installed, enabled, and returning
+//! What this module answers is *is a tier installed, on the schedule this build
+//! declares, and was it ever asked to run*. Whether it actually **ran** is
+//! `record.rs`, and §6 M82 is the milestone that found those to be different
+//! questions: these two tasks were installed, enabled, and returning
 //! `0x800710E0` — the scheduler declining a launch whose idle condition is
 //! unmet — while the one word on disk went on reading `ok`.
+//!
+//! §6 M83 is the third question. A ledger records what a tier did and can say
+//! nothing about a night it was never asked, so "never run" covered a task
+//! declined every evening and one that was never registered at all. Both
+//! readbacks here go to the **scheduler**, never to the file this module wrote
+//! at install time — that would be comparing a copy against itself (M73's
+//! argument for reading a resource back out of the linked artifact). Task
+//! Scheduler reorders the XML it is handed and drops `<Enabled>`, so the
+//! comparison is semantic: the day set and the hour, through the same two
+//! helpers the tests grade the table with.
 //!
 //! **Installing a timer changes the machine**, so this command does exactly
 //! what its flag says and nothing implicitly: `--status` reads, `--install`
@@ -117,6 +128,225 @@ fn installed(tier: &str) -> bool {
     }
 }
 
+const WEEK: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+
+/// The weekdays a Task Scheduler trigger names, in week order.
+fn windows_days(trigger: &str) -> Vec<&'static str> {
+    WEEK.iter()
+        .copied()
+        .filter(|d| trigger.contains(&format!("<{d} />")) || trigger.contains(&format!("<{d}/>")))
+        .collect()
+}
+
+/// The weekdays an `OnCalendar` names, in week order. Handles the three forms
+/// this desk has held: a bare day, a `Mon..Sat` range, and the bare `*-*-*` of
+/// the pre-§6 M82 daily nightly, which names every night.
+fn systemd_days(on_calendar: &str) -> Vec<&'static str> {
+    let Some(spec) = on_calendar.split_whitespace().next() else {
+        return Vec::new();
+    };
+    if spec.starts_with('*') {
+        return WEEK.to_vec();
+    }
+    let index = |abbrev: &str| WEEK.iter().position(|d| d.starts_with(abbrev));
+    let (from, to) = match spec.split_once("..") {
+        Some((a, b)) => (index(a), index(b)),
+        None => (index(spec), index(spec)),
+    };
+    match (from, to) {
+        (Some(a), Some(b)) if a <= b => WEEK[a..=b].to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+/// `03:00` out of an `OnCalendar`'s last field.
+fn hhmm(spec: &str) -> Option<String> {
+    take_hhmm(spec.split_whitespace().last()?)
+}
+
+/// `03:00` out of a Task Scheduler XML, anchored on the element that carries it.
+/// Not `split_once('T')` — the first `T` in `<CalendarTrigger>` is not a date's.
+fn windows_hhmm(xml: &str) -> Option<String> {
+    let start = xml.find("<StartBoundary>")? + "<StartBoundary>".len();
+    take_hhmm(xml[start..].split_once('T')?.1)
+}
+
+fn take_hhmm(time: &str) -> Option<String> {
+    let time: String = time.chars().take(5).collect();
+    (time.len() == 5 && time.as_bytes()[2] == b':').then_some(time)
+}
+
+/// When a tier is registered to fire, **as the scheduler holds it**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Schedule {
+    pub days: Vec<&'static str>,
+    pub hhmm: Option<String>,
+}
+
+impl Schedule {
+    /// What this build declares, for comparison against what is installed.
+    /// Read off the Windows spelling on both hosts on purpose: the two are
+    /// held equal by `both_hosts_name_the_same_nights_and_the_same_hour`, so
+    /// either is the declaration and picking one keeps this comparison from
+    /// depending on which host is asking.
+    fn declared(tier: &Tier) -> Schedule {
+        Schedule {
+            days: windows_days(tier.windows_trigger),
+            hhmm: windows_hhmm(tier.windows_trigger),
+        }
+    }
+}
+
+/// Read the tier's schedule back out of the scheduler. `None` is "it would not
+/// say" — not installed, or a query that failed — which is distinct from an
+/// installed tier whose schedule disagrees.
+fn registered(tier: &str) -> Option<Schedule> {
+    if cfg!(windows) {
+        let xml = run_capture(
+            std::process::Command::new("schtasks").args([
+                "/Query",
+                "/TN",
+                &task_name(tier),
+                "/XML",
+            ]),
+            "schtasks /Query /XML",
+        )
+        .ok()?;
+        Some(Schedule {
+            days: windows_days(&xml),
+            hhmm: windows_hhmm(&xml),
+        })
+    } else {
+        // The unit as systemd loaded it, not the file we wrote: `show` reports
+        // the running configuration, so an edit that was never `daemon-reload`ed
+        // reads as the drift it is.
+        let out = run_capture(
+            std::process::Command::new("systemctl").args([
+                "--user",
+                "show",
+                &format!("gg-{tier}.timer"),
+                "--property=TimersCalendar",
+            ]),
+            "systemctl show",
+        )
+        .ok()?;
+        // `TimersCalendar={ OnCalendar=Mon..Sat *-*-* 03:00:00 ; next_elapse=… }`
+        let spec = out.split("OnCalendar=").nth(1)?.split(';').next()?.trim();
+        Some(Schedule {
+            days: systemd_days(spec),
+            hhmm: hhmm(spec),
+        })
+    }
+}
+
+/// Does what is installed match what this build declares? Pure over its two
+/// arguments so the answer can be shown to reject (§6 M82's rule for the
+/// verdict, applied to the schedule).
+///
+/// This is not pedantry about a string: the WSL lane was still carrying the
+/// pre-§6 M82 daily nightly and Sunday-04:00 weekly at M83, because that
+/// milestone corrected [`TIERS`] and only the Windows host had `--install` run
+/// against the correction. A table is not a schedule until something says so.
+pub fn drift(tier: &Tier, found: Option<&Schedule>) -> Option<String> {
+    let found = found?;
+    let want = Schedule::declared(tier);
+    if found.days != want.days {
+        return Some(format!(
+            "installed for {} — this build declares {}; run `cargo xtask timers --install`",
+            day_list(&found.days),
+            day_list(&want.days),
+        ));
+    }
+    if found.hhmm != want.hhmm {
+        return Some(format!(
+            "installed at {} — this build declares {}; run `cargo xtask timers --install`",
+            found.hhmm.clone().unwrap_or_else(|| "?".into()),
+            want.hhmm.clone().unwrap_or_else(|| "?".into()),
+        ));
+    }
+    None
+}
+
+fn day_list(days: &[&str]) -> String {
+    if days.is_empty() {
+        return "no night".to_owned();
+    }
+    if days.len() == WEEK.len() {
+        return "every night".to_owned();
+    }
+    days.iter().map(|d| &d[..3]).collect::<Vec<_>>().join(",")
+}
+
+/// What the scheduler says about its own last launch of this tier.
+///
+/// Windows keeps a result code and a run time; systemd keeps the timer's last
+/// trigger and the service's `Result`. Neither is a verdict — see
+/// [`record::Asked`] for why that distinction is the whole of §6 M83.
+fn last_attempt(tier: &str) -> record::Asked {
+    if cfg!(windows) {
+        // `Get-ScheduledTaskInfo` rather than `schtasks /FO CSV /V`: the CSV's
+        // headers *and* its date format are localized, while these are CIM
+        // property names and an epoch. The two also disagree on sign for the
+        // same bits — CSV prints `-2147020576` where this prints `2147946720`
+        // — which is why the code is normalized through `u32` (§6 M83).
+        let script = format!(
+            "$i = Get-ScheduledTaskInfo -TaskName '{}' -ErrorAction SilentlyContinue; \
+             if ($null -eq $i) {{ 'none' }} else {{ \
+             $t = if ($null -eq $i.LastRunTime) {{ '-' }} else {{ \
+             [int64](([datetimeoffset]$i.LastRunTime.ToUniversalTime()).ToUnixTimeSeconds()) }}; \
+             \"$t $($i.LastTaskResult)\" }}",
+            task_name(tier)
+        );
+        let Ok(out) = run_capture(
+            std::process::Command::new("powershell").args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &script,
+            ]),
+            "powershell Get-ScheduledTaskInfo",
+        ) else {
+            return record::Asked::Unknown;
+        };
+        record::windows_asked(out.trim())
+    } else {
+        let ask = |unit: &str, property: &str| {
+            run_capture(
+                std::process::Command::new("systemctl").args([
+                    "--user",
+                    "show",
+                    unit,
+                    &format!("--property={property}"),
+                ]),
+                "systemctl show",
+            )
+            .ok()
+            .and_then(|o| Some(o.split_once('=')?.1.trim().to_owned()))
+        };
+        let Some(trigger) = ask(&format!("gg-{tier}.timer"), "LastTriggerUSec") else {
+            return record::Asked::Unknown;
+        };
+        // systemd renders that property as a localized human stamp whatever
+        // `--timestamp=` says, so the epoch comes from `date`, and a stamp it
+        // refuses leaves the time unknown rather than wrong.
+        let at = run_capture(
+            std::process::Command::new("date").args(["-d", &trigger, "+%s"]),
+            "date -d",
+        )
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+        record::systemd_asked(at, ask(&format!("gg-{tier}.service"), "Result").as_deref())
+    }
+}
+
 fn status() -> anyhow::Result<()> {
     let events = record::events();
     let now = record::now();
@@ -163,6 +393,22 @@ fn status() -> anyhow::Result<()> {
             detail,
             if standing.stale { "  [STALE]" } else { "" },
         );
+
+        // The scheduler's own two answers (§6 M83), asked here and nowhere
+        // else: `--fast` runs on every agent turn and spawning a process to
+        // learn something that cannot change the verdict does not belong in a
+        // tier that must stay instant on a clean tree.
+        let Some(tier) = TIERS.iter().find(|t| t.name == standing.tier) else {
+            continue;
+        };
+        let found = registered(tier.name);
+        if let Some(drifted) = drift(tier, found.as_ref()) {
+            println!("xtask timers:   schedule  {drifted}");
+        }
+        let asked = last_attempt(tier.name);
+        if let Some(line) = record::reconcile(&standing, &asked, now, record::ledger_seen()) {
+            println!("xtask timers:   scheduler {line}");
+        }
     }
 
     // The history itself, because "did it fire at all?" is the question the
@@ -391,43 +637,6 @@ fn dirs_config() -> anyhow::Result<PathBuf> {
 mod tests {
     use super::*;
 
-    const WEEK: [&str; 7] = [
-        "Monday",
-        "Tuesday",
-        "Wednesday",
-        "Thursday",
-        "Friday",
-        "Saturday",
-        "Sunday",
-    ];
-
-    /// The weekdays a Task Scheduler trigger names, in week order.
-    fn windows_days(trigger: &str) -> Vec<&'static str> {
-        WEEK.iter()
-            .copied()
-            .filter(|d| trigger.contains(&format!("<{d} />")))
-            .collect()
-    }
-
-    /// The weekdays an `OnCalendar` names, in week order. Handles the two forms
-    /// this table uses — a bare day and a `Mon..Sat` range.
-    fn systemd_days(on_calendar: &str) -> Vec<&'static str> {
-        let spec = on_calendar
-            .split_whitespace()
-            .next()
-            .expect("an OnCalendar with a day spec");
-        let index = |abbrev: &str| {
-            WEEK.iter()
-                .position(|d| d.starts_with(abbrev))
-                .expect("a real weekday abbreviation")
-        };
-        let (from, to) = match spec.split_once("..") {
-            Some((a, b)) => (index(a), index(b)),
-            None => (index(spec), index(spec)),
-        };
-        WEEK[from..=to].to_vec()
-    }
-
     /// The claim §6 M82 exists for. Before it, the nightly fired every day at
     /// 03:00 and the weekly — which *is* the nightly plus two gates — fired at
     /// 04:00 on Sunday, into a four-hour run still holding `xtask.exe`. Two
@@ -498,5 +707,79 @@ mod tests {
     fn the_tier_table_is_the_one_record_reads() {
         assert!(TIERS.iter().all(|t| record::scheduled(t.name)));
         assert_eq!(TIERS.len(), 2);
+    }
+
+    /// The scheduler hands its XML back reordered and short an element, so the
+    /// comparison cannot be textual. This is that readback verbatim from the
+    /// desk at §6 M83 — `WeeksInterval` ahead of `DaysOfWeek`, no `<Enabled>`
+    /// — and it must read as agreement.
+    #[test]
+    fn the_schedule_the_scheduler_hands_back_is_the_one_that_went_in() {
+        let readback = "<Triggers> <CalendarTrigger> <StartBoundary>2026-01-01T03:00:00\
+             </StartBoundary> <ScheduleByWeek> <WeeksInterval>1</WeeksInterval> <DaysOfWeek> \
+             <Monday /> <Tuesday /> <Wednesday /> <Thursday /> <Friday /> <Saturday /> \
+             </DaysOfWeek> </ScheduleByWeek> </CalendarTrigger> </Triggers>";
+        let found = Schedule {
+            days: windows_days(readback),
+            hhmm: windows_hhmm(readback),
+        };
+        assert_eq!(found.hhmm.as_deref(), Some("03:00"), "{found:?}");
+        let nightly = &TIERS[0];
+        assert_eq!(drift(nightly, Some(&found)), None, "{found:?}");
+    }
+
+    /// What the WSL lane was actually carrying at §6 M83: the pre-M82 daily
+    /// nightly and its Sunday-04:00 weekly, because that milestone corrected
+    /// the table and only one host had `--install` run against the correction.
+    /// Both must be named, and they fail in different fields.
+    #[test]
+    fn a_schedule_left_behind_by_an_uninstalled_correction_is_named() {
+        let daily = Schedule {
+            days: systemd_days("*-*-* 03:00:00"),
+            hhmm: hhmm("*-*-* 03:00:00"),
+        };
+        let complaint = drift(&TIERS[0], Some(&daily)).expect("the daily nightly is drift");
+        assert!(
+            complaint.contains("every night") && complaint.contains("Mon,Tue"),
+            "{complaint}"
+        );
+
+        let late = Schedule {
+            days: systemd_days("Sun *-*-* 04:00:00"),
+            hhmm: hhmm("Sun *-*-* 04:00:00"),
+        };
+        let complaint = drift(&TIERS[1], Some(&late)).expect("the 04:00 weekly is drift");
+        assert!(
+            complaint.contains("04:00") && complaint.contains("03:00"),
+            "{complaint}"
+        );
+    }
+
+    /// A scheduler that would not say is not a complaint — the WSL lane has no
+    /// Task Scheduler and the Windows host no `systemctl`, and neither is a
+    /// defect in the other's timers.
+    #[test]
+    fn a_scheduler_that_will_not_say_is_never_a_complaint() {
+        assert_eq!(drift(&TIERS[0], None), None);
+    }
+
+    /// The first `T` in `<CalendarTrigger>` is not a date's, which the obvious
+    /// `split_once('T')` cannot tell — it read `rigge` off this very table.
+    #[test]
+    fn the_hour_is_read_off_the_element_that_carries_it() {
+        for tier in TIERS {
+            assert_eq!(
+                windows_hhmm(tier.windows_trigger).as_deref(),
+                Some("03:00"),
+                "{}",
+                tier.name
+            );
+            assert_eq!(
+                hhmm(tier.on_calendar).as_deref(),
+                Some("03:00"),
+                "{}",
+                tier.name
+            );
+        }
     }
 }

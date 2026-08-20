@@ -148,6 +148,167 @@ impl Standing {
     }
 }
 
+// ---- what the scheduler was asked, as against what the tier did ----------
+
+/// What the **scheduler** says about its own last launch — never a verdict.
+///
+/// It is one slot, overwritten by every attempt including a refused one, which
+/// is the pre-§6 M82 defect exactly: this desk's 03:00 nightly ran green and
+/// finished at 07:10, and a refusal at 14:47 the same day overwrote the result
+/// it left. So this answers *was the tier asked*, and [`Standing`] answers what
+/// it did; §6 M83 exists because [`Verdict::Never`] was covering both a task
+/// declined every evening and one that was never registered at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Asked {
+    /// No scheduler, or it would not say. Never a complaint on its own.
+    Unknown,
+    /// Installed and never launched — the scheduler's own sentinel.
+    Never,
+    /// `RunOnlyIfIdle` declined the launch. Windows-only by construction: the
+    /// politeness contract is spelled `Nice=15` on the other host (§5), and a
+    /// nice level never refuses to start anything.
+    Refused { at: Option<u64> },
+    /// Launched and then stopped from outside — `StopOnIdleEnd`, which this
+    /// tree sets itself. The corroborating half of [`Verdict::Killed`].
+    Stopped { at: Option<u64> },
+    /// The scheduler believes it is running right now.
+    Running { at: Option<u64> },
+    /// It launched and the scheduler saw the process to an end.
+    Launched {
+        at: Option<u64>,
+        ok: bool,
+        /// Printed rather than interpreted when no table knows it, on
+        /// `fp-isa`'s rule: a code guessed at is worse than a code quoted.
+        code: String,
+    },
+}
+
+impl Asked {
+    fn at(&self) -> Option<u64> {
+        match self {
+            Asked::Unknown | Asked::Never => None,
+            Asked::Refused { at } | Asked::Stopped { at } | Asked::Running { at } => *at,
+            Asked::Launched { at, .. } => *at,
+        }
+    }
+}
+
+/// `<epoch|-> <code>` as `Get-ScheduledTaskInfo` reports it, or `none`.
+///
+/// Only the codes this desk was observed to produce are named, plus the one
+/// `StopOnIdleEnd` documents; anything else is quoted as hex. The four measured
+/// across 198 registered tasks were `0` (109), `0x41303` (77), `0x800710E0` (5)
+/// and `0x41301` (4) — a census, not a recollection.
+pub fn windows_asked(line: &str) -> Asked {
+    let mut it = line.split_whitespace();
+    let (Some(when), Some(code)) = (it.next(), it.next()) else {
+        return Asked::Unknown;
+    };
+    // Windows tools disagree on sign for the same bits, so normalize through
+    // `u32`: `schtasks /FO CSV` prints `-2147020576` for `0x800710E0` and
+    // `Get-ScheduledTaskInfo` prints `2147946720`.
+    let Ok(code) = code.parse::<i64>().map(|c| c as u32) else {
+        return Asked::Unknown;
+    };
+    // 1999-11-30 is the never-run sentinel, and every date before this tree
+    // existed means the same thing.
+    let at = when.parse::<u64>().ok().filter(|t| *t > 1_262_304_000);
+    match code {
+        0 => Asked::Launched {
+            at,
+            ok: true,
+            code: "0".to_owned(),
+        },
+        0x0004_1301 => Asked::Running { at },
+        0x0004_1303 => Asked::Never,
+        0x0004_1306 => Asked::Stopped { at },
+        0x8007_10E0 => Asked::Refused { at },
+        other => Asked::Launched {
+            at,
+            ok: false,
+            code: format!("0x{other:08X}"),
+        },
+    }
+}
+
+/// The timer's last trigger and the service's `Result`. systemd has no idle
+/// condition, so [`Asked::Refused`] is unreachable here — that is a difference
+/// between the hosts' politeness contracts, not a gap in this reader.
+pub fn systemd_asked(at: Option<u64>, result: Option<&str>) -> Asked {
+    match result {
+        None => Asked::Unknown,
+        // A timer that has never fired leaves the property empty, and `date`
+        // refuses the `n/a` systemd prints for it.
+        _ if at.is_none() => Asked::Never,
+        Some("success") => Asked::Launched {
+            at,
+            ok: true,
+            code: "success".to_owned(),
+        },
+        Some("running") | Some("start-limit-hit") => Asked::Running { at },
+        Some("signal") | Some("timeout") => Asked::Stopped { at },
+        Some(other) => Asked::Launched {
+            at,
+            ok: false,
+            code: other.to_owned(),
+        },
+    }
+}
+
+/// The reading that needs both halves, or `None` when the scheduler adds
+/// nothing to what the ledger already said.
+///
+/// The load-bearing row is the third: a launch the scheduler saw succeed with
+/// no record on disk is §6 M82's own wiring broken, and it is the one state
+/// here that indicts this tree rather than the desk. `ledger_seen` is what
+/// keeps that accusation honest — a `history.txt` that does not exist means
+/// nothing has ever recorded, which a run predating §6 M82 or a `cargo clean`
+/// both produce, while a file that exists and lacks the run is the wiring. The
+/// WSL lane hit exactly that on M83's first run of this code and the message
+/// was wrong about it, which is the misdiagnosis M82 exists to not ship.
+pub fn reconcile(
+    standing: &Standing,
+    asked: &Asked,
+    now: u64,
+    ledger_seen: bool,
+) -> Option<String> {
+    let when = asked
+        .at()
+        .map(|t| format!(" ({} ago)", ago(now.saturating_sub(t))))
+        .unwrap_or_default();
+    let tier = standing.tier;
+    Some(match (&standing.verdict, asked) {
+        (_, Asked::Unknown) => return None,
+        // Silence with a cause. The desk is the dev machine and the gaming PC,
+        // so a declined launch is the politeness contract working, not a fault
+        // — but it is not "never installed" and it is not "never fired".
+        (Verdict::Never, Asked::Refused { .. }) => format!(
+            "{tier}: the scheduler declined its last launch{when} — idle-only (§5), so the desk \
+             was in use. Not silence, and nothing to repair."
+        ),
+        (Verdict::Never, Asked::Never) => format!(
+            "{tier}: installed and never launched — the scheduler has not reached its hour yet."
+        ),
+        (Verdict::Never, Asked::Launched { ok: true, .. }) if ledger_seen => format!(
+            "{tier}: the scheduler ran it{when} and it recorded nothing — the ledger is broken, \
+             not the timer (§6 M83)."
+        ),
+        (Verdict::Never, Asked::Launched { ok: true, .. }) => format!(
+            "{tier}: the scheduler ran it{when} and there is no ledger yet — that run predates \
+             §6 M82, or `cargo clean` took the file. The next scheduled run settles it."
+        ),
+        // The scheduler corroborating a kill, which is the one thing the ledger
+        // infers rather than observes: a start with no finish.
+        (Verdict::Killed { .. }, Asked::Stopped { .. }) => {
+            format!("{tier}: the scheduler stopped it{when} — `StopOnIdleEnd`, the desk came back.")
+        }
+        (Verdict::Killed { .. }, Asked::Refused { .. }) => {
+            format!("{tier}: killed mid-run, and the scheduler has since declined a launch{when}.")
+        }
+        _ => return None,
+    })
+}
+
 // ---- writing ------------------------------------------------------------
 
 /// Run `f` as `tier`, bracketed by the two records.
@@ -248,6 +409,13 @@ impl Event {
 }
 
 // ---- reading ------------------------------------------------------------
+
+/// Whether anything has ever recorded, as distinct from whether this tier has.
+/// The discriminator [`reconcile`] needs to tell a broken recorder from a
+/// ledger that simply does not exist yet.
+pub fn ledger_seen() -> bool {
+    status_dir().join("history.txt").is_file()
+}
 
 pub fn events() -> Vec<Event> {
     std::fs::read_to_string(status_dir().join("history.txt"))
@@ -634,5 +802,218 @@ mod tests {
             "the tree is recorded, not merely the fact of a run: {:?}",
             after_red[3].commit
         );
+    }
+
+    // ---- §6 M83: what the scheduler was asked -----------------------------
+
+    /// A tier with no ledger at all, which is where every M83 row starts.
+    fn never(tier: &'static str) -> Standing {
+        Standing {
+            tier,
+            verdict: Verdict::Never,
+            stale: true,
+        }
+    }
+
+    /// The bits this desk actually produced, read out of `Get-ScheduledTaskInfo`
+    /// at §6 M83 — `2147946720` is `0x800710E0` unsigned, and `schtasks` prints
+    /// the same code as `-2147020576`. Both must land on the same state, which
+    /// is the whole reason the parse normalizes through `u32`.
+    #[test]
+    fn the_two_windows_spellings_of_one_refusal_agree() {
+        let unsigned = windows_asked("1787255220 2147946720");
+        let signed = windows_asked("1787255220 -2147020576");
+        assert_eq!(unsigned, signed);
+        assert_eq!(
+            unsigned,
+            Asked::Refused {
+                at: Some(1_787_255_220)
+            }
+        );
+    }
+
+    /// Row 1 of the milestone. Before it, this desk's `--status` said "never
+    /// run" of a task the scheduler had declined that afternoon — the same
+    /// three words it would have used for one that was never registered.
+    #[test]
+    fn a_refused_launch_is_not_silence_and_not_a_missing_task() {
+        let now = 1_787_255_220 + 3 * 3600;
+        let refused = reconcile(
+            &never("nightly"),
+            &Asked::Refused {
+                at: Some(1_787_255_220),
+            },
+            now,
+            false,
+        )
+        .expect("a refusal is worth saying");
+        assert!(refused.contains("declined"), "{refused}");
+        assert!(refused.contains("3h ago"), "{refused}");
+        assert!(
+            refused.contains("nothing to repair"),
+            "a refusal is the politeness contract working: {refused}"
+        );
+
+        let unlaunched = reconcile(&never("nightly"), &Asked::Never, now, false)
+            .expect("never-launched is worth saying");
+        assert!(
+            unlaunched != refused,
+            "the two states the pre-M83 reading conflated"
+        );
+        assert!(unlaunched.contains("never launched"), "{unlaunched}");
+    }
+
+    /// The one row that indicts this tree rather than the desk: the scheduler
+    /// saw the tier run to a clean exit and the ledger holds nothing, which is
+    /// §6 M82's own wiring broken. It must not read like a quiet night.
+    #[test]
+    fn a_run_the_scheduler_saw_succeed_with_no_record_blames_the_ledger() {
+        let ran = Asked::Launched {
+            at: Some(1_787_000_000),
+            ok: true,
+            code: "0".into(),
+        };
+        let now = 1_787_000_000 + 600;
+        let line = reconcile(&never("weekly"), &ran, now, true)
+            .expect("a run that recorded nothing is the loudest row here");
+        assert!(line.contains("ledger is broken"), "{line}");
+        assert!(!line.contains("declined"), "{line}");
+
+        // The same scheduler answer with no ledger file at all is a different
+        // fact, and the WSL lane was in exactly this state at §6 M83: its last
+        // two runs predate the milestone that taught a tier to record itself.
+        let fresh = reconcile(&never("weekly"), &ran, now, false)
+            .expect("a run with no ledger yet is still worth saying");
+        assert!(
+            !fresh.contains("broken"),
+            "a ledger that does not exist yet is not a broken one: {fresh}"
+        );
+        assert!(fresh.contains("predates"), "{fresh}");
+    }
+
+    /// A kill is the one verdict the ledger *infers* — a start with no finish —
+    /// so the scheduler saying it stopped the task is corroboration, and names
+    /// the setting this tree itself asked for.
+    #[test]
+    fn the_scheduler_corroborates_a_kill_it_caused() {
+        let killed = Standing {
+            tier: "nightly",
+            verdict: Verdict::Killed {
+                at: 1_787_000_000,
+                commit: "abc1234".into(),
+            },
+            stale: false,
+        };
+        let line = reconcile(
+            &killed,
+            &Asked::Stopped {
+                at: Some(1_787_010_000),
+            },
+            1_787_010_000,
+            true,
+        )
+        .expect("a stop is worth saying beside an inferred kill");
+        assert!(line.contains("StopOnIdleEnd"), "{line}");
+    }
+
+    /// The scheduler is never a verdict: it holds one slot, overwritten by
+    /// every attempt, and this desk proved why — a green 03:00 run whose result
+    /// a 14:47 refusal replaced the same day. A tier the ledger says passed is
+    /// not made sick by the newest attempt having been declined.
+    #[test]
+    fn the_newest_attempt_does_not_overrule_a_recorded_pass() {
+        let passed = Standing {
+            tier: "nightly",
+            verdict: Verdict::Ran {
+                at: 1_787_200_000,
+                commit: "abc1234".into(),
+                ok: true,
+                secs: 15_000,
+                reason: String::new(),
+            },
+            stale: false,
+        };
+        assert!(passed.green());
+        assert_eq!(
+            reconcile(
+                &passed,
+                &Asked::Refused {
+                    at: Some(1_787_255_220)
+                },
+                1_787_255_220,
+                true
+            ),
+            None,
+            "a refusal after a recorded pass is an ordinary evening"
+        );
+    }
+
+    /// A code no table knows is quoted, never guessed at — `fp-isa`'s rule for
+    /// an unrecognized mnemonic, and the reason the four codes that *are* named
+    /// came from a census of 198 registered tasks rather than from memory.
+    #[test]
+    fn a_result_code_no_table_knows_is_quoted_as_hex() {
+        let Asked::Launched { ok, code, .. } = windows_asked("1787255220 2147746065") else {
+            panic!("an unknown code is still a launch that ended");
+        };
+        assert!(!ok);
+        assert_eq!(code, "0x80040111");
+    }
+
+    /// The never-run sentinel is a date, not only a code: every task on this
+    /// desk that had never run reported `11/30/1999`, which is before this tree
+    /// existed and cannot be a real run time.
+    #[test]
+    fn the_never_run_sentinel_date_is_not_reported_as_a_time() {
+        assert_eq!(windows_asked("-  267011"), Asked::Never);
+        // 1999-11-30 as an epoch, which is what the field converts to.
+        assert_eq!(windows_asked("943920000 267011"), Asked::Never);
+        assert_eq!(
+            windows_asked("943920000 0").at(),
+            None,
+            "a sentinel date is not a run time whatever the code beside it"
+        );
+    }
+
+    /// systemd has no idle condition, so a refusal is unreachable on that host.
+    /// The politeness contract is `Nice=15` there (§5) and a nice level never
+    /// declines to start anything — a difference between the hosts, stated.
+    #[test]
+    fn the_linux_host_cannot_refuse_a_launch() {
+        let states = ["success", "exit-code", "signal", "timeout", "running"];
+        for result in states {
+            let asked = systemd_asked(Some(1_787_216_216), Some(result));
+            assert!(
+                !matches!(asked, Asked::Refused { .. }),
+                "{result} read as a refusal"
+            );
+        }
+        assert_eq!(systemd_asked(None, None), Asked::Unknown);
+        assert_eq!(
+            systemd_asked(None, Some("success")),
+            Asked::Never,
+            "a timer that never fired leaves no trigger time to parse"
+        );
+    }
+
+    /// An unknown scheduler adds nothing, and must never turn into a complaint
+    /// of its own — the host without the other's scheduler is the common case,
+    /// not a fault.
+    #[test]
+    fn an_unknown_scheduler_says_nothing_at_all() {
+        for verdict in [
+            Verdict::Never,
+            Verdict::Killed {
+                at: 1,
+                commit: "abc1234".into(),
+            },
+        ] {
+            let standing = Standing {
+                tier: "nightly",
+                verdict,
+                stale: true,
+            };
+            assert_eq!(reconcile(&standing, &Asked::Unknown, 100_000, true), None);
+        }
     }
 }
