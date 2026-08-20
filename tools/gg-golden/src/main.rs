@@ -3438,14 +3438,81 @@ fn render_triangle_scaled(scale: f32) -> Render {
     })
 }
 
+/// What this machine's driver *is*, as the four lines that go beside a
+/// reference set (§6 M81's open row).
+///
+/// `backend_id` keys the directory and deliberately keeps doing so: the cheap
+/// repair — putting the version in the name — orphans every reference in it on
+/// a patch bump, which is the opposite of what a reference set is for. So the
+/// version is recorded *inside* instead, and the directory name still means
+/// "this driver on this OS".
+struct Provenance {
+    lines: Vec<(&'static str, String)>,
+}
+
+impl Provenance {
+    /// Read off a live device. One bring-up, shared with [`backend_id`]'s.
+    fn of(report: &gg_rhi::DeviceReport) -> Self {
+        let (major, minor, patch) = report.api_version;
+        Self {
+            lines: vec![
+                ("driver", report.driver.0.clone()),
+                ("version", report.driver.1.clone()),
+                ("api", format!("{major}.{minor}.{patch}")),
+                // The unsanitised name, which the directory's own spelling
+                // loses: `nvidia-geforce-rtx-4090-windows` is not something a
+                // reader can compare against a driver dialog.
+                ("device", report.chosen.clone()),
+            ],
+        }
+    }
+
+    fn text(&self) -> String {
+        self.lines
+            .iter()
+            .map(|(k, v)| format!("{k} = {v}\n"))
+            .collect()
+    }
+
+    /// The fields this set was blessed under that no longer hold, `"was" -> now`.
+    /// Empty when the file agrees, and when it does not this is the whole of
+    /// what changed rather than a boolean.
+    fn against(&self, recorded: &str) -> Vec<String> {
+        let mut moved = Vec::new();
+        for (key, now) in &self.lines {
+            let was = recorded
+                .lines()
+                .find_map(|l| l.split_once(" = ").filter(|(k, _)| k.trim() == *key))
+                .map(|(_, v)| v.trim());
+            // A key the file does not hold is a file written by an older build,
+            // which is a difference like any other and is named as one.
+            if was != Some(now.as_str()) {
+                moved.push(format!(
+                    "{key}: `{}` -> `{now}`",
+                    was.unwrap_or("<unstated>")
+                ));
+            }
+        }
+        moved
+    }
+}
+
+/// The provenance file's name inside a backend's directory. Not a `.png`, so
+/// the roster's own scene walk steps over it.
+const PROVENANCE: &str = "driver.txt";
+
 /// Reference sets are per-backend (§4.10): software and hardware rasterizers
 /// legitimately differ, and the two lavapipe pins (per OS, §5.4) do too.
-fn backend_id() -> anyhow::Result<String> {
+///
+/// Returns the [`Provenance`] off the same bring-up: reading the driver from a
+/// second device would be a second answer to a question with one.
+fn backend_id() -> anyhow::Result<(String, Provenance)> {
     // A tiny bring-up just to read the device name would be wasteful; scenes
     // already log it. For the reference key, one probe context is fine at v0
     // scale (one scene) — revisit when scene count makes it matter.
     let rhi = gg_rhi::OffscreenRhi::new((4, 4))?;
     let chosen = rhi.device_report().chosen.clone();
+    let provenance = Provenance::of(rhi.device_report());
     drop(rhi.shutdown());
     let driver = if chosen.to_lowercase().contains("llvmpipe") {
         "lavapipe".to_string()
@@ -3461,7 +3528,7 @@ fn backend_id() -> anyhow::Result<String> {
             .join("-")
     };
     let os = if cfg!(windows) { "windows" } else { "linux" };
-    Ok(format!("{driver}-{os}"))
+    Ok((format!("{driver}-{os}"), provenance))
 }
 
 /// `<workspace>/tests/gg-images` (§3 layout): references live with the tests,
@@ -3696,6 +3763,18 @@ fn reference_roster() -> anyhow::Result<Vec<String>> {
                 ));
             }
         }
+        // A set with no recorded driver is the state every set was in before
+        // §6 M81: what it means is "whatever was installed when somebody last
+        // blessed", and no run on any host can recover it. Fatal here rather
+        // than warned, because unlike a *changed* driver this is a hole in the
+        // tree and the only thing that fills it is a bless on that backend.
+        if !dir.join(PROVENANCE).exists() {
+            wrong.push(format!(
+                "`{backend}` records no driver — `{PROVENANCE}` is written by `gg-golden bless` \
+                 on that backend and is what says which build of a driver these references mean. \
+                 Two Mesa releases are the same `llvmpipe` and do not render the same picture"
+            ));
+        }
         for orphan in held
             .iter()
             .filter(|h| !SCENES.iter().any(|s| s.name == **h))
@@ -3711,8 +3790,27 @@ fn reference_roster() -> anyhow::Result<Vec<String>> {
 }
 
 fn run(filter: Option<&str>) -> anyhow::Result<()> {
-    let backend = backend_id()?;
+    let (backend, provenance) = backend_id()?;
     let root = references_root().join(&backend);
+    // Read before a scene renders, so a driver that moved is on the reader's
+    // screen above the failures it caused rather than after them.
+    let moved = match std::fs::read_to_string(root.join(PROVENANCE)) {
+        Ok(recorded) => provenance.against(&recorded),
+        // Absent is the roster's arm below, not this one: a machine that has
+        // never run this backend has no directory at all, and saying "the
+        // driver moved" about a set that does not exist is a lie.
+        Err(_) => Vec::new(),
+    };
+    if !moved.is_empty() {
+        println!(
+            "gg-golden: the `{backend}` references were blessed under a different driver — {}\n  \
+             Not a failure on its own: a driver bump that still passes the gates is a reference \
+             set that still holds. It is here so a failure below is read as a driver change \
+             before it is read as a regression (§4.10: a bless is a deliberate act, and \"the \
+             driver moved\" is a reason to look, not a reason to re-bless).",
+            moved.join(", ")
+        );
+    }
     let mut failures = Vec::new();
     let mut drifted = Vec::new();
     let mut entries = Vec::new();
@@ -3875,7 +3973,16 @@ fn run(filter: Option<&str>) -> anyhow::Result<()> {
     }
     anyhow::ensure!(
         failures.is_empty(),
-        "golden suite failed:\n{}",
+        "golden suite failed{}:\n{}",
+        // Carried into the error and not only onto stdout: a tier prints the
+        // error and the reader who sees it may never see the run's output.
+        match moved.is_empty() {
+            true => String::new(),
+            false => format!(
+                " (under a driver these references were not blessed under — {})",
+                moved.join(", ")
+            ),
+        },
         failures.join("\n")
     );
     if drifted.is_empty() {
@@ -3896,7 +4003,7 @@ fn run(filter: Option<&str>) -> anyhow::Result<()> {
 /// is the same HTML report the failures use, old and new side by side with the
 /// heatmap between them (§4.10: "a deliberate, reviewed act").
 fn bless(filter: Option<&str>) -> anyhow::Result<()> {
-    let backend = backend_id()?;
+    let (backend, provenance) = backend_id()?;
     let root = references_root().join(&backend);
     let mut blessed = 0usize;
     let mut entries = Vec::new();
@@ -3960,6 +4067,13 @@ fn bless(filter: Option<&str>) -> anyhow::Result<()> {
         println!("gg-golden: review the change at {}", path.display());
     }
     anyhow::ensure!(blessed > 0, "no scene matched the filter");
+    // Written on a filtered bless too: one scene re-blessed under a new driver
+    // is a set whose images no longer share a provenance, and the honest record
+    // of that is the *current* driver, since it is the one that had the last
+    // word on what is in the directory.
+    let path = root.join(PROVENANCE);
+    std::fs::write(&path, provenance.text())?;
+    println!("gg-golden: recorded the driver at {}", path.display());
     Ok(())
 }
 
@@ -4057,7 +4171,11 @@ fn main() -> anyhow::Result<()> {
         // bring-up and naming the reference sets are keyed by, so the identity
         // checked is the identity the suite would run under.
         Some("backend") => {
-            println!("{}", backend_id()?);
+            let (id, provenance) = backend_id()?;
+            // Provenance first and the id **last**: `xtask gpu` reads the last
+            // line to refuse a software rasterizer, so the id keeps that slot.
+            print!("{}", provenance.text());
+            println!("{id}");
             Ok(())
         }
         _ => anyhow::bail!(
@@ -4108,5 +4226,58 @@ mod tests {
                 "`{name}` is not a file name a reference can be written under"
             );
         }
+    }
+
+    /// The provenance a live device would produce, without one (§1.5, and there
+    /// is no device in the fast tier anyway).
+    fn provenance(version: &str) -> super::Provenance {
+        super::Provenance {
+            lines: vec![
+                ("driver", "llvmpipe".into()),
+                ("version", version.into()),
+                ("api", "1.4.348".into()),
+                ("device", "llvmpipe (LLVM 22.1.8, 256 bits)".into()),
+            ],
+        }
+    }
+
+    /// A file this machine wrote reads back as agreement, and the round trip is
+    /// the only thing that says the two halves share a spelling — `against`
+    /// parses ` = ` and `text` writes it, and a mismatch between them would
+    /// report every field as moved on every run, on every backend, forever.
+    #[test]
+    fn a_record_this_machine_wrote_agrees_with_this_machine() {
+        let now = provenance("Mesa 26.1.3 (git-bfce4dd45a) (LLVM 22.1.8)");
+        assert_eq!(now.against(&now.text()), Vec::<String>::new());
+    }
+
+    /// The row this exists for: two Mesa releases are the same `llvmpipe` and
+    /// the same `lavapipe-<os>` directory, and the difference between them is a
+    /// picture (§6 M81). The numbers are this tree's own two pins.
+    #[test]
+    fn one_driver_at_two_versions_is_two_different_drivers() {
+        let linux = provenance("Mesa 25.2.8-0ubuntu0.24.04.2 (LLVM 20.1.2)");
+        let windows = provenance("Mesa 26.1.3 (git-bfce4dd45a) (LLVM 22.1.8)");
+        let moved = windows.against(&linux.text());
+        assert_eq!(moved.len(), 1, "one field moved, not {moved:?}");
+        // Named with both halves: "the driver changed" sends a reader nowhere,
+        // and `25.2.8 -> 26.1.3` sends them to the release notes.
+        assert!(moved[0].starts_with("version: `Mesa 25.2.8"), "{moved:?}");
+        assert!(moved[0].ends_with("(LLVM 22.1.8)`"), "{moved:?}");
+    }
+
+    /// A record written by a build that did not know about a field is a
+    /// difference, not agreement — silently forgiving an absent key is how a
+    /// widened record would go unnoticed on every set already on disk.
+    #[test]
+    fn a_field_the_record_never_held_is_named_rather_than_forgiven() {
+        let now = provenance("Mesa 26.1.3 (git-bfce4dd45a) (LLVM 22.1.8)");
+        let older: String = now
+            .text()
+            .lines()
+            .filter(|l| !l.starts_with("api = "))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(now.against(&older), vec!["api: `<unstated>` -> `1.4.348`"]);
     }
 }

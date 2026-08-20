@@ -135,6 +135,7 @@ pub struct gg_rhi::DeviceReport
 pub gg_rhi::DeviceReport::api_version: (u32, u32, u32)
 pub gg_rhi::DeviceReport::candidates: alloc::vec::Vec<gg_rhi::Candidate>
 pub gg_rhi::DeviceReport::chosen: alloc::string::String
+pub gg_rhi::DeviceReport::driver: (alloc::string::String, alloc::string::String)
 pub gg_rhi::DeviceReport::samples: alloc::vec::Vec<gg_rhi::Samples>
 pub gg_rhi::DeviceReport::transfer_dedicated: bool
 impl gg_rhi::DeviceReport

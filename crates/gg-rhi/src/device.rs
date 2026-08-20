@@ -30,6 +30,16 @@ pub struct DeviceReport {
     pub chosen: String,
     /// Chosen device's Vulkan version (major, minor, patch).
     pub api_version: (u32, u32, u32),
+    /// The *driver* behind the chosen device, name and version, e.g.
+    /// `("llvmpipe", "Mesa 26.1.3 (LLVM 21.1.0)")` or `("NVIDIA", "580.97.0")`.
+    ///
+    /// Separate from [`Self::chosen`] because a device name is not a build: two
+    /// Mesa releases are the same `llvmpipe` and do not render the same picture,
+    /// which is what left this tree's two lavapipe reference sets two minor
+    /// versions apart with nothing recording it (§6 M81). The version is the
+    /// driver's own prose rather than the encoded `driverVersion`, which each
+    /// vendor packs its own way and no reader can compare by eye.
+    pub driver: (String, String),
     /// Whether a dedicated transfer family existed (lavapipe has one family
     /// total, so `false` there — recorded, not papered over).
     pub transfer_dedicated: bool,
@@ -306,7 +316,11 @@ fn missing_features(
 /// A driver-supplied fixed-size description. Bounded rather than pointer-walked:
 /// this reads memory a *lost* device's driver filled in, which is the worst
 /// place to trust a terminator that may not be there.
-fn c_str(bytes: &[std::ffi::c_char; vk::MAX_DESCRIPTION_SIZE]) -> String {
+///
+/// Generic over the length because Vulkan's three of these — description, driver
+/// name, driver info — are all 256 today and agree by coincidence, which is the
+/// kind of agreement §2.1 is about.
+fn c_str<const N: usize>(bytes: &[std::ffi::c_char; N]) -> String {
     // SAFETY: c_char and u8 have the same layout and size; the array is live.
     let bytes = unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<u8>(), bytes.len()) };
     CStr::from_bytes_until_nul(bytes)
@@ -559,6 +573,13 @@ impl Device {
             .collect();
 
         let api = props.api_version;
+        let driver_version = match c_str(&p12.driver_info) {
+            // A driver may leave this empty. The encoded number is then the only
+            // identity there is, and it is printed raw rather than decoded
+            // because the packing is the vendor's and NVIDIA's is not Vulkan's.
+            info if info.is_empty() => format!("driverVersion {:#010x}", props.driver_version),
+            info => info,
+        };
         let report = DeviceReport {
             chosen: candidates[chosen_idx].name.clone(),
             candidates,
@@ -567,11 +588,14 @@ impl Device {
                 vk::api_version_minor(api),
                 vk::api_version_patch(api),
             ),
+            driver: (c_str(&p12.driver_name), driver_version),
             transfer_dedicated,
             samples,
         };
         tracing::info!(
             chosen = %report.chosen,
+            driver = %report.driver.0,
+            driver_version = %report.driver.1,
             api = ?report.api_version,
             transfer_dedicated,
             samples = ?report.samples.iter().map(|s| s.count()).collect::<Vec<_>>(),

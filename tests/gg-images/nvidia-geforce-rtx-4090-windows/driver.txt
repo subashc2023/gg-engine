@@ -1,0 +1,4 @@
+driver = NVIDIA
+version = 610.88
+api = 1.4.341
+device = NVIDIA GeForce RTX 4090

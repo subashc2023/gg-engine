@@ -1,0 +1,4 @@
+driver = llvmpipe
+version = Mesa 26.1.3 (git-bfce4dd45a) (LLVM 22.1.8)
+api = 1.4.348
+device = llvmpipe (LLVM 22.1.8, 256 bits)
