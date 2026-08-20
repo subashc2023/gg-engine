@@ -224,3 +224,97 @@ pub(crate) fn radical_inverse(bits: u32) -> f32 {
     b = ((b & 0x00ff_00ff) << 8) | ((b & 0xff00_ff00) >> 8);
     b as f32 * 2.328_306_4e-10
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// The table's three load-bearing properties, none of which needs a
+    /// reference implementation and none of which was checked outside
+    /// `gg-tools split-sum` before §6 M81 — a manual instrument, so these
+    /// constants were graded once and trusted thereafter.
+    ///
+    /// What the numbers are *for*: `scale + bias` is the directional albedo at
+    /// `f0 = 1`, which is precisely what the multiscatter correction divides by
+    /// (§6 M34). Above 1 is a surface returning more light than reached it; at
+    /// roughness 0 anything but 1 is a mirror dimmed or brightened by the
+    /// approximation alone. [Laz13]'s fit, kept in [`fit`] beside this, fails
+    /// the first by 2.2x at grazing incidence — so the bound is a property of
+    /// *this* table and not of the shape of the problem.
+    #[test]
+    fn no_texel_of_the_table_returns_more_light_than_reached_it() {
+        let table = table();
+        assert_eq!(table.len(), EXTENT * EXTENT);
+        let edge = (EXTENT - 1) as f32;
+        for (i, texel) in table.iter().enumerate() {
+            let (e, at) = (texel[0] + texel[1], (i % EXTENT, i / EXTENT));
+            assert!(
+                texel[0] >= 0.0 && texel[1] >= 0.0,
+                "{at:?} is negative: {texel:?}"
+            );
+            // f32 slack only: the estimator is unbiased, so its own noise at
+            // `SAMPLES` is all this leaves room for.
+            assert!(e <= 1.0 + 1e-4, "{at:?} radiates {e}");
+        }
+        // The mirror row, the one the correction divides by. Read *through*
+        // `sample`, since the claim is about the bilinear read having no
+        // half-texel offset rather than about the texels. `n_dot_v = 0` is
+        // excluded: it is the silhouette, where `integrate` clamps and the
+        // shading term this feeds is zero anyway.
+        for x in 1..=20 {
+            let n_dot_v = x as f32 / 20.0;
+            let (scale, bias) = sample(&table, 0.0, n_dot_v);
+            let e = scale + bias;
+            assert!(
+                (e - 1.0).abs() < 1e-3,
+                "a mirror at n·v {n_dot_v} returns {e}"
+            );
+        }
+        // And the axis round trip that buys it: a read at a texel's own `n·v` —
+        // `(x/edge)²`, the axis being stored squared — is that texel, and not a
+        // blend of it with its neighbour.
+        for y in 0..EXTENT {
+            for x in 0..EXTENT {
+                let v = x as f32 / edge;
+                let (scale, bias) = sample(&table, y as f32 / edge, v * v);
+                let texel = table[y * EXTENT + x];
+                assert!(
+                    (scale - texel[0]).abs() < 1e-6 && (bias - texel[1]).abs() < 1e-6,
+                    "({x}, {y}) sampled {:?}, holds {texel:?}",
+                    (scale, bias)
+                );
+            }
+        }
+    }
+
+    /// The cross-check that makes [`integrate`] believable, which until §6 M81
+    /// ran only when somebody typed `gg-tools split-sum`: the same albedo by
+    /// **uniform hemisphere** sampling, which shares [`d_ggx`] and
+    /// [`visibility`] with it and shares none of the sampling algebra — no
+    /// importance distribution, no analytic `D`/pdf cancellation, the BRDF
+    /// evaluated as written. An error in that cancellation is invisible to any
+    /// amount of self-comparison, and is what this catches.
+    ///
+    /// Roughness 0.3 and up, because a uniform estimator cannot find a
+    /// near-delta lobe at any sane count — which is what importance sampling is
+    /// for, and is a fact about the estimator rather than about the table.
+    #[test]
+    fn two_estimators_sharing_no_sampling_agree_about_the_albedo() {
+        for roughness in [0.3f32, 0.55, 0.8, 1.0] {
+            for n_dot_v in [0.2f32, 0.6, 0.95] {
+                let (scale, bias) = integrate(roughness, n_dot_v, 4096);
+                let uniform = integrate_uniform(roughness, n_dot_v, 131_072);
+                let error = (scale + bias - uniform) / uniform;
+                assert!(
+                    error.abs() < 0.01,
+                    "roughness {roughness}, n·v {n_dot_v}: importance {}, uniform {uniform} \
+                     — {:.3} %",
+                    scale + bias,
+                    error * 100.0
+                );
+            }
+        }
+    }
+}

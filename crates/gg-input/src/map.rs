@@ -743,6 +743,13 @@ fn strip_comment(line: &str) -> &str {
 
 /// `"one"` or `["one", "two"]` → the strings. No escapes: a binding name is a
 /// key spelling, and permitting `\"` in one would be format surface with no use.
+///
+/// The separator is **required** (§6 M81). `["A" "B"]` is not TOML and was read
+/// here as two bindings, which is M74's lesson pointing the other way: that
+/// milestone's hazard was valid TOML this parser refuses, and this is invalid
+/// TOML it accepts. Same cost either way — the file the game plays by and the
+/// file every other tool reads are not the same file. A trailing comma stays
+/// legal, because TOML says it is.
 fn parse_strings(value: &str) -> Option<Vec<String>> {
     let inner = match value.strip_prefix('[') {
         Some(rest) => rest.strip_suffix(']')?,
@@ -754,7 +761,11 @@ fn parse_strings(value: &str) -> Option<Vec<String>> {
         let quoted = rest.strip_prefix('"')?;
         let (token, tail) = quoted.split_once('"')?;
         out.push(token.to_owned());
-        rest = tail.trim_start().strip_prefix(',').unwrap_or(tail).trim();
+        rest = tail.trim();
+        rest = match rest.is_empty() {
+            true => rest,
+            false => rest.strip_prefix(',')?.trim(),
+        };
     }
     (!out.is_empty()).then_some(out)
 }
@@ -810,6 +821,37 @@ mod tests {
         let game = map.context("game").unwrap();
         assert!(map.claims(&[game], Source::Key(Key::Escape)));
         assert!(map.claims(&[game], Source::Key(Key::Tab)));
+    }
+
+    /// M74's edge from the other side (§6 M81): that one was valid TOML this
+    /// parser refused, this is invalid TOML it accepted. `["A" "B"]` read as two
+    /// bindings, so a hand-edited map with a comma missing played one way here
+    /// and was rejected by every other tool that opened it — a divergence the
+    /// subset exists to make impossible.
+    #[test]
+    fn a_list_with_no_comma_in_it_is_not_two_bindings() {
+        let parse = |value: &str| {
+            ActionMap::parse(&format!("[game.actions]\nlook = {value}\n"), ACTIONS, AXES)
+        };
+        assert!(
+            matches!(
+                parse(r#"["Tab" "Escape"]"#),
+                Err(MapError::Syntax { line: 2, .. })
+            ),
+            "a missing comma is a missing comma"
+        );
+        // The separator and not the whitespace: the spelling either side of it
+        // is free, and a trailing comma is legal TOML and stays legal here.
+        for ok in [
+            r#"["Tab","Escape"]"#,
+            r#"[ "Tab" ,  "Escape" ]"#,
+            r#"["Tab", "Escape",]"#,
+        ] {
+            let map = parse(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+            let game = map.context("game").unwrap();
+            assert!(map.claims(&[game], Source::Key(Key::Escape)), "{ok}");
+            assert!(map.claims(&[game], Source::Key(Key::Tab)), "{ok}");
+        }
     }
 
     /// And whether the game does mouse-look at all, which is a question about

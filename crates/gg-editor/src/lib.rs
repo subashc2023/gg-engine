@@ -2029,6 +2029,97 @@ mod tests {
 
     use super::*;
 
+    /// A world with something in every pane: two archetypes so the tree has
+    /// more than one, `Renderable`s so the markers and the gizmo have geometry
+    /// to draw, and an `Eye` on some of them.
+    fn populated() -> (gg_ecs::World, gg_ecs::Entity) {
+        use gg_ecs::boundary::{Eye, Renderable};
+        use gg_math::sim;
+        let mut world = gg_ecs::World::new();
+        let mut first = None;
+        for i in 0..6u32 {
+            let e = world.spawn();
+            let at = sim::DVec3::new(f64::from(i), 0.0, -4.0);
+            world
+                .insert(e, Renderable::boxed(at, sim::Vec3::splat(0.5), 0x00ff_8040))
+                .unwrap();
+            if i % 2 == 0 {
+                world.insert(e, Eye::at(at, 0.0, 0.0)).unwrap();
+            }
+            first.get_or_insert(e);
+        }
+        (world, first.unwrap())
+    }
+
+    /// The gate [`gg_ui::Router::duplicate`] was built for and never had (§6
+    /// M81) — its own doc says "exposed rather than only logged so a UI test can
+    /// assert there are none", and no test did.
+    ///
+    /// Two widgets sharing an id fight over hover, capture and focus, and the
+    /// symptom is a button that *sometimes* belongs to a different button. The
+    /// editor is where it would happen: ~40 hand-written const ids across seven
+    /// panels, plus every list row spelled `ID.indexed(n)`, where forgetting the
+    /// `indexed` is one character and looks right. Nothing below the shell would
+    /// catch it — the check is a `tracing::warn!` in a crate whose warnings no
+    /// gate reads — and above the shell it is `xtask reload --editor`, five
+    /// manual minutes over one layout.
+    ///
+    /// Ticked twice per pane because a duplicate is resolved in
+    /// `Router::begin` against what the *previous* frame declared: one tick
+    /// declares, the next reports. Every pane in [`Pane::ALL`], each tool, and
+    /// with a selection, since panes only declare what they are showing.
+    #[test]
+    fn no_two_widgets_in_any_of_the_editors_panes_declare_one_id() {
+        let (mut world, entity) = populated();
+        let mut editor = Editor::new(None);
+        editor.selected = Some(entity);
+        let mut at = 0u64;
+        let mut tick_twice = |editor: &mut Editor, world: &mut gg_ecs::World, what: &str| {
+            for _ in 0..2 {
+                at += 1;
+                editor.tick(world, &Tick::default(), &frame_at((1600, 900), at));
+            }
+            assert_eq!(
+                editor.router.duplicate().map(WidgetId::get),
+                None,
+                "{what}: two widgets declared one id"
+            );
+        };
+        for pane in Pane::ALL {
+            editor.dock.activate(pane.id());
+            tick_twice(&mut editor, &mut world, pane.title());
+        }
+        // The viewport's overlay is the one that changes shape with state
+        // rather than with which tab is up: the gizmo declares an arm per axis
+        // per tool, and the markers a widget per placement.
+        editor.dock.activate(Pane::Viewport.id());
+        for tool in Tool::ALL {
+            editor.tool = tool;
+            tick_twice(&mut editor, &mut world, tool.label());
+        }
+        // And with nothing selected, which is a different set of declarations
+        // and not a subset of the one above.
+        editor.selected = None;
+        tick_twice(&mut editor, &mut world, "no selection");
+
+        // The vacuity guard, and it has to be here rather than in `gg-ui`: what
+        // the loop above proves is only worth the assertion if the assertion can
+        // fire through *this* editor's own router on *this* tick loop. Declared
+        // after a tick, so it joins that frame's set and the next `begin`
+        // resolves it.
+        let clash = WidgetId::new("test.clash");
+        let rect = gg_ui::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        };
+        editor.router.hit(clash, rect);
+        editor.router.hit(clash, rect);
+        editor.tick(&mut world, &Tick::default(), &frame_at((1600, 900), at + 1));
+        assert_eq!(editor.router.duplicate(), Some(clash), "the check is inert");
+    }
+
     /// The mouse rule in both directions, because the bug was one of them: §6
     /// M15.4's pick and the game's mouse-look share one click in one rectangle,
     /// and the pointer used to win it whatever the transport said — so selecting
