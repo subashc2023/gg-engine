@@ -637,6 +637,27 @@ mod tests {
         assert_eq!(i.axis(MOVE_RIGHT), 0.0, "opposed keys cancel");
     }
 
+    /// Why the shell may claim a chord's press and let its release fall through
+    /// to `feed` (§6 M81's open row, closed here rather than in `play.rs`).
+    /// `Event::Key` is level, not edge: `key` sets or clears a bit and `tick`
+    /// samples it, so a release whose press nobody recorded clears a bit already
+    /// zero and the derived edges compare two frames that agree. The unpaired
+    /// release is therefore not observable — not in `pressed`, not in
+    /// `just_released`, and not in the `InputFrame` a replay is made of.
+    ///
+    /// Here rather than beside the arm that produces it: this is the *reason*
+    /// the arm is harmless, and it is a property of this crate's input model. An
+    /// edge queue would make the shell's asymmetry a defect at the same moment
+    /// it made this red, which is the coupling worth having.
+    #[test]
+    fn a_release_whose_press_was_claimed_is_not_an_edge() {
+        let (mut claimed, mut quiet) = (input(), input());
+        // The chord: the shell swallows Tab's press, so only the release feeds.
+        claimed.key(Key::Tab, false);
+        assert_eq!(claimed.tick(), quiet.tick(), "same frame as none");
+        assert!(!claimed.pressed(LOOK) && !claimed.just_released(LOOK));
+    }
+
     #[test]
     fn a_mouse_button_and_a_key_reach_the_same_action() {
         let mut i = input();
