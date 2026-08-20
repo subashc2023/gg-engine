@@ -31,6 +31,7 @@
 //!
 //! Run: `cargo xtask dx` (prints the table), `--record` (archives it too).
 
+use anyhow::Context as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -422,15 +423,26 @@ fn add_a_shader_parameter() -> anyhow::Result<Measured> {
 fn add_an_asset() -> anyhow::Result<Measured> {
     let dir = scratch().join("assets/source");
     std::fs::create_dir_all(&dir)?;
-    // A 1x1 PNG, by hand: the point is the pipeline, not the picture.
-    const PIXEL: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
-        0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8,
-        0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D, 0xB0, 0x00, 0x00, 0x00,
-        0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    // A 60-byte mono PCM `.wav`, by hand: the point is the pipeline, not the
+    // sound. It must be one of `ggc`'s four *source* extensions — this dropped
+    // in a `.png` until §6 M81, and a `.png` in this tree is a texture a glTF
+    // references rather than a compilation unit, so `walk` skipped it in
+    // silence and the scenario timed `ggc` building an empty 64-byte pack.
+    #[rustfmt::skip]
+    const TONE: &[u8] = &[
+        b'R', b'I', b'F', b'F', 52, 0, 0, 0, b'W', b'A', b'V', b'E',
+        b'f', b'm', b't', b' ', 16, 0, 0, 0,
+        1, 0,                   // PCM, refused if it is anything this cannot decode
+        1, 0,                   // mono
+        0x80, 0xBB, 0x00, 0x00, // 48 kHz — the clip's own rate, so no resampling
+        0x00, 0x77, 0x01, 0x00, // byte rate
+        2, 0,                   // block align
+        16, 0,                  // bits
+        b'd', b'a', b't', b'a', 16, 0, 0, 0,
+        0x00, 0x00, 0x00, 0x10, 0x00, 0x20, 0x00, 0x30,
+        0x00, 0x40, 0x00, 0x30, 0x00, 0x20, 0x00, 0x10,
     ];
-    std::fs::write(dir.join("dx-swatch.png"), PIXEL)?;
+    std::fs::write(dir.join("dx-tone.wav"), TONE)?;
     let out = scratch().join("assets/dx.ggpack");
     let started = Instant::now();
     exec(
@@ -448,9 +460,16 @@ fn add_an_asset() -> anyhow::Result<Measured> {
         "dx: compile the asset tree",
     )?;
     let latency_us = started.elapsed().as_micros();
+    // The task is "have it in a pack", so that is what is asserted. `is_file`
+    // was the whole check until §6 M81 and a pack holding nothing is still a
+    // file — which is how a source format the compiler never accepted went four
+    // milestones without a number attached to it.
+    let pack = gg_assets::Pack::open(&out)
+        .with_context(|| format!("dx: opening the pack at {}", out.display()))?;
     anyhow::ensure!(
-        out.is_file(),
-        "dx: ggc produced no pack at {}",
+        pack.find_by_name("dx-tone").is_some(),
+        "dx: the pack at {} does not hold `dx-tone` — the file was dropped in and compiled into \
+         nothing, which is what this scenario exists to time",
         out.display()
     );
     Ok(Measured {
