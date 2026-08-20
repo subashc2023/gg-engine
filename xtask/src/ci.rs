@@ -937,8 +937,6 @@ fn demo_runs() -> anyhow::Result<()> {
 /// (`SETTLE_QUIET`) plus a stage-and-load. If that headroom ever runs out the
 /// run says so by name below instead of coming back as a rerun.
 fn rejuvenation() -> anyhow::Result<()> {
-    use std::process::Stdio;
-
     let root = crate::util::workspace_root();
     exec(
         cargo().args(["build", "-p", "demo-03-reload", "-p", "gg-runtime"]),
@@ -959,17 +957,48 @@ fn rejuvenation() -> anyhow::Result<()> {
     let game = dir.join(name);
     std::fs::copy(&built, &game)?;
 
-    let mut cmd = std::process::Command::new(root.join("target/debug").join(if cfg!(windows) {
+    let log = rejuvenating_run(&built, &game, &[])?;
+    resumed_where_it_left_off(&log, 1)?;
+    continuation(&root, &built, &game)
+}
+
+/// The shell binary, wherever this tree just built it.
+fn shell(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("target/debug").join(if cfg!(windows) {
         "gg-runtime.exe"
     } else {
         "gg-runtime"
-    }));
+    })
+}
+
+/// One forced rejuvenation, start to finish: spawn, wait until the shell says it
+/// is watching, rewrite the artifact, and return the **whole chain's** log.
+///
+/// Both processes are in it, because the successor inherits this pipe and a
+/// reader returns only at EOF — which is what makes "did it come back" and
+/// "how many times did each line appear" answerable at all.
+fn rejuvenating_run(
+    built: &std::path::Path,
+    game: &std::path::Path,
+    extra: &[(&str, &str)],
+) -> anyhow::Result<String> {
+    use std::process::Stdio;
+
+    let root = crate::util::workspace_root();
+    let mut cmd = std::process::Command::new(shell(&root));
     cmd.arg("--game")
-        .arg(&game)
+        .arg(game)
         .args(["--frames", "300000", "--leak-budget", "0"])
         .env("GG_HEADLESS", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (flag, value) in extra {
+        if flag.starts_with("--") {
+            cmd.arg(flag).arg(value);
+        } else {
+            cmd.env(flag, value);
+        }
+    }
     let mut child = cmd.spawn()?;
 
     // Drained on threads rather than through `wait_with_output`, which cannot
@@ -994,7 +1023,7 @@ fn rejuvenation() -> anyhow::Result<()> {
             stderr.join().unwrap_or_default()
         );
     }
-    std::fs::copy(&built, &game)?;
+    std::fs::copy(built, game)?;
     child.wait()?;
 
     let log = format!(
@@ -1002,16 +1031,28 @@ fn rejuvenation() -> anyhow::Result<()> {
         stdout.join().unwrap_or_default(),
         stderr.join().unwrap_or_default()
     );
-    // Named ahead of the `rejuvenating` lookup, which would otherwise report a
-    // missing line for a run that simply ended first — the one way the frame
-    // bound below can still be wrong, and the reading that sent M14's flake
-    // back for a rerun.
+    // Named ahead of every lookup below, which would otherwise report a missing
+    // line for a run that simply ended first — the one way the frame bound can
+    // still be wrong, and the reading that sent M14's flake back for a rerun.
     anyhow::ensure!(
         log.contains("rejuvenating") || !log.contains("clean exit"),
         "the run finished its frames without reloading: the rewrite landed while the shell was \
          watching, so the bound is too short for this machine's settle-and-stage rather than \
          mistimed:\n{log}"
     );
+    Ok(log)
+}
+
+/// §6 M5's criterion, off a chain's log: the world it comes back to is the world
+/// it left.
+///
+/// `births` is how many times the demo's idempotent bootstrap may log, and it is
+/// a *different number per leg* rather than a constant: a world that arrives as
+/// data never builds one. One where the game starts fresh, and **zero** wherever
+/// a save opened the session — there, a single birth is the successor having
+/// rebuilt the world instead of restoring it, which is the criterion failing
+/// while every tick assertion below still passes (§6 M84).
+fn resumed_where_it_left_off(log: &str, births: usize) -> anyhow::Result<()> {
     let line = |needle: &str| {
         log.lines()
             .find(|l| l.contains(needle))
@@ -1032,11 +1073,14 @@ fn rejuvenation() -> anyhow::Result<()> {
         crate::util::field_u64(&resumed, "entities")? > 0,
         "came back to an empty world: {resumed}"
     );
-    // The demo's bootstrap is idempotent and logs once. Twice would mean the
-    // successor rebuilt the world instead of restoring it — passing the tick
-    // assertion above while failing the criterion it exists for.
-    let births = log.matches("open for business").count();
-    anyhow::ensure!(births == 1, "the game bootstrapped {births} times");
+    // Twice — or once where a save opened the session — means the successor
+    // rebuilt the world instead of restoring it, passing the tick assertion
+    // above while failing the criterion it exists for.
+    let bootstrapped = log.matches("open for business").count();
+    anyhow::ensure!(
+        bootstrapped == births,
+        "the game bootstrapped {bootstrapped} times, expected {births}"
+    );
     anyhow::ensure!(
         log.contains("clean exit"),
         "the successor did not finish its run:\n{log}"
@@ -1045,6 +1089,170 @@ fn rejuvenation() -> anyhow::Result<()> {
         "xtask: rejuvenation: restarted at tick {left_at}, resumed with \
          {} entities, one bootstrap",
         crate::util::field_u64(&resumed, "entities")?
+    );
+    Ok(())
+}
+
+/// §6 M84: a restart is a **continuation**, so the successor re-reads no
+/// boot-time world source — and the decision that must cross instead is a
+/// refusal to overwrite.
+///
+/// The claim needs a **data directory**, which is precisely what the leg above
+/// does not have: it drives demo 03 with `--game` alone, so `player_file`
+/// returns `None` and every source this is about is inert. That is why five
+/// milestones of boot-time readers landed on top of a handoff with nothing
+/// noticing. Two demos carry a `game.ggproj` and neither is this one, so the
+/// manifest is written here — `title` is the only required key and `--game`
+/// beside it wins field by field, which is the rule §6 M42 added *for gates*.
+///
+/// Graded by **counting lines and comparing bytes**, never by the restore's own
+/// tick: `App::restore` logs before the clobber, so the leg above passes intact
+/// on a successor that then rewinds to a five-second-old checkpoint. What cannot
+/// be faked is that the predecessor read the session and the successor did not.
+fn continuation(
+    root: &std::path::Path,
+    built: &std::path::Path,
+    game: &std::path::Path,
+) -> anyhow::Result<()> {
+    const SLUG: &str = "gg-rejuvenate";
+    let dir = root.join("target/rejuvenate");
+    let manifest = dir.join("game.ggproj");
+    std::fs::write(
+        &manifest,
+        "title = Rejuvenation Gate\nslug = gg-rejuvenate\n",
+    )?;
+    let home = dir.join("home");
+    let data = home.join(SLUG);
+    let progress = data.join("progress.ggsave");
+
+    // A session to resume from, so the predecessor has something to read: the
+    // file is the *subject*, and a leg that ran without one would count zero
+    // reads and pass (§5.8's rule, which this file states twelve lines into
+    // `assets`).
+    let seed = |frames: &str| -> anyhow::Result<String> {
+        let out = std::process::Command::new(shell(root))
+            .arg("--game")
+            .arg(game)
+            .arg("--project")
+            .arg(&manifest)
+            .args(["--frames", frames])
+            .env("GG_HEADLESS", "1")
+            .env("LOCALAPPDATA", &home)
+            .env("XDG_DATA_HOME", &home)
+            .output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "seeding the player directory: {}",
+            out.status
+        );
+        Ok(format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    };
+    // A flag is spelled with its dashes and an environment variable is not, so
+    // one list carries both — `rejuvenating_run` tells them apart by the dashes.
+    let (home_arg, manifest_arg) = (home.display().to_string(), manifest.display().to_string());
+    let extra = [
+        ("--project", manifest_arg.as_str()),
+        ("LOCALAPPDATA", home_arg.as_str()),
+        ("XDG_DATA_HOME", home_arg.as_str()),
+    ];
+
+    // ---- the session is read once, by the process that booted ----
+    // ---- a preference file this build cannot read is not an absent one ----
+    //
+    // No restart in this leg: the defect it pins predates one. `read_to_string`
+    // was `.ok()`, so a `settings.cfg` the player saved as UTF-16 — which is what
+    // Notepad does to the file whose own header says "Yours to edit" — read as
+    // *absent*, nothing was applied, and the exit write below then replaced their
+    // choices with the game's declared defaults. §6 M44 gave the session this
+    // rule and this file never got it.
+    let _ = std::fs::remove_dir_all(&home);
+    seed("60")?;
+    let settings = data.join("settings.cfg");
+    // A UTF-16LE BOM and one character: valid text, invalid UTF-8, and the exact
+    // bytes the invitation produces.
+    let unreadable = vec![0xFFu8, 0xFE, b'A', 0x00];
+    std::fs::write(&settings, &unreadable)?;
+    let log = seed("60")?;
+    anyhow::ensure!(
+        log.contains("found and unreadable"),
+        "a settings file this build could not read went unnamed — the player's only witness \
+         (§6 M84)\n{log}"
+    );
+    anyhow::ensure!(
+        std::fs::read(&settings)? == unreadable,
+        "the player's settings were overwritten by a build that never read them"
+    );
+
+    // ---- the session is read once, by the process that booted ----
+    let _ = std::fs::remove_dir_all(&home);
+    seed("200")?;
+    anyhow::ensure!(
+        progress.is_file(),
+        "the seed run left no {} — this leg would then be counting reads of a file that does \
+         not exist",
+        progress.display()
+    );
+    let log = rejuvenating_run(built, game, &extra)?;
+    resumed_where_it_left_off(&log, 0)?;
+    // Each of the four boot-time sources, counted the same way. `settings` needs
+    // its own line because a preference is not a world and would survive every
+    // assertion above: re-applying it discards whatever the player changed while
+    // playing, and the file is written back from the world at exit.
+    //
+    // The needle is `App`'s own — it logs when `want_settings`' value is spent on
+    // the first tick, so it fires exactly once per session that read a file. A
+    // line added here for the purpose turned out to duplicate it, and the
+    // duplicate is what this leg reported.
+    let applied = log.matches("settings applied").count();
+    anyhow::ensure!(
+        applied == 1,
+        "the preferences were applied {applied} times: a successor re-reading `settings.cfg` \
+         throws away every change made during the session it is continuing (§6 M84)\n{log}"
+    );
+    let reads = log.matches("resuming the player's session").count();
+    anyhow::ensure!(
+        reads == 1,
+        "the session was read {reads} times: a successor re-reading `progress.ggsave` rewinds \
+         to the last checkpoint, which is up to five seconds of play thrown away by the \
+         mechanism that exists to preserve it (§6 M84)\n{log}"
+    );
+    let loads = log.matches("save loaded").count();
+    anyhow::ensure!(loads == 1, "a save was loaded {loads} times:\n{log}");
+
+    // ---- a file the predecessor could not read, the successor must not write ----
+    //
+    // The half `Handoff::host` exists for. `keep_progress` was a local, and a
+    // restart drops every local — so the successor inherited permission it was
+    // never granted and overwrote the player's file, which is the loss the
+    // refusal was protecting against arriving one process later.
+    let _ = std::fs::remove_dir_all(&home);
+    seed("200")?;
+    let refused = b"not a save, and this build must therefore not overwrite it".to_vec();
+    std::fs::write(&progress, &refused)?;
+    let log = rejuvenating_run(built, game, &extra)?;
+    // One birth here and not zero: the planted file is refused, so this session
+    // *does* start fresh — and the successor must still not add a second.
+    resumed_where_it_left_off(&log, 1)?;
+    anyhow::ensure!(
+        log.contains("this build cannot read it"),
+        "the predecessor did not refuse the planted file, so nothing was inherited and this \
+         leg proves nothing:\n{log}"
+    );
+    let after = std::fs::read(&progress)?;
+    anyhow::ensure!(
+        after == refused,
+        "the successor overwrote a file its predecessor refused to touch: {} bytes became {}",
+        refused.len(),
+        after.len()
+    );
+    println!(
+        "xtask: rejuvenation: continuation — an unreadable preference left whole, every boot \
+         source spent once across the restart, a refused file left at {} bytes",
+        after.len()
     );
     Ok(())
 }

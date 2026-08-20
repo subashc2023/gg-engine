@@ -50,6 +50,10 @@ pub struct App {
     /// held there too: what dist must not contain is the *watcher*, and gating a
     /// pair of counters would buy a second body for every method that reads it.
     rejuvenate: Rejuvenator,
+    /// Which player files this session may overwrite, held here for one reason:
+    /// a rejuvenation must hand it to the successor, and the stage happens deep
+    /// inside a reload where the shell's boot locals are long gone (§6 M84).
+    writable: gg_core::reload::rejuvenate::Writable,
     /// What the window last reported as its inner size, in physical pixels —
     /// the surface every UI on it is laid out for ([`App::surface`]). Starts at
     /// the headless canvas and is only ever moved by [`App::resize`], so a run
@@ -376,6 +380,7 @@ impl App {
             lib,
             governor: gg_core::governor::Governor::new(),
             rejuvenate: Rejuvenator::new(args.leak_budget),
+            writable: gg_core::reload::rejuvenate::Writable::default(),
             extent: gg_ecs::boundary::CANVAS,
             hz,
             halted: false,
@@ -439,6 +444,13 @@ impl App {
     /// session runs (§6 M42, corrected at M44).
     pub fn want_settings(&mut self, prefs: Prefs) {
         self.settings = Some(prefs);
+    }
+
+    /// Which player files this session may overwrite (§6 M84). The shell decides
+    /// it at boot; this holds it only so a rejuvenation can carry it, since a
+    /// successor re-reads none of the files the decision was made from.
+    pub fn may_overwrite(&mut self, writable: gg_core::reload::rejuvenate::Writable) {
+        self.writable = writable;
     }
 
     /// Keep the player's files current while this session runs (§6 M48). Each
@@ -1239,8 +1251,12 @@ impl App {
         // rather than the one the retired dylib understood.
         if self.rejuvenate.due() {
             let staged = self.world.snapshot().encode();
-            self.rejuvenate
-                .stage(self.next_tick, staged, self.drive.survives_restart());
+            self.rejuvenate.stage(
+                self.next_tick,
+                staged,
+                self.writable,
+                self.drive.survives_restart(),
+            );
         }
         info!(
             entities = report.entities,

@@ -16,7 +16,7 @@ use gg_abi::{
     AbiInfo, AbiStatus, ArchetypeMatch, BOUNDARY_FINGERPRINT, Entity, HOST_API_VERSION, HostApiV1,
     QueryDesc, WorldHandle,
 };
-use gg_core::reload::rejuvenate::Handoff;
+use gg_core::reload::rejuvenate::{Handoff, Writable};
 use gg_core::reload::{self, GameLib, LeakBudget, ReloadError};
 
 // A host table that answers nothing. Every test below fails before any of these
@@ -231,10 +231,53 @@ fn a_handoff_carries_the_clock_beside_the_world() {
     let staged = Handoff {
         tick: 7_777,
         world: b"opaque here: gg-core sits below the ECS".to_vec(),
+        writable: Writable::default(),
     };
     let resumed = Handoff::decode(&staged.encode()).unwrap();
-    assert_eq!(resumed.tick, staged.tick);
-    assert_eq!(resumed.world, staged.world);
+    assert_eq!(resumed, staged);
+}
+
+#[test]
+fn every_permission_survives_the_restart_it_crosses() {
+    // Four states and all four have to cross (§6 M84). The interesting ones are
+    // the two mixed: a codec that dropped a bit, or read one flag for both,
+    // still round-trips the two uniform cases.
+    for progress in [false, true] {
+        for settings in [false, true] {
+            let staged = Handoff {
+                tick: 12,
+                world: b"world".to_vec(),
+                writable: Writable { progress, settings },
+            };
+            let resumed = Handoff::decode(&staged.encode()).unwrap();
+            assert_eq!(resumed.writable, staged.writable, "{progress} {settings}");
+            assert_eq!(
+                resumed.world, staged.world,
+                "the world moved with the flags"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_word_this_build_does_not_understand_is_permission_and_not_a_refusal() {
+    // Refusing every write on a header we merely failed to read would lose a
+    // session that was never in danger; the pre-§6 M84 behaviour is the safe arm.
+    let mut bytes = Handoff {
+        tick: 1,
+        world: b"world".to_vec(),
+        writable: Writable {
+            progress: false,
+            settings: false,
+        },
+    }
+    .encode();
+    assert!(!Handoff::decode(&bytes).unwrap().writable.progress);
+    bytes[16] = 0xFF;
+    assert_eq!(
+        Handoff::decode(&bytes).unwrap().writable,
+        Writable::default()
+    );
 }
 
 #[test]
@@ -243,11 +286,15 @@ fn a_handoff_that_is_not_this_builds_is_refused_rather_than_resumed() {
     // else's world, so every one of these is an error and not a default.
     assert!(Handoff::decode(b"").is_err());
     assert!(Handoff::decode(b"short").is_err());
-    assert!(Handoff::decode(b"NOPE____________").is_err());
+    // Header-length exactly, so this reaches the magic check rather than being
+    // refused for being short — the arm the two above already cover.
+    assert_eq!(b"NOPE________________".len(), 20);
+    assert!(Handoff::decode(b"NOPE________________").is_err());
 
     let mut wrong_format = Handoff {
         tick: 1,
         world: Vec::new(),
+        writable: Writable::default(),
     }
     .encode();
     wrong_format[4] = 9;

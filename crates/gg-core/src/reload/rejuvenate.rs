@@ -18,17 +18,74 @@ use std::path::{Path, PathBuf};
 use super::{LeakBudget, ReloadError};
 
 const MAGIC: [u8; 4] = *b"GGRJ";
-const FORMAT: u32 = 1;
-/// Magic, format, tick.
-const HEADER: usize = 16;
+// 2 since §6 M84 added `host`. A successor refuses a predecessor's format
+// outright rather than guessing at a shorter header — the two processes are the
+// same build in every case a restart is reached from.
+const FORMAT: u32 = 2;
+/// Magic, format, tick, [`Writable`]'s flags.
+const HEADER: usize = 20;
 
-/// What a predecessor left for its successor: the sim clock, and the world as
-/// `Snapshot::encode` flattened it.
+/// Which of the player's files a session may overwrite, carried across a
+/// restart (§6 M84).
+///
+/// **One rule: a file this build could not read is a file it must not
+/// overwrite.** §6 M44 stated it for the session and the shell held it in a
+/// local — and a restart drops every local. A successor re-reads no boot-time
+/// source, so without this it inherits permission nobody granted and writes over
+/// the file its predecessor refused to touch: the loss the refusal exists to
+/// prevent, arriving one process later and looking like the disk's fault.
+///
+/// Here rather than in the shell for [`Rejuvenator`]'s own reason — *whether* a
+/// session may do a thing is policy about the process's lifecycle, and §3 caps
+/// the shell at wiring. The paths stay the shell's; these are the two player
+/// files with an exit write.
+///
+/// `true` is permission, so [`Writable::default`] is a session that read
+/// everything it found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Writable {
+    /// `progress.ggsave`.
+    pub progress: bool,
+    /// `settings.cfg` — the same rule, which it did not have until §6 M84.
+    pub settings: bool,
+}
+
+impl Default for Writable {
+    fn default() -> Self {
+        Self {
+            progress: true,
+            settings: true,
+        }
+    }
+}
+
+impl Writable {
+    fn bits(self) -> u32 {
+        u32::from(self.progress) | u32::from(self.settings) << 1
+    }
+
+    /// **Anything unrecognised is permission**, which is the pre-§6 M84
+    /// behaviour and the safe half of the trade: refusing every write on a word
+    /// we merely failed to understand would lose a session that was never in
+    /// danger.
+    fn from_bits(bits: u32) -> Self {
+        match bits {
+            0..=3 => Self {
+                progress: bits & 1 != 0,
+                settings: bits & 2 != 0,
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
+/// What a predecessor left for its successor: the sim clock, the world as
+/// `Snapshot::encode` flattened it, and whatever the shell must not re-derive.
 ///
 /// The tick rides here rather than inside the world image because it is the
 /// *host's* state — `gg-core` owns the clock — and a game that reads `tick` would
 /// see time run backwards if a restart silently resumed at zero.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Handoff {
     /// The tick to resume at: the first one that had not run when the world was
     /// captured.
@@ -36,6 +93,9 @@ pub struct Handoff {
     /// The encoded world. Opaque here: `gg-core` sits below the ECS (§3) and
     /// carries these bytes without reading them.
     pub world: Vec<u8>,
+    /// What the predecessor had permission to overwrite. It rides here for the
+    /// tick's reason — host state, with no other way across a restart.
+    pub writable: Writable,
 }
 
 impl Handoff {
@@ -48,6 +108,7 @@ impl Handoff {
         out.extend_from_slice(&MAGIC);
         out.extend_from_slice(&FORMAT.to_le_bytes());
         out.extend_from_slice(&self.tick.to_le_bytes());
+        out.extend_from_slice(&self.writable.bits().to_le_bytes());
         out.extend_from_slice(&self.world);
         out
     }
@@ -74,10 +135,13 @@ impl Handoff {
             return Err(bad(format!("format {format}, this build writes {FORMAT}")));
         }
         let mut tick = [0u8; 8];
-        tick.copy_from_slice(&header[8..HEADER]);
+        tick.copy_from_slice(&header[8..16]);
+        let mut bits = [0u8; 4];
+        bits.copy_from_slice(&header[16..HEADER]);
         Ok(Handoff {
             tick: u64::from_le_bytes(tick),
             world: bytes[HEADER..].to_vec(),
+            writable: Writable::from_bits(u32::from_le_bytes(bits)),
         })
     }
 
@@ -137,7 +201,9 @@ impl Rejuvenator {
     /// `restartable` is whether the run's input stream could survive the restart
     /// at all; a run that is recording or replaying is refused here rather than
     /// corrupted later, and says so.
-    pub fn stage(&mut self, tick: u64, world: Vec<u8>, restartable: bool) {
+    ///
+    /// `writable` is what the successor inherits — see [`Writable`].
+    pub fn stage(&mut self, tick: u64, world: Vec<u8>, writable: Writable, restartable: bool) {
         let (spent, budget) = (self.budget.spent(), self.budget.budget());
         if !restartable {
             tracing::warn!(
@@ -154,7 +220,11 @@ impl Rejuvenator {
             tick,
             "leaked dylib budget spent — rejuvenating"
         );
-        self.staged = Some(Handoff { tick, world });
+        self.staged = Some(Handoff {
+            tick,
+            world,
+            writable,
+        });
     }
 
     /// Whether a session is waiting to be handed on — the loop's cue to stop.

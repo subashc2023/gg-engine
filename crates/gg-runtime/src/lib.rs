@@ -392,21 +392,52 @@ fn session(args: &Args) -> Result<Option<Args>, Exit> {
     // recorded stream drives verb *ids*, so a rebind cannot reach one — but the
     // legend a game draws from the map is world state, and a file the operator
     // edited would otherwise diverge a blessed stream with nobody having played.
-    let rebinds = player_file(args, gg_input::BINDINGS_FILE)
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .unwrap_or_default();
+    // Absent and unreadable are different sentences (§6 M84): the first is the
+    // ordinary case and says nothing, the second is a file the player has and
+    // this build did not honour, which they can only act on if it is named.
+    // Nothing writes this one back, so there is no overwrite to refuse — the
+    // whole loss is the silence, which is why it read `.ok()` for a milestone.
+    let rebinds = match player_file(args, gg_input::BINDINGS_FILE) {
+        Some(path) if path.is_file() => std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            warn!(%error, path = %path.display(),
+                  "bindings: found and unreadable — the game's own keys stand");
+            String::new()
+        }),
+        _ => String::new(),
+    };
     // Read here rather than at the window, so a headless run reports a folder
     // that ships a picture it cannot draw — the only tier a gate may run (§1.5).
     let icon = icon(args);
     let mut app = app::App::new(args, &staging, DEFAULT_TICK_HZ, bindings, rebinds, replay)?;
     // Before the first frame: the loop's clock resumes at the tick this carries.
+    //
+    // **And it decides every source below it (§6 M84).** Five things write the
+    // world at boot — this, `--load`, `progress`, the opening scene, and
+    // `settings` — and until M84 exactly one pair of the ten was reconciled. A
+    // `--restore` is not a sixth source competing with the rest: it says this
+    // process is a session *continuing*, and the four below describe how a
+    // session *starts*. The predecessor already spent them; their effect is in
+    // the world it handed over. Applying one again does not add anything, it
+    // rewinds — to a checkpoint up to `CHECKPOINT_SECONDS` stale, or to the
+    // authored level, or to the preferences the player has since changed.
+    //
+    // `restart` re-execs with the whole argv (`rejuvenate::restart`), which is
+    // how the successor finds its game — and is also why `--load` is on this
+    // list rather than exempt from it: the flag the operator typed once is
+    // handed to every successor forever.
+    // What this session may overwrite: a continuation inherits its predecessor's
+    // refusals, a fresh boot starts permitted and earns one by failing to read a
+    // file (§6 M44's rule, generalised).
+    let mut writable = gg_core::reload::rejuvenate::Writable::default();
+    let mut continuing = false;
     if let Some(path) = &args.restore {
-        app.restore(&gg_core::Handoff::take(path).map_err(anyhow::Error::from)?)?;
+        let handoff = gg_core::Handoff::take(path).map_err(anyhow::Error::from)?;
+        (writable, continuing) = (handoff.writable, true);
+        app.restore(&handoff)?;
     }
-    // After the handoff, and they are not two answers to one question: a
-    // predecessor's world is this process continuing, a save is a session
-    // resuming. A run given both continues into the saved one.
-    if let Some(path) = &args.load {
+    if let Some(path) = &args.load
+        && !continuing
+    {
         app.load_save(path)?;
     }
     // The player's own session (§6 M44), ahead of the opening scene and never
@@ -418,10 +449,9 @@ fn session(args: &Args) -> Result<Option<Args>, Exit> {
     // somewhere. The editor is out of both, like `--save`.
     let progress = player_file(args, PROGRESS).filter(|_| !args.editor);
     let mut resumed = false;
-    let mut keep_progress = true;
     if let Some(path) = progress
         .as_deref()
-        .filter(|path| path.is_file() && args.load.is_none())
+        .filter(|path| path.is_file() && args.load.is_none() && !continuing)
     {
         match app.load_save(path) {
             Ok(()) => {
@@ -430,14 +460,14 @@ fn session(args: &Args) -> Result<Option<Args>, Exit> {
             }
             Err(error) => {
                 warn!(%error, "progress: this build cannot read it — starting fresh, file untouched");
-                keep_progress = false;
+                writable.progress = false;
             }
         }
     }
     // The project's opening scene (§6 M15.2 post-close; §6 M20 pull 2): the
     // world as data — the editor opens Stopped at the save's tick with no game
     // code run, and a plain run opens the level the project checked in.
-    if let Some(scene) = opening_scene(args).filter(|_| !resumed) {
+    if let Some(scene) = opening_scene(args).filter(|_| !resumed && !continuing) {
         info!(scene = %scene.display(), "opening scene");
         app.load_save(&scene)?;
     }
@@ -446,27 +476,49 @@ fn session(args: &Args) -> Result<Option<Args>, Exit> {
     // asks for MSAA) keeps what it declared until there is a file, and the file
     // is written from the world, so the first exit records it.
     let settings = player_file(args, gg_ecs::boundary::settings::FILE);
-    if let Some(text) = settings
-        .as_deref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-    {
-        let (prefs, stale) = gg_ecs::boundary::settings::decode(&text);
-        if !stale.is_empty() {
-            warn!(
-                ?stale,
-                "settings: lines this build does not answer to — ignored"
-            );
+    if let Some(path) = settings.as_deref().filter(|_| !continuing) {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let (prefs, stale) = gg_ecs::boundary::settings::decode(&text);
+                if !stale.is_empty() {
+                    warn!(
+                        ?stale,
+                        "settings: lines this build does not answer to — ignored"
+                    );
+                }
+                app.want_settings(prefs);
+            }
+            // Absent is the ordinary case and the comment above is its whole
+            // policy: nothing applied, and the first exit writes what the game
+            // declared.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            // Present and unreadable is not that (§6 M84). Until M84 this arm
+            // was `.ok()`, so a `settings.cfg` saved as UTF-16 by the editor the
+            // file's own header invites — "Yours to edit" — read as absent, and
+            // the exit write below then replaced the player's choices with the
+            // game's defaults. §6 M44 gave `progress` this rule and this file
+            // never got it: what cannot be read must not be overwritten.
+            Err(error) => {
+                warn!(%error, path = %path.display(),
+                      "settings: found and unreadable — the game's own stand, file untouched");
+                writable.settings = false;
+            }
         }
-        app.want_settings(prefs);
     }
+    // Everything below writes rather than reads, so it is filtered by permission
+    // and never by `continuing`: a successor *is* the session now, and a session
+    // that stopped checkpointing because it was handed on is one that loses the
+    // very seconds the restart existed to preserve.
+    let progress = progress.filter(|_| writable.progress);
+    let settings = settings.filter(|_| writable.settings);
+    app.may_overwrite(writable);
     // From here the session is on the disk as it goes (§6 M48), not only at the
     // exit it may never reach. Same path and same policy as the exit write —
-    // `keep_progress` included, because a file this build could not read is one
-    // it must not overwrite, and a checkpoint is the write that would.
-    app.checkpoint_to(
-        progress.as_ref().filter(|_| keep_progress).cloned(),
-        settings.clone(),
-    );
+    // Permission included, because a file this build could not read is one it
+    // must not overwrite, and a checkpoint is the write that would. Both paths
+    // are already filtered by `Writable` above, so this cannot disagree with the
+    // exit write below — one place decides and two places obey (§6 M84).
+    app.checkpoint_to(progress.clone(), settings.clone());
 
     // Headless is windowless, not invisible-windowed: §1.5 forbids an automated
     // tier from creating an OS window *at all*, and every `xtask ci` tier sets
@@ -523,7 +575,7 @@ fn session(args: &Args) -> Result<Option<Args>, Exit> {
     // game, because the game got no tick in which to decide otherwise. A
     // failure here is counted, never fatal: the process is already leaving, and
     // what it says about the disk is `player::note`'s and is said once (§6 M54).
-    if let Some(path) = progress.filter(|_| keep_progress) {
+    if let Some(path) = progress {
         let _ = app.write_save(&path);
     }
     // Also before `finish`, and the reason is the same one: the pick is the

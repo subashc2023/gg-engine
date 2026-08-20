@@ -351,12 +351,37 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   and everything after it says so by hand. Two spellings and no threaded
 ///   flag, which is what makes a `?` added to the setup half right by default.
 ///
+/// - **The five sources of a world at boot** (2091 -> 2117, §6 M84): twenty-six
+///   lines, and what buys them is that the shell is the *only* place the five
+///   are visible at once. `--restore`, `--load`, `progress.ggsave`, the opening
+///   scene and `settings.cfg` each write the world during `session`, they
+///   arrived over five milestones, and exactly one pair of the ten was ever
+///   reconciled — the comment `--load` carries. The other four re-applied
+///   themselves on top of a handoff, so a rejuvenated session rewound to a
+///   five-second-old checkpoint or to the authored level. No crate below can
+///   see that: `gg-core` owns the restart and has never heard of a player file,
+///   `gg-ecs` owns the save and cannot know a predecessor exists, and each
+///   reader in isolation is correct.
+///
+///   Most of the twenty-six is the *reads* being made answerable —
+///   `settings.cfg` and `bindings.cfg` distinguishing absent from unreadable,
+///   which §6 M44 gave the session and never gave them, so a file saved as
+///   UTF-16 by the editor its own header invites read as absent and was then
+///   overwritten with the game's defaults at exit.
+///
+///   Not here, and deliberately: `Writable` itself is `gg-core`'s, beside
+///   `Rejuvenator`, on that type's own stated ground — *whether* a session may
+///   do a thing is policy about the process's lifecycle and §3 caps the shell at
+///   wiring. Thirty-three lines went there rather than here, which is why this
+///   raise is twenty-six and not fifty-nine.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session), M45 (the
 /// keys), M46 (the window), M47 (the refusal), M48 (the crash), M63 (the
 /// viewport's pointer), M80 (the frame rate), M81 (the box's first line, and
-/// its post-close correction) — each argued the same way.
-const SHELL_BUDGET: usize = 2091;
+/// its post-close correction), M84 (the boot sequence) — each argued the same
+/// way.
+const SHELL_BUDGET: usize = 2117;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.
