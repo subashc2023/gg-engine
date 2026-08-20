@@ -18,6 +18,7 @@ mod new;
 mod notes;
 mod probe;
 mod public_api;
+mod record;
 mod replay;
 mod rsrc;
 mod run;

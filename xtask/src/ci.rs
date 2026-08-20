@@ -20,12 +20,21 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 pub fn run_tier(tier: &str) -> anyhow::Result<()> {
-    match tier {
+    let body = || match tier {
         "fast" => fast(),
         "push" => push(),
         "nightly" => nightly(),
         "weekly" => weekly(),
         other => anyhow::bail!("unknown ci tier `{other}`"),
+    };
+    // A scheduled tier records itself (§6 M82): the scheduler's shell cannot
+    // write a verdict for a launch it refused, and wrote the *previous* one for
+    // a run `StopOnIdleEnd` killed. `weekly` reaches `nightly` by call and not
+    // through here, so a Sunday leaves one bracketed record and not two.
+    if crate::record::scheduled(tier) {
+        crate::record::around(tier, body)
+    } else {
+        body()
     }
 }
 
@@ -61,6 +70,12 @@ const FAST_TIER_WINDOW: usize = 5;
 /// Stop-hook tier: fmt + clippy on changed crates + tests for changed crates.
 /// A clean tree passes by definition — the hook blocks on dirty-and-red only.
 fn fast() -> anyhow::Result<()> {
+    // §5: "a red nightly is the stop-the-line event a red main used to be" —
+    // and until §6 M82 the only reader of that verdict was a manual command
+    // with no caller, which is how the weekly sat red for four days on a desk
+    // that ran this tier on every agent turn. Before the clean-tree return, not
+    // after: a clean tree is exactly when there is room to notice.
+    crate::record::report();
     let changed = changed_build_paths()?;
     if changed.is_empty() {
         println!("xtask ci --fast: tree clean — green by definition");
@@ -137,6 +152,7 @@ fn fast_tier_verdict(window: &[u64]) -> anyhow::Result<()> {
 /// found it hours later with the session that caused it long gone. Fourteen
 /// seconds on a warm tree buys the loop back (§6 M20 item 11).
 fn push() -> anyhow::Result<()> {
+    crate::record::report();
     exec(cargo().args(["fmt", "--check"]), "cargo fmt --check")?;
     clippy(&All)?;
     // The workspace lint above resolves features *unified*, and since M10 no
