@@ -123,8 +123,9 @@ fn run(target: (u32, u32), input: &[InputFrame]) -> Run {
             motion: (frame.axes[X.index()], frame.axes[Y.index()]),
             primary: frame.pressed(CLICK),
             advance_focus: false,
-            // `gg_editor::host` appends no `ui_press`, so an editor session has
-            // no keyboard press to route (§6 M74).
+            // `host` appends no `ui_press` and `Editor::tick` clears the one a
+            // *game* may declare (§6 M81) — this had said the host's silence
+            // settled it, which is the belief that hid the leak.
             activate: false,
             // Exactly what `Tick::from_input` derives from the same two verbs.
             scroll: i32::from(frame.pressed(UP)) - i32::from(frame.pressed(DOWN)),
@@ -437,8 +438,9 @@ fn stopped(world: &mut World, editor: &mut Editor, input: &[InputFrame]) {
             motion: (frame.axes[X.index()], frame.axes[Y.index()]),
             primary: frame.pressed(CLICK),
             advance_focus: false,
-            // `gg_editor::host` appends no `ui_press`, so an editor session has
-            // no keyboard press to route (§6 M74).
+            // `host` appends no `ui_press` and `Editor::tick` clears the one a
+            // *game* may declare (§6 M81) — this had said the host's silence
+            // settled it, which is the belief that hid the leak.
             activate: false,
             scroll: 0,
         };
@@ -935,8 +937,9 @@ fn a_click_in_a_playing_viewport_picks_nothing() {
             motion: (frame.axes[X.index()], frame.axes[Y.index()]),
             primary: frame.pressed(CLICK),
             advance_focus: false,
-            // `gg_editor::host` appends no `ui_press`, so an editor session has
-            // no keyboard press to route (§6 M74).
+            // `host` appends no `ui_press` and `Editor::tick` clears the one a
+            // *game* may declare (§6 M81) — this had said the host's silence
+            // settled it, which is the belief that hid the leak.
             activate: false,
             scroll: 0,
         };
@@ -1062,8 +1065,9 @@ fn with_no_project_the_game_pane_is_a_picker_and_a_click_on_a_row_opens_one() {
             motion: (frame.axes[X.index()], frame.axes[Y.index()]),
             primary: frame.pressed(CLICK),
             advance_focus: false,
-            // `gg_editor::host` appends no `ui_press`, so an editor session has
-            // no keyboard press to route (§6 M74).
+            // `host` appends no `ui_press` and `Editor::tick` clears the one a
+            // *game* may declare (§6 M81) — this had said the host's silence
+            // settled it, which is the belief that hid the leak.
             activate: false,
             scroll: 0,
         };
@@ -1131,8 +1135,9 @@ fn the_prompt_takes_typed_text_only_once_a_click_has_focused_it() {
             motion: (frame.axes[X.index()], frame.axes[Y.index()]),
             primary: frame.pressed(CLICK),
             advance_focus: false,
-            // `gg_editor::host` appends no `ui_press`, so an editor session has
-            // no keyboard press to route (§6 M74).
+            // `host` appends no `ui_press` and `Editor::tick` clears the one a
+            // *game* may declare (§6 M81) — this had said the host's silence
+            // settled it, which is the belief that hid the leak.
             activate: false,
             scroll: 0,
         };

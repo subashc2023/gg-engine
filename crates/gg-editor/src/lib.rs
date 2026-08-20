@@ -1119,6 +1119,18 @@ impl Editor {
             self.history.clear();
         }
         self.place(frame.extent, frame.dpi);
+        // The editor borrows the *pointer* verbs deliberately (`host::open`):
+        // one mouse serves both routers, and the shell arbitrates by who is
+        // holding it. A key has no position to arbitrate by, so a game's
+        // `ui_press` reached this router on every tick — demos 10 and 12
+        // declare it on `Enter`, which is also `editor_text_send`, so sending a
+        // chat prompt pressed whatever the operator last clicked (§6 M81).
+        // Cleared rather than rebound: no host verb claims a press, and
+        // inventing a key nobody asked for is a feature, not this repair.
+        let tick = &Tick {
+            activate: false,
+            ..*tick
+        };
         self.router.begin(tick, self.fit.canvas);
         // Before the panels, so a camera moved this tick is the one the viewport
         // tag and the shell's extract both see. It no longer reads the router's
@@ -2326,6 +2338,51 @@ mod tests {
                 self.step(None, false);
             }
         }
+
+        /// A tick carrying the keyboard's press and nothing else — exactly what
+        /// `Tick::from_input` derives from a build's declared `ui_press`.
+        fn key(&mut self) -> Commands {
+            self.tick += 1;
+            let tick = Tick {
+                activate: true,
+                ..Tick::default()
+            };
+            let commands = self.editor.tick(
+                &mut self.world,
+                &tick,
+                &frame_at(self.extent, self.tick - 1),
+            );
+            self.window = self.editor.take_window_command().or(self.window);
+            commands
+        }
+    }
+
+    /// A *game's* `ui_press` does not reach the editor's router (§6 M81's open
+    /// row, reproduced and closed). The shell derives one `UiTick` and hands it
+    /// to both stages (`app.rs`), demos 10 and 12 declare the verb on `Enter`,
+    /// and `Enter` is also `editor_text_send` — so before this, sending a chat
+    /// prompt pressed whatever the operator last clicked, with the pointer
+    /// parked elsewhere and no button down.
+    ///
+    /// Graded on the transport rather than on the router's own state: what makes
+    /// it a defect is that a *command* went out, and `Commands::playing` is what
+    /// the shell acts on.
+    #[test]
+    fn a_games_press_verb_does_not_reach_the_editors_router() {
+        let mut driver = Driver::new((1280, 720));
+        driver.step(None, false);
+        let play = driver.editor.transport(0);
+        let asked: Vec<Option<bool>> = driver
+            .click((play.x + play.w * 0.5, play.y + play.h * 0.5))
+            .iter()
+            .map(|commands| commands.playing)
+            .collect();
+        // The pointer's own press still works — this must fail for the right
+        // reason, and a router that routed nothing would pass the assert below.
+        assert_eq!(asked, vec![None, Some(true)], "the click ran the scene");
+        // Away from the bar entirely, so hover cannot be what presses it.
+        driver.step(Some((640.0, 400.0)), false);
+        assert_eq!(driver.key().playing, None, "and the keystroke did not");
     }
 
     /// The title bar holds the whole of what an OS one did, and nothing in it
