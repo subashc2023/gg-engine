@@ -50,6 +50,11 @@ const FRAMES: usize = 1200;
 /// every trace below has somewhere to go and something to fail at.
 const TARGET_HZ: u32 = 60;
 
+/// The window the plant above was measured in. Constant except while `drag`
+/// drags it, which is the point of that row.
+const WIDTH: u32 = 1920;
+const HEIGHT: u32 = 1080;
+
 pub fn run(_args: &[String]) -> Result<()> {
     println!(
         "the automatic render scale against a plant of {FLOOR_MS:.3} ms + {FILL_MS:.2} ms x \
@@ -64,22 +69,34 @@ pub fn run(_args: &[String]) -> Result<()> {
     );
 
     println!(
-        "  trace                shipped                                   naive\n  \
-         {:<18} {:>7} {:>7} {:>6} {:>7}   {:>7} {:>7} {:>6} {:>7}",
-        "", "settle", "scale", "turns", "late %", "settle", "scale", "turns", "late %"
+        "  trace              shipped                                            naive\n  \
+         {:<16} {:>7} {:>7} {:>7} {:>6} {:>7}   {:>7} {:>7} {:>7} {:>6} {:>7}",
+        "",
+        "settle",
+        "scale",
+        "worst",
+        "turns",
+        "late %",
+        "settle",
+        "scale",
+        "worst",
+        "turns",
+        "late %"
     );
     for trace in &TRACES {
         let shipped = drive(trace, false);
         let naive = drive(trace, true);
         println!(
-            "  {:<18} {:>7} {:>7.3} {:>6} {:>7.1}   {:>7} {:>7.3} {:>6} {:>7.1}",
+            "  {:<16} {:>7} {:>7.3} {:>7.3} {:>6} {:>7.1}   {:>7} {:>7.3} {:>7.3} {:>6} {:>7.1}",
             trace.name,
             settle(&shipped),
             shipped.factor,
+            shipped.worst,
             shipped.turns,
             shipped.late,
             settle(&naive),
             naive.factor,
+            naive.worst,
             naive.turns,
             naive.late
         );
@@ -88,7 +105,15 @@ pub fn run(_args: &[String]) -> Result<()> {
         "\n  `turns` is the count of *direction changes* and is the number this exists to read: \
          \n  a loop that steps down four times and stops has settled, one that alternates has not, \
          \n  and both can show the same number of moves. `late %` is the share of frames over the \
-         \n  target, which is what a player feels rather than what a controller intends."
+         \n  target, which is what a player feels rather than what a controller intends, and \
+         \n  `worst` is the lowest the scale ever got — where it *ends* forgives a loop that went \
+         \n  to the floor and climbed back out, which is a picture a player watched go soft."
+    );
+    println!(
+        "\n  `drag` is the row those last two columns were added for (§6 M81): a machine that is \
+         \n  never late at all, whose window is dragged for one second. The naive controller reads \
+         \n  the hand's cadence as a slow machine and goes to the floor; the shipped one is handed \
+         \n  the extent, and a size that changed clears the window exactly as its own move does."
     );
     Ok(())
 }
@@ -97,41 +122,68 @@ pub fn run(_args: &[String]) -> Result<()> {
 /// Each is chosen to fail in a way the others cannot.
 struct Trace {
     name: &'static str,
-    /// The load at frame `i`, and whether this frame is a one-off hitch.
-    load: fn(usize) -> (f64, bool),
+    /// The load at frame `i`, and the period in ms when this frame's cost is
+    /// *not* the plant's — a hitch, or a paint the frame loop did not pace.
+    load: fn(usize) -> (f64, Option<f64>),
+    /// Whether those unpaced frames come with a **new window size**. A resize
+    /// paint and a shader compile are the same number in the period column and
+    /// are not the same event, and this is the whole of what tells them apart.
+    dragging: bool,
 }
 
-const TRACES: [Trace; 5] = [
+/// Frames a resize drag paints, and what one costs. Win32 runs the drag inside
+/// `DefWindowProc`'s modal loop, so `Event::Frame` stops and the only
+/// presentations are `Event::Resized`'s — which arrive when the *hand* moves,
+/// not when the machine finishes. 120 ms is an unhurried drag; the number that
+/// matters is that it is the mouse's and not the plant's.
+const DRAG: std::ops::Range<usize> = 300..360;
+const DRAG_MS: f64 = 120.0;
+
+const TRACES: [Trace; 6] = [
     // A machine that was always this slow. The base case, and the only one
     // whose answer is arithmetic: it should walk down and stop.
     Trace {
         name: "steady",
-        load: |_| (1.0, false),
+        load: |_| (1.0, None),
+        dragging: false,
     },
     // Fine, then a heavier room. The step response, which is where a loop
     // overshoots if it is going to.
     Trace {
         name: "step",
-        load: |i| ((if i < 200 { 0.25 } else { 1.0 }), false),
+        load: |i| ((if i < 200 { 0.25 } else { 1.0 }), None),
+        dragging: false,
     },
     // Heavy, then the player walks out of it. Does the scale come back, and how
     // long does a player look at a soft picture they no longer need?
     Trace {
         name: "recovery",
-        load: |i| ((if i < 400 { 1.0 } else { 0.25 }), false),
+        load: |i| ((if i < 400 { 1.0 } else { 0.25 }), None),
+        dragging: false,
     },
     // A comfortable machine with a shader compile every second. Nothing should
     // move: this is the false-positive test, and the one a controller reading
     // the worst frame rather than the median fails outright.
     Trace {
         name: "hitches",
-        load: |i| (0.25, i % 60 == 0),
+        load: |i| (0.25, (i % 60 == 0).then_some(300.0)),
+        dragging: false,
     },
     // Sat exactly where one step down is too much and none is too little. The
     // dead band's own test — with no dead band this alternates forever.
     Trace {
         name: "boundary",
-        load: |_| (0.335, false),
+        load: |_| (0.335, None),
+        dragging: false,
+    },
+    // A comfortable machine whose window is dragged for a second (§6 M81's
+    // open row). The periods are the hand's, so the only honest answer is
+    // that nothing moves — a controller that judges them is measuring the
+    // mouse.
+    Trace {
+        name: "drag",
+        load: |i| (0.25, DRAG.contains(&i).then_some(DRAG_MS)),
+        dragging: true,
     },
 ];
 
@@ -147,6 +199,10 @@ struct Run {
     /// which are the best and the worst outcome and print the same otherwise.
     moves: usize,
     factor: f64,
+    /// The lowest the scale ever got. Where it *ends* forgives a loop that went
+    /// to the floor and climbed back out, which is a picture a player watched
+    /// go soft and is the whole subject of the `drag` row.
+    worst: f64,
     turns: usize,
     late: f64,
 }
@@ -168,15 +224,21 @@ fn drive(trace: &Trace, naive: bool) -> Run {
     let mut turns = 0;
     let mut direction = 0i32;
     let mut late = 0usize;
+    let mut worst = 1.0_f64;
     for i in 0..FRAMES {
-        let (load, hitch) = (trace.load)(i);
-        let ms = match hitch {
-            true => 300.0,
-            false => plant_ms(factor, load),
-        };
-        if !hitch && ms > target_ms {
+        let (load, unpaced) = (trace.load)(i);
+        let ms = unpaced.unwrap_or_else(|| plant_ms(factor, load));
+        if unpaced.is_none() && ms > target_ms {
             late += 1;
         }
+        // A drag's paints each arrive at a size the hand just made. The naive
+        // controller below cannot see that — its window holds periods and
+        // nothing else, which is exactly the shape the shipped one had until
+        // §6 M81 handed it the extent.
+        let extent = match trace.dragging && unpaced.is_some() {
+            true => (WIDTH + i as u32, HEIGHT),
+            false => (WIDTH, HEIGHT),
+        };
         let was = factor;
         if naive {
             window.push(ms);
@@ -194,7 +256,11 @@ fn drive(trace: &Trace, naive: bool) -> Run {
                 }
             }
         } else {
-            real.observe_at(Duration::from_micros((ms * 1000.0) as u64), TARGET_HZ);
+            real.observe_at(
+                Duration::from_micros((ms * 1000.0) as u64),
+                TARGET_HZ,
+                extent,
+            );
             factor = real.factor();
         }
         if factor != was {
@@ -212,8 +278,10 @@ fn drive(trace: &Trace, naive: bool) -> Run {
             }
             direction = now;
         }
+        worst = worst.min(factor);
     }
     Run {
+        worst,
         // Settled means it stopped in time to be seen stopping — a move in the
         // last tenth of the run is a loop still going, not one that finished.
         settled: last_move.filter(|i| *i < FRAMES - FRAMES / 10),

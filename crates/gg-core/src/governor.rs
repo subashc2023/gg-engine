@@ -18,6 +18,17 @@
 //! cooldown counter, no damping term and no gain to tune: the window *is* the
 //! cooldown, and it is the shortest one that is honest.
 //!
+//! §6 M81 found that rule enforced over half its subject: the scale and the
+//! **window's own extent** multiply into one pixel count, and only the first of
+//! them cleared. What that costs is a resize drag — Win32 runs one inside
+//! `DefWindowProc`'s modal loop, so `Event::Frame` stops and the only
+//! presentations are `Event::Resized`'s, which arrive when the *hand* moves.
+//! Thirty of those are a window full of the mouse's cadence, and `gg-tools
+//! governor`'s `drag` trace read a machine that misses no frame at all
+//! (`late 0.0 %`) taken to the floor and still short of full scale twelve
+//! hundred frames later. So the extent is handed in and a change to it is
+//! treated exactly as a move is, because it *is* one.
+//!
 //! What is deliberately absent: this never looks at a GPU timer. `gpu-timings`
 //! is in no shipping tier (it is `tier-dev` and `tier-instrumented` only), so a
 //! governor built on `pass_timings` would be a feature that does nothing in the
@@ -79,6 +90,8 @@ pub struct Governor {
     /// because it is this type's clock and nothing else reads it — a shell that
     /// kept it would be keeping a field on behalf of one method.
     last: Option<Instant>,
+    /// The extent the previous frame was measured at. `None` until one has been.
+    extent: Option<(u32, u32)>,
 }
 
 impl Default for Governor {
@@ -95,6 +108,7 @@ impl Governor {
             window: Vec::with_capacity(WINDOW),
             factor: 1.0,
             last: None,
+            extent: None,
         }
     }
 
@@ -113,19 +127,25 @@ impl Governor {
         self.factor < 1.0
     }
 
-    /// One frame, timed against the last one this saw, and the rate the player
-    /// asked to protect. The shipping entry point — [`observe_at`](Self::observe_at)
-    /// is the same decision over a period somebody else measured, which is what
-    /// a test and `gg-tools governor` drive.
+    /// One frame, timed against the last one this saw, at the extent it was
+    /// drawn into, and the rate the player asked to protect. The shipping entry
+    /// point — [`observe_at`](Self::observe_at) is the same decision over a
+    /// period somebody else measured, which is what a test and `gg-tools
+    /// governor` drive.
     ///
     /// The first call after a gap measures nothing: the interval across bring-up
     /// is a pipeline cache and a swapchain rather than a frame, and handing it
-    /// to a controller would soften every session's first second.
-    pub fn observe(&mut self, hz: u32) -> bool {
+    /// to a controller would soften every session's first second. The extent is
+    /// still recorded on that path, so the frame after it is compared against
+    /// what was actually on screen rather than against a stale size.
+    pub fn observe(&mut self, hz: u32, extent: (u32, u32)) -> bool {
         let now = Instant::now();
         match self.last.replace(now) {
-            Some(last) => self.observe_at(now - last, hz),
-            None => false,
+            Some(last) => self.observe_at(now - last, hz, extent),
+            None => {
+                self.extent = Some(extent);
+                false
+            }
         }
     }
 
@@ -137,7 +157,24 @@ impl Governor {
     /// can act on.
     ///
     /// Returns whether the factor moved, which is what the caller logs.
-    pub fn observe_at(&mut self, elapsed: Duration, hz: u32) -> bool {
+    ///
+    /// A frame drawn at a different `extent` than the one before it is not
+    /// comparable to it and is discarded — the window and the clock both, since
+    /// the interval *into* a resize is no more a frame period than the interval
+    /// out of it. This is the move rule and not a second one: a scale and an
+    /// extent multiply into the same pixel count. Deliberately *not* extended to
+    /// `Prefs::scale`, which is a player deciding what they want rather than a
+    /// swapchain being rebuilt under a measurement; re-converging over one
+    /// window after that is the design (§6 M80) and not a defect.
+    pub fn observe_at(&mut self, elapsed: Duration, hz: u32, extent: (u32, u32)) -> bool {
+        // Changed, not merely unknown: a caller handing a period has already
+        // seen two frames, and demanding it repeat the size before anything
+        // counts would cost every direct driver a frame for nothing.
+        if self.extent.replace(extent).is_some_and(|was| was != extent) {
+            self.window.clear();
+            self.last = None;
+            return false;
+        }
         let Some(target_us) = (match hz {
             0 => None,
             hz => Some(1.0e6 / f64::from(hz)),
@@ -214,6 +251,9 @@ mod tests {
 
     use super::*;
 
+    /// A window that is not being dragged, which is every test below but one.
+    const EXTENT: (u32, u32) = (1920, 1080);
+
     fn ms(n: f64) -> Duration {
         Duration::from_micros((n * 1000.0) as u64)
     }
@@ -225,7 +265,7 @@ mod tests {
     fn a_machine_that_keeps_up_is_never_touched() {
         let mut g = Governor::new();
         for _ in 0..500 {
-            assert!(!g.observe_at(ms(16.6), 60));
+            assert!(!g.observe_at(ms(16.6), 60, EXTENT));
         }
         assert_eq!(g.factor(), 1.0);
         assert!(!g.engaged());
@@ -237,10 +277,13 @@ mod tests {
     fn switching_it_off_gives_the_scale_back() {
         let mut g = Governor::new();
         for _ in 0..200 {
-            g.observe_at(ms(50.0), 60);
+            g.observe_at(ms(50.0), 60, EXTENT);
         }
         assert!(g.engaged(), "50 ms frames against a 16.6 ms target");
-        assert!(g.observe_at(ms(50.0), 0), "turning it off is a move");
+        assert!(
+            g.observe_at(ms(50.0), 0, EXTENT),
+            "turning it off is a move"
+        );
         assert_eq!(g.factor(), 1.0);
     }
 
@@ -251,7 +294,7 @@ mod tests {
     fn a_hopeless_machine_stops_at_the_floor() {
         let mut g = Governor::new();
         for _ in 0..2000 {
-            g.observe_at(ms(500.0), 60);
+            g.observe_at(ms(500.0), 60, EXTENT);
         }
         assert_eq!(g.factor(), FLOOR);
     }
@@ -268,7 +311,7 @@ mod tests {
                 0 => ms(300.0),
                 _ => ms(16.0),
             };
-            assert!(!g.observe_at(period, 60), "moved on frame {i}");
+            assert!(!g.observe_at(period, 60, EXTENT), "moved on frame {i}");
         }
         assert_eq!(g.factor(), 1.0);
     }
@@ -281,19 +324,19 @@ mod tests {
     fn a_decision_is_never_taken_over_its_own_last_move() {
         let mut g = Governor::new();
         for _ in 0..WINDOW {
-            g.observe_at(ms(50.0), 60);
+            g.observe_at(ms(50.0), 60, EXTENT);
         }
         let after = g.factor();
         assert!(after < 1.0, "the first window should have moved it");
         for i in 1..WINDOW {
             assert!(
-                !g.observe_at(ms(50.0), 60),
+                !g.observe_at(ms(50.0), 60, EXTENT),
                 "moved again {i} frames into a window it had just cleared"
             );
             assert_eq!(g.factor(), after);
         }
         assert!(
-            g.observe_at(ms(50.0), 60),
+            g.observe_at(ms(50.0), 60, EXTENT),
             "and moves on the frame it refills"
         );
     }
@@ -307,7 +350,7 @@ mod tests {
         const { assert!(SPARE < 1.0 / SLOW, "the dead band must not be empty") };
         let mut down = Governor::new();
         for _ in 0..WINDOW {
-            down.observe_at(ms(60.0), 60);
+            down.observe_at(ms(60.0), 60, EXTENT);
         }
         // One window, one move, and most of the way there: 16.6 of 60 ms is a
         // factor of 0.527 and the arithmetic should find it in a single step.
@@ -319,15 +362,86 @@ mod tests {
 
         let mut up = Governor::new();
         for _ in 0..WINDOW {
-            up.observe_at(ms(60.0), 60);
+            up.observe_at(ms(60.0), 60, EXTENT);
         }
         let low = up.factor();
         for _ in 0..WINDOW {
-            up.observe_at(ms(1.0), 60);
+            up.observe_at(ms(1.0), 60, EXTENT);
         }
         assert!(
             up.factor() <= low * UP_MAX + 1e-9,
             "a whole second of idle frames must not hand the scale back at once"
+        );
+    }
+
+    /// A resize drag is the hand's cadence, not the machine's (§6 M81). Win32
+    /// stops the frame loop for the length of one, so every presentation in it
+    /// is an `Event::Resized` paint arriving when the mouse moved — and the
+    /// machine here is a fast one that would never otherwise be touched.
+    ///
+    /// The window is what makes this different from a hitch: sixty consecutive
+    /// slow paints are a *median* of slow paints, which is exactly what the
+    /// median rule cannot save. What saves it is that each one is a different
+    /// size.
+    #[test]
+    fn a_window_being_dragged_is_not_a_slow_machine() {
+        let mut g = Governor::new();
+        for i in 0..600 {
+            let dragging = (300..360).contains(&i);
+            let (period, extent) = match dragging {
+                true => (ms(120.0), (1920 + i as u32, 1080)),
+                false => (ms(4.0), EXTENT),
+            };
+            assert!(!g.observe_at(period, 60, extent), "moved on frame {i}");
+        }
+        assert_eq!(g.factor(), 1.0);
+    }
+
+    /// The same paints at one size *do* move it, which is what says the test
+    /// above is the extent's doing and not the period's. A window resized once
+    /// and then held while the machine crawls is a slow machine.
+    #[test]
+    fn a_window_that_stopped_moving_is_measured_again() {
+        let mut g = Governor::new();
+        let mut moved = false;
+        for i in 0..600 {
+            let period = match (300..360).contains(&i) {
+                true => ms(120.0),
+                false => ms(4.0),
+            };
+            // Whether it *ever* moved, not where it ended: the fast frames
+            // after the slow stretch hand the scale back, so the final state
+            // forgives exactly the defect this is the control for.
+            moved |= g.observe_at(period, 60, EXTENT);
+        }
+        assert!(moved, "sixty slow frames at one size are sixty frames");
+    }
+
+    /// A resize clears the window rather than merely skipping one sample —
+    /// the move rule, over the other half of the pixel count. Without it a
+    /// drag's last paint would be judged together with the frames from before
+    /// the window ever changed size.
+    #[test]
+    fn a_resize_clears_the_window_the_way_a_move_does() {
+        let mut g = Governor::new();
+        for _ in 0..WINDOW - 1 {
+            g.observe_at(ms(50.0), 60, EXTENT);
+        }
+        // The frame the size changed on, which a window filled before it would
+        // otherwise decide from on the spot.
+        assert!(
+            !g.observe_at(ms(50.0), 60, (1280, 720)),
+            "decided on the resize frame itself, over samples from another size"
+        );
+        for i in 1..WINDOW {
+            assert!(
+                !g.observe_at(ms(50.0), 60, (1280, 720)),
+                "decided {i} frames after a resize, over samples from before it"
+            );
+        }
+        assert!(
+            g.observe_at(ms(50.0), 60, (1280, 720)),
+            "and decides on the frame the new size refills it"
         );
     }
 
@@ -339,7 +453,7 @@ mod tests {
         let step = |frame_ms: f64| {
             let mut g = Governor::new();
             for _ in 0..WINDOW {
-                g.observe_at(ms(frame_ms), 60);
+                g.observe_at(ms(frame_ms), 60, EXTENT);
             }
             g.factor()
         };

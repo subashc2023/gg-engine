@@ -712,12 +712,20 @@ impl App {
     /// consumes `elapsed` into the tick clock and keeps no duration, and adding a
     /// wall time to `Due` would put a host measurement in the one place the sim
     /// reads.
+    ///
+    /// The extent goes with it because a frame drawn at a different size is not
+    /// comparable to the one before it (§6 M81) — and during a resize *drag* it
+    /// is the only guard there is, since Win32 stops the frame loop and the
+    /// paints `play.rs` makes to keep the border from trailing black arrive at
+    /// the hand's cadence rather than the machine's. Handed the window's extent
+    /// and not the scene's: the scene's already folds in the factor this
+    /// returns, which is a controller reading its own output back.
     fn govern(&mut self) -> f64 {
         if self.drive.scripted() {
             return 1.0;
         }
         let hz = self.ui.prefs().scale_auto;
-        if self.governor.observe(hz) {
+        if self.governor.observe(hz, self.extent) {
             tracing::info!(
                 factor = self.governor.factor(),
                 hz,
