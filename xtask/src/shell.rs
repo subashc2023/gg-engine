@@ -1559,6 +1559,7 @@ pub const LEGS: &[Leg] = &[
     ("--editor", editor),
     ("--launcher", launcher),
     ("--knob", knob),
+    ("--dpi", dpi),
     ("--tetris", tetris),
     ("--menu", tetris_menu),
     ("--progress", progress),
@@ -1791,6 +1792,118 @@ fn with_knobs(source: &Replay, knobs: &[(u64, &str, &str)]) -> Replay {
     }
     recorder.finish()
 }
+
+/// The other half of the layout the file carries (§6 M81), and the one §6 M40
+/// left out: the **monitor scale**.
+///
+/// `gg_editor::ui_scale` reads the surface *and* the desktop's scale factor, and
+/// picks a different whole scale from them — so a session recorded on a 150 %
+/// desktop lays out against a canvas no other host reproduces, the operator's
+/// own headless replay included, since a run with no window assumes 1.0. The
+/// surface has ridden the header since M40 and the scale did not, which is a
+/// file describing half a layout.
+///
+/// Graded by the one pairing that needs no reference: **1920×1080 at 150 % and
+/// 640×360 at 100 % are the same canvas**, three times the pixels at three
+/// halves the scale. So the same stream under the first must hash exactly like
+/// the untouched one under the second, tick for tick — an equality a run that
+/// ignored the recorded scale cannot produce, since it would lay 1920×1080 out
+/// at scale 2 and click somewhere else entirely.
+///
+/// Three claims, and the third is what says nothing already checked in moved:
+///
+/// 1. the surface alone is not enough — restamped to 1920×1080 with no scale,
+///    the session parts from the untouched run and the log stops picking;
+/// 2. the scale in the file closes it, exactly;
+/// 3. a file saying 1.0 and a file saying nothing are the same run, so every
+///    replay recorded before this field existed means what it always did.
+fn dpi() -> anyhow::Result<()> {
+    let path = editor_replay_path();
+    let source = Replay::decode(&std::fs::read(&path).map_err(|e| {
+        anyhow::anyhow!(
+            "no editor stream at {} ({e}) — `cargo xtask replay --bless` authors it",
+            path.display()
+        )
+    })?)?;
+    let (host, game) = stage_game(&HASHED_TIERS[0], "demo-05-many", "demo_05_many")?;
+    let dir = workspace_root().join("target/dpi");
+    std::fs::create_dir_all(&dir)?;
+    // Restamped rather than re-recorded: what is under test is the *header*, and
+    // a leg that re-authored the session at 1920×1080 would be aiming its own
+    // clicks and could not tell a layout that moved from a script that did.
+    let restamped = |name: &str, dpi: Option<f32>| -> anyhow::Result<String> {
+        let mut replay = source.clone();
+        replay.set_surface(BIG_EXTENT);
+        replay.set_dpi(dpi.unwrap_or(0.0));
+        let at = dir.join(name);
+        std::fs::write(&at, replay.encode())?;
+        Ok(at.display().to_string())
+    };
+    let run = |file: &str| -> anyhow::Result<(String, Vec<(u64, String)>)> {
+        let log = play(&host, &game, &["--replay", file, "--editor"], true)?;
+        let seq = sequence(&log)?;
+        Ok((log, seq))
+    };
+
+    let (aimed_log, aimed) = run(&path.display().to_string())?;
+    let (silent_log, silent) = run(&restamped("silent.ggrp", None)?)?;
+    let parted = divergence(&("aimed", aimed.clone()), &("no scale", silent)).ok_or_else(|| {
+        anyhow::anyhow!(
+            "§6 M81: {BIG_EXTENT:?} with no recorded scale hashed like the {HEADLESS_EXTENT:?} \
+             session it was restamped from — the surface is then not reaching the layout either, \
+             and this leg grades nothing"
+        )
+    })?;
+    // The hash says the run moved; this says *what* moved. Without it a hash
+    // that shifted for some other reason would stand in for hit-testing.
+    // `picked entity`, not `picked`: a click on empty space logs `picked
+    // nothing`, and the restamped run does that ten times over.
+    let picks = |log: &str| log.matches("editor: picked entity").count();
+    anyhow::ensure!(
+        picks(&aimed_log) > 0 && picks(&silent_log) == 0,
+        "§6 M81: the restamped surface moved the hash without moving where the clicks landed \
+         ({} entity picks aimed, {} adrift) — this leg is then measuring something other than \
+         hit-testing",
+        picks(&aimed_log),
+        picks(&silent_log)
+    );
+
+    let (_, carried) = run(&restamped("carried.ggrp", Some(BIG_DPI))?)?;
+    if let Some(found) = divergence(&("aimed", aimed.clone()), &("carried", carried)) {
+        anyhow::bail!(
+            "§6 M81: {BIG_EXTENT:?} at {BIG_DPI} is the same canvas as {HEADLESS_EXTENT:?} at 1.0 \
+             and did not replay as it — the recorded scale is not reaching `ui_scale`: {found}"
+        );
+    }
+
+    let (_, flat) = run(&restamped("flat.ggrp", Some(1.0))?)?;
+    if let Some(found) = divergence(&("no scale", sequence(&silent_log)?), &("1.0", flat)) {
+        anyhow::bail!(
+            "§6 M81: a file recording a scale of 1.0 replayed differently from one recording no \
+             scale at all — every replay written before the field existed then means something \
+             new: {found}"
+        );
+    }
+
+    println!(
+        "xtask reload: demo 05's editor session restamped to {BIG_EXTENT:?} parts from its own \
+         {HEADLESS_EXTENT:?} run at {parted} and stops picking — and replays as it, tick for \
+         tick, once the file also says the monitor was at {BIG_DPI}, which is the same canvas \
+         (§6 M81)"
+    );
+    Ok(())
+}
+
+/// The surface and scale the `--dpi` leg restamps onto the editor stream.
+///
+/// Not free: the auto scale is capped by the room the window leaves, so at
+/// 1600×900 — the `--editor-extent` leg's own window — every scale factor in use
+/// still resolves to 2 and the defect cannot occur. 1920×1080 is the smallest
+/// 16:9 window where it can, and 1.5 is the smallest desktop scale that moves it
+/// (1.25 asks for 2.5, and halves round *down*). Their canvas is 640×360, which
+/// is [`HEADLESS_EXTENT`] at 1.0 — the equality the leg is built on.
+const BIG_EXTENT: (u32, u32) = (1920, 1080);
+const BIG_DPI: f32 = 1.5;
 
 /// The two points the latency instrument measures, as generated-system counts.
 ///
@@ -5657,7 +5770,7 @@ fn refuse() -> anyhow::Result<()> {
     let data = data.display().to_string();
     // A refusal is a nonzero exit, so `play_env`'s success check is the one
     // thing this leg cannot borrow.
-    let run = |manifest: &Path, game: &Path| -> anyhow::Result<String> {
+    let run_with = |manifest: &Path, game: &Path, extra: &[&str]| -> anyhow::Result<String> {
         let out = Command::new(&host)
             .arg("--project")
             .arg(manifest)
@@ -5665,6 +5778,7 @@ fn refuse() -> anyhow::Result<()> {
             .arg(game)
             .arg("--frames")
             .arg("10")
+            .args(extra)
             .env("GG_HEADLESS", "1")
             .env("LOCALAPPDATA", &data)
             .env("XDG_DATA_HOME", &data)
@@ -5678,6 +5792,7 @@ fn refuse() -> anyhow::Result<()> {
         );
         Ok(streams)
     };
+    let run = |manifest: &Path, game: &Path| run_with(manifest, game, &[]);
     let manifest = dir.join("game.ggproj");
     std::fs::write(&manifest, "title = M47 Refusal\n")?;
 
@@ -5718,8 +5833,30 @@ fn refuse() -> anyhow::Result<()> {
         log.display()
     );
 
+    // 3. The **other** sentence, which had no gate at all until it was wrong (§6
+    //    M81 post-close). A session that ran and then failed on its way out is
+    //    not a game that would not start, and a player told the latter goes
+    //    looking for a broken download. Reached by giving `--save` a path whose
+    //    parent is a *file*, which fails `create_dir_all` on both hosts and
+    //    needs no privileges — the same trick `--disk` refuses a data directory
+    //    with. Ten ticks run first, so the claim is about a session that existed.
+    std::fs::write(&manifest, "title = M47 Refusal\n")?;
+    let blocked = dir.join("blocked");
+    std::fs::write(&blocked, "not a directory")?;
+    let save = blocked.join("out.ggsv");
+    let _ = std::fs::remove_file(&log);
+    let streams = run_with(&manifest, &game, &["--save", &save.display().to_string()])?;
+    let written = std::fs::read_to_string(&log)
+        .map_err(|e| anyhow::anyhow!("no log at {} ({e}):\n{streams}", log.display()))?;
+    anyhow::ensure!(
+        written.contains("the session ended early") && !written.contains("refused to start"),
+        "a session that played ten ticks and then could not write its save was reported as one \
+         that never started — the flag is set where the answer is not known (§6 M81):\n{written}"
+    );
+
     println!(
-        "xtask reload --refuse: a shell that cannot start leaves the reason where it can be read"
+        "xtask reload --refuse: a shell that cannot start leaves the reason where it can be read, \
+         and one that started says the other sentence"
     );
     Ok(())
 }
@@ -7171,12 +7308,13 @@ fn reaches(log: &str, wanted: &[&str]) -> usize {
 /// A window for the `--editor-extent` leg, and the choice is not arbitrary.
 ///
 /// What the layout depends on is the *logical canvas* — the extent divided by
-/// `gg_editor::ui_scale` — not the pixel count. Every 16:9 window whose scale
-/// comes out whole reduces to the same 640×360 canvas as a headless run, so
-/// 1080p and 1440p recordings replay headlessly with no flag at all, and using
-/// one here would make this leg's negative control fail for the right reason.
+/// `gg_editor::ui_scale` — not the pixel count, so a window that reduces to the
+/// headless 640×360 would make this leg's negative control pass for no reason.
 /// 1600×900 scales by 2 to an 800×450 canvas, which is a genuinely different
-/// layout — the case the flag exists for.
+/// layout — the case the flag exists for — and it is the largest standard 16:9
+/// mode that still resolves to one scale at *every* desktop factor in use,
+/// which is what keeps this leg about the extent alone. At 1920×1080 the DPI
+/// moves the scale as well, and that is `--dpi`'s subject (§6 M81).
 const WINDOWED_EXTENT: (u32, u32) = (1600, 900);
 
 /// How many ticks the canonical hash moved on while the editor had the sim

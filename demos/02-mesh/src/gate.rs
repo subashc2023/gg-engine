@@ -79,9 +79,11 @@ fn meta(seed: u64) -> ReplayMeta {
         seed,
         actions: sim::ACTIONS.iter().map(|s| (*s).to_owned()).collect(),
         axes: sim::AXES.iter().map(|s| (*s).to_owned()).collect(),
-        // A generated stream was laid out for no surface, and this one drives no
-        // UI: `(0, 0)` is the same "the file does not say" a v2 file decodes to.
+        // A generated stream was laid out for no surface and on no monitor, and
+        // this one drives no UI: zero is the same "the file does not say" an
+        // older file decodes to.
         surface: (0, 0),
+        dpi: 0,
     }
 }
 

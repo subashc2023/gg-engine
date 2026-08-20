@@ -333,12 +333,12 @@ pub fn run(mut args: Args, argv: &[String]) -> Result<(), Exit> {
         match session(&args) {
             Ok(Some(next)) => args = next,
             Ok(None) => break Ok(()),
-            Err(error) => {
-                break Err(Exit {
-                    error,
-                    started: true,
-                });
-            }
+            // Whether it started is the session's own answer and not this
+            // loop's: everything up to the frame loop is a game that never
+            // opened (§6 M81 post-close — this arm said `true` for all of it,
+            // so a folder short its dylib told a stranger their *session* had
+            // ended, and `xtask reload --refuse` went red unwatched).
+            Err(exit) => break Err(exit),
         }
     };
     // After every session and once per process (§6 M54). A game whose disk
@@ -366,7 +366,15 @@ pub fn run(mut args: Args, argv: &[String]) -> Result<(), Exit> {
 /// 4) — the arguments the *next* session runs under, which is a new shell state
 /// and not a swap, because a session is built around the dylib it was pointed
 /// at. Everything else about the run carries over, `--frames` included.
-fn session(args: &Args) -> anyhow::Result<Option<Args>> {
+fn session(args: &Args) -> Result<Option<Args>, Exit> {
+    // Every `?` below the frame loop is startup and converts through `Exit`'s
+    // `From` as one; the loop itself and everything after it is a session that
+    // ran, and says so by hand. Two spellings rather than a flag threaded
+    // through, so a new `?` in the setup half cannot get the sentence wrong.
+    let began = |error: anyhow::Error| Exit {
+        error,
+        started: true,
+    };
     let staging = std::env::temp_dir().join(format!("gg-runtime-{}", std::process::id()));
     let bindings = match &args.input {
         Some(path) => {
@@ -393,7 +401,7 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     let mut app = app::App::new(args, &staging, DEFAULT_TICK_HZ, bindings, rebinds, replay)?;
     // Before the first frame: the loop's clock resumes at the tick this carries.
     if let Some(path) = &args.restore {
-        app.restore(&gg_core::Handoff::take(path)?)?;
+        app.restore(&gg_core::Handoff::take(path).map_err(anyhow::Error::from)?)?;
     }
     // After the handoff, and they are not two answers to one question: a
     // predecessor's world is this process continuing, a save is a session
@@ -473,10 +481,11 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
         )?;
         FrameLoop::locked(DEFAULT_TICK_HZ)
             .resuming_at(app.next_tick())
-            .run(&mut app, target)?
+            .run(&mut app, target)
+            .map_err(began)?
     } else {
         let title = args.title.clone().unwrap_or_else(|| app.title());
-        play::play(&mut app, &title, target, args.window, icon)?
+        play::play(&mut app, &title, target, args.window, icon).map_err(began)?
     };
 
     // First of everything after the loop, because every line below it either
@@ -490,7 +499,8 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     // The window is down and the GPU is accounted for (§4.3), which is the only
     // point a session may be handed on. Never returns on success.
     if let Some(handoff) = app.handoff() {
-        gg_core::reload::rejuvenate::restart(&handoff, RESTORE_FLAG)?;
+        gg_core::reload::rejuvenate::restart(&handoff, RESTORE_FLAG)
+            .map_err(|e| began(e.into()))?;
     }
     // Before `finish`, which consumes the app: what a save holds is the world,
     // and the world is gone once the recorder has been taken out of it.
@@ -499,7 +509,7 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     if let Some(path) = &args.save
         && !args.editor
     {
-        app.write_save(path)?;
+        app.write_save(path).map_err(began)?;
     }
     // Same window as the save, and the same reason: what a preference is read
     // out of is the world, and the world goes with the app (§6 M42).
@@ -542,7 +552,7 @@ fn session(args: &Args) -> anyhow::Result<Option<Args>> {
     let next = None;
     if let (Some(path), Some(recorder)) = (&args.record, app.finish()) {
         let replay = recorder.finish();
-        std::fs::write(path, replay.encode())?;
+        std::fs::write(path, replay.encode()).map_err(|e| began(e.into()))?;
         info!(path = %path.display(), ticks = replay.ticks(),
               changes = replay.change_count(), "replay written");
     }

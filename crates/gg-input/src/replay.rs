@@ -18,7 +18,7 @@
 //! dist, and the dist gate checks for its presence rather than its absence.
 
 use crate::map::MAX_AXES;
-use crate::state::InputFrame;
+use crate::state::{AXIS_SCALE, InputFrame};
 
 /// File magic. A replay is identified by its bytes, not by its extension.
 pub const MAGIC: [u8; 4] = *b"GGRP";
@@ -40,7 +40,14 @@ pub const MAGIC: [u8; 4] = *b"GGRP";
 /// inputs a session was fed that are not verbs. Appended after the text channel
 /// for the reason that channel was appended last — a v2 file is a byte-prefix
 /// of a v3 one, so nothing in `tests/replays/` is re-blessed to read it.
-pub const FORMAT: u32 = 3;
+///
+/// 4 adds the recorded **monitor scale** (§6 M81), which is the other half of
+/// the same dependence and was missing for four milestones: the editor's layout
+/// is a function of the surface *and* the DPI, so a session recorded on a
+/// desktop at anything but 100 % replays against a different layout — on any
+/// host, the operator's own headless one included, since a run with no window
+/// assumes 1.0. Appended on the same prefix rule.
+pub const FORMAT: u32 = 4;
 
 /// The oldest format this build still reads. A v1 file has no text channel,
 /// which decodes as the empty one rather than as a refusal: every replay in
@@ -79,6 +86,18 @@ pub struct ReplayMeta {
     /// file could carry it. The flag remains, now as the override that authors a
     /// session for a *different* surface, which is what it was really for.
     pub surface: (u32, u32),
+    /// The monitor scale the session was laid out at, in [`AXIS_SCALE`]ths, or
+    /// `0` when the file does not say (§6 M81).
+    ///
+    /// The surface above is only half of the layout's dependence: `ui_scale`
+    /// reads the desktop's own scale factor too, and picks a *different* whole
+    /// scale from it at the same window size, which moves every widget.
+    ///
+    /// Quantized on the axis rule rather than stored as a float, and with the
+    /// axis constant rather than one of its own: a scale factor is a continuous
+    /// number a driver reports, which is exactly what that rule exists for, and
+    /// every desktop scale in use is an exact multiple of 1/1024.
+    pub dpi: u32,
 }
 
 impl ReplayMeta {
@@ -102,7 +121,23 @@ impl ReplayMeta {
             actions: actions.iter().map(|s| (*s).to_owned()).collect(),
             axes: axes.iter().map(|s| (*s).to_owned()).collect(),
             surface: (0, 0),
+            dpi: 0,
         }
+    }
+}
+
+/// A monitor scale factor in [`AXIS_SCALE`]ths, saturating — the quantization
+/// [`ReplayMeta::dpi`] is stored under.
+///
+/// Negative and non-finite report as `0`, which is the same "does not say" a
+/// file without the field decodes to: a host that cannot name its own scale has
+/// not named it.
+#[must_use]
+pub fn quantize_dpi(dpi: f32) -> u32 {
+    let ticks = dpi * AXIS_SCALE as f32;
+    match ticks.is_finite() && ticks >= 1.0 {
+        true => ticks.round().min(u32::MAX as f32) as u32,
+        false => 0,
     }
 }
 
@@ -268,8 +303,18 @@ impl Replay {
     /// authored for an extent rather than recorded against one (§6 M40).
     /// `(0, 0)` is the pre-v3 spelling of "the file does not say", and writing
     /// it deliberately is how a gate builds its own negative control.
+    ///
+    /// The DPI stays whatever it was: an authored session is authored *at* a
+    /// scale, and restamping the extent alone is exactly the half-described
+    /// layout §6 M81 found in recorded ones.
     pub fn set_surface(&mut self, surface: (u32, u32)) {
         self.meta.surface = surface;
+    }
+
+    /// Restamp the recorded monitor scale, for [`Replay::set_surface`]'s caller
+    /// and its reasons (§6 M81). `0` is "the file does not say".
+    pub fn set_dpi(&mut self, dpi: f32) {
+        self.meta.dpi = quantize_dpi(dpi);
     }
 
     /// The segments, in tick order.
@@ -431,6 +476,8 @@ impl Replay {
         }
         out.extend_from_slice(&self.meta.surface.0.to_le_bytes());
         out.extend_from_slice(&self.meta.surface.1.to_le_bytes());
+        // v4, on the same prefix rule as the two above it.
+        out.extend_from_slice(&self.meta.dpi.to_le_bytes());
         out
     }
 
@@ -499,6 +546,7 @@ impl Replay {
             }
             surface = (r.u32()?, r.u32()?);
         }
+        let dpi = if format >= 4 { r.u32()? } else { 0 };
 
         // Every lookup on this file is a `partition_point`, which answers a
         // question about a *sorted* slice and answers it wrongly, silently and
@@ -521,6 +569,7 @@ impl Replay {
                 actions,
                 axes,
                 surface,
+                dpi,
             },
             segments,
             ticks,
@@ -578,10 +627,15 @@ impl Recorder {
         }
     }
 
-    /// Record the surface the session is laid out for (§6 M40) — physical
-    /// pixels, and the host's to know.
-    pub fn record_surface(&mut self, surface: (u32, u32)) {
+    /// Record the layout the session is aimed at (§6 M40, M81) — the surface in
+    /// physical pixels and the monitor's scale factor, both the host's to know.
+    ///
+    /// One call because they are one fact: a hit test divides a physical click
+    /// by a scale the host derives from *both*, and a file carrying one of them
+    /// describes a layout that never existed.
+    pub fn record_surface(&mut self, surface: (u32, u32), dpi: f32) {
         self.replay.meta.surface = surface;
+        self.replay.meta.dpi = quantize_dpi(dpi);
     }
 
     /// Record one tick. Ticks must arrive in order; a frame identical to the
@@ -761,6 +815,9 @@ mod tests {
             actions: vec!["look".into(), "spawn".into()],
             axes: vec!["move_right".into()],
             surface: (1280, 720),
+            // 125 % — a scale that is not 1.0 and is exact in 1024ths, so the
+            // round trip below is an equality and not a tolerance.
+            dpi: quantize_dpi(1.25),
         }
     }
 
@@ -1039,28 +1096,62 @@ mod tests {
         assert_eq!(replay.meta().surface, (1280, 720));
     }
 
-    /// The v2 layout is a byte-prefix of the v3 one, which is what keeps every
-    /// checked-in replay readable — and re-blessing a determinism baseline to
-    /// survive a *reader* change would make the bless a formality (§5.6). A v2
-    /// file therefore decodes with an empty channel and no surface, and `(0, 0)`
-    /// is how "the file does not say" is spelled.
+    /// Every older layout is a byte-prefix of the current one, which is what keeps
+    /// every checked-in replay readable — and re-blessing a determinism baseline
+    /// to survive a *reader* change would make the bless a formality (§5.6).
+    /// Each older file decodes with the fields it predates saying nothing, and
+    /// `(0, 0)`/`0` is how that is spelled.
+    ///
+    /// Both older versions, not only the newest one: a reader that walked the
+    /// v4 tail off the end of a v3 file would still pass a v2-only test, since
+    /// truncating further hides the very bytes the bug reads.
     #[test]
     fn a_recording_from_before_the_knob_channel_still_reads() {
         let mut rec = Recorder::new(meta());
         rec.record(0, frame(1, 0));
-        let v3 = rec.finish().encode();
+        let v4 = rec.finish().encode();
 
         const FORMAT_AT: usize = 4;
-        // v3 appends a knob count and two extents to what v2 wrote.
-        let mut v2 = v3.clone();
-        v2.truncate(v3.len() - 3 * size_of::<u32>());
-        v2[FORMAT_AT..FORMAT_AT + 4].copy_from_slice(&2u32.to_le_bytes());
+        // Trailing `u32`s each version appended: v4 a scale, v3 a knob count
+        // and two extents.
+        let older = |version: u32, trailing: usize| {
+            let mut bytes = v4.clone();
+            bytes.truncate(v4.len() - trailing * size_of::<u32>());
+            bytes[FORMAT_AT..FORMAT_AT + 4].copy_from_slice(&version.to_le_bytes());
+            Replay::decode(&bytes).unwrap()
+        };
 
-        let replay = Replay::decode(&v2).unwrap();
-        assert_eq!(replay.knob_count(), 0);
-        assert!(replay.knobs_at(0).is_empty());
-        assert_eq!(replay.meta().surface, (0, 0));
-        assert_eq!(replay.frame(0), frame(1, 0));
+        let v3 = older(3, 1);
+        assert_eq!(v3.meta().surface, (1280, 720), "v3 still says this much");
+        assert_eq!(v3.meta().dpi, 0);
+
+        let v2 = older(2, 4);
+        assert_eq!(v2.knob_count(), 0);
+        assert!(v2.knobs_at(0).is_empty());
+        assert_eq!(v2.meta().surface, (0, 0));
+        assert_eq!(v2.meta().dpi, 0);
+        assert_eq!(v2.frame(0), frame(1, 0));
+    }
+
+    /// The scale rides the header beside the surface it is half of (§6 M81).
+    ///
+    /// The quantization arms are the ones a host can actually hand over: a
+    /// desktop scale is always a quarter step, and a host with no window has no
+    /// scale to name — which must read as the same "does not say" a pre-v4 file
+    /// does, not as a scale of zero.
+    #[test]
+    fn the_monitor_scale_rides_the_header_and_says_nothing_when_it_cannot() {
+        for dpi in [1.0, 1.25, 1.5, 1.75, 2.0, 3.0] {
+            let mut rec = Recorder::new(meta());
+            rec.record_surface((3840, 2160), dpi);
+            rec.record(0, frame(0, 0));
+            let replay = Replay::decode(&rec.finish().encode()).unwrap();
+            assert_eq!(replay.meta().surface, (3840, 2160));
+            assert_eq!(replay.meta().dpi, quantize_dpi(dpi), "{dpi}");
+        }
+        for absent in [0.0, -1.0, f32::NAN] {
+            assert_eq!(quantize_dpi(absent), 0, "{absent}");
+        }
     }
 
     #[test]

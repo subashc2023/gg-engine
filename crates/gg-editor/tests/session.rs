@@ -75,8 +75,12 @@ fn world() -> (World, gg_ecs::Entity) {
 /// panes went before it can aim at them (§6 M15.1 — the layout is no longer a
 /// table of constants).
 fn placed(target: (u32, u32)) -> Editor {
+    placed_at(target, 1.0)
+}
+
+fn placed_at(target: (u32, u32), dpi: f32) -> Editor {
     let mut editor = Editor::new(None);
-    editor.place(target, 1.0);
+    editor.place(target, dpi);
     editor
 }
 
@@ -106,6 +110,12 @@ struct Run {
 /// harness that only counted the clicks would pass over a stop that restored
 /// nothing.
 fn run(target: (u32, u32), input: &[InputFrame]) -> Run {
+    run_at(target, 1.0, input)
+}
+
+/// The same, on a monitor reporting `dpi` — every gate in this tree runs at
+/// 1.0, which is exactly what makes the DPI worth a test of its own.
+fn run_at(target: (u32, u32), dpi: f32, input: &[InputFrame]) -> Run {
     let (mut world, camera) = world();
     let mut editor = Editor::new(None);
     let (mut playing, mut steps, mut saves) = (Vec::new(), 0, 0);
@@ -140,7 +150,7 @@ fn run(target: (u32, u32), input: &[InputFrame]) -> Run {
             &ui,
             &Frame {
                 extent: target,
-                dpi: 1.0,
+                dpi,
                 tick: tick as u64,
                 hz: 60,
                 play,
@@ -324,6 +334,37 @@ fn the_same_session_leaves_the_same_world_at_any_window_size() {
              at {target:?}"
         );
     }
+}
+
+/// The same session on a **differently scaled monitor**, which the extent above
+/// says nothing about: `ui_scale` reads the DPI as well as the window, so the
+/// same physical clicks reach different widgets and the session is not the same
+/// session (§6 M81's open row, reproduced).
+///
+/// 1920x1080 is where the two part and is why this is the suite's own extent:
+/// the auto scale is capped by the room the window leaves, so at 1280x720 every
+/// DPI in the range lands on 2 and the defect cannot occur.
+///
+/// Both halves are load-bearing. The first is the divergence. The second aims
+/// the same script at the layout 1.5 produces and lands the *reference* world,
+/// which is what says the recording is replayable at that DPI and only its
+/// coordinates were wrong — so carrying the number is the whole of the repair,
+/// and no behaviour of the editor is DPI-dependent beyond where things are.
+#[test]
+fn the_same_frames_land_elsewhere_on_a_differently_scaled_monitor() {
+    let reference = run(TARGET, &frames(&script(&placed(TARGET)), CLICK, X, Y));
+    let aimed_at_1x = frames(&script(&placed(TARGET)), CLICK, X, Y);
+    assert_ne!(
+        run_at(TARGET, 1.5, &aimed_at_1x).world.canonical_hash(),
+        reference.world.canonical_hash(),
+        "the same physical clicks at 150% desktop scale reached the same widgets"
+    );
+    let aimed_at_1_5x = frames(&script(&placed_at(TARGET, 1.5)), CLICK, X, Y);
+    assert_eq!(
+        run_at(TARGET, 1.5, &aimed_at_1_5x).world.canonical_hash(),
+        reference.world.canonical_hash(),
+        "re-aimed, the session is the same session"
+    );
 }
 
 /// And at one extent the stream is exactly reproducible, which is the half the

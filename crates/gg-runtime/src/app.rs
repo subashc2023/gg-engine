@@ -388,6 +388,10 @@ impl App {
             #[cfg(feature = "hot-reload")]
             rebinds,
             input,
+            // Written above `drive`, which moves it: a struct literal evaluates
+            // its fields in source order, and a headless replay never calls
+            // `set_dpi` to learn the scale it was recorded at (§6 M81).
+            dpi: drive.dpi().unwrap_or(1.0),
             drive,
             knobs: gg_core::cvar::Watch::new(),
             next_tick: 0,
@@ -417,7 +421,6 @@ impl App {
             #[cfg(feature = "editor")]
             editor: editing,
             gpu: None,
-            dpi: 1.0,
             pack: args.pack.clone(),
             cache: args.data.clone(),
             #[cfg(feature = "debug-tools")]
@@ -584,8 +587,14 @@ impl App {
     /// What the monitor says a logical pixel is worth (§6 M15.1) — stated by
     /// the windowed loop, since a window is the only thing that can ask. A
     /// headless run leaves the 1.0 it starts at, which is the truth there.
+    ///
+    /// **A replay's own scale outranks it** (§6 M81), the way its surface does:
+    /// `ui_scale` reads both, so a session recorded on a 150 % desktop reaches
+    /// different widgets on a 100 % one — and on every headless host, which has
+    /// no monitor and assumes 1.0. Refused here rather than at the two readers,
+    /// so a third reader cannot forget.
     pub fn set_dpi(&mut self, dpi: f32) {
-        self.dpi = dpi;
+        self.dpi = self.drive.dpi().unwrap_or(dpi);
     }
 
     /// The live input state, for `gg_platform::feed` to apply raw events to.
@@ -2028,11 +2037,12 @@ impl Stages for App {
         let moved = self.knobs.moved();
         let replayed = self.drive.knobs(tick, &moved);
         gg_core::cvar::apply(replayed.iter().map(|(_, n, v)| (n.as_str(), v.as_str())))?;
-        // The surface the session opened at, once. `attach` has run by now in a
+        // The layout the session opened at, once. `attach` has run by now in a
         // windowed session and a headless one never resizes, so this is the
-        // extent every click below was scaled by (§6 M40, M15.1).
+        // extent *and* the monitor scale every click below was scaled by (§6
+        // M40, M15.1, M81) — both, because `ui_fit` reads both.
         if tick == 0 {
-            self.drive.record_surface(self.surface());
+            self.drive.record_surface(self.surface(), self.dpi);
         }
         // The cursor's own accumulator, filled before the latch below for the
         // same reason platform events are: it is this tick's input (§6 M15.1).

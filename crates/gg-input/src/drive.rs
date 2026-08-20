@@ -9,7 +9,7 @@
 //! that mattered, and §1.2's "any bug report is a replay file" only holds if
 //! every live tick is written down.
 
-use crate::{Input, InputFrame, Recorder, Replay};
+use crate::{AXIS_SCALE, Input, InputFrame, Recorder, Replay};
 
 /// Live play, optionally recorded, or a recording being played back.
 pub enum Drive {
@@ -88,11 +88,11 @@ impl Drive {
         }
     }
 
-    /// Record the surface a session is laid out for (§6 M40). A no-op while
-    /// replaying, whose surface is already in the file.
-    pub fn record_surface(&mut self, surface: (u32, u32)) {
+    /// Record the layout a session is aimed at (§6 M40, M81). A no-op while
+    /// replaying, whose surface and scale are already in the file.
+    pub fn record_surface(&mut self, surface: (u32, u32), dpi: f32) {
         if let Drive::Live(Some(recorder)) = self {
-            recorder.record_surface(surface);
+            recorder.record_surface(surface, dpi);
         }
     }
 
@@ -104,6 +104,18 @@ impl Drive {
         match self.replay()?.meta().surface {
             (0, 0) => None,
             extent => Some(extent),
+        }
+    }
+
+    /// The monitor scale a replay says it was recorded at, if it says (§6 M81)
+    /// — [`Drive::surface`]'s other half, and `None` on the same terms.
+    ///
+    /// Exact: [`AXIS_SCALE`] is a power of two.
+    #[must_use]
+    pub fn dpi(&self) -> Option<f32> {
+        match self.replay()?.meta().dpi {
+            0 => None,
+            ticks => Some(ticks as f32 / AXIS_SCALE as f32),
         }
     }
 
@@ -198,11 +210,34 @@ mod tests {
             actions: Vec::new(),
             axes: Vec::new(),
             surface: (0, 0),
+            dpi: 0,
         };
         assert!(!Drive::Live(None).scripted(), "a player at a keyboard");
         assert!(
             Drive::Live(Some(Box::new(Recorder::new(meta)))).scripted(),
             "a recording in progress is a file being written"
         );
+    }
+
+    /// Both halves of the recorded layout come back as themselves, and a live
+    /// session has neither to give (§6 M40, M81).
+    ///
+    /// The scale is asserted *exactly*: every desktop scale is a quarter step
+    /// and [`AXIS_SCALE`] is a power of two, so a tolerance here would forgive
+    /// the one thing that can go wrong — a host laying out at 1.49 and a file
+    /// saying 1.5 pick different whole scales at the same window size.
+    #[test]
+    fn the_layout_a_replay_was_recorded_at_comes_back_as_itself() {
+        let mut recorder = Recorder::new(ReplayMeta::new(1, "dev", 60, &[], &[]));
+        recorder.record_surface((3840, 2160), 1.5);
+        recorder.record(0, InputFrame::default());
+        let replay = Replay::decode(&recorder.finish().encode()).unwrap();
+        let drive = Drive::Replay(Box::new(replay));
+        assert_eq!(drive.surface(), Some((3840, 2160)));
+        assert_eq!(drive.dpi(), Some(1.5));
+        // Not the file's business, and a host that read it from one would be
+        // laying a live session out for a monitor it is not on.
+        assert_eq!(Drive::Live(None).dpi(), None);
+        assert_eq!(Drive::Live(None).surface(), None);
     }
 }

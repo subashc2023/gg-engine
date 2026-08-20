@@ -448,6 +448,7 @@ mod tests {
             actions: ACTIONS.iter().map(|s| (*s).to_owned()).collect(),
             axes: AXES.iter().map(|s| (*s).to_owned()).collect(),
             surface: (0, 0),
+            dpi: 0,
         }
     }
 

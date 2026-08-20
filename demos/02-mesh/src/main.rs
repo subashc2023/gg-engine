@@ -118,6 +118,7 @@ fn main() -> anyhow::Result<()> {
                     .collect(),
                 axes: scene::sim::AXES.iter().map(|s| (*s).to_owned()).collect(),
                 surface: (0, 0),
+                dpi: 0,
             }))
         })),
     };

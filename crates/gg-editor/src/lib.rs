@@ -545,10 +545,14 @@ static SCALE: gg_core::cvar::CVar = gg_core::cvar::CVar::new_int(
 /// **This is the layout's dependence on the window**, and therefore on
 /// hit-testing: a click is at a logical position, and a logical position is a
 /// physical one divided by this. A session recorded at one extent replays at
-/// that extent — the host records it (`--editor-extent`) rather than the replay
-/// header carrying it, which is §6 M15.1's named residual. The DPI is *not* a
-/// second such dependence for any gate: every headless and golden host reports
-/// 1.0, and a windowed one at 1.0 lays out exactly as they do.
+/// that extent, and since §6 M81 at the DPI as well — the replay header carries
+/// both (§6 M40 carried only the first), because they are one fact and a file
+/// naming half of it describes a layout that never existed. Until then the DPI
+/// was scoped to "not a dependence for any gate", which was true — every
+/// headless and golden host reports 1.0 — and is not the same as closed: an
+/// operator's desktop at 150 % lays out at a scale their own headless replay
+/// cannot reproduce. Gated by `xtask reload --dpi`, on the equality that needs
+/// no reference: 1920×1080 at 1.5 is 640×360 at 1.0.
 #[must_use]
 pub fn ui_scale(extent: (u32, u32), dpi: f32) -> f32 {
     match SCALE.int() {

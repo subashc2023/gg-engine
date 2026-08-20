@@ -339,12 +339,24 @@ use crate::util::{cargo, run_capture, walk_rs, workspace_root};
 ///   the three shader watchers are `gg-render`'s, and the six new gates are
 ///   `xtask`'s.
 ///
+/// - **Where the flag is set** (2090 -> 2091, §6 M81 post-close): one line, and
+///   it corrects the raise directly above rather than buying anything new. That
+///   raise's second half broke its first: the carried outcome set `started` on
+///   *every* error `session` returned, so a folder short its dylib told a
+///   stranger their session had ended, which is the exact sentence the flag
+///   exists to avoid — and `xtask reload --refuse` went red for six commits
+///   because that leg is nightly and the desk was running `--push`. The fix
+///   moves the answer to where it is known: `session` returns `Exit`, so its
+///   setup half converts through `From` as "never started" and the frame loop
+///   and everything after it says so by hand. Two spellings and no threaded
+///   flag, which is what makes a `?` added to the setup half right by default.
+///
 /// Full raise history, one line each: §6 M5, M8, M13, M15.1 (title bar), M15.2
 /// (play mode), M18 item 2 (audio), M43 (clips), M44 (the session), M45 (the
 /// keys), M46 (the window), M47 (the refusal), M48 (the crash), M63 (the
-/// viewport's pointer), M80 (the frame rate), M81 (the box's first line) — each
-/// argued the same way.
-const SHELL_BUDGET: usize = 2090;
+/// viewport's pointer), M80 (the frame rate), M81 (the box's first line, and
+/// its post-close correction) — each argued the same way.
+const SHELL_BUDGET: usize = 2091;
 
 /// Per-crate dependency budgets (§3). Only the crates §3 actually names carry
 /// one; a budget invented here would be a rule this file made up.
