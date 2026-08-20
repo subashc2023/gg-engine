@@ -165,8 +165,31 @@ impl Uploader {
     /// Barriers the graphics queue owes for everything flushed so far, taken
     /// out (they are recorded once). Empty when the device has a single queue
     /// family — see the module docs.
+    ///
+    /// "Flushed so far" is true only because [`Uploader::unflushed`] refuses the
+    /// frame that would call this with a batch still open: an acquire is pushed
+    /// when the release is *recorded*, not when it is submitted.
     pub fn take_acquires(&mut self) -> Vec<Acquire> {
         std::mem::take(&mut self.acquires)
+    }
+
+    /// Bytes staged into a batch that has not been flushed, `0` when there is no
+    /// open batch — the one question a frame asks before it records anything
+    /// (§6 M81).
+    ///
+    /// Recording an upload and never flushing it fails two ways at once and both
+    /// are silent. The copy has not been submitted, so the destination still
+    /// holds whatever it held; and `acquires` was pushed at record time, so a
+    /// device with a dedicated transfer family records an acquire barrier for a
+    /// release that is still sitting in an unsubmitted command buffer, while
+    /// `timeline_value` has not moved and the graphics submit therefore waits on
+    /// nothing. Every caller flushes today and nothing made them.
+    pub fn unflushed(&self) -> u64 {
+        if self.recording {
+            self.head - self.batch_start
+        } else {
+            0
+        }
     }
 
     /// Drop the barriers owed for an image about to be destroyed.

@@ -7512,4 +7512,80 @@ mod tests {
         assert_eq!(seen.len(), count, "a duplicated leg flag: {seen:?}");
         assert!(seen.iter().all(|f| f.starts_with("--") && f.len() > 2));
     }
+
+    /// A log the way the shell writes one under `RUST_LOG=gg::hash=debug`:
+    /// `(tick, hash)` lines, with anything in `notes` spliced in before the tick
+    /// it was logged during.
+    fn log(hashes: &[(u64, &str)], notes: &[(u64, &str)]) -> String {
+        let mut out = String::new();
+        for (tick, hash) in hashes {
+            for (at, note) in notes.iter().filter(|(at, _)| at == tick) {
+                out.push_str(&format!("  INFO demo: {note} at={at}\n"));
+            }
+            out.push_str(&format!(
+                "  DEBUG gg::hash: state tick={tick} hash={hash}\n"
+            ));
+        }
+        out
+    }
+
+    /// The three functions every `xtask reload` leg's verdict is computed from,
+    /// and none of them was tested (§6 M81).
+    ///
+    /// The stake is the whole command: roughly thirty legs assert that two runs
+    /// hash alike or that they part at a named tick, and each of those is a call
+    /// to [`divergence`] over two [`sequence`]s. A `divergence` that answered
+    /// `None` unconditionally would leave every one of them printing green
+    /// having compared nothing — the failure §6 M81 exists to hunt, in the
+    /// harness that hunts it.
+    #[test]
+    fn a_verdict_is_only_reached_when_two_runs_were_actually_compared() {
+        let base = log(&[(0, "aa"), (1, "bb"), (2, "cc")], &[]);
+        let same = sequence(&base).unwrap();
+        let left = ("left", same.clone());
+
+        // Forgives what it should, or every leg is red and nobody trusts it.
+        assert_eq!(divergence(&left, &("right", same.clone())), None);
+
+        // Names the *first* difference, not the last and not a bare verdict:
+        // "hashes differ" on tick 9,000 is what §5.6 exists to prevent.
+        let later = sequence(&log(&[(0, "aa"), (1, "zz"), (2, "yy")], &[])).unwrap();
+        let parted = divergence(&left, &("right", later)).expect("bb and zz differ");
+        assert!(parted.contains("tick 1"), "the first one: {parted}");
+        assert!(parted.contains("bb") && parted.contains("zz"), "{parted}");
+
+        // The length arm. `--away` (§6 M49) rests on it alone: a suspension that
+        // still charged the clock produces a run that agrees tick for tick with
+        // the shorter one and then keeps going, so a zip with no length check
+        // calls the two equal and the leg's whole claim evaporates.
+        let short = sequence(&log(&[(0, "aa"), (1, "bb")], &[])).unwrap();
+        let ran_on = divergence(&left, &("right", short)).expect("a prefix is not agreement");
+        assert!(ran_on.contains('3') && ran_on.contains('2'), "{ran_on}");
+
+        // And the vacuity floor underneath all of it: two runs that emitted no
+        // hashes at all agree trivially, so an empty sequence has to be refused
+        // where it is read rather than compared where it is not.
+        let empty = sequence("  INFO gg::runtime: golden runtime online\n").unwrap_err();
+        assert!(empty.to_string().contains("no state hashes"));
+    }
+
+    /// A milestone belongs to the tick whose systems logged it, which is the
+    /// hash line *after* it — every `--tetris`/`--shooter`/`--orbit` leg asserts
+    /// its game reached a named moment on a named tick, and reading the line
+    /// before would shift all of them by one.
+    #[test]
+    fn a_milestone_lands_on_the_first_hashed_tick_at_or_after_it() {
+        let text = log(&[(0, "aa"), (1, "bb"), (2, "cc")], &[(1, "row cleared")]);
+        assert_eq!(logged_at(&text, "row cleared"), Some(1));
+        // Absent is `None` rather than tick 0, or a leg proves a milestone it
+        // never reached.
+        assert_eq!(logged_at(&text, "top-out"), None);
+        // Logged after the last hash line is also `None`: there is no tick it
+        // could belong to, and guessing the last one would date a shutdown
+        // message to the final frame of play.
+        assert_eq!(
+            logged_at(&format!("{text}  INFO demo: done\n"), "done"),
+            None
+        );
+    }
 }

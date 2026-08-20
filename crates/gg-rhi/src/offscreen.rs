@@ -308,6 +308,7 @@ impl OffscreenRhi {
     /// A stale handle, or a draw whose push constants do not match its
     /// pipeline — both found while resolving, before anything is recorded.
     pub fn execute(&mut self, passes: &[Pass<'_>]) -> Result<(), RhiError> {
+        self.gpu.ensure_uploads_flushed()?;
         let resolved = graph::resolve(&self.gpu, passes)?;
         if let Some(timings) = &mut self.timings {
             crate::timing::warn_pass_overflow(passes.len());

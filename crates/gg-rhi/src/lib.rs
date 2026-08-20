@@ -743,6 +743,7 @@ impl Rhi {
         passes: &[Pass<'_>],
     ) -> Result<FrameOutcome, RhiError> {
         let _ = frame;
+        self.gpu.ensure_uploads_flushed()?;
         let resolved = graph::resolve(&self.gpu, passes)?;
 
         let slot_index = (self.frame_index % FRAMES_IN_FLIGHT) as usize;

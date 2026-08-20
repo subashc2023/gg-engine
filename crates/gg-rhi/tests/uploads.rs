@@ -809,6 +809,55 @@ fn a_resource_retired_before_its_first_read_leaves_no_barrier_owed() {
     assert!(report.clean(), "unclean: {report:?}");
 }
 
+/// A frame that would read an upload nobody submitted is refused by name (§6
+/// M81), and the refusal costs the *recorded* batch nothing — flushing after it
+/// still lands every byte.
+///
+/// This is the one hazard in the file whose failure is invisible on both halves
+/// at once. The copy never ran, so the destination holds what it held — on a
+/// fresh buffer that is zeroes, which reads as a black texture rather than as an
+/// error. And `Uploader::acquires` is pushed when the release is *recorded*, so
+/// where the transfer family is its own engine the frame acquires ownership of a
+/// resource whose release is still sitting in an unsubmitted command buffer,
+/// with `timeline_value` unmoved and the graphics submit therefore waiting on
+/// nothing at all. Unlike the ownership tests above this one is **not** vacuous
+/// on lavapipe: an open batch is an open batch whatever the queue topology.
+#[test]
+fn a_frame_is_refused_while_an_upload_it_would_read_is_still_unflushed() {
+    init_tracing();
+    let mut rhi = OffscreenRhi::new((8, 8)).unwrap();
+    let buffer = rhi
+        .create_buffer(&BufferDesc {
+            name: "test.unflushed",
+            size: 256,
+            kind: BufferKind::Readback,
+        })
+        .unwrap();
+
+    // Nothing recorded: the check must be silent, or every frame in the tree
+    // fails and the gate is about the check rather than about the hazard.
+    common::render(&mut rhi, [0.0, 0.0, 0.0, 1.0], &[]).unwrap();
+
+    rhi.upload_buffer(buffer, 0, &[0x5au8; 256]).unwrap();
+    let err = common::render(&mut rhi, [0.0, 0.0, 0.0, 1.0], &[])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("never flushed"), "got: {err}");
+    assert!(err.contains("256 bytes"), "the batch's own size: {err}");
+
+    // Refused, not consumed. The recorded batch is still there to flush.
+    rhi.flush_uploads().unwrap();
+    common::render(&mut rhi, [0.0, 0.0, 0.0, 1.0], &[]).unwrap();
+    assert!(
+        rhi.map_buffer(buffer).unwrap().iter().all(|b| *b == 0x5a),
+        "the refused frame cost the batch its bytes"
+    );
+
+    rhi.destroy_buffer(buffer).unwrap();
+    let report = rhi.shutdown();
+    assert!(report.clean(), "unclean: {report:?}");
+}
+
 /// A storage image takes a slot in the other global array and the layout
 /// transition that array's descriptors declare (§4.3).
 #[test]

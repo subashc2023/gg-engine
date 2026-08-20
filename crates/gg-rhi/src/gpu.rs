@@ -353,6 +353,25 @@ impl Gpu {
         self.uploader.take_acquires()
     }
 
+    /// Refuse a frame that would read an upload nobody submitted (§6 M81) — see
+    /// [`crate::upload::Uploader::unflushed`] for the two ways it fails.
+    ///
+    /// Named at the call site rather than fixed by flushing here: a blocking
+    /// submit inserted silently into a frame is a stall with no author, and the
+    /// caller is the only one who knows whether it meant to upload at all.
+    pub fn ensure_uploads_flushed(&self) -> Result<(), RhiError> {
+        let bytes = self.uploader.unflushed();
+        if bytes == 0 {
+            return Ok(());
+        }
+        Err(RhiError::Loader(format!(
+            "{bytes} bytes of uploads are recorded and were never flushed; call \
+             `flush_uploads` before executing — the copy has not been submitted, so this \
+             frame reads whatever the destination held, and where the transfer family is \
+             its own engine it acquires ownership the release never gave up (§4.3)"
+        )))
+    }
+
     /// Teardown in dependency order, returning the §4.3 leak report. Caller
     /// destroyed its own presentation resources first and waited idle.
     pub fn destroy(&mut self) -> Vec<String> {

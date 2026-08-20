@@ -1037,9 +1037,36 @@ struct App<'h> {
     window: Option<Window>,
     handler: &'h mut dyn FnMut(&Window, Event) -> Control,
     result: Result<(), PlatformError>,
+    /// Whether this loop iteration has already produced its frame — see
+    /// [`App::wants_frame`].
+    framed: bool,
 }
 
 impl App<'_> {
+    /// One [`Event::Frame`] per loop iteration, whichever source asked for it
+    /// (§6 M81).
+    ///
+    /// Under [`ControlFlow::Poll`] `about_to_wait` fires every iteration *and*
+    /// the OS delivers `RedrawRequested` whenever it wants the surface
+    /// repainted — an expose, a compositor's own request, every step of a
+    /// resize drag. Dispatching both ran the same tick twice for one picture,
+    /// charged `--frames` twice for it, and put a frame nothing paced into the
+    /// governor's window (§6 M80).
+    ///
+    /// Coalesced rather than dropped, because the two sources are not
+    /// redundant: Win32 runs a resize inside `DefWindowProc`'s own modal loop,
+    /// where `about_to_wait` does not run at all and `RedrawRequested` is the
+    /// only source there is.
+    fn wants_frame(&mut self) -> bool {
+        !std::mem::replace(&mut self.framed, true)
+    }
+
+    /// End the iteration [`App::wants_frame`] was answering for. Called from
+    /// `about_to_wait`, which winit runs once after each batch of events.
+    fn end_iteration(&mut self) {
+        self.framed = false;
+    }
+
     fn dispatch(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         if let Some(window) = &self.window
             && (self.handler)(window, event) == Control::Exit
@@ -1083,7 +1110,10 @@ impl ApplicationHandler for App<'_> {
         let event = match event {
             WindowEvent::Resized(size) => Event::Resized(size.width, size.height),
             WindowEvent::CloseRequested => Event::CloseRequested,
-            WindowEvent::RedrawRequested => Event::Frame,
+            WindowEvent::RedrawRequested => match self.wants_frame() {
+                true => Event::Frame,
+                false => return,
+            },
             WindowEvent::KeyboardInput { event, .. } => match key_event(&event) {
                 Some(event) => event,
                 None => return,
@@ -1153,8 +1183,12 @@ impl ApplicationHandler for App<'_> {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Continuous rendering: one frame per loop iteration in poll mode.
         // Presentation paces the loop; real frame pacing lands with the loop
-        // skeleton (§4.1).
-        self.dispatch(event_loop, Event::Frame);
+        // skeleton (§4.1). Skipped when `RedrawRequested` already produced this
+        // iteration's frame — see `wants_frame`.
+        if self.wants_frame() {
+            self.dispatch(event_loop, Event::Frame);
+        }
+        self.end_iteration();
     }
 }
 
@@ -1175,6 +1209,7 @@ pub fn run(
         window: None,
         handler: &mut handler,
         result: Ok(()),
+        framed: false,
     };
     // Dispatch Exiting before propagating any loop error: a failed run is
     // exactly the case where the handler never reached its own teardown, and
@@ -1183,6 +1218,61 @@ pub fn run(
     app.dispatch_exiting();
     loop_result?;
     app.result
+}
+
+#[cfg(test)]
+mod loop_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{App, Control, Event, Window, WindowDesc};
+
+    /// §6 M81: one [`Event::Frame`] per loop iteration, whichever source asked.
+    ///
+    /// Windowless on purpose (§1.5), and it drives the real `App` rather than a
+    /// copy of the rule — what it cannot reach is winit itself, so the two
+    /// callers stay one line each: `window_event`'s `RedrawRequested` arm and
+    /// `about_to_wait`. The untested half is that winit orders them the way
+    /// this asserts, which is `ControlFlow::Poll`'s documented contract and not
+    /// something this tree gets to check.
+    ///
+    /// [`Pump`](super::Pump) is deliberately not part of this: it has no
+    /// `about_to_wait` at all, so `RedrawRequested` is its only frame source and
+    /// there is nothing to coalesce.
+    #[test]
+    fn one_frame_per_loop_iteration_whichever_source_asked_for_it() {
+        let mut handler = |_: &Window, _: Event| Control::Continue;
+        let mut app = App {
+            desc: WindowDesc::invisible("test", (1, 1)),
+            window: None,
+            handler: &mut handler,
+            result: Ok(()),
+            framed: false,
+        };
+
+        // An ordinary iteration: nothing from the OS, `about_to_wait` alone.
+        assert!(app.wants_frame(), "poll mode renders continuously");
+        app.end_iteration();
+
+        // The OS asks for a repaint, then `about_to_wait` runs in the same
+        // iteration. Before M81 this was two frames for one picture.
+        assert!(app.wants_frame(), "the repaint the OS asked for");
+        assert!(
+            !app.wants_frame(),
+            "and `about_to_wait` must not add another"
+        );
+        app.end_iteration();
+
+        // Several repaints inside one iteration are still one frame — a resize
+        // drag delivers them in bursts.
+        assert!(app.wants_frame());
+        assert!(!app.wants_frame());
+        assert!(!app.wants_frame());
+        app.end_iteration();
+
+        // And the next iteration starts clean, or the loop renders once and
+        // never again.
+        assert!(app.wants_frame(), "a closed iteration frees the next one");
+    }
 }
 
 /// The polling driver for tests: create a window, then interleave
