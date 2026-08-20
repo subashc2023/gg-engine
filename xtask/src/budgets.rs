@@ -432,6 +432,7 @@ pub fn check() -> anyhow::Result<()> {
     watched_shader_modules()?;
     fingerprint_scope()?;
     imported_math_lists()?;
+    headless_parses()?;
     dependencies()?;
     unused_dependencies()?;
     game_crate_pin()?;
@@ -503,6 +504,101 @@ fn imported_math_lists() -> anyhow::Result<()> {
         gate.len()
     );
     Ok(())
+}
+
+/// The token a read of §1.5's law spells, and what the scan finds.
+const HEADLESS_READ: &str = "var_os(\"GG_HEADLESS\")";
+
+/// Every crate that reads §1.5's law reads it the same way (§6 M81).
+///
+/// Three copies, and the replication is *correct*: `gg-audio` must not link
+/// windowing — the crate owning the speakers should not be able to open a
+/// window by accident — and `gg-agent` is deliberately dependency-free, so
+/// neither can call `gg_platform::headless`. Both say so in their own comments
+/// ("`gg-platform`'s parse exactly", "replicated because this crate deliberately
+/// has no dependencies"), which is an agreement claim held by prose and is the
+/// shape this milestone exists to convert. Drift splits the law rather than
+/// breaking it: a tier whose window layer reads headless and whose audio layer
+/// does not is a tier that made a noise, and nothing downstream would say so.
+///
+/// **Scanned, not listed** — a fourth copy is caught by the gate rather than by
+/// a reviewer who did not know to look. And a site the scan cannot read is a
+/// failure rather than a skip, because `.is_some()` where the closure belongs is
+/// precisely the drift that makes `GG_HEADLESS=0` mean headless-*on*.
+fn headless_parses() -> anyhow::Result<()> {
+    let sites = headless_sites()?;
+    anyhow::ensure!(
+        !sites.is_empty(),
+        "no crate reads `{HEADLESS_READ}` — §1.5's law is enforced in three of them and the scan \
+         found none, so this gate is comparing nothing"
+    );
+    let (first_file, first) = &sites[0];
+    for (at_file, parse) in &sites[1..] {
+        anyhow::ensure!(
+            parse == first,
+            "§1.5's headless law is read two ways: {first_file} spells it `{first}` and \
+             {at_file} spells it `{parse}` — the copies are deliberate, since neither `gg-audio` \
+             nor `gg-agent` may link windowing, and until now their agreement was a comment"
+        );
+    }
+    println!(
+        "xtask: {} site(s) read §1.5's headless law, all spelling it `{first}`",
+        sites.len()
+    );
+    Ok(())
+}
+
+/// Every read of [`HEADLESS_READ`] in the tree with the predicate it spells.
+/// Split out of the gate so `mod tests` can run the real scan without the
+/// judgement, which is what makes "the tree agrees today" a fast assertion.
+fn headless_sites() -> anyhow::Result<Vec<(String, String)>> {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    walk_rs(&root, &mut files);
+    files.sort();
+    let mut sites = Vec::new();
+    for file in &files {
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let at_file = file
+            .strip_prefix(&root)
+            .unwrap_or(file)
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        for (at, _) in text.match_indices(HEADLESS_READ) {
+            let parse = headless_predicate(&text[at + HEADLESS_READ.len()..]).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{at_file} reads `{HEADLESS_READ}` in a spelling this gate cannot read \
+                     (§1.5) — the law is one predicate, `.is_some_and(|v| …)`, and a read that \
+                     is not one is the drift the gate exists for"
+                )
+            })?;
+            sites.push((at_file.clone(), parse));
+        }
+    }
+    Ok(sites)
+}
+
+/// The `.is_some_and(…)` immediately after a [`HEADLESS_READ`], balanced to its
+/// closing paren and whitespace-collapsed so a rustfmt wrap is not a divergence.
+/// Split out so `mod tests` can plant one; `None` is a read spelled some other
+/// way, which the caller reports rather than skips.
+fn headless_predicate(rest: &str) -> Option<String> {
+    let body = rest.strip_prefix(".is_some_and(")?;
+    let mut depth = 1usize;
+    for (i, c) in body.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 1 => {
+                return Some(body[..i].split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Where the shader modules and their hot-reload watchers live. Two paths
@@ -1328,6 +1424,66 @@ mod tests {
         // those lines are `count_code`'s and would otherwise be dropped twice.
         assert!(named("mod app;").is_empty());
         assert!(named("#[cfg(test)]\nmod tests {\n}").is_empty());
+    }
+
+    /// The three drifts §1.5's law can take, and the one that is not a drift
+    /// (§6 M81). `.is_some()` is the whole point: it is one word shorter, it
+    /// reads correctly, and under it `GG_HEADLESS=0` means headless-*on* —
+    /// which is a tier opening a window on the user's screen.
+    #[test]
+    fn a_headless_read_is_one_predicate_and_a_wrap_is_not_a_divergence() {
+        let read = |t: &str| headless_predicate(t);
+        let shipped = "|v| !v.is_empty() && v != \"0\"";
+        assert_eq!(
+            read(".is_some_and(|v| !v.is_empty() && v != \"0\")").as_deref(),
+            Some(shipped)
+        );
+        // Nested parens inside the closure, and rustfmt's wrap — neither is a
+        // divergence, so the balance and the collapse are both load-bearing.
+        assert_eq!(
+            read(".is_some_and(|v| !(v.is_empty()) && v != \"0\")").as_deref(),
+            Some("|v| !(v.is_empty()) && v != \"0\"")
+        );
+        assert_eq!(
+            read(".is_some_and(\n            |v| !v.is_empty()\n                && v != \"0\",\n        )")
+                .as_deref(),
+            Some("|v| !v.is_empty() && v != \"0\",")
+        );
+        // The read this gate exists for: no closure at all, reported as
+        // unreadable rather than skipped.
+        assert_eq!(read(".is_some()"), None);
+        assert_eq!(
+            read(".is_some_and(|v| v != \"0\""),
+            None,
+            "unbalanced is not a parse"
+        );
+        // And a real drift is a different string, which is what the caller
+        // compares — the vacuous version of this test would assert only that
+        // the shipped spelling parses.
+        assert_ne!(
+            read(".is_some_and(|v| !v.is_empty())").as_deref(),
+            Some(shipped)
+        );
+
+        // And the real scan over the real tree, which is the half a parse test
+        // cannot reach: the three crates §1.5 names each hold exactly one read
+        // and all three agree today.
+        let sites = headless_sites().unwrap();
+        let mut where_ = sites.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>();
+        where_.sort_unstable();
+        assert_eq!(
+            where_,
+            [
+                "crates/gg-agent/src/ask.rs",
+                "crates/gg-audio/src/lib.rs",
+                "crates/gg-platform/src/lib.rs"
+            ],
+            "the §1.5 law is read somewhere new, or somewhere it was is gone"
+        );
+        assert!(
+            sites.iter().all(|(_, p)| p == shipped),
+            "{sites:?} do not all spell §1.5's law the same way"
+        );
     }
 
     /// Both directions on the fingerprint scope: the real file agrees with the
