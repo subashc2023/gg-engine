@@ -64,6 +64,26 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
         "gg-rhi + gg-render offscreen suites on the real device",
     )?;
 
+    // The other half of the pair (§6 M85): what a frame that *fails* between
+    // taking the acquires and submitting them owes afterwards. Vacuous on one
+    // family — the list is empty either way — so the test skips on lavapipe and
+    // this is the only place in the matrix it asserts anything.
+    let mut faults = cargo();
+    faults.args([
+        "nextest",
+        "run",
+        "-p",
+        "gg-rhi",
+        "--features",
+        "inject",
+        "-E",
+        "binary(injected)",
+    ]);
+    exec(
+        device(&mut faults, adapter),
+        "injected failure sweep on the real device (§6 M85)",
+    )?;
+
     // The golden suite against this device's own reference set. A device with
     // no set fails with "no reference", which is the suite saying a bless is
     // owed — a deliberate, reviewed act (§4.10), not something this leg does.

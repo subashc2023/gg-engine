@@ -20,6 +20,13 @@ mod device;
 mod frame;
 mod gpu;
 mod graph;
+// Public only where it exists (§6 M85). Arming is a test's business and the
+// `inject` feature is in no tier, so with it off nothing here is reachable and
+// the §5.10 baseline does not move.
+#[cfg(feature = "inject")]
+pub mod inject;
+#[cfg(not(feature = "inject"))]
+mod inject;
 mod instance;
 mod offscreen;
 mod pipeline;
@@ -779,6 +786,8 @@ impl Rhi {
             backbuffer,
             instruments,
         ) {
+            // Recorded into a buffer nobody will submit: the debt stands.
+            self.gpu.restore_acquires(acquires);
             self.drain_acquire(slot.acquire);
             return Err(e);
         }
@@ -828,6 +837,9 @@ impl Rhi {
                 vk::Fence::null(),
             )
         } {
+            // A submit that fails executes nothing, so the acquires this frame
+            // recorded were never made and are still owed.
+            self.gpu.restore_acquires(acquires);
             self.drain_acquire(slot.acquire);
             return Err(self.gpu.explain(e));
         }

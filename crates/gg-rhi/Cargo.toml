@@ -44,3 +44,9 @@ validation = []
 # pass names. Off in dist, where `Timings::new` folds to `None` and the rest
 # goes with it.
 gpu-timings = []
+# The allocation-failure seam (§6 M85). In no tier and off by default — the one
+# build that has it is `cargo nextest run -p gg-rhi --features inject`, which is
+# what `tests/injected.rs` is `cfg`'d on. Not a dev-dependency because cargo has
+# no such thing for features, and not default-on because a counter in the one
+# function every byte passes through is not something to ship on a maybe.
+inject = []

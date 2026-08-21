@@ -115,6 +115,7 @@ impl Breadcrumbs {
         resources: &mut Resources,
         slots: usize,
     ) -> Result<Self, RhiError> {
+        crate::inject::point("Breadcrumbs::new")?;
         // Dynamic: host-visible and persistently mapped, which is the property
         // the whole mechanism rests on — the marks must be readable *after* the
         // device that wrote them is gone.

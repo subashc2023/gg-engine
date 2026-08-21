@@ -324,33 +324,22 @@ impl OffscreenRhi {
             aspect: image.format.aspect(),
         };
         let acquires = self.gpu.take_acquires();
-        let device = self.gpu.device.raw();
-        // SAFETY: single-shot recording; the wait below proves the previous
-        // submission retired before the pool is reset.
-        unsafe {
-            device
-                .reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
-                .map_err(RhiError::vk)?;
-            let begin = vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            device
-                .begin_command_buffer(self.cmd, &begin)
-                .map_err(RhiError::vk)?;
-            // SAFETY: cmd records on the graphics family and this submit waits
-            // on the transfer timeline value the releases signaled.
-            crate::upload::Uploader::record_acquires(&self.gpu.device, self.cmd, &acquires);
-            // SAFETY: as above; every handle came from resolve.
-            graph::record(
-                &self.gpu.device,
-                self.cmd,
-                self.gpu.bindless.set(),
-                &resolved,
-                backbuffer,
-                graph::Instruments { stamps, crumbs },
-            );
-            device.end_command_buffer(self.cmd).map_err(RhiError::vk)?;
+        // Four fallible steps stand between here and the submit that discharges
+        // them, and until §6 M85 every one returned straight out — see
+        // [`crate::upload::Uploader::restore_acquires`] for what that costs.
+        let mut outcome = self.record(
+            &acquires,
+            &resolved,
+            backbuffer,
+            graph::Instruments { stamps, crumbs },
+        );
+        if outcome.is_ok() {
+            outcome = self.submit_and_wait();
         }
-        self.submit_and_wait()?;
+        if let Err(e) = outcome {
+            self.gpu.restore_acquires(acquires);
+            return Err(e);
+        }
         // The wait is inside submit_and_wait, so by here the timestamps are
         // complete and this read never blocks.
         if let Some(timings) = &mut self.timings {
@@ -376,6 +365,59 @@ impl OffscreenRhi {
     /// [`crate::Rhi::breadcrumbs`].
     pub fn breadcrumbs(&self) -> String {
         self.gpu.breadcrumbs()
+    }
+
+    /// Ownership-transfer barriers the graphics queue still owes (§4.3, §6 M85).
+    ///
+    /// Always 0 where the transfer family is not its own — see
+    /// [`crate::DeviceReport::transfer_dedicated`], which is what a test asking
+    /// this has to check first or it is asserting `0 == 0`.
+    #[cfg(feature = "inject")]
+    #[must_use]
+    pub fn acquires_owed(&self) -> usize {
+        self.gpu.acquires_owed()
+    }
+
+    /// Record the frame into `self.cmd`, acquires first — [`crate::Rhi::record`]
+    /// one surface over. A method rather than the inline block it was so that
+    /// [`Self::execute`] has one `Err` to answer instead of four (§6 M85).
+    fn record(
+        &self,
+        acquires: &[crate::upload::Acquire],
+        passes: &[graph::ResolvedPass<'_>],
+        backbuffer: Bound,
+        instruments: graph::Instruments,
+    ) -> Result<(), RhiError> {
+        // The one site inside the window between taking the acquires and the
+        // submit that discharges them — which is the window §6 M85 found four
+        // ways out of, all of them dropping the debt.
+        crate::inject::point("OffscreenRhi::record")?;
+        let device = self.gpu.device.raw();
+        // SAFETY: single-shot recording; renders are synchronous, so the
+        // previous submission retired before the pool is reset.
+        unsafe {
+            device
+                .reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
+                .map_err(RhiError::vk)?;
+            let begin = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            device
+                .begin_command_buffer(self.cmd, &begin)
+                .map_err(RhiError::vk)?;
+            // SAFETY: cmd records on the graphics family and this submit waits
+            // on the transfer timeline value the releases signaled.
+            crate::upload::Uploader::record_acquires(&self.gpu.device, self.cmd, acquires);
+            // SAFETY: as above; every handle came from resolve.
+            graph::record(
+                &self.gpu.device,
+                self.cmd,
+                self.gpu.bindless.set(),
+                passes,
+                backbuffer,
+                instruments,
+            );
+            device.end_command_buffer(self.cmd).map_err(RhiError::vk)
+        }
     }
 
     /// Record and run a one-shot graphics command buffer to completion. Used

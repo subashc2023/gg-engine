@@ -161,6 +161,7 @@ impl Timings {
     /// (§2, lab equipment unbolts) without this module growing two shapes that
     /// have to be kept in step.
     pub(crate) fn new(device: &Device, slots: usize) -> Result<Option<Self>, RhiError> {
+        crate::inject::point("Timings::new")?;
         if !cfg!(feature = "gpu-timings") || device.timestamp_mask() == 0 {
             return Ok(None);
         }

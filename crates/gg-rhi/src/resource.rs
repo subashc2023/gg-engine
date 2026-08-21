@@ -446,6 +446,7 @@ pub(crate) struct Resources {
 
 impl Resources {
     pub fn new(device: &Device) -> Result<Self, RhiError> {
+        crate::inject::point("Resources::new")?;
         let mut samplers = Vec::with_capacity(Sampler::COUNT as usize);
         for s in Sampler::all() {
             match s.create(device) {

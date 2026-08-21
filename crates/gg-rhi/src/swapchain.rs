@@ -220,6 +220,7 @@ impl Swapchain {
         desired: (u32, u32),
         want: Output,
     ) -> Result<Self, RhiError> {
+        crate::inject::point("Swapchain::new")?;
         let mut swapchain = Self {
             raw: vk::SwapchainKHR::null(),
             format: vk::Format::UNDEFINED,

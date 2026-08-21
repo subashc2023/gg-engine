@@ -586,6 +586,27 @@ fn gpu_tests() -> anyhow::Result<()> {
     cmd.args(["nextest", "run", "-p", "gg-rhi", "-p", "gg-platform"]);
     lavapipe_env(&mut cmd)?;
     exec(&mut cmd, "headless GPU tests on pinned lavapipe (§5.4)")?;
+    // The unwind ladders, executed (§6 M85). A build of its own because the
+    // seam is a feature no tier carries, and here rather than in `--push`
+    // because it is a device per site — eleven bring-ups on the pin, plus four
+    // more on a Linux loader, where `VK_EXT_headless_surface` makes the
+    // windowed ladders reachable and the desk's Windows lavapipe does not.
+    let mut cmd = cargo();
+    cmd.args([
+        "nextest",
+        "run",
+        "-p",
+        "gg-rhi",
+        "--features",
+        "inject",
+        "-E",
+        "binary(injected)",
+    ]);
+    lavapipe_env(&mut cmd)?;
+    exec(
+        &mut cmd,
+        "injected failure sweep on pinned lavapipe (§6 M85)",
+    )?;
     // A build of its own, because Tracy's GPU path is `#[cfg]`-absent without
     // the feature and the shell that exercises it for real needs a window
     // (§1.5). An offscreen context stands in and produces the same readings.

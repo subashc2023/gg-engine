@@ -98,6 +98,7 @@ pub(crate) struct Bindless {
 
 impl Bindless {
     pub fn new(device: &Device, resources: &Resources) -> Result<Self, RhiError> {
+        crate::inject::point("Bindless::new")?;
         let limits = device.descriptor_limits();
         let sampled_capacity = WANT_SAMPLED_IMAGES.min(limits.sampled_images).max(1);
         let storage_capacity = WANT_STORAGE_IMAGES.min(limits.storage_images).max(1);

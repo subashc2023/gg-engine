@@ -152,6 +152,7 @@ impl PipelineStore {
     /// folder beside every shipped game: a cwd-relative default is a decision
     /// about someone else's disk, made by the layer least able to make it.
     pub fn new(device: &Device, dir: Option<&Path>) -> Result<Self, RhiError> {
+        crate::inject::point("PipelineStore::new")?;
         let device_key: String = device
             .report()
             .chosen

@@ -353,6 +353,19 @@ impl Gpu {
         self.uploader.take_acquires()
     }
 
+    /// Hand them back after a frame that took them and failed before submitting
+    /// — see [`crate::upload::Uploader::restore_acquires`].
+    pub fn restore_acquires(&mut self, acquires: Vec<Acquire>) {
+        self.uploader.restore_acquires(acquires);
+    }
+
+    /// How many are owed — the §6 M85 gate's subject, and 0 on any device whose
+    /// transfer family is not its own.
+    #[cfg(feature = "inject")]
+    pub fn acquires_owed(&self) -> usize {
+        self.uploader.acquires_owed()
+    }
+
     /// Refuse a frame that would read an upload nobody submitted (§6 M81) — see
     /// [`crate::upload::Uploader::unflushed`] for the two ways it fails.
     ///

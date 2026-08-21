@@ -24,6 +24,7 @@ pub(crate) struct Frames {
 
 impl Frames {
     pub fn new(device: &Device) -> Result<Self, RhiError> {
+        crate::inject::point("Frames::new")?;
         let mut slots = Vec::with_capacity(FRAMES_IN_FLIGHT as usize);
         for i in 0..FRAMES_IN_FLIGHT {
             let pool_info = vk::CommandPoolCreateInfo::default()

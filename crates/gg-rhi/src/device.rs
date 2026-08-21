@@ -919,16 +919,29 @@ impl Device {
     }
 
     /// Allocate GPU memory. Every byte in the engine flows through here so
-    /// the shutdown leak report is total (§4.3).
+    /// the shutdown leak report is total (§4.3) — which is also what makes it
+    /// the one seam a failure can be injected at (§6 M85).
     pub(crate) fn allocate(
         &mut self,
         desc: &gpu_allocator::vulkan::AllocationCreateDesc<'_>,
     ) -> Result<gpu_allocator::vulkan::Allocation, RhiError> {
-        self.allocator
+        // Before the allocator, not after: an injected failure must leave the
+        // real one untouched, or the unwind is grading a state no shortage
+        // produces.
+        if crate::inject::allocating() {
+            return Err(RhiError::Allocator(format!(
+                "injected allocation failure at `{}` (§6 M85)",
+                desc.name
+            )));
+        }
+        let allocation = self
+            .allocator
             .as_mut()
             .ok_or_else(|| RhiError::Allocator("allocator already torn down".into()))?
             .allocate(desc)
-            .map_err(|e| RhiError::Allocator(e.to_string()))
+            .map_err(|e| RhiError::Allocator(e.to_string()))?;
+        crate::inject::allocated();
+        Ok(allocation)
     }
 
     /// Return an allocation to the allocator.
@@ -940,7 +953,9 @@ impl Device {
             .as_mut()
             .ok_or_else(|| RhiError::Allocator("allocator already torn down".into()))?
             .free(allocation)
-            .map_err(|e| RhiError::Allocator(e.to_string()))
+            .map_err(|e| RhiError::Allocator(e.to_string()))?;
+        crate::inject::freed();
+        Ok(())
     }
 
     /// Live allocations at shutdown, named — the §4.3 leak report. CI fails

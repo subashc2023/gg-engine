@@ -98,6 +98,7 @@ pub(crate) struct Uploader {
 
 impl Uploader {
     pub fn new(device: &mut Device) -> Result<Self, RhiError> {
+        crate::inject::point("Uploader::new")?;
         let ring = create_raw_buffer_in(
             device,
             "gg.staging.ring",
@@ -171,6 +172,27 @@ impl Uploader {
     /// when the release is *recorded*, not when it is submitted.
     pub fn take_acquires(&mut self) -> Vec<Acquire> {
         std::mem::take(&mut self.acquires)
+    }
+
+    /// Put back barriers a frame took and then failed before submitting.
+    ///
+    /// The graphics queue still owes them: a release the transfer queue
+    /// recorded is half an ownership transfer, and the acquire has to reach
+    /// *some* submitted command buffer or the resource arrives with undefined
+    /// contents (§4.3). Taking them is not what discharges the debt — the
+    /// submit is — so a frame that returns `Err` between the two must hand them
+    /// back or they are owed by nobody and no later frame will ever record one.
+    ///
+    /// At the front, because these predate anything staged since. In practice
+    /// nothing is: no caller stages an upload between taking these and failing.
+    pub fn restore_acquires(&mut self, acquires: Vec<Acquire>) {
+        self.acquires.splice(0..0, acquires);
+    }
+
+    /// How many are owed right now (§6 M85's gate). 0 on a single-family device.
+    #[cfg(feature = "inject")]
+    pub fn acquires_owed(&self) -> usize {
+        self.acquires.len()
     }
 
     /// Bytes staged into a batch that has not been flushed, `0` when there is no
