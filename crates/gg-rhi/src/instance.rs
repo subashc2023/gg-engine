@@ -72,20 +72,39 @@ fn wants_validation(value: Option<&str>) -> bool {
     value != Some("0")
 }
 
-#[cfg(all(test, feature = "validation"))]
-mod tests {
-    use super::wants_validation;
+/// The instance extensions that are asked for only if the implementation has
+/// them, and whether the portability flag goes with them. Split from [`new`] for
+/// the reason [`wants_validation`] is: the policy is the part worth checking and
+/// it is only checkable apart from a live loader — which matters more here than
+/// there, since no implementation on this desk advertises the portability row.
+fn optional_extensions(
+    available: &[&std::ffi::CStr],
+    windowed: bool,
+) -> (Vec<&'static std::ffi::CStr>, bool) {
+    let has = |n: &std::ffi::CStr| available.contains(&n);
+    let mut wanted = Vec::new();
 
-    #[test]
-    fn only_an_exact_zero_takes_the_validation_layer_off() {
-        assert!(wants_validation(None), "unset is the default, and on");
-        assert!(!wants_validation(Some("0")));
-        // Every other spelling stays on, including the ones that look like an
-        // off switch — a downgrade has to be asked for precisely.
-        for text in ["", "1", "false", "off", "no", "00", " 0", "0 "] {
-            assert!(wants_validation(Some(text)), "`{text}` should stay on");
-        }
+    // The HDR colour spaces are behind an instance extension, and asking for one
+    // that is not enabled is undefined rather than an error. Absent it,
+    // `Swapchain::choose` never sees an HDR pair to match and falls back to SDR,
+    // which is the same path a display without HDR takes.
+    if windowed && has(ash::ext::swapchain_colorspace::NAME) {
+        wanted.push(ash::ext::swapchain_colorspace::NAME);
     }
+
+    // A *portability* implementation — Vulkan translated onto another API, which
+    // in practice means MoltenVK onto Metal — is hidden from
+    // `enumerate_physical_devices` unless the instance opts in by name and by
+    // flag. Without both, a Mac with a working driver reports no devices at all,
+    // or refuses creation with `ERROR_INCOMPATIBLE_DRIVER`, which `new` renders
+    // as *no graphics driver provides it* — the message for a machine that has
+    // none. Conditional on the extension being advertised, so this is inert on
+    // every conformant implementation and cannot change what the desk enumerates.
+    let portable = has(ash::khr::portability_enumeration::NAME);
+    if portable {
+        wanted.push(ash::khr::portability_enumeration::NAME);
+    }
+    (wanted, portable)
 }
 
 /// The Vulkan instance plus the debug plumbing that rides with it.
@@ -189,29 +208,24 @@ impl Instance {
             Presentation::None => vec![ash::khr::surface::NAME.as_ptr()],
         };
 
-        // The HDR colour spaces are behind an instance extension, and asking for
-        // one that is not enabled is undefined rather than an error — so this is
-        // checked and pushed rather than assumed. Absent it, `Swapchain::choose`
-        // simply never sees an HDR pair to match and falls back to SDR, which is
-        // the same path a display without HDR takes.
-        if matches!(presentation, Presentation::Window(_)) {
-            // SAFETY: entry is live; `None` asks for the implementation's own list.
-            if let Ok(available) = unsafe { entry.enumerate_instance_extension_properties(None) } {
-                let named = |n: &std::ffi::CStr| {
-                    available
-                        .iter()
-                        .any(|e| e.extension_name_as_c_str().is_ok_and(|a| a == n))
-                };
-                if named(ash::ext::swapchain_colorspace::NAME) {
-                    extensions.push(ash::ext::swapchain_colorspace::NAME.as_ptr());
-                }
-            }
-        }
+        // SAFETY: entry is live; `None` asks for the implementation's own list.
+        let advertised =
+            unsafe { entry.enumerate_instance_extension_properties(None) }.unwrap_or_default();
+        let names: Vec<&std::ffi::CStr> = advertised
+            .iter()
+            .filter_map(|e| e.extension_name_as_c_str().ok())
+            .collect();
+        let (optional, portable) =
+            optional_extensions(&names, matches!(presentation, Presentation::Window(_)));
+        extensions.extend(optional.iter().map(|n| n.as_ptr()));
 
         let app_info = vk::ApplicationInfo::default()
             .application_name(c"golden")
             .api_version(vk::make_api_version(0, 1, 3, 0));
         let mut info = vk::InstanceCreateInfo::default().application_info(&app_info);
+        if portable {
+            info = info.flags(vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR);
+        }
 
         #[cfg(feature = "validation")]
         let layer_names = [c"VK_LAYER_KHRONOS_validation".as_ptr()];
@@ -419,4 +433,50 @@ fn suppressed() -> &'static [crate::suppressions::Suppression] {
             Vec::new()
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::optional_extensions;
+    #[cfg(feature = "validation")]
+    use super::wants_validation;
+
+    #[test]
+    fn a_portability_implementation_is_opted_into_and_no_other_is_disturbed() {
+        let conformant = [
+            ash::khr::surface::NAME,
+            ash::ext::swapchain_colorspace::NAME,
+        ];
+        let (wanted, portable) = optional_extensions(&conformant, true);
+        assert!(!portable, "no flag where nothing advertises portability");
+        assert_eq!(wanted, vec![ash::ext::swapchain_colorspace::NAME]);
+
+        // Both halves or neither: the name without the flag enumerates nothing,
+        // and the flag without the name is invalid instance creation.
+        let moltenvk = [
+            ash::khr::surface::NAME,
+            ash::khr::portability_enumeration::NAME,
+        ];
+        let (wanted, portable) = optional_extensions(&moltenvk, true);
+        assert!(portable);
+        assert_eq!(wanted, vec![ash::khr::portability_enumeration::NAME]);
+
+        // An offscreen context reaches no display, so it wants no colour space —
+        // and still has to see the device (§4.10 runs the same gates there).
+        let (wanted, portable) = optional_extensions(&moltenvk, false);
+        assert!(portable);
+        assert_eq!(wanted, vec![ash::khr::portability_enumeration::NAME]);
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn only_an_exact_zero_takes_the_validation_layer_off() {
+        assert!(wants_validation(None), "unset is the default, and on");
+        assert!(!wants_validation(Some("0")));
+        // Every other spelling stays on, including the ones that look like an
+        // off switch — a downgrade has to be asked for precisely.
+        for text in ["", "1", "false", "off", "no", "00", " 0", "0 "] {
+            assert!(wants_validation(Some(text)), "`{text}` should stay on");
+        }
+    }
 }

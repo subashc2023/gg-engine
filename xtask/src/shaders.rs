@@ -44,9 +44,13 @@ pub fn assert_slang_pin() -> anyhow::Result<()> {
     let pin_path = root.join("slang-pin.toml");
     let pins: toml::Value = toml::from_str(&std::fs::read_to_string(&pin_path)?)?;
 
-    // Host key by OS family, matching how the two lanes are provisioned: the
-    // Windows host takes Slang from the LunarG SDK, the WSL lane from SLANG_DIR.
-    let host = if cfg!(windows) { "windows" } else { "linux" };
+    // Host key by OS family, matching how the lanes are provisioned: the Windows
+    // host takes Slang from the LunarG SDK, the WSL lane from SLANG_DIR. The
+    // key is the OS's own name rather than `if windows { .. } else { "linux" }`,
+    // which filed every third host under `linux` and then reported a *version
+    // drift* against a row that was never that host's — a confident wrong answer
+    // where the missing-row message below is the true one.
+    let host = std::env::consts::OS;
     let expected = pins
         .get("hosts")
         .and_then(|h| h.get(host))

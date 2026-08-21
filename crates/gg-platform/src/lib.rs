@@ -99,6 +99,24 @@ pub fn alert(title: &str, body: &str) -> bool {
         };
         true
     }
+    // macOS has nothing to look for: the dialog is the window server's, reached
+    // through `osascript`, which is part of the OS rather than something a
+    // player installs — so this arm is the one Unix that has no residual.
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("osascript")
+            .args([
+                "-e",
+                &format!(
+                    "display dialog {} with title {} buttons {{\"OK\"}} \
+                     default button 1 with icon stop",
+                    applescript(body),
+                    applescript(title),
+                ),
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
     // No X11 or Wayland equivalent to declare, so this is the desktop's own
     // dialog or nothing: §8 carries it as a named residual rather than as
     // parity, and a bare WM with neither installed falls through to the log.
@@ -130,8 +148,37 @@ pub fn alert(title: &str, body: &str) -> bool {
                 .is_ok_and(|status| status.success())
         })
     }
-    #[cfg(not(any(windows, all(unix, not(target_os = "macos")))))]
+    #[cfg(not(any(windows, unix)))]
     false
+}
+
+/// `text` as an AppleScript string literal, quotes included.
+///
+/// `osascript` is handed the whole script as one argument, so a body carrying a
+/// path — which every caller's does — puts backslashes and quotes inside source
+/// that is about to be compiled. Unescaped, the script fails to parse, no dialog
+/// opens, and the refusal is silent: the exact failure this path exists to
+/// prevent, on the one platform where the only witness is a stranger.
+///
+/// Compiled into test builds on every host, because a macOS-only helper is one
+/// nothing on this desk could falsify.
+#[cfg(any(target_os = "macos", test))]
+fn applescript(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        // A literal newline is a syntax error in an AppleScript string, not a
+        // line break — and `log.txt`'s path arrives on its own line.
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// What kind of window to create.
@@ -804,6 +851,24 @@ pub fn feed(input: &mut gg_input::Input, event: &Event) -> bool {
         _ => return false,
     }
     true
+}
+
+#[cfg(test)]
+mod alert_tests {
+    use super::applescript;
+
+    /// The three characters a refusal actually carries — M47's body names
+    /// `log.txt` on its own line, and a Windows-authored path is nothing but
+    /// backslashes. Each one unescaped is a script that does not compile, and a
+    /// dialog that does not open is the failure being reported going unseen.
+    #[test]
+    fn a_path_in_a_refusal_survives_becoming_applescript() {
+        assert_eq!(applescript("plain"), "\"plain\"");
+        assert_eq!(applescript(r"C:\dev\g.dll"), r#""C:\\dev\\g.dll""#);
+        assert_eq!(applescript(r#"the "game""#), r#""the \"game\"""#);
+        // Not a line break: a raw newline ends the literal and the parse fails.
+        assert_eq!(applescript("wrote\nlog.txt"), r#""wrote\nlog.txt""#);
+    }
 }
 
 #[cfg(test)]

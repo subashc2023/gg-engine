@@ -23,6 +23,14 @@ pub fn run(system: bool) -> anyhow::Result<()> {
             // SAFETY: single-threaded at this point; set before the Vulkan
             // loader is first touched, so the pinned ICD is the only driver.
             unsafe { std::env::set_var("VK_DRIVER_FILES", &icd) };
+        } else if cfg!(target_os = "macos") {
+            // Nothing to pin: Mesa's software rasterizer has no build for this
+            // host, so there is no reference driver for the table to be read
+            // against and the system stack is the only answer there is. Said
+            // rather than discovered — the unqualified path would otherwise hunt
+            // for `llvmpipe`, find none, and report the pin broken.
+            println!("probe: no pinned lavapipe on macOS — reading the system driver stack");
+            return probe_device(true);
         } else {
             println!(
                 "probe: WSL lavapipe is the system ICD, not a digest-pinned container — \
@@ -104,7 +112,27 @@ fn probe_device(system: bool) -> anyhow::Result<()> {
 
     let app_info =
         ash::vk::ApplicationInfo::default().api_version(ash::vk::make_api_version(0, 1, 3, 0));
-    let create_info = ash::vk::InstanceCreateInfo::default().application_info(&app_info);
+    // The same opt-in `gg_rhi::instance::optional_extensions` makes, and this is
+    // the copy that has to be right first: a portability implementation is
+    // invisible without it, so the instrument that exists to say *what this
+    // machine can do* would answer "no devices" on the one machine anybody would
+    // ask. Conditional on the advertisement, so no other host sees a change.
+    // SAFETY: entry is loaded and outlives this; `None` asks the loader for its
+    // own list, which allocates nothing we own.
+    let portable = unsafe { entry.enumerate_instance_extension_properties(None) }
+        .unwrap_or_default()
+        .iter()
+        .any(|e| {
+            e.extension_name_as_c_str()
+                .is_ok_and(|n| n == ash::khr::portability_enumeration::NAME)
+        });
+    let names = [ash::khr::portability_enumeration::NAME.as_ptr()];
+    let mut create_info = ash::vk::InstanceCreateInfo::default().application_info(&app_info);
+    if portable {
+        create_info = create_info
+            .flags(ash::vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR)
+            .enabled_extension_names(&names);
+    }
     // SAFETY: valid create-info; instance destroyed below before return.
     let instance = unsafe { entry.create_instance(&create_info, None)? };
 

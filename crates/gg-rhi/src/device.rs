@@ -487,6 +487,13 @@ impl Device {
             .push_next(&mut f13);
 
         let mut device_extensions = vec![ash::khr::swapchain::NAME.as_ptr()];
+        // Mandatory rather than optional, in the spec's own wording: a device
+        // that advertises the portability row must be created with it enabled.
+        // The instance half is `instance::optional_extensions`; this is the only
+        // other place a translated implementation costs a line.
+        if has_extension(inst, pd, ash::khr::portability_subset::NAME) {
+            device_extensions.push(ash::khr::portability_subset::NAME.as_ptr());
+        }
         // Optional and asked for only by a build that profiles: absence costs a
         // Tracy column, never the engine, so it is checked rather than required
         // (§4.8) — and `cfg!` keeps dist from requesting it at all.

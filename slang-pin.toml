@@ -28,6 +28,11 @@
 # Windows lane takes Slang from the LunarG Vulkan SDK (§9), the WSL lane from a
 # standalone SLANG_DIR. Converging them is desirable but not required — what is
 # required is that neither drifts unnoticed.
+#
+# The key is `std::env::consts::OS`, so a third host is a third row and its
+# absence is refused by name. `macos` has none yet: the row is written when a
+# Mac first runs `cargo xtask shaders` and the generated diff has been read,
+# never guessed ahead of the machine.
 
 [hosts]
 windows = "2025.23.2"
