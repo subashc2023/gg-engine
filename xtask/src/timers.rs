@@ -5,7 +5,7 @@
 //! Two hosts, two mechanisms, one shape: **one run a night** at 03:00 —
 //! nightly Monday to Saturday, weekly on Sunday, which is a superset of it —
 //! both at **below-normal priority**, both under `GG_HEADLESS=1`, both leaving
-//! a record under `target/ci-status/`. Windows uses Task Scheduler through a
+//! a record under `ci-status/`. Windows uses Task Scheduler through a
 //! generated XML — `schtasks /Create` on a command line cannot express
 //! idle-only or priority, and those are the politeness half of the contract,
 //! not decoration. WSL uses systemd user timers.
@@ -94,6 +94,18 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
 /// Where a run leaves its record. Read by `--status`, and the artifact §5 asks
 /// a scheduled tier to write.
 ///
+/// **Beside `target/`, never inside it** (§6 M90), for the reason `.gitignore`
+/// already gives `dist-symbols/`: `target/`'s whole contract is that anything
+/// in it may be deleted at any moment, and this is not a build output — it is
+/// the record of whether the build was ever verified. Two costs, and the second
+/// is the one that made this a defect rather than untidiness. A `cargo clean`
+/// took the history, which [`record::Verdict::Never`] then had to render as
+/// *never run, or `cargo clean`* — two opposite states in one word. And the
+/// scheduled action's transcript redirect names this directory: `cmd.exe` does
+/// not create one, so the next launch after a clean failed to open the file,
+/// **ran nothing**, and wrote its "cannot find the path" to the console of a
+/// task nobody watches. A clean silently switched the schedule off.
+///
 /// `GG_CI_STATUS_DIR` redirects it, and exists for exactly one caller:
 /// `record`'s test of the write path. `around` is the load-bearing function of
 /// §6 M82 and writing to the desk's own ledger to prove it works would corrupt
@@ -102,7 +114,7 @@ pub fn run(args: &[&str]) -> anyhow::Result<()> {
 /// not get to leave its own centre ungated.
 pub fn status_dir() -> PathBuf {
     std::env::var_os("GG_CI_STATUS_DIR")
-        .map_or_else(|| workspace_root().join("target/ci-status"), PathBuf::from)
+        .map_or_else(|| workspace_root().join("ci-status"), PathBuf::from)
 }
 
 /// Installed-ness is the scheduler's answer; whether the tier *ran* is the
@@ -275,6 +287,61 @@ pub fn drift(tier: &Tier, found: Option<&Schedule>) -> Option<String> {
     None
 }
 
+/// What the scheduler holds as the tier's *action* — its own copy, never the
+/// XML or unit file we wrote (§6 M83's rule, and M73's argument for it).
+fn registered_action(tier: &str) -> Option<String> {
+    if cfg!(windows) {
+        let xml = run_capture(
+            std::process::Command::new("schtasks").args([
+                "/Query",
+                "/TN",
+                &task_name(tier),
+                "/XML",
+            ]),
+            "schtasks /Query /XML",
+        )
+        .ok()?;
+        let (_, tail) = xml.split_once("<Arguments>")?;
+        Some(tail.split_once("</Arguments>")?.0.to_owned())
+    } else {
+        run_capture(
+            std::process::Command::new("systemctl").args([
+                "--user",
+                "show",
+                &format!("gg-{tier}.service"),
+                "--property=ExecStart",
+            ]),
+            "systemctl show",
+        )
+        .ok()
+    }
+}
+
+/// Does the installed action still write into this build's [`status_dir`]?
+///
+/// Not cosmetic, and not the same question [`drift`] asks: a task can fire to
+/// the minute and still name a directory that is gone. Neither host's shell
+/// creates the path it is told to redirect into, so the launch fails **before
+/// the tier runs** and leaves nothing anywhere — no log to read, no record to
+/// miss, and a scheduler result code nobody is looking at. That is how a
+/// `cargo clean` used to switch the schedule off (§6 M90); it is also what the
+/// move out of `target/` leaves behind on a desk that installed the old one.
+///
+/// A substring test rather than an equality: the rest of the action is the
+/// tier's own name and the shell's punctuation, both of which
+/// [`windows_action`] already owns, and the escaping of `&` and `>` is Task
+/// Scheduler's to choose.
+pub fn transcript_drift(action: Option<&str>, status: &std::path::Path) -> Option<String> {
+    let want = status.display().to_string();
+    (!action?.contains(&want)).then(|| {
+        format!(
+            "writes its transcript somewhere other than `{want}` — this build keeps the ledger \
+             and the logs there, and a redirect into a directory nothing creates runs no tier at \
+             all; run `cargo xtask timers --install`"
+        )
+    })
+}
+
 fn day_list(days: &[&str]) -> String {
     if days.is_empty() {
         return "no night".to_owned();
@@ -349,10 +416,11 @@ fn last_attempt(tier: &str) -> record::Asked {
 
 fn status() -> anyhow::Result<()> {
     let events = record::events();
+    let logs = record::sightings();
     let now = record::now();
     for standing in record::standing(&events, now) {
         let detail = match &standing.verdict {
-            record::Verdict::Never => "no record — never run, or `cargo clean`".to_owned(),
+            record::Verdict::Never => "no record — never run, or the ledger was removed".to_owned(),
             record::Verdict::Running { at, commit } => format!(
                 "{}  running now      {commit}  (started {} ago)",
                 record::stamp(*at),
@@ -405,9 +473,26 @@ fn status() -> anyhow::Result<()> {
         if let Some(drifted) = drift(tier, found.as_ref()) {
             println!("xtask timers:   schedule  {drifted}");
         }
+        if let Some(drifted) =
+            transcript_drift(registered_action(tier.name).as_deref(), &status_dir())
+        {
+            println!("xtask timers:   action    {drifted}");
+        }
         let asked = last_attempt(tier.name);
         if let Some(line) = record::reconcile(&standing, &asked, now, record::ledger_seen()) {
             println!("xtask timers:   scheduler {line}");
+        }
+        // The third witness (§6 M90), read after the other two because it is
+        // the weakest: a transcript proves a launch and never an outcome. The
+        // quoted line is the whole of its value — it is what tells a runner
+        // that never built from a run whose record went missing — so it is
+        // printed here and not in the one-clause line `ci --fast` gets.
+        let log = logs.iter().find(|l| l.tier == standing.tier);
+        if let Some(line) = record::unrecorded(&standing, log, now) {
+            println!("xtask timers:   transcript {line}");
+            if let Some(log) = log {
+                println!("xtask timers:              ends: {}", log.note);
+            }
         }
     }
 
@@ -636,6 +721,47 @@ fn dirs_config() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ledger is not a build artifact (§6 M90).
+    ///
+    /// Stated here because the cost of getting it wrong is silent in both
+    /// directions: a `cargo clean` erased the record of every run, and — worse
+    /// — the scheduled action redirects its transcript into this directory,
+    /// which neither host's shell creates, so the next launch after a clean
+    /// ran no tier and wrote its complaint to a console nobody watches.
+    #[test]
+    fn the_ledger_does_not_live_where_a_clean_can_take_it() {
+        // The env override is `record`'s test seam and may name anywhere.
+        assert!(
+            std::env::var_os("GG_CI_STATUS_DIR").is_some()
+                || !status_dir().starts_with(workspace_root().join("target")),
+            "the scheduled tiers' ledger is under `target/`, whose whole contract is that \
+             anything in it may be deleted at any moment — `.gitignore` gives `dist-symbols/` \
+             the same treatment for the same reason (§6 M90)"
+        );
+    }
+
+    /// A schedule right to the minute, writing into a directory that is gone.
+    #[test]
+    fn an_action_naming_another_directory_is_drift() {
+        let status = std::path::Path::new("C:\\dev\\GGEngine\\ci-status");
+        // What this build installs today.
+        assert_eq!(
+            transcript_drift(Some(&windows_action("nightly", status)), status),
+            None
+        );
+        // What this desk had installed before the ledger moved: same tier, same
+        // hour, transcript into `target/` — and after a clean, no run at all.
+        let stale = windows_action(
+            "nightly",
+            std::path::Path::new("C:\\dev\\GGEngine\\target/ci-status"),
+        );
+        let complaint = transcript_drift(Some(&stale), status).expect("the old path is drift");
+        assert!(complaint.contains("timers --install"), "{complaint}");
+        // A scheduler that would not say is not an accusation (§6 M83's rule
+        // for `registered`, and the reason `found` is an `Option` there too).
+        assert_eq!(transcript_drift(None, status), None);
+    }
 
     /// The claim §6 M82 exists for. Before it, the nightly fired every day at
     /// 03:00 and the weekly — which *is* the nightly plus two gates — fired at

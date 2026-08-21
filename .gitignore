@@ -3,6 +3,11 @@ target/
 # cannot delete the only copy a released tag symbolizes against; out of git
 # because a PDB is megabytes and §9's fresh-clone bar is a budget.
 dist-symbols/
+# The scheduled tiers' ledger and transcripts (§5, §6 M90). Outside target/ for
+# the same reason and one more: the scheduler's redirect names this directory
+# and `cmd.exe` will not create it, so a `cargo clean` used to switch the
+# schedule off rather than merely forget what it had done.
+ci-status/
 *.jsonl
 *.md
 !README.md

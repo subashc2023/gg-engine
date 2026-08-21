@@ -33,7 +33,7 @@ const KEEP: usize = 500;
 /// it kills is mistaken for live.
 const RUN_LIMIT: u64 = 6 * 3600;
 
-/// One line of `target/ci-status/history.txt`.
+/// One line of `ci-status/history.txt`.
 ///
 /// Fields are space-separated and `reason` is last, so it may contain spaces
 /// and a reader that gains a field stays compatible with a file that lacks one.
@@ -63,8 +63,11 @@ pub enum Kind {
 /// What a tier's history amounts to right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    /// No record at all — a fresh clone, or a `cargo clean`. Deliberately the
-    /// loudest reading rather than the quietest (§6 M82).
+    /// No record at all — a fresh clone, or a ledger someone removed.
+    /// Deliberately the loudest reading rather than the quietest (§6 M82).
+    /// `cargo clean` left this list at §6 M90, when the ledger moved out of
+    /// `target/`: a state that arrives by routine housekeeping is not one a
+    /// verdict can carry, since the reader cannot tell it from the real thing.
     Never,
     /// Started, no finish yet, and still inside [`RUN_LIMIT`] — this run is in
     /// progress. It is a real state and not a degenerate kill: `ci::nightly`
@@ -146,6 +149,120 @@ impl Standing {
             Verdict::Ran { .. } => format!("{} has not run{}", self.tier, age.unwrap_or_default()),
         })
     }
+}
+
+// ---- the transcript, for the launch the ledger cannot see ----------------
+
+/// How much of a tier's log is read to characterise it. A green nightly's
+/// transcript is ~900 KiB and `--fast` reads this on every agent turn, so the
+/// window is the tail — which is also the only part worth quoting, since the
+/// case this exists for is a run that ended badly.
+const TAIL: u64 = 8 * 1024;
+
+/// What a tier's **transcript** says, where the ledger cannot speak at all.
+///
+/// [`around`] brackets the tier from inside the process running it, so a launch
+/// that dies before `xtask` exists is one it can never record. Both hosts'
+/// actions are `cargo xtask ci --<tier>`, which makes the runner something the
+/// run must build first — and a desk in use holds `target/debug/xtask.exe`, so
+/// cargo waits on the build lock and then fails to relink it. That is how this
+/// tree's **weekly tier had never once completed** at §6 M90: a 115-byte log
+/// from one Sunday reading `failed to remove file … Access is denied`, and a
+/// ledger reading *never run* for the four days after it.
+///
+/// A log proves a **launch** and never an outcome, so this is read only where
+/// the ledger is silent — never to contradict a record, only to fill a hole one
+/// could not reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sighting {
+    pub tier: &'static str,
+    /// The transcript's own last write.
+    pub at: u64,
+    /// One line of it: the first that announces an error, else the last it
+    /// wrote. Both readings answer *what was happening when it stopped*.
+    pub note: String,
+}
+
+/// Every scheduled tier's transcript as the disk holds it now.
+pub fn sightings() -> Vec<Sighting> {
+    TIERS
+        .iter()
+        .filter_map(|tier| {
+            let path = status_dir().join(format!("{}.log", tier.name));
+            let meta = std::fs::metadata(&path).ok()?;
+            let at = meta
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            Some(Sighting {
+                tier: tier.name,
+                at,
+                note: note(&path, meta.len()),
+            })
+        })
+        .collect()
+}
+
+fn note(path: &std::path::Path, len: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut text = String::new();
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    if len > TAIL && file.seek(SeekFrom::End(-(TAIL as i64))).is_err() {
+        return String::new();
+    }
+    // Lossy: a tail cut at a fixed offset lands mid-codepoint by construction.
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    text.push_str(&String::from_utf8_lossy(&bytes));
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines
+        .iter()
+        .find(|l| l.to_ascii_lowercase().starts_with("error"))
+        .or_else(|| lines.last())
+        .map(|l| one_line(l))
+        .unwrap_or_default()
+}
+
+/// A launch that happened and left no record of itself.
+///
+/// Pure over its arguments, like everything else that decides a reading here.
+/// The rule is deliberately narrow: a transcript **newer than anything the
+/// ledger holds** is a launch the ledger missed. A `Running` tier's log is
+/// newer than its own `started` line by construction and a `Killed` one's is
+/// newer than the start it never finished, so neither is a hole — both already
+/// have a reading, and adding a second would be this module's own §6 M86.
+///
+/// It states the fact and names no cause, because the log cannot tell the two
+/// apart and this desk has produced one of each: a weekly whose transcript is
+/// 115 bytes of cargo failing to relink `xtask.exe`, and a nightly whose
+/// transcript ends in its own green line — a run that bracketed itself and
+/// whose record went missing afterwards. [`Sighting::note`] is what separates
+/// them, and `timers --status` quotes it; one clause per tier is all the line
+/// `ci --fast` prints on every agent turn can afford to be.
+pub fn unrecorded(standing: &Standing, log: Option<&Sighting>, now: u64) -> Option<String> {
+    let log = log?;
+    let missed = match &standing.verdict {
+        Verdict::Never => true,
+        Verdict::Ran { at, .. } => log.at > *at,
+        Verdict::Running { .. } | Verdict::Killed { .. } => false,
+    };
+    missed.then(|| {
+        format!(
+            "{} launched {} ago and left no record",
+            standing.tier,
+            ago(now.saturating_sub(log.at)),
+        )
+    })
 }
 
 // ---- what the scheduler was asked, as against what the tier did ----------
@@ -295,7 +412,8 @@ pub fn reconcile(
         ),
         (Verdict::Never, Asked::Launched { ok: true, .. }) => format!(
             "{tier}: the scheduler ran it{when} and there is no ledger yet — that run predates \
-             §6 M82, or `cargo clean` took the file. The next scheduled run settles it."
+             §6 M82, or the ledger has not been written since it moved out of `target/` at \
+             §6 M90. The next scheduled run settles it."
         ),
         // The scheduler corroborating a kill, which is the one thing the ledger
         // infers rather than observes: a start with no finish.
@@ -477,10 +595,19 @@ pub fn standing(events: &[Event], now: u64) -> Vec<Standing> {
 /// until M82 the only reader of that verdict was a manual command with no
 /// caller. This is the reader: the Stop hook's cadence is the only one this
 /// desk reliably has.
-pub fn verdict_line(events: &[Event], now: u64) -> Option<String> {
+pub fn verdict_line(events: &[Event], now: u64, logs: &[Sighting]) -> Option<String> {
     let complaints: Vec<String> = standing(events, now)
         .iter()
-        .filter_map(|s| s.complaint(now))
+        .flat_map(|s| {
+            let missed = unrecorded(s, logs.iter().find(|l| l.tier == s.tier), now);
+            match (&s.verdict, missed) {
+                // A launch nothing recorded *is* the whole of "has never run",
+                // with the cause attached; anywhere else it stands beside the
+                // complaint, since a superseded red is still a red.
+                (Verdict::Never, Some(line)) => vec![line],
+                (_, missed) => s.complaint(now).into_iter().chain(missed).collect(),
+            }
+        })
         .collect();
     if complaints.is_empty() {
         return None;
@@ -495,7 +622,7 @@ pub fn verdict_line(events: &[Event], now: u64) -> Option<String> {
 /// did not fire is a condition of the machine, and refusing to build over it
 /// would block every commit on something no edit can repair (§6 M82).
 pub fn report() {
-    if let Some(line) = verdict_line(&events(), now()) {
+    if let Some(line) = verdict_line(&events(), now(), &sightings()) {
         println!("{line}");
     }
 }
@@ -597,6 +724,77 @@ mod tests {
             .expect("nightly is a scheduled tier")
     }
 
+    fn seen(at: u64, note: &str) -> Sighting {
+        Sighting {
+            tier: "nightly",
+            at,
+            note: note.into(),
+        }
+    }
+
+    /// The third witness, and the four readings it has to keep apart (§6 M90).
+    ///
+    /// The case it exists for is the first: this tree's weekly tier launched
+    /// every Sunday and had never once completed, because the action is
+    /// `cargo xtask ci --weekly` and a desk in use holds the `xtask.exe` the
+    /// run must relink — so it died before there was anything to bracket it,
+    /// and the ledger, which can only be written from inside, said *never run*.
+    #[test]
+    fn a_transcript_the_ledger_cannot_account_for_is_a_launch_it_missed() {
+        let now = 100 * DAY;
+        let never = nightly(&[], now);
+        let line = unrecorded(&never, Some(&seen(now - 4 * DAY, "error: …")), now)
+            .expect("a log with no record at all is the hole this fills");
+        assert!(line.contains("nightly launched 4d ago"), "{line}");
+
+        // A run that *did* record itself, with nothing newer on disk: the
+        // ledger is the better witness and this one keeps quiet.
+        let ran = [
+            ev(now - 3600, "nightly", Kind::Started),
+            ev(now - 900, "nightly", done(true)),
+        ];
+        let standing = nightly(&ran, now);
+        assert_eq!(
+            unrecorded(&standing, Some(&seen(now - 1000, "…")), now),
+            None
+        );
+        // The same run, and a transcript from *after* it — a second launch the
+        // ledger never saw.
+        assert!(unrecorded(&standing, Some(&seen(now - 60, "…")), now).is_some());
+
+        // A live run writes its log continuously and its `finished` line only
+        // at the end, so `Running` is newer-log by construction and must not
+        // read as a miss. Same for a `Killed` start that was never finished.
+        let live = nightly(&[ev(now - 600, "nightly", Kind::Started)], now);
+        assert!(matches!(live.verdict, Verdict::Running { .. }));
+        assert_eq!(unrecorded(&live, Some(&seen(now - 5, "…")), now), None);
+        let killed = nightly(&[ev(now - 8 * 3600, "nightly", Kind::Started)], now);
+        assert!(matches!(killed.verdict, Verdict::Killed { .. }));
+        assert_eq!(
+            unrecorded(&killed, Some(&seen(now - 7 * 3600, "…")), now),
+            None
+        );
+
+        // And no transcript is no claim: a tier that never wrote one is the
+        // ordinary fresh-clone case, which `Verdict::Never` already reports.
+        assert_eq!(unrecorded(&never, None, now), None);
+    }
+
+    /// A launch nothing recorded *replaces* "has never run" rather than joining
+    /// it — the two are one fact, and the second has the cause attached.
+    #[test]
+    fn the_one_line_prefers_the_witness_that_knows_more() {
+        let now = 100 * DAY;
+        let line = verdict_line(&[], now, &[seen(now - 2 * DAY, "…")]).expect("a complaint");
+        assert!(
+            line.contains("nightly launched 2d ago and left no record"),
+            "{line}"
+        );
+        assert!(!line.contains("nightly has never run"), "not both: {line}");
+        // The weekly has no transcript here, so it keeps the plain reading.
+        assert!(line.contains("weekly has never run"), "{line}");
+    }
+
     #[test]
     fn a_tier_that_passed_recently_is_green_and_says_nothing() {
         let now = 100 * DAY;
@@ -607,7 +805,7 @@ mod tests {
             ev(now - 3 * DAY + 900, "weekly", done(true)),
         ];
         assert!(nightly(&events, now).green());
-        assert_eq!(verdict_line(&events, now), None);
+        assert_eq!(verdict_line(&events, now, &[]), None);
     }
 
     /// The whole defect: a launch refused for not being idle writes nothing, so
@@ -684,7 +882,7 @@ mod tests {
             ev(now - 3600, "nightly", Kind::Started),
             ev(now - 900, "nightly", done(false)),
         ];
-        let line = verdict_line(&events, now).expect("a red is a complaint");
+        let line = verdict_line(&events, now, &[]).expect("a red is a complaint");
         assert!(line.contains("nightly is RED"), "{line}");
         assert!(line.contains("clippy failed"), "the reason travels: {line}");
     }
@@ -692,7 +890,7 @@ mod tests {
     /// A cleaned tree reports the loudest thing it can, not the quietest.
     #[test]
     fn no_history_at_all_reads_as_never_run() {
-        let line = verdict_line(&[], 100 * DAY).expect("an empty ledger is a complaint");
+        let line = verdict_line(&[], 100 * DAY, &[]).expect("an empty ledger is a complaint");
         assert!(line.contains("nightly has never run"), "{line}");
         assert!(line.contains("weekly has never run"), "{line}");
     }
