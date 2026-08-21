@@ -665,6 +665,7 @@ mod tests {
     #[test]
     fn an_archive_is_a_function_of_its_input() {
         let dir = std::env::temp_dir().join(format!("gg-zip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp");
         std::fs::write(dir.join("a.txt"), b"one").expect("a");
         std::fs::write(dir.join("b.bin"), [0u8; 500]).expect("b");

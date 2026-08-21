@@ -376,6 +376,13 @@ fn session(args: &Args) -> Result<Option<Args>, Exit> {
         started: true,
     };
     let staging = std::env::temp_dir().join(format!("gg-runtime-{}", std::process::id()));
+    // Windows recycles PIDs and this directory outlives the run that made it —
+    // the staged dylib is deliberately never unloaded (§4.2.2), so no
+    // destructor of ours can delete a copy the loader still has mapped. The
+    // clear is therefore the only end that works, and it is also the one that
+    // matters: without it a successor inherits a predecessor's generations
+    // (§6 M89).
+    let _ = std::fs::remove_dir_all(&staging);
     let bindings = match &args.input {
         Some(path) => {
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?

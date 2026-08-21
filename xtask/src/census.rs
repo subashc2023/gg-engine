@@ -54,6 +54,7 @@ const POPULATION_GATES: &[(&str, &str)] = &[
     ("budgets.rs", "widget_provenance"),
     ("ci.rs", "allowlist_crosscheck"),
     ("ci.rs", "greps"),
+    ("ci.rs", "nightly"),
     ("ci.rs", "no_imported_math"),
     ("deps.rs", "check_folder"),
     ("dist.rs", "gate"),

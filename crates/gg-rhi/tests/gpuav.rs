@@ -68,10 +68,9 @@ float4 fs_main() : SV_Target
 "#;
 
 fn pipeline(rhi: &mut OffscreenRhi) -> PipelineHandle {
-    let dir = std::env::temp_dir().join(format!("gg-rhi-gpuav-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("gpuav.slang"), SOURCE).unwrap();
-    let module = gg_shaders::compile_module(&dir.to_string_lossy(), "gpuav.slang").unwrap();
+    let scratch = common::Scratch::new("gpuav");
+    let search = scratch.slang("gpuav.slang", SOURCE);
+    let module = gg_shaders::compile_module(&search, "gpuav.slang").unwrap();
     let find = |stage| {
         module
             .entry_points

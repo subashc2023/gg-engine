@@ -15,6 +15,47 @@ use gg_rhi::{
 /// Bytes per pixel of the offscreen target's RGBA8 format.
 const BYTES_PER_PIXEL: u64 = 4;
 
+/// A scratch directory a recycled PID cannot make lie (§6 M89).
+///
+/// Named for the process because that is what makes a failure's leavings
+/// findable, and **cleared on the way in** because a name is not an isolation
+/// claim: Windows reuses PIDs, nothing here removed its directory, and
+/// `draw_covers_target_and_cache_persists` read a four-day-old 4090 pipeline
+/// blob as its own run's output. Removed on the way out *unless the test is
+/// failing*, which is the only reading under which both halves are wanted —
+/// evidence survives a red run and a green one leaves nothing behind.
+pub struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    /// `%TEMP%/gg-rhi-<what>-<pid>`, empty, existing.
+    pub fn new(what: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("gg-rhi-{what}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    /// The directory, for the `&str` every `gg_shaders` entry point takes.
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    /// Write `source` into the scratch and hand back the directory as Slang
+    /// wants it — a search path plus a file name, never a joined path.
+    pub fn slang(&self, file: &str, source: &str) -> String {
+        std::fs::write(self.0.join(file), source).unwrap();
+        self.0.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
 /// Clear the target to `clear`, run `draws` into it, and copy it back:
 /// tightly packed RGBA8, row-major, sRGB-encoded (PNG-ready bytes, §4.10).
 pub fn render(

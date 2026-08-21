@@ -30,11 +30,9 @@ fn pipeline(
     source: &str,
     depth: gg_rhi::DepthMode,
 ) -> (PipelineHandle, u32) {
-    let dir = std::env::temp_dir().join(format!("gg-rhi-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = common::Scratch::new(name);
     let file = format!("{name}.slang");
-    std::fs::write(dir.join(&file), source).unwrap();
-    let module = gg_shaders::compile_module(&dir.to_string_lossy(), &file).unwrap();
+    let module = gg_shaders::compile_module(&scratch.slang(&file, source), &file).unwrap();
     let find = |stage| {
         module
             .entry_points

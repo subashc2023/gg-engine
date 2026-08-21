@@ -9,12 +9,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use demo_06_lit::{
-    ATRIUM, HOLD, LAMP_AT, LAMP_INTENSITY, LAMPS, MOVE_FORWARD, START_POSITION, SUN_PERIOD,
-    Visitor, sun_direction,
+    ATRIUM, HOLD, LAMP_AT, LAMP_INTENSITY, LAMPS, MOVE_FORWARD, SKY_INTENSITY, START_POSITION,
+    SUN_PERIOD, Visitor, sun_direction,
 };
 use gg_ecs::boundary::{
     self, AbiInfo, ActionId, ComponentsTable, Eye, HostApiV1, InputFrame, Light, MAX_AXES, Model,
-    SystemsTable, TickCtx, VerbsTable, asset_id, light,
+    Sky, SystemsTable, TickCtx, VerbsTable, asset_id, light,
 };
 use gg_ecs::{Query, World};
 
@@ -45,6 +45,12 @@ impl Game {
         unsafe { gg_game_init(core::ptr::from_ref(boundary::host_api())) };
 
         let mut world = World::new();
+        // The host's half of `adopt`, which this file claimed to be running and
+        // was not (§6 M89): the shell registers the whole boundary protocol
+        // before it adopts the game's list, so a world without it refuses every
+        // component the game uses and did not declare — which is how demo 06's
+        // `Sky` was refused from §6 M27 to M89 with a test suite over it.
+        boundary::register_all(&mut world).unwrap();
         // SAFETY: the tables are this binary's own and live for the process.
         let (table, declared) = unsafe {
             let declared = world.adopt(&gg_game_components()).unwrap();
@@ -139,6 +145,15 @@ fn the_first_tick_places_the_visitor_the_atrium_and_every_light() {
     let eye = game.all::<Eye>();
     assert_eq!(eye.len(), 1);
     assert_eq!(eye[0].position, START_POSITION);
+
+    // The environment the atrium is lit by, and the reason this line exists:
+    // the host registered five of the ten boundary components by hand and
+    // `Sky` was never one of them, so from §6 M27 to M89 this spawn was refused
+    // `UnknownComponent`, reported in one log line, and the demo about light ran
+    // without any. Nothing above noticed because nothing above asked.
+    let sky = game.all::<Sky>();
+    assert_eq!(sky.len(), 1, "the atrium has an environment");
+    assert_eq!(sky[0].intensity, SKY_INTENSITY);
 }
 
 #[test]

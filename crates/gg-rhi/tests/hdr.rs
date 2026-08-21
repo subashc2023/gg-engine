@@ -11,6 +11,8 @@
 // unwrap is permitted in tests (§2, Error handling row).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use gg_rhi::{
     Access, BufferDesc, BufferKind, ColorAttachment, DepthBias, DrawSpec, ImageDesc, ImageFormat,
     ImageUse, OffscreenRhi, Pass, PassKind, PipelineDesc, RhiError, Target, Transition,
@@ -21,11 +23,9 @@ use gg_rhi::{
 const BRIGHT: f32 = 8.0;
 
 fn shader(source: &str, stem: &str) -> gg_shaders::CompiledModule {
-    let dir = std::env::temp_dir().join(format!("gg-rhi-hdr-{}-{stem}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = common::Scratch::new(&format!("hdr-{stem}"));
     let file = format!("{stem}.slang");
-    std::fs::write(dir.join(&file), source).unwrap();
-    gg_shaders::compile_module(&dir.to_string_lossy(), &file).unwrap()
+    gg_shaders::compile_module(&scratch.slang(&file, source), &file).unwrap()
 }
 
 /// IEEE-754 binary16 → `f32`, for reading a float target back. Ten lines rather

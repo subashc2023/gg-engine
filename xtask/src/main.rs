@@ -72,12 +72,16 @@ fn main() {
 fn usage() -> anyhow::Result<()> {
     // The reload legs come off `shell::LEGS` rather than a second list: the two
     // drifted three flags apart before §6 M81, and a usage text that omits a leg
-    // is how a leg stops being run.
+    // is how a leg stops being run. The nightly's come off `ci::LEGS` for the
+    // same reason (§6 M89).
     let legs = shell::leg_flags();
+    let nightly = ci::leg_flags();
     anyhow::bail!(
         "usage: cargo xtask <command>\n\
          \n\
          ci [--fast|--push|--nightly|--weekly] [--hook]   local-first CI tiers (§5) — windowless by construction (§1.5)\n\
+         ci --nightly [{nightly}]\n\
+         \x20                                                one leg of the nightly, unrecorded — a subset is not the tier's verdict (§6 M89)\n\
          interactive                                      manual WSI suite: storms + demo runs; two legs present visibly\n\
          run <demo> [shell flags]                         manual: build the game dylib, play it under gg-runtime (creates a window)\n\
          new <name>                                       a new game crate from the template: copy, rename, register, build (§6 M12)\n\

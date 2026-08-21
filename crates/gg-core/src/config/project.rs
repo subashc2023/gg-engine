@@ -526,6 +526,7 @@ window = 1280x720
     #[test]
     fn paths_resolve_against_the_manifest_so_a_folder_can_be_moved() {
         let dir = std::env::temp_dir().join(format!("gg-project-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(MANIFEST);
         std::fs::write(&path, WHOLE).unwrap();

@@ -181,6 +181,7 @@ mod tests {
     #[test]
     fn the_report_lands_in_a_file_named_for_the_process() {
         let dir = std::env::temp_dir().join(format!("gg-crash-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = write(&dir, "report body").unwrap();
         assert!(path.ends_with(format!("gg-crash-{}.txt", std::process::id())));

@@ -22,7 +22,7 @@ use std::path::Path;
 
 use gg_core::reload::rejuvenate::Rejuvenator;
 use gg_core::{GameLib, Stages};
-use gg_ecs::boundary::{Eye, Light, Look, Model, Prefs, Renderable, TickCtx, Widget, host_api};
+use gg_ecs::boundary::{Eye, Look, Model, Prefs, Renderable, TickCtx, host_api};
 use gg_ecs::{ComponentOutcome, Save, Snapshot, World};
 use gg_extract::{Extracted, Latch};
 use gg_input::{
@@ -1803,11 +1803,9 @@ impl Away {
 /// laid one out differently would be accepted and then panic mid-extract,
 /// outside every shim (§4.2.2).
 fn adopt(world: &mut World, lib: &GameLib) -> anyhow::Result<usize> {
-    world.register::<Renderable>()?;
-    world.register::<Eye>()?;
-    world.register::<Model>()?;
-    world.register::<Light>()?;
-    world.register::<Widget>()?;
+    // The whole protocol, off `gg_ecs::boundary`'s own list (§6 M89) — this was
+    // five of the ten by hand, and `Sky` was one of the five it never gained.
+    gg_ecs::boundary::register_all(world)?;
     // SAFETY: `lib` is verified — `GameLib::load` returned it — and is never
     // unloaded, which is what makes its descriptors `&'static`.
     let declared = unsafe { world.adopt(lib.components()) }?;

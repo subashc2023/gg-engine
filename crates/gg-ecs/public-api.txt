@@ -443,6 +443,7 @@ pub fn gg_ecs::boundary::host_api() -> &'static gg_abi::host::HostApiV1
 pub unsafe fn gg_ecs::boundary::init(*const gg_abi::host::HostApiV1)
 pub fn gg_ecs::boundary::layout_of<T: gg_ecs::component::Component>() -> gg_abi::layout::ComponentLayout
 pub unsafe fn gg_ecs::boundary::read_verbs(&gg_abi::verb::VerbsTable) -> gg_ecs::boundary::Verbs
+pub fn gg_ecs::boundary::register_all(&mut gg_ecs::world::World) -> core::result::Result<(), gg_ecs::registry::RegistryError>
 pub unsafe fn gg_ecs::boundary::run(*mut gg_abi::host::WorldHandle, *const gg_abi::system::TickCtx, fn(&mut gg_ecs::GameWorld<'_>)) -> gg_abi::system::SystemStatus
 pub unsafe fn gg_ecs::boundary::same_schemas(&gg_abi::layout::ComponentsTable, &gg_abi::layout::ComponentsTable) -> bool
 pub fn gg_ecs::boundary::set_logger(fn(u32, &str)) -> core::result::Result<(), fn(u32, &str)>

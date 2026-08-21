@@ -182,10 +182,9 @@ fn arm(
     rhi: &mut OffscreenRhi,
     words: &[u32; WORDS],
 ) -> (PipelineHandle, BufferHandle, [u8; size_of::<u64>()]) {
-    let dir = std::env::temp_dir().join(format!("gg-rhi-hang-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("hang.slang"), HANG).unwrap();
-    let module = gg_shaders::compile_module(&dir.to_string_lossy(), "hang.slang").unwrap();
+    let scratch = common::Scratch::new("hang");
+    let search = scratch.slang("hang.slang", HANG);
+    let module = gg_shaders::compile_module(&search, "hang.slang").unwrap();
     let find = |stage| {
         module
             .entry_points

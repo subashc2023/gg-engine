@@ -910,6 +910,7 @@ mod tests {
     #[cfg_attr(not(windows), ignore = "a PE resource section is Windows'")]
     fn a_hand_written_object_is_one_the_real_linker_accepts() {
         let dir = std::env::temp_dir().join(format!("gg-rsrc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let icon = gg_core::config::icon::encode(
             gg_core::config::icon::SIDE,

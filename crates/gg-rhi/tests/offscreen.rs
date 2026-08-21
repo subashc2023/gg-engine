@@ -43,10 +43,9 @@ fn clear_readback_is_exact() {
 #[test]
 fn draw_covers_target_and_cache_persists() {
     init_tracing();
-    let dir = std::env::temp_dir().join(format!("gg-rhi-offscreen-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("fullscreen.slang"),
+    let scratch = common::Scratch::new("offscreen");
+    let search = scratch.slang(
+        "fullscreen.slang",
         r#"
 struct VOut { float4 pos : SV_Position; }
 
@@ -63,9 +62,8 @@ VOut vs_main(uint vid: SV_VertexID)
 [shader("fragment")]
 float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
 "#,
-    )
-    .unwrap();
-    let module = gg_shaders::compile_module(&dir.to_string_lossy(), "fullscreen.slang").unwrap();
+    );
+    let module = gg_shaders::compile_module(&search, "fullscreen.slang").unwrap();
     let find = |stage| {
         module
             .entry_points
@@ -78,7 +76,7 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
 
     // Deliberately not created here: a first launch finds no directory, and the
     // store making its own is half of what a shipped game needs from it.
-    let cache_dir = dir.join("cache");
+    let cache_dir = scratch.path().join("cache");
     let mut rhi = OffscreenRhi::with_cache((64, 64), Some(&cache_dir)).unwrap();
     let pipeline = rhi
         .create_pipeline(&PipelineDesc {
@@ -174,10 +172,9 @@ float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
 #[test]
 fn wrong_push_constant_size_is_an_error() {
     init_tracing();
-    let dir = std::env::temp_dir().join(format!("gg-rhi-push-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("pushy.slang"),
+    let scratch = common::Scratch::new("push");
+    let search = scratch.slang(
+        "pushy.slang",
         r#"
 struct P { float4 color; }
 [[vk::push_constant]] ConstantBuffer<P> push;
@@ -196,9 +193,8 @@ VOut vs_main(uint vid: SV_VertexID)
 [shader("fragment")]
 float4 fs_main() : SV_Target { return push.color; }
 "#,
-    )
-    .unwrap();
-    let module = gg_shaders::compile_module(&dir.to_string_lossy(), "pushy.slang").unwrap();
+    );
+    let module = gg_shaders::compile_module(&search, "pushy.slang").unwrap();
     assert_eq!(module.push_constants.as_ref().unwrap().size, 16);
     let find = |stage| {
         module
@@ -273,10 +269,9 @@ float4 fs_main() : SV_Target { return push.color; }
 #[test]
 fn every_draw_in_one_pass_reaches_the_target() {
     init_tracing();
-    let dir = std::env::temp_dir().join(format!("gg-rhi-many-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("many.slang"),
+    let scratch = common::Scratch::new("many");
+    let search = scratch.slang(
+        "many.slang",
         r#"
 // Push constants place the quad and colour it, so one pipeline draws each
 // instance differently — the same shape demo 02's per-cube push takes.
@@ -300,9 +295,8 @@ VOut vs_main(uint vid: SV_VertexID)
 [shader("fragment")]
 float4 fs_main() : SV_Target { return push.color; }
 "#,
-    )
-    .unwrap();
-    let module = gg_shaders::compile_module(&dir.to_string_lossy(), "many.slang").unwrap();
+    );
+    let module = gg_shaders::compile_module(&search, "many.slang").unwrap();
     let find = |stage| {
         module
             .entry_points
@@ -388,10 +382,9 @@ float4 fs_main() : SV_Target { return push.color; }
 #[test]
 fn a_draw_lands_in_its_own_rectangle() {
     init_tracing();
-    let dir = std::env::temp_dir().join(format!("gg-rhi-tiles-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("fullscreen.slang"),
+    let scratch = common::Scratch::new("tiles");
+    let search = scratch.slang(
+        "fullscreen.slang",
         r#"
 struct VOut { float4 pos : SV_Position; }
 
@@ -407,9 +400,8 @@ VOut vs_main(uint vid: SV_VertexID)
 [shader("fragment")]
 float4 fs_main() : SV_Target { return float4(0.0, 1.0, 0.0, 1.0); }
 "#,
-    )
-    .unwrap();
-    let module = gg_shaders::compile_module(&dir.to_string_lossy(), "fullscreen.slang").unwrap();
+    );
+    let module = gg_shaders::compile_module(&search, "fullscreen.slang").unwrap();
     let find = |stage| {
         module
             .entry_points

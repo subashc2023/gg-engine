@@ -19,11 +19,24 @@ use crate::util::{READY, cargo, drain, run as exec, run_capture, walk_rs, worksp
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-pub fn run_tier(tier: &str) -> anyhow::Result<()> {
+/// A tier, or named legs of one (§6 M89).
+///
+/// The record is the reason this takes both at once rather than being two
+/// entry points: **a partial run is not the tier**, so it must not leave a
+/// verdict in the ledger a whole one would (§6 M82). `legs` empty is the tier;
+/// anything else is a subset, unbracketed, and says so on the way out.
+fn run_legs(tier: &str, legs: &[&str]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        legs.is_empty() || tier == "nightly",
+        "xtask ci --{tier}: this tier has no legs to select — {} is only spelled for --nightly. \
+         Running nothing and reporting green is the one thing a gate may not do (§6 M81), so an \
+         argument nothing answers to is a failure",
+        legs.join(" ")
+    );
     let body = || match tier {
         "fast" => fast(),
         "push" => push(),
-        "nightly" => nightly(),
+        "nightly" => nightly(legs),
         "weekly" => weekly(),
         other => anyhow::bail!("unknown ci tier `{other}`"),
     };
@@ -31,20 +44,31 @@ pub fn run_tier(tier: &str) -> anyhow::Result<()> {
     // write a verdict for a launch it refused, and wrote the *previous* one for
     // a run `StopOnIdleEnd` killed. `weekly` reaches `nightly` by call and not
     // through here, so a Sunday leaves one bracketed record and not two.
-    if crate::record::scheduled(tier) {
+    if legs.is_empty() && crate::record::scheduled(tier) {
         crate::record::around(tier, body)
     } else {
         body()
     }
 }
 
+/// The tier flag, and whatever else was asked for.
+///
+/// The first tier-shaped argument wins and the rest are legs, which is what
+/// makes `--nightly --push` reach the nightly's *first leg* rather than the push
+/// tier. Before §6 M89 this took the first `--` argument and dropped every other
+/// one on the floor — `xtask ci --nightly --dist` ran four hours of the whole
+/// tier and said nothing about the flag it ignored.
 pub fn run(args: &[&str]) -> anyhow::Result<()> {
-    let tier = args
-        .iter()
-        .find(|a| a.starts_with("--") && **a != "--hook")
-        .map(|a| &a[2..])
-        .unwrap_or("fast");
-    run_tier(tier)
+    let (mut tier, mut legs) = (None, Vec::new());
+    for arg in args.iter().filter(|a| **a != "--hook") {
+        match *arg {
+            "--fast" | "--push" | "--nightly" | "--weekly" if tier.is_none() => {
+                tier = Some(&arg[2..]);
+            }
+            leg => legs.push(leg),
+        }
+    }
+    run_legs(tier.unwrap_or("fast"), &legs)
 }
 
 /// §5's verification budget for the Stop hook's tier: `--fast` **< 30 s** warm.
@@ -231,33 +255,106 @@ fn push() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn nightly() -> anyhow::Result<()> {
-    push()?;
-    crate::dist::gate()?;
-    crate::probe::run(false)?;
-    stress_and_miri()?;
-    aarch64_leg()?;
-    replay_instrumented_profile()?;
+/// One leg of the nightly tier: the flag that selects it and what it runs.
+type Leg = (&'static str, fn() -> anyhow::Result<()>);
+
+/// Every nightly leg, in run order — `shell::LEGS`' table for `shell::LEGS`'
+/// reason (§6 M81), arrived at from the other direction (§6 M89).
+///
+/// The tier had never once produced a verdict: it is `RunOnlyIfIdle` and the
+/// desk is in use at 03:00, so `timers --status` showed every launch declined
+/// and the ledger empty. Running it by hand meant four unbroken hours or
+/// reproducing five private functions at a prompt — which is what let a red
+/// `gpu_tests` and a demo with no sky sit under a green push tier for months.
+///
+/// This *is* the tier's body, so there is no second list to fall out of step
+/// with: [`nightly`] iterates it.
+const LEGS: &[Leg] = &[
+    ("--push", push),
+    ("--dist", crate::dist::gate),
+    ("--probe", probe_leg),
+    ("--stress", stress_and_miri),
+    ("--aarch64", aarch64_leg),
+    ("--instrumented", replay_instrumented_profile),
     // §5.6c in full, replay segments across a reload, §5.11's reload cases, and
     // the reload-latency instrument (§6 M5): everything that needs the shell
     // driving a real game dylib.
-    crate::shell::gates(&[])?;
-    crate::bench::run(&[])?;
+    ("--reload", reload_leg),
+    ("--bench", bench_leg),
     // Not `--record`: the numbers are a manual act like `bench --record` (§8).
     // What the tier is for is the other failure — every scenario is a text edit
     // against real source, and a rename should turn this red rather than
     // quietly measuring nothing.
-    crate::dx::run(&[])?;
-    gpu_tests()?;
+    ("--dx", dx_leg),
+    ("--gpu-tests", gpu_tests),
     // Instrumented shaders catch what the layer alone cannot see: an out-of-range
     // bindless index, a read off the end of a device address (§8's sync/upload
     // risk row). Nightly rather than weekly — 28 s windowless on the pin.
-    crate::gpuav::run(&[])?;
-    winit_scan()?;
-    println!(
-        "xtask ci --nightly: green (windowless by construction — windowed WSI coverage is \
-         `cargo xtask interactive`, manual)"
-    );
+    ("--gpuav", gpuav_leg),
+    ("--winit", winit_scan),
+];
+
+/// The four legs whose own entry points take arguments this table does not.
+fn probe_leg() -> anyhow::Result<()> {
+    crate::probe::run(false)
+}
+fn reload_leg() -> anyhow::Result<()> {
+    crate::shell::gates(&[])
+}
+fn bench_leg() -> anyhow::Result<()> {
+    crate::bench::run(&[])
+}
+fn dx_leg() -> anyhow::Result<()> {
+    crate::dx::run(&[])
+}
+fn gpuav_leg() -> anyhow::Result<()> {
+    crate::gpuav::run(&[])
+}
+
+/// The leg flags as the usage line spells them, `|`-separated.
+pub fn leg_flags() -> String {
+    LEGS.iter()
+        .map(|(flag, _)| *flag)
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn nightly(legs: &[&str]) -> anyhow::Result<()> {
+    if let Some(unknown) = legs
+        .iter()
+        .find(|arg| !LEGS.iter().any(|(flag, _)| flag == *arg))
+    {
+        anyhow::bail!(
+            "xtask ci --nightly: no leg named `{unknown}`. Running nothing and reporting green \
+             is the one thing a gate may not do (§6 M81), so this is a failure rather than an \
+             empty set.\nlegs: {}",
+            leg_flags()
+        );
+    }
+    crate::census::graded(
+        LEGS.len(),
+        "the nightly tier's legs",
+        "LEGS is empty, so this tier just reported green having run nothing",
+    )?;
+    for (flag, leg) in LEGS {
+        if legs.is_empty() || legs.contains(flag) {
+            leg()?;
+        }
+    }
+    // A subset is not the tier and does not get the tier's sentence — nothing
+    // recorded it either (see [`run_legs`]), and the two must agree or the
+    // ledger and the console tell a reader different things (§6 M82).
+    if legs.is_empty() {
+        println!(
+            "xtask ci --nightly: green (windowless by construction — windowed WSI coverage is \
+             `cargo xtask interactive`, manual)"
+        );
+    } else {
+        println!(
+            "xtask ci --nightly: {} green — a subset, so no verdict was recorded (§6 M89)",
+            legs.join(" ")
+        );
+    }
     Ok(())
 }
 
@@ -1806,7 +1903,7 @@ fn replay_instrumented_profile() -> anyhow::Result<()> {
 }
 
 fn weekly() -> anyhow::Result<()> {
-    nightly()?;
+    nightly(&[])?;
     // Standing from M4B (§6, M0A's deferred schedule): the two gates that check
     // the repository rather than the code.
     crate::fresh::clone_gate()?;
@@ -2032,7 +2129,7 @@ pub(crate) fn contains_path(text: &str, needle: &str) -> bool {
 }
 
 fn greps() -> anyhow::Result<()> {
-    let (violations, scanned) = scan(&workspace_root())?;
+    let (violations, scanned, scratches) = scan(&workspace_root())?;
     // `walk_rs` returns silently on a directory that is not there, so every §3
     // grep over a renamed tree is a green line reporting zero files (§6 M87).
     crate::census::graded(
@@ -2040,6 +2137,15 @@ fn greps() -> anyhow::Result<()> {
         "the §3 greps",
         "no source file under apps/, crates/, demos/, tools/ or xtask/ was read, so every ban \
          below held over nothing",
+    )?;
+    // Its own count, because this one matches a *shape* rather than a tree: a
+    // scratch spelled some other way is not caught, and nineteen going to zero
+    // means the spelling moved and not that the tree stopped making scratches.
+    crate::census::graded(
+        scratches,
+        "the §6 M89 scratch rule",
+        "no `temp_dir().join(…process::id()…)` is followed by a directory creation, so the \
+         scan is matching a shape this tree no longer writes",
     )?;
     anyhow::ensure!(
         violations.is_empty(),
@@ -2111,7 +2217,7 @@ fn crlf_offenders(listing: &str) -> Vec<&str> {
 /// nobody has tested — §5's "reject a plant" criterion in its cheapest form.
 ///
 /// Returns the violations and how many files were read.
-fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
+fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize, usize)> {
     let mut files = Vec::new();
     // Applications (§6 M15.1 item 4). Under every §3 grep from its first line:
     // an application is host code, and the one rule an editor launcher could
@@ -2128,6 +2234,7 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
 
     let mut violations = Vec::new();
     let mut recorded = Vec::new();
+    let mut scratches = 0usize;
     for file in &files {
         let rel = file.strip_prefix(root).unwrap_or(file);
         let rel_str = rel.to_string_lossy().replace('\\', "/");
@@ -2205,6 +2312,40 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
                     "{rel_str}:{}: unsafe without a `// SAFETY:` note of its own (§4.2)",
                     lineno + 1
                 ));
+            }
+        }
+
+        // A scratch named for the process is a **name**, not isolation (§6 M89).
+        // Windows recycles PIDs and nothing removed the last holder's
+        // directory, so `draw_covers_target_and_cache_persists` read a
+        // four-day-old 4090 pipeline blob as this run's own output — and 25,000
+        // of these were sitting in `%TEMP%`, a gigabyte of them staged game
+        // dylibs. The rule is keyed on *creation*: a directory made and filled
+        // must be cleared first. A path only written to is exempt, since a
+        // write replaces what it finds — which is why the rejuvenation handoff
+        // and the crash report are not subjects here.
+        //
+        // This file spells both needles literally, so it cannot be its own
+        // subject; `xtask/src/{rsrc,ship}.rs` stay covered, and no scratch of
+        // this shape lives in `ci.rs` for the exemption to hide.
+        if rel_str != "xtask/src/ci.rs" {
+            for (lineno, line) in lines.iter().enumerate() {
+                if !line.contains("temp_dir().join(") || !line.contains("process::id()") {
+                    continue;
+                }
+                let after = &lines[lineno + 1..lines.len().min(lineno + 4)];
+                let Some(made) = after.iter().position(|l| l.contains("create_dir_all")) else {
+                    continue;
+                };
+                scratches += 1;
+                if !after[..made].iter().any(|l| l.contains("remove_dir_all")) {
+                    violations.push(format!(
+                        "{rel_str}:{}: a `process::id()` scratch is created without being \
+                         cleared first (§6 M89) — a PID is a name and Windows reuses them, so \
+                         the last holder's files read as this run's",
+                        lineno + 1
+                    ));
+                }
             }
         }
 
@@ -2309,7 +2450,7 @@ fn scan(root: &std::path::Path) -> anyhow::Result<(Vec<String>, usize)> {
         ));
     }
 
-    Ok((violations, files.len()))
+    Ok((violations, files.len(), scratches))
 }
 
 /// The reviewed membership of the [`CVar::recorded`] set (§6 M40).
@@ -2974,7 +3115,7 @@ render graph
     /// a directory nobody read. `walk_rs` returns silently on a missing
     /// directory, which is what makes the mistake invisible rather than loud.
     fn violations(root: &Path) -> Vec<String> {
-        let (found, scanned) = super::scan(root).unwrap();
+        let (found, scanned, _) = super::scan(root).unwrap();
         assert!(
             scanned > 0,
             "{} held no source file the scan walks — a plant that lands outside apps/, crates/, \
@@ -3185,6 +3326,72 @@ render graph
             )],
         );
         assert!(violations(&root).is_empty());
+    }
+
+    /// The nightly roster is the inventory the usage line prints and an
+    /// unrecognized flag is refused against (§6 M81's rule, §6 M89's table).
+    #[test]
+    fn every_nightly_leg_is_distinct_looks_like_a_flag_and_is_refused_when_it_is_not_one() {
+        let mut seen: Vec<&str> = super::LEGS.iter().map(|(flag, _)| *flag).collect();
+        let count = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), count, "a duplicated nightly leg flag: {seen:?}");
+        assert!(seen.iter().all(|f| f.starts_with("--") && f.len() > 2));
+        // Every flag reaches the usage line, which is the only place a reader
+        // learns one exists.
+        let printed = super::leg_flags();
+        assert!(seen.iter().all(|f| printed.contains(f)), "{printed}");
+
+        // A flag no leg answers to is a failure, not an empty set — and the
+        // message names the roster rather than leaving the reader to find it.
+        let refused = super::nightly(&["--gpu-test"])
+            .expect_err("a leg that does not exist")
+            .to_string();
+        assert!(refused.contains("--gpu-test"), "{refused}");
+        assert!(refused.contains("--gpu-tests"), "{refused}");
+
+        // Legs are the nightly's alone: every other tier refuses them rather
+        // than running its whole self and ignoring the argument, which is what
+        // `run` did to `--dist` before this milestone.
+        let wrong = super::run(&["--push", "--dist"])
+            .expect_err("a leg handed to a tier that has none")
+            .to_string();
+        assert!(wrong.contains("--dist"), "{wrong}");
+    }
+
+    /// §6 M89: a scratch named for the process, created without being cleared.
+    ///
+    /// Both directions, because the forgiving half is what makes this a rule
+    /// rather than a ban on the idiom: the same three lines with the clear in
+    /// them are the shape six sites already had and thirteen did not.
+    #[test]
+    fn a_pid_named_scratch_must_be_cleared_before_it_is_created() {
+        const BARE: &str = "fn s() {\n    let d = std::env::temp_dir().join(format!(\"gg-x-{}\", \
+                            std::process::id()));\n    std::fs::create_dir_all(&d).unwrap();\n}\n";
+        let root = plant("scratch-bare", &[("crates/gg-x/src/lib.rs", BARE)]);
+        let found = violations(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("without being cleared first"),
+            "{found:?}"
+        );
+
+        let cleared = BARE.replace(
+            "    std::fs::create_dir_all",
+            "    let _ = std::fs::remove_dir_all(&d);\n    std::fs::create_dir_all",
+        );
+        let root = plant("scratch-cleared", &[("crates/gg-x/src/lib.rs", &cleared)]);
+        assert!(violations(&root).is_empty(), "{:?}", violations(&root));
+
+        // A path only written to is not a subject: a write replaces what it
+        // finds, which is why the rejuvenation handoff needs no clear.
+        let written = BARE.replace(
+            "    std::fs::create_dir_all(&d).unwrap();",
+            "    std::fs::write(&d, b\"x\").unwrap();",
+        );
+        let root = plant("scratch-write", &[("crates/gg-x/src/lib.rs", &written)]);
+        assert!(violations(&root).is_empty(), "{:?}", violations(&root));
     }
 
     /// §2's Sim time row: sim-visible time is a tick count, never a float. The

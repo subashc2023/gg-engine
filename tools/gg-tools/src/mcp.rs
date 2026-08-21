@@ -245,8 +245,30 @@ mod tests {
         std::env::temp_dir().join(format!("gg-mcp-test-{}", std::process::id()))
     }
 
-    fn write_record(seams: &str) -> PathBuf {
+    /// The scratch, removed unless the test is failing (§6 M89). `Deref` so
+    /// every `&dir` below still reads as the `&Path` it was.
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    fn write_record(seams: &str) -> Scratch {
         let dir = dir();
+        // A PID is a name, not an isolation claim: Windows recycles them and
+        // nothing here removed the last holder's directory (§6 M89).
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(
             dir.join("session.json"),
@@ -256,7 +278,7 @@ mod tests {
             ),
         )
         .expect("write");
-        dir
+        Scratch(dir)
     }
 
     /// A notification has no `id`, and the spec forbids answering one.

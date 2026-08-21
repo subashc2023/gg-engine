@@ -53,6 +53,38 @@ pub use ui::{CANVAS, CELL, TEXT, Widget, state, text_width, widget, widget_id};
 
 pub use crate::hash::system_id;
 
+/// Register every component **this module** declares (§6 M89).
+///
+/// A host reads these whatever the game says — the renderer draws a
+/// [`Renderable`] and weighs a [`Sky`], the mixer plays a [`Sound`], the shell
+/// applies a [`Prefs`] — so registration cannot be conditional on the game
+/// having remembered to declare them. It is idempotent against a game that
+/// did: same id, same schema, and [`World::adopt`](crate::World::adopt) accepts
+/// that and refuses only a *collision*.
+///
+/// It exists because the shell kept the list by hand and `Sky` was never added
+/// to it. Demo 06 spawned one from §6 M27 to M89 and the insert was refused
+/// every time, one `ERROR` line deep, in the demo whose whole subject is light
+/// — and no picture noticed, because `gg-golden` builds its own worlds and
+/// registers `Sky` itself.
+///
+/// # Errors
+///
+/// A collision, which is a startup error and never a silent remap (§4.2).
+pub fn register_all(world: &mut crate::World) -> Result<(), crate::RegistryError> {
+    world.register::<Sound>()?;
+    world.register::<Prefs>()?;
+    world.register::<Renderable>()?;
+    world.register::<Model>()?;
+    world.register::<Light>()?;
+    world.register::<Sky>()?;
+    world.register::<Eye>()?;
+    world.register::<Look>()?;
+    world.register::<Node>()?;
+    world.register::<Widget>()?;
+    Ok(())
+}
+
 // Re-exported so `gg_game!`'s expansion names exactly one crate: a game crate is
 // pinned to three engine dependencies (§3) and a macro that silently required a
 // fourth path in scope would be a pin held by hope.
@@ -85,4 +117,62 @@ pub const fn abi_info() -> AbiInfo {
 #[must_use]
 pub fn handle(world: &mut crate::World) -> *mut WorldHandle {
     core::ptr::from_mut(world).cast()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    /// Every `gg.` component this module declares is one [`super::register_all`]
+    /// registers.
+    ///
+    /// A text scan over this module's own sources, for the reason `xtask`'s
+    /// cross-file gates are one: the alternative is a registry the derive writes
+    /// into, which is a linker-order inventory rather than a list a reader can
+    /// check. What it catches is the omission that produced it — a component
+    /// added to the protocol and not to the host's list.
+    #[test]
+    fn every_boundary_component_is_one_the_host_registers() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/boundary");
+        let mut declared = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("the boundary module's own directory") {
+            let path = entry.expect("an entry").path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a source file");
+            // The declared id, then the `pub struct` under it — the type name
+            // is what `register_all` spells and the id is what makes it ours.
+            for (at, _) in text.match_indices("#[component(id = \"gg.") {
+                let name = text[at..]
+                    .split_once("pub struct ")
+                    .and_then(|(_, tail)| tail.split(|c: char| !c.is_alphanumeric()).next())
+                    .expect("a struct under the attribute")
+                    .to_owned();
+                declared.push(name);
+            }
+        }
+        declared.sort_unstable();
+        // §6 M87: a scan that matched nothing would make the loop below a
+        // universal quantifier over an empty set, which is true and worthless.
+        assert!(
+            declared.len() >= 10,
+            "the scan found {} boundary components — it stopped matching this module's \
+             declarations rather than the module losing them (§6 M87)",
+            declared.len()
+        );
+
+        let body = include_str!("boundary.rs")
+            .split_once("pub fn register_all")
+            .expect("register_all is in this file")
+            .1;
+        let body = &body[..body.find("\n}").expect("its closing brace")];
+        for name in &declared {
+            assert!(
+                body.contains(&format!("register::<{name}>()")),
+                "`{name}` is a boundary component the host does not register — a game that \
+                 spawns one without declaring it is refused `UnknownComponent` and told so in \
+                 a log line nothing reads (§6 M89)"
+            );
+        }
+    }
 }
