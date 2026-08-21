@@ -13,6 +13,7 @@
 
 pub mod codegen;
 mod compile;
+pub mod constants;
 #[cfg(feature = "hot-reload")]
 pub mod hot;
 
@@ -20,6 +21,7 @@ pub use compile::{
     CompiledEntryPoint, CompiledModule, FieldType, Scalar, Stage, StructField, StructLayout,
     compile_module, slang_build_tag,
 };
+pub use constants::ShaderConst;
 
 /// Errors from compilation or reflection. `Slang` carries the compiler's own
 /// diagnostics verbatim — the hot path shows them to the human who typed the

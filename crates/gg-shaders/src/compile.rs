@@ -144,6 +144,12 @@ pub struct CompiledModule {
     pub push_constants: Option<StructLayout>,
     /// Global parameter count, as reflected (spike 1's canary assertion).
     pub global_parameter_count: u32,
+    /// Literal scalar `static const`s declared in this module's own file
+    /// (§6 M86). Text-scanned rather than reflected: Slang's reflection API
+    /// exposes parameters, and a `static const` is not one. Constants an
+    /// `#include` brings in belong to *its* generated module, so nothing here
+    /// is a second copy of `pbr::FRAME_STRIDE`.
+    pub constants: Vec<crate::ShaderConst>,
 }
 
 /// The version tag of the Slang actually linked into this process.
@@ -243,10 +249,27 @@ pub fn compile_module(search_dir: &str, module_name: &str) -> Result<CompiledMod
         });
     }
 
+    // The module's own text, read again rather than asked of Slang (§6 M86).
+    // Reflection walks parameters; a `static const` is not one, and the numbers
+    // the host needs — a stride, a mode, a flag bit — are all `static const`.
+    //
+    // Both spellings of `module_name`, because both callers exist and Slang
+    // accepts either: `xtask shaders` passes `post.slang` and the hot watcher
+    // passes `post`. The first version read only the literal name, so every
+    // hot recompile failed at this line and the watcher kept last-good pixels —
+    // an edit that silently stopped landing, caught by `gg-render`'s own
+    // `tests/hot.rs` and by nothing else in the tier.
+    let dir = std::path::Path::new(search_dir);
+    let source = std::fs::read_to_string(dir.join(module_name))
+        .or_else(|_| std::fs::read_to_string(dir.join(format!("{module_name}.slang"))))
+        .map_err(|e| ShaderError::BadPath(format!("{search_dir}/{module_name}: {e}")))?;
+    let constants = crate::constants::scan(&source)?;
+
     Ok(CompiledModule {
         entry_points: compiled,
         push_constants,
         global_parameter_count,
+        constants,
     })
 }
 

@@ -77,6 +77,18 @@ pub gg_render::content::DrawMaterial::roughness: f32
 impl core::default::Default for gg_render::content::DrawMaterial
 pub fn gg_render::content::DrawMaterial::default() -> Self
 pub mod gg_render::cvars
+pub mod gg_render::cvars::views
+pub const gg_render::cvars::views::AO: usize
+pub const gg_render::cvars::views::AO_RAW: usize
+pub const gg_render::cvars::views::DEPTH: usize
+pub const gg_render::cvars::views::FIELD: usize
+pub const gg_render::cvars::views::LAMPS: usize
+pub const gg_render::cvars::views::MOMENTS: usize
+pub const gg_render::cvars::views::NAMES: &[&str]
+pub const gg_render::cvars::views::NORMAL: usize
+pub const gg_render::cvars::views::SCENE: usize
+pub const gg_render::cvars::views::SHADOW_0: usize
+pub const gg_render::cvars::views::SHADOW_END: usize
 pub const gg_render::cvars::DEBUG_VIEWS: &[&str]
 pub const gg_render::cvars::LATTICE_OFFSET: f64
 pub static gg_render::cvars::AA: gg_core::cvar::CVar

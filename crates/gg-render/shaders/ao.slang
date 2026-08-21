@@ -18,13 +18,14 @@
 // not a scene. An occluder off the edge of the frame, or hidden behind a nearer
 // surface, is not there. That error is measured rather than apologized for.
 
+// Depth reconstruction, shared with the debug blit's normal view (§6 M86) —
+// which is a picture of what this pass sees, so the two cannot be transcriptions
+// of each other. `PROJECTION_*` comes from here.
+#include "include/depth.slang"
+
 // The global set (§4.3). Binding 1 (storage images) has no consumer here.
 [[vk::binding(0, 0)]] Texture2D<float4> g_textures[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
-
-// Depth reconstruction modes, mirroring `View::ortho`'s zero-means-perspective.
-static const uint PROJECTION_PERSPECTIVE = 0u;
-static const uint PROJECTION_ORTHOGRAPHIC = 1u;
 
 // Per-pixel index pairs — `r.ao_pattern`, see `fs_main`. NONE is the control
 // that says how much of a defect the pattern is responsible for at all; a
@@ -76,119 +77,46 @@ VOut vs_main(uint vid: SV_VertexID)
     return o;
 }
 
+// This pass's depth buffer as `include/depth.slang` wants it. Built per call
+// rather than held in a global: it is four scalars and two handles the compiler
+// folds away, and a file-scope copy would be a second place the push constant is
+// unpacked.
+DepthView depth_view()
+{
+    DepthView v;
+    v.image = g_textures[push.depth_index];
+    v.samp = g_samplers[push.sampler_index];
+    v.projection = push.projection;
+    v.texel = push.texel;
+    v.project = push.project;
+    v.depth_params = push.depth_params;
+    return v;
+}
+
+// Thin forwarders so every call site below reads as it did before the split.
 float raw_depth(float2 uv)
 {
-    return g_textures[push.depth_index].SampleLevel(g_samplers[push.sampler_index], uv, 0).r;
+    return depth_at(depth_view(), uv);
 }
 
-// Reverse-Z clears to 0.0 and nothing renders *at* the far plane, so a zero here
-// is background — the one depth this pass must not reconstruct a position from.
-bool is_background(float d)
-{
-    return d <= 0.0;
-}
-
-// View-space position from a uv and its depth. Camera-relative, like everything
-// downstream of extract (§1.4), so view space and world space differ by a
-// rotation and this is the frame the reference casts in.
-//
-// The two projections are two lines rather than an inverse matrix: reverse-Z
-// with an infinite far gives `depth = near / -z` exactly, and the orthographic
-// one is affine in z. Inverting a 4x4 per pixel to recover two constants would
-// be the expensive way to be less exact.
 float3 view_position(float2 uv, float d)
 {
-    float2 ndc = uv * 2.0 - 1.0;
-    if (push.projection == PROJECTION_ORTHOGRAPHIC)
-    {
-        return float3(ndc * push.project, d * push.depth_params.x + push.depth_params.y);
-    }
-    float linear_depth = push.depth_params.x / max(d, 1e-9);
-    return float3(ndc * push.project * linear_depth, -linear_depth);
+    return view_position(depth_view(), uv, d);
 }
 
 float3 position_at(float2 uv)
 {
-    return view_position(uv, raw_depth(uv));
+    return position_at(depth_view(), uv);
 }
 
-// The direction from a surface point toward the viewer, which every horizon in
-// this pass is measured against.
-//
-// **Orthographic has no eye point** — `shade_all`'s note, and the same trap one
-// pass along. Under parallel rays every view ray is the camera's axis, so
-// normalizing `-p` turns a fragment's *screen position* into a view direction
-// and tilts every slice plane by however far off centre it sits — by the frame's
-// half-angle at its corners.
-//
-// What that is worth, measured rather than asserted (`gg-tools ao`'s projection
-// row): it takes the orthographic leg's mean rendered occlusion from 0.9728 to
-// 0.9585 against a reference's 0.9536, and its worst error from 0.6155 to
-// 0.4856. Its mean *absolute* error rises, 0.0479 to 0.0598, and that is the
-// honest shape of it — the wrong vector under-estimates everywhere and the right
-// one is wrong in both directions instead. No golden in the tree can see the
-// difference, because the only orthographic scene among them is demo 11's flat
-// framing, whose visible faces are one coplanar sheet with no depth for a
-// screen-space estimate to work from.
 float3 to_eye(float3 p)
 {
-    if (push.projection == PROJECTION_ORTHOGRAPHIC)
-    {
-        return float3(0.0, 0.0, 1.0);
-    }
-    return normalize(-p);
+    return to_eye(depth_view(), p);
 }
 
-// The normal, from the depth buffer rather than from a G-buffer the prepass does
-// not write.
-//
-// One of the two one-sided differences on each axis is the surface's and the
-// other may belong to something else, and the whole difficulty is telling which.
-//
-// **By curvature, not by depth difference** (§6 M71). Differencing toward the
-// *nearer* neighbour is the obvious rule and it is wrong in exactly one place,
-// which happens to be the place a normal matters most: at a crease, where a
-// surface seen at a glancing angle meets one seen closer to head-on. The
-// glancing surface's own neighbour is several per cent of the depth away while
-// the head-on surface across the seam is barely any distance at all, so the
-// nearer-neighbour rule reaches *across* the crease and returns a normal
-// belonging to the other wall — and which way it goes flips with the seam's
-// sub-pixel position, so the answer walks as the camera turns. It cost twenty
-// code values along a seam whose truth is a constant, against three for the same
-// seam cast on the CPU, and no sampling knob touched it: `gg-tools ao --crease`.
-//
-// A second difference asks the question that is actually being asked. Three
-// samples on one surface are collinear in view space whatever the angle, so
-// `|2*a1 - a2 - p|` is zero on the co-planar side and is the kink's full size on
-// the side that crosses a crease or a silhouette. Four taps an axis rather than
-// two, which is the price.
 float3 reconstruct_normal(float2 uv, float3 p)
 {
-    float2 sx = float2(push.texel.x, 0.0);
-    float2 sy = float2(0.0, push.texel.y);
-    float3 right = position_at(uv + sx);
-    float3 left = position_at(uv - sx);
-    float3 down = position_at(uv + sy);
-    float3 up = position_at(uv - sy);
-    float bend_right = abs(2.0 * right.z - position_at(uv + 2.0 * sx).z - p.z);
-    float bend_left = abs(2.0 * left.z - position_at(uv - 2.0 * sx).z - p.z);
-    float bend_down = abs(2.0 * down.z - position_at(uv + 2.0 * sy).z - p.z);
-    float bend_up = abs(2.0 * up.z - position_at(uv - 2.0 * sy).z - p.z);
-    float3 dx = bend_right < bend_left ? right - p : p - left;
-    float3 dy = bend_down < bend_up ? down - p : p - up;
-    float3 n = cross(dy, dx);
-    float len = length(n);
-    if (len < 1e-12)
-    {
-        // A perfectly degenerate neighbourhood — a single-pixel island, or the
-        // frame's own edge. Facing the camera is the answer that occludes
-        // nothing rather than the one that occludes everything.
-        return float3(0.0, 0.0, 1.0);
-    }
-    n /= len;
-    // The prepass renders front faces, so the normal points back at the eye. The
-    // guard is against the *reconstruction's* sign, not the geometry's.
-    return dot(n, to_eye(p)) < 0.0 ? -n : n;
+    return reconstruct_normal(depth_view(), uv, p);
 }
 
 // How many world metres the radius is worth in pixels at this depth.

@@ -85,8 +85,28 @@ pub fn build_all(check: bool) -> anyhow::Result<()> {
     }
     modules.sort(); // deterministic order, deterministic logs
 
+    // The `include/` trees first (§6 M86): their generated modules hold the
+    // constants a compiled module's own Rust imports, so a run that stopped
+    // half way would leave the tree less consistent building them second.
+    // Deduplicated across modules, since a crate's shaders share one directory.
+    let mut include_dirs: Vec<PathBuf> = modules
+        .iter()
+        .filter_map(|m| m.parent().map(|d| d.join("include")))
+        .collect();
+    include_dirs.sort();
+    include_dirs.dedup();
+
     let mut built = 0usize;
     let mut skipped = 0usize;
+    for dir in &include_dirs {
+        for included in includes(dir)? {
+            if process_include(&included, check)? {
+                built += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+    }
     for module in &modules {
         if process_module(module, check)? {
             built += 1;
@@ -209,6 +229,71 @@ fn process_module(module: &Path, check: bool) -> anyhow::Result<bool> {
         } else {
             ""
         }
+    );
+    Ok(true)
+}
+
+/// Generate (or, under `check`, verify) one `#include`d file's constants module
+/// (§6 M86). Returns false when the source hash already matched.
+///
+/// No Slang session and no SPIR-V: an include has no entry points, and what a
+/// host wants from it is the numbers. Hashed over its own bytes alone — the
+/// concatenation `process_module` hashes exists so an *including* module goes
+/// stale when this file changes, which is a different question from whether
+/// this file's own artifact is current.
+fn process_include(included: &Path, check: bool) -> anyhow::Result<bool> {
+    let stem = included
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .ok_or_else(|| anyhow::anyhow!("include has no stem: {}", included.display()))?;
+    let crate_root = included
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| anyhow::anyhow!("include is not under <crate>/shaders/include/"))?;
+    let rs_path = crate_root
+        .join("src/shaders_gen")
+        .join(format!("{stem}.rs"));
+
+    let source = std::fs::read(included)?;
+    let hash = sha256_hex(&source);
+    let header = gg_shaders::codegen::header_line(&hash);
+    if !check
+        && let Ok(existing) = std::fs::read_to_string(&rs_path)
+        && existing.lines().nth(1) == Some(header.as_str())
+    {
+        return Ok(false);
+    }
+
+    let text = String::from_utf8(source)
+        .map_err(|e| anyhow::anyhow!("{}: not UTF-8: {e}", included.display()))?;
+    let constants = gg_shaders::constants::scan(&text)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", included.display()))?;
+    let generated = gg_shaders::codegen::generate_include(&stem, &constants, &hash);
+
+    if check {
+        let on_disk = std::fs::read_to_string(&rs_path).map_err(|_| {
+            anyhow::anyhow!(
+                "{}: missing — run `cargo xtask shaders` and commit (§5 gate 3)",
+                rs_path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            on_disk == generated,
+            "{}: stale against {} — run `cargo xtask shaders` and commit (§5 gate 3: \
+             reflection codegen diff-clean)",
+            rs_path.display(),
+            included.display()
+        );
+        return Ok(true);
+    }
+
+    std::fs::create_dir_all(rs_path.parent().unwrap_or(&rs_path))?;
+    std::fs::write(&rs_path, &generated)?;
+    println!(
+        "xtask: shaders/include/{stem}.slang -> {} ({} constants)",
+        rs_path.display(),
+        constants.len()
     );
     Ok(true)
 }

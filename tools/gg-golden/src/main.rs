@@ -171,6 +171,31 @@ const SCENES: &[Scene] = &[
         render: render_boxes_occluded,
     },
     Scene {
+        name: "corner-normals",
+        // The debug pass, which no golden had ever rendered (§6 M86) — thirteen
+        // views, one shader, and the only automated thing that ran it was
+        // pipeline creation. That is how `debug.slang` kept a copy of the
+        // occlusion pass's normal reconstruction for fourteen milestones after
+        // §6 M71 replaced it.
+        //
+        // It is the *normal* view because the reconstruction is now shared, so
+        // this picture is a witness for the AO pass as well as for the blit: a
+        // future edit to `include/depth.slang` moves this reference, which is
+        // the machine the transcription's own comment claimed to be.
+        //
+        // Tighter than its parent: a normal is a computed direction rather than
+        // a shaded surface, so nothing here is at a silhouette's mercy, and the
+        // whole point is that a rule change shows up.
+        policy: Policy {
+            tolerance: 2,
+            max_diff_pixels: 32,
+            benign_delta: 4,
+            max_dssim: 0.02,
+            max_bias: 0.25,
+        },
+        render: render_corner_normals,
+    },
+    Scene {
         name: "mesh-replay",
         // The curated replay, played back through the sim, captured deep into
         // the script (§4.10's replay-driven playback). Judged as strictly as
@@ -2433,11 +2458,106 @@ fn render_boxes() -> Render {
 }
 
 fn render_boxes_occluded() -> Render {
-    render_boxes_from(gg_render::View {
+    render_boxes_from(occluded_view())
+}
+
+/// The angle that makes the three boxes overlap.
+fn occluded_view() -> gg_render::View {
+    gg_render::View {
         yaw: 0.14,
         pitch: -0.15,
         ..gg_render::View::default()
+    }
+}
+
+/// The depth buffer's own normal, through `r.debug_view normal` (§6 M86).
+///
+/// **A concave corner, not a silhouette.** The first version of this scene put
+/// the view over `boxes-occluded`, where three boxes overlap and the only depth
+/// discontinuities are silhouettes — the pre-M71 nearer-neighbour rule moved 28
+/// pixels of it, which is inside any budget a computed direction can safely
+/// carry. What §6 M71 is about is a *crease*: a glancing surface meeting a
+/// head-on one, where the nearer neighbour is across the seam rather than along
+/// it. So this scene is a wall and a floor meeting at a right angle, with a
+/// block standing in the corner to make three more of them, seen from an eye
+/// yawed and pitched off the axes. `View` carries no roll, so the block's own
+/// vertical edges still project vertically — §6 M71's finding that a seam
+/// exactly along a screen axis is a seam the defect cannot walk in — but the
+/// floor/wall seam and the two the block makes with the floor land slanted,
+/// which is where the rule is actually asked a question.
+///
+/// The CVar is restored on the way out, on the argument the `load` subcommand's
+/// `AO` guard states: a CVar is process-global and nothing promises this is the
+/// only scene the process renders. Leaving it set would show every later scene
+/// its own normals, which is a failure that reads as thirty broken references.
+fn render_corner_normals() -> Render {
+    let _view = Restore(gg_render::cvars::DEBUG_VIEW.int(), |was| {
+        gg_render::cvars::DEBUG_VIEW.set_int(was);
+    });
+    gg_render::cvars::DEBUG_VIEW.set_int(gg_render::cvars::views::NORMAL as i64);
+
+    let extent = BOXES_EXTENT;
+    let view = gg_render::View {
+        yaw: 0.55,
+        pitch: -0.32,
+        ..gg_render::View::default()
+    };
+    let extracted = corner_world(view.frustum(extent))?;
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?)
+    })?;
+    ensure_clean(&renderer.shutdown())?;
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
     })
+}
+
+/// Two slabs meeting at a right angle with a block in the corner: six concave
+/// seams and no pack (§6 M86).
+fn corner_world(frustum: gg_extract::Frustum) -> anyhow::Result<gg_extract::Extracted> {
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Light, Renderable};
+    use gg_math::sim;
+
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    world.register::<Light>()?;
+    let sun = world.spawn();
+    world.insert(
+        sun,
+        Light::sun(sim::Vec3::new(-0.35, -0.86, -0.37), 0x00ff_f4e0, 3.2),
+    )?;
+    for (position, half_extent, color) in [
+        // Floor and back wall — the seam between them runs across the frame.
+        (
+            sim::DVec3::new(0.0, -2.0, -6.0),
+            sim::Vec3::new(5.0, 0.2, 5.0),
+            0x00b0_b0b0,
+        ),
+        (
+            sim::DVec3::new(0.0, 0.0, -10.8),
+            sim::Vec3::new(5.0, 3.0, 0.2),
+            0x00a0_a8b0,
+        ),
+        // The block: four more seams, two of them at a glancing angle from here.
+        (
+            sim::DVec3::new(-0.9, -1.0, -7.4),
+            sim::Vec3::splat(0.8),
+            0x0060_ff60,
+        ),
+    ] {
+        let entity = world.spawn();
+        world.insert(entity, Renderable::boxed(position, half_extent, color))?;
+    }
+    let mut extracted = gg_extract::Extracted::default();
+    extracted.transforms::<Renderable>(&world, gg_math::sim::DVec3::ZERO, frustum)?;
+    extracted.append_lights(&world)?;
+    Ok(extracted)
 }
 
 /// The engine's own v1 pass list, headless (§1.5): the same `scene_graph` the

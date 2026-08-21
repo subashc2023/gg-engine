@@ -349,13 +349,85 @@ pub static DEBUG_SCALE: CVar =
 
 /// What [`DEBUG_VIEW`]'s index means, in order. Index 0 is off.
 ///
-/// Public because the editor lists them and `gg-tools` names them, and a second
-/// copy of this table is a second copy that goes stale — `debug_source` in the
-/// renderer is what resolves an index against the frame, and it reads this one.
-pub const DEBUG_VIEWS: &[&str] = &[
-    "off", "scene", "depth", "normal", "ao", "ao-raw", "shadow.0", "shadow.1", "shadow.2",
-    "shadow.3", "lamps", "field", "moments",
-];
+/// Public because the editor lists them and `gg-tools` names them. The claim
+/// here used to be that `debug_source` "reads this one" and so a second copy
+/// could not go stale; it was **false** (§6 M86). That function is a `match` on
+/// bare integers and touched this table only for its `len()`, and
+/// `debug_wants_depth` was a third copy of the same ordering — so a view
+/// inserted anywhere but the end would have renamed every later one, with the
+/// comment saying it could not happen.
+///
+/// The ordering is now [`views`] and this table is *derived from it*, so a row
+/// is a name and an index at once and the renderer's arms are named.
+pub const DEBUG_VIEWS: &[&str] = views::NAMES;
+
+/// One ordering for `r.debug_view`: the index, the name, and the arm the
+/// renderer resolves (§6 M86).
+///
+/// A `usize` per view rather than an enum because the CVar carries a number and
+/// the editor lists strings — an enum would need a conversion at each end, which
+/// is two more places for the ordering to live.
+pub mod views {
+    /// The names, in index order. Index 0 is off.
+    pub const NAMES: &[&str] = &[
+        "off", "scene", "depth", "normal", "ao", "ao-raw", "shadow.0", "shadow.1", "shadow.2",
+        "shadow.3", "lamps", "field", "moments",
+    ];
+
+    /// The picture, unmodified — the one view whose source is the frame itself.
+    pub const SCENE: usize = 1;
+    /// The camera's depth as metres.
+    pub const DEPTH: usize = 2;
+    /// The normal `gg-render`'s occlusion pass reconstructs from that depth.
+    pub const NORMAL: usize = 3;
+    /// The denoised occlusion target.
+    pub const AO: usize = 4;
+    /// The occlusion pass's own output, before the blur.
+    pub const AO_RAW: usize = 5;
+    /// The first sun cascade; the four are contiguous.
+    pub const SHADOW_0: usize = 6;
+    /// One past the last cascade — the half-open end of that run.
+    pub const SHADOW_END: usize = 10;
+    /// The lamp atlas.
+    pub const LAMPS: usize = 10;
+    /// The irradiance field's radiance record.
+    pub const FIELD: usize = 11;
+    /// The field's visibility moments.
+    pub const MOMENTS: usize = 12;
+
+    /// Every index has a name and every name its index — the assertion that
+    /// makes the two halves above one fact rather than two.
+    const _: () = {
+        assert!(NAMES.len() == MOMENTS + 1);
+        assert!(SHADOW_END == SHADOW_0 + 4);
+        // A `&str` comparison is not `const`, so the check is on the bytes.
+        const fn is(index: usize, name: &str) -> bool {
+            let (a, b) = (NAMES[index].as_bytes(), name.as_bytes());
+            if a.len() != b.len() {
+                return false;
+            }
+            let mut i = 0;
+            while i < a.len() {
+                if a[i] != b[i] {
+                    return false;
+                }
+                i += 1;
+            }
+            true
+        }
+        assert!(is(0, "off"));
+        assert!(is(SCENE, "scene"));
+        assert!(is(DEPTH, "depth"));
+        assert!(is(NORMAL, "normal"));
+        assert!(is(AO, "ao"));
+        assert!(is(AO_RAW, "ao-raw"));
+        assert!(is(SHADOW_0, "shadow.0"));
+        assert!(is(SHADOW_END - 1, "shadow.3"));
+        assert!(is(LAMPS, "lamps"));
+        assert!(is(FIELD, "field"));
+        assert!(is(MOMENTS, "moments"));
+    };
+}
 
 /// Whether the irradiance nobody authored is gathered at all (§6 M36).
 ///

@@ -54,7 +54,7 @@ use crate::{GpuHost, SCENE_FORMAT, View, srgb_to_linear};
 /// `gg_assets::Vertex` is what `scene.slang`'s `VERTEX_STRIDE` says it is, so a
 /// change to the file format is a build error rather than a garbled mesh.
 const _: () = {
-    assert!(core::mem::size_of::<gg_assets::Vertex>() == 48);
+    assert!(core::mem::size_of::<gg_assets::Vertex>() == shader::consts::VERTEX_STRIDE as usize);
     assert!(core::mem::offset_of!(gg_assets::Vertex, normal) == 12);
     assert!(core::mem::offset_of!(gg_assets::Vertex, uv) == 24);
     assert!(core::mem::offset_of!(gg_assets::Vertex, tangent) == 32);
@@ -1245,9 +1245,12 @@ mod tests {
 
     #[test]
     fn the_instance_record_is_what_the_shader_strides_by() {
-        // `scene.slang` hardcodes INSTANCE_STRIDE; this is the other half of
-        // that agreement, the way the vertex assertions above are.
-        assert_eq!(core::mem::size_of::<GpuInstance>(), 128);
+        // The stride comes out of `scene.slang` since §6 M86, so this is one
+        // number rather than the two halves of an agreement it used to be.
+        assert_eq!(
+            core::mem::size_of::<GpuInstance>(),
+            shader::consts::INSTANCE_STRIDE as usize
+        );
         assert_eq!(core::mem::offset_of!(GpuInstance, tint), 64);
         assert_eq!(core::mem::offset_of!(GpuInstance, rotation), 80);
         assert_eq!(core::mem::offset_of!(GpuInstance, offset), 96);

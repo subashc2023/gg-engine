@@ -15,16 +15,14 @@
 // fullscreen triangle notices.
 
 #include "include/dither.slang"
+// Not a transcription of the occlusion pass any more (§6 M86): MODE_NORMAL is a
+// picture of what that pass reconstructs, so the reconstruction is one function
+// and `PROJECTION_*` is one pair of constants.
+#include "include/depth.slang"
 
 // The global set (§4.3). Binding 1 (storage images) has no consumer here.
 [[vk::binding(0, 0)]] Texture2D<float4> g_textures[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
-
-// `ao.slang`'s two, and they mean the same thing — this shader reconstructs
-// position exactly as the occlusion pass does, because half of what it is for is
-// showing what that pass saw.
-static const uint PROJECTION_PERSPECTIVE = 0u;
-static const uint PROJECTION_ORTHOGRAPHIC = 1u;
 
 // How to read a texel of `source_index`.
 static const uint MODE_SCENE = 0u;  // linear radiance, exposed, no curve
@@ -76,44 +74,19 @@ float4 fetch(float2 uv)
     return g_textures[push.source_index].SampleLevel(g_samplers[push.sampler_index], uv, 0);
 }
 
-// `ao.slang`'s, transcribed rather than shared: an include would put the whole
-// occlusion pass in this translation unit for four lines, and the two are
-// checked against each other by the fact that MODE_NORMAL is *read* — a
-// reconstruction that drifted from the one AO marches against would show it.
-float3 view_position(float2 uv, float d)
+// The source read as a depth buffer, for the two modes that reconstruct from it.
+// `source_index` is the depth image in exactly those two cases, which is what
+// makes one `DepthView` serve a blit that mostly shows something else.
+DepthView depth_view()
 {
-    float2 ndc = uv * 2.0 - 1.0;
-    if (push.projection == PROJECTION_ORTHOGRAPHIC)
-    {
-        return float3(ndc * push.project, d * push.depth_params.x + push.depth_params.y);
-    }
-    float linear_depth = push.depth_params.x / max(d, 1e-9);
-    return float3(ndc * push.project * linear_depth, -linear_depth);
-}
-
-float3 position_at(float2 uv)
-{
-    return view_position(uv, fetch(uv).r);
-}
-
-float3 reconstruct_normal(float2 uv, float3 p)
-{
-    float3 right = position_at(uv + float2(push.texel.x, 0.0));
-    float3 left = position_at(uv - float2(push.texel.x, 0.0));
-    float3 down = position_at(uv + float2(0.0, push.texel.y));
-    float3 up = position_at(uv - float2(0.0, push.texel.y));
-    float3 dx = abs(right.z - p.z) < abs(p.z - left.z) ? right - p : p - left;
-    float3 dy = abs(down.z - p.z) < abs(p.z - up.z) ? down - p : p - up;
-    float3 n = cross(dy, dx);
-    float len = length(n);
-    if (len < 1e-12)
-    {
-        return float3(0.0, 0.0, 1.0);
-    }
-    n /= len;
-    float3 to_eye = push.projection == PROJECTION_ORTHOGRAPHIC ? float3(0.0, 0.0, 1.0)
-                                                               : normalize(-p);
-    return dot(n, to_eye) < 0.0 ? -n : n;
+    DepthView v;
+    v.image = g_textures[push.source_index];
+    v.samp = g_samplers[push.sampler_index];
+    v.projection = push.projection;
+    v.texel = push.texel;
+    v.project = push.project;
+    v.depth_params = push.depth_params;
+    return v;
 }
 
 // Outside the source: what a letterboxed atlas sits on. A mid grey rather than
@@ -175,13 +148,13 @@ float3 shown(VOut i, float2 uv)
     {
         return float3(0.0);
     }
-    float3 p = view_position(uv, d);
+    float3 p = view_position(depth_view(), uv, d);
     if (push.mode == MODE_NORMAL)
     {
         // Half-and-half, the usual encoding: a normal is signed and the target
         // is not, and a view where "up" is a recognisable colour is worth more
         // than one where half the range is clipped to black.
-        return reconstruct_normal(uv, p) * 0.5 + 0.5;
+        return reconstruct_normal(depth_view(), uv, p) * 0.5 + 0.5;
     }
     // MODE_DEPTH. Distance along the view axis rather than to the eye: it is
     // what the reconstruction produces and what every consumer of this buffer

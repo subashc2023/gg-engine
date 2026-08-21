@@ -63,6 +63,14 @@ mod shaders_gen {
     pub mod ugly;
     /// The UI layer's one pipeline.
     pub mod ui;
+    // The `#include`d files: no entry points, no push constants, and the
+    // numbers a host would otherwise write down a second time (§6 M86).
+    /// Depth reconstruction, shared by the occlusion pass and the debug blit.
+    pub mod depth;
+    /// The ordered dither `post` and `debug` both apply (§6 M22).
+    pub mod dither;
+    /// The shading model's binary layout and its `SHADING_*` bits (§6 M11).
+    pub mod pbr;
 }
 
 use std::path::Path;
@@ -79,6 +87,7 @@ pub use lighting::{CascadeReach, cascade_reach};
 // Re-exported because [`View::samples`] is spelled in it and the shell sets
 // that field: a host would otherwise have to depend on `gg-rhi` to name a
 // count, which §3 keeps to this crate's own dependents.
+use cvars::views;
 pub use gg_rhi::Samples;
 use gg_rhi::{
     Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthMode, DeviceAddress,
@@ -91,6 +100,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use scene::ScenePass;
 use shaders_gen::ao as ao_shader;
 use shaders_gen::debug as debug_shader;
+use shaders_gen::depth::consts as depth_consts;
 use shaders_gen::post as post_shader;
 use shaders_gen::skybox as skybox_shader;
 use shaders_gen::ugly as shader;
@@ -106,7 +116,7 @@ struct Vertex {
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<Vertex>() == 24);
+    assert!(core::mem::size_of::<Vertex>() == shader::consts::VERTEX_STRIDE as usize);
     assert!(core::mem::offset_of!(Vertex, normal) == 12);
 };
 
@@ -2243,13 +2253,12 @@ struct SceneAttachments {
 /// `debug.slang`'s `MODE_*`, mirrored. Two copies of five numbers, and the
 /// agreement is asserted by [`debug_source`] naming both the mode and the image
 /// it applies to — a swapped pair shows the wrong thing rather than nothing.
-mod debug_mode {
-    pub const SCENE: u32 = 0;
-    pub const DEPTH: u32 = 1;
-    pub const NORMAL: u32 = 2;
-    pub const RED: u32 = 3;
-    pub const RGB: u32 = 4;
-}
+/// `debug.slang`'s `MODE_*`, under the names the resolver below reads (§6 M86).
+///
+/// Five `const`s mirroring the shader's five until M86. A sixth mode added
+/// there would have been a number typed here too, and a blit is the one pass
+/// whose wrong answer looks like a picture.
+use shaders_gen::debug::consts as debug_mode;
 
 /// What `r.debug_view` resolved to against this frame (§6 M59).
 #[derive(Clone, Copy)]
@@ -2321,7 +2330,7 @@ fn debug_view() -> usize {
 /// The two views that read the camera's depth, and therefore the only reason a
 /// frame with `r.ao` off would allocate a *sampleable* one.
 fn debug_wants_depth(view: usize) -> bool {
-    matches!(view, 2 | 3)
+    matches!(view, views::DEPTH | views::NORMAL)
 }
 
 /// Acquire them, in the order the graph dump lists resources.
@@ -2419,33 +2428,33 @@ fn scene_attachments(
     let square = |size: u32| ((size, size), (size, size));
     let all = (1, 1);
     let debug = match view {
-        1 => Some((scene, debug_mode::SCENE, 1.0, camera, all)),
-        2 => ao_source.map(|id| (id, debug_mode::DEPTH, 50.0, camera, all)),
-        3 => ao_source.map(|id| (id, debug_mode::NORMAL, 1.0, camera, all)),
-        4 => ao_target.map(|id| (id, debug_mode::RED, 1.0, camera, all)),
-        5 => ao_raw.map(|id| (id, debug_mode::RED, 1.0, camera, all)),
-        6..=9 => shadows
-            .get(view - 6)
+        views::SCENE => Some((scene, debug_mode::MODE_SCENE, 1.0, camera, all)),
+        views::DEPTH => ao_source.map(|id| (id, debug_mode::MODE_DEPTH, 50.0, camera, all)),
+        views::NORMAL => ao_source.map(|id| (id, debug_mode::MODE_NORMAL, 1.0, camera, all)),
+        views::AO => ao_target.map(|id| (id, debug_mode::MODE_RED, 1.0, camera, all)),
+        views::AO_RAW => ao_raw.map(|id| (id, debug_mode::MODE_RED, 1.0, camera, all)),
+        views::SHADOW_0..views::SHADOW_END => shadows
+            .get(view - views::SHADOW_0)
             .zip(sun)
-            .map(|(id, sun)| (*id, debug_mode::RED, 1.0, square(sun.size), all)),
-        10 => lamp_atlas.map(|id| {
+            .map(|(id, sun)| (*id, debug_mode::MODE_RED, 1.0, square(sun.size), all)),
+        views::LAMPS => lamp_atlas.map(|id| {
             let extent = lamps.extent();
-            (id, debug_mode::RED, 1.0, (extent, extent), all)
+            (id, debug_mode::MODE_RED, 1.0, (extent, extent), all)
         }),
-        11 => field_sh.zip(probes.sh_live()).map(|(id, (live, whole))| {
+        views::FIELD => field_sh.zip(probes.sh_live()).map(|(id, (live, whole))| {
             let kept = probe::SH_TEXELS - 1;
             let shown = (live.0 / probe::SH_TEXELS * kept, live.1);
             (
                 id,
-                debug_mode::RGB,
+                debug_mode::MODE_RGB,
                 1.0,
                 (shown, whole),
                 (kept, probe::SH_TEXELS),
             )
         }),
-        12 => field_moments
+        views::MOMENTS => field_moments
             .zip(probes.moment_live())
-            .map(|(id, shape)| (id, debug_mode::RED, 0.02, shape, all)),
+            .map(|(id, shape)| (id, debug_mode::MODE_RED, 0.02, shape, all)),
         _ => None,
     }
     .map(|(id, mode, scale, (live, whole), group)| DebugSource {
@@ -3320,14 +3329,22 @@ impl BoxPass {
             // inverts to `view.z = ndc.z * range + z0`.
             let far = view.ortho_far.max(view.near * 2.0);
             let range = far - view.near;
-            (1, [view.ortho * aspect, -view.ortho], [range, -far])
+            (
+                depth_consts::PROJECTION_ORTHOGRAPHIC,
+                [view.ortho * aspect, -view.ortho],
+                [range, -far],
+            )
         } else {
             // `perspective_reverse_z`'s own expression, not `1/tan`: the two
             // differ by an ulp, and a reconstruction that disagreed with the
             // projection by an ulp is a depth buffer read at the wrong scale.
             let (sin_half, cos_half) = gg_math::sim::sin_cos(view.fov_y * 0.5);
             let h = cos_half / sin_half;
-            (0, [aspect / h, -1.0 / h], [view.near, 0.0])
+            (
+                depth_consts::PROJECTION_PERSPECTIVE,
+                [aspect / h, -1.0 / h],
+                [view.near, 0.0],
+            )
         };
         Ok(ao_shader::AoPush::new(
             depth.get(),
@@ -3344,7 +3361,9 @@ impl BoxPass {
             cvars::AO_STEPS.int().clamp(1, 32) as u32,
             cvars::AO_FALLOFF.float().max(1e-3) as f32,
             cvars::AO_BIAS.float().max(0.0) as f32,
-            cvars::AO_PATTERN.int().clamp(0, 2) as u32,
+            cvars::AO_PATTERN
+                .int()
+                .clamp(0, i64::from(ao_shader::consts::PATTERN_BALANCED)) as u32,
         ))
     }
 
@@ -4402,12 +4421,18 @@ fn present_index(present: gg_rhi::Present) -> i64 {
 /// The inverse — what the swapchain granted, as the number `r.hdr` and the post
 /// pass both speak. The two must stay each other's inverse, which is what
 /// `the_output_cvar_and_the_swapchain_agree_on_what_the_numbers_mean` holds.
+///
+/// The numbers are `post.slang`'s own since §6 M86. That test held two of the
+/// three copies of this ordering together and could not see the third: the
+/// shader tests `push.output` against `OUTPUT_*`, and a fourth contract inserted
+/// anywhere but the end would have tonemapped HDR10 as scRGB with every
+/// assertion here green.
 fn output_index(output: gg_rhi::Output) -> i64 {
-    match output {
-        gg_rhi::Output::Sdr => 0,
-        gg_rhi::Output::Hdr10 => 1,
-        gg_rhi::Output::ScRgb => 2,
-    }
+    i64::from(match output {
+        gg_rhi::Output::Sdr => post_shader::consts::OUTPUT_SDR,
+        gg_rhi::Output::Hdr10 => post_shader::consts::OUTPUT_HDR10,
+        gg_rhi::Output::ScRgb => post_shader::consts::OUTPUT_SCRGB,
+    })
 }
 
 /// The display's peak in units of diffuse white — what the tonemapper's shoulder

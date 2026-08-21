@@ -32,7 +32,10 @@ pub struct UiVertex {
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<UiVertex>() == 20);
+    assert!(
+        core::mem::size_of::<UiVertex>()
+            == crate::shaders_gen::ui::consts::UI_VERTEX_STRIDE as usize
+    );
     assert!(core::mem::offset_of!(UiVertex, uv) == 8);
     assert!(core::mem::offset_of!(UiVertex, color) == 16);
 };
