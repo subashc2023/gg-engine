@@ -1,11 +1,12 @@
 //! How the editor gets a pointer over a game that never asked for one (§4.7,
 //! §4.9).
 //!
-//! `gg_ui::boundary` routes a *game's* UI through four well-known verbs the
-//! game declares. An editor cannot require that: a game declaring `ui_click`
-//! would be an editable game and every other one would open into a window with
-//! no cursor. So the host **appends** whichever of the four the loaded build did
-//! not declare, and binds them.
+//! `gg_ui::boundary` routes a *game's* UI through well-known verbs the game
+//! declares. An editor cannot require that: a game declaring `ui_click` would be
+//! an editable game and every other one would open into a window with no cursor.
+//! So the host **appends** whichever of `DEFAULTS` the loaded build did not
+//! declare, and binds them — twenty of them now, six `ui_*` and the editor's own
+//! fourteen, which that table lists with its own history.
 //!
 //! The point of appending rather than opening a side channel is §6 M15's fourth
 //! exit row. Editor input then lives in the same [`InputFrame`] the recorder

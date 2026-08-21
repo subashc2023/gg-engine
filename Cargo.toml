@@ -182,8 +182,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [workspace.lints.clippy]
-# Error-handling policy (§2): unwrap/expect forbidden in engine crates. Tools and
-# xtask do not inherit workspace lints; tests carry an explicit #[allow].
+# Error-handling policy (§2): unwrap/expect forbidden in engine crates. `xtask`
+# does not inherit workspace lints; every `tools/*` crate does (each carries
+# `[lints] workspace = true`). Tests carry an explicit #[allow].
 unwrap_used = "deny"
 expect_used = "deny"
 # Determinism mechanisms (§3): the method and type lists live in clippy.toml.

@@ -1679,12 +1679,15 @@ fn no_imported_math(profile: &str) -> anyhow::Result<()> {
         }
     }
     fresh.sort();
-    anyhow::ensure!(
-        !fresh.is_empty(),
-        "no aarch64 {profile_dir} artifact in {} was built from the tree's current sources — the \
-         scan below would have passed by reading nothing",
-        deps.display(),
-    );
+    crate::census::graded(
+        fresh.len(),
+        &format!("§8's aarch64 {profile_dir} import scan"),
+        &format!(
+            "no artifact in {} was built from the tree's current sources, so the scan below \
+             would have passed by reading nothing",
+            deps.display()
+        ),
+    )?;
 
     let readelf = ["aarch64-linux-gnu-readelf", "llvm-readelf", "readelf"]
         .into_iter()
@@ -2030,6 +2033,14 @@ pub(crate) fn contains_path(text: &str, needle: &str) -> bool {
 
 fn greps() -> anyhow::Result<()> {
     let (violations, scanned) = scan(&workspace_root())?;
+    // `walk_rs` returns silently on a directory that is not there, so every §3
+    // grep over a renamed tree is a green line reporting zero files (§6 M87).
+    crate::census::graded(
+        scanned,
+        "the §3 greps",
+        "no source file under apps/, crates/, demos/, tools/ or xtask/ was read, so every ban \
+         below held over nothing",
+    )?;
     anyhow::ensure!(
         violations.is_empty(),
         "grep gate failed:\n{}",
@@ -2648,6 +2659,16 @@ fn allowlist_crosscheck() -> anyhow::Result<()> {
     // added there to make cargo-deny green is an exemption taken without the
     // review §4.1 requires. The other direction can only fire if someone writes
     // an allowlist row and then declines to use it.
+    // Both sides above end in `unwrap_or_default()`, so a restructure of either
+    // file leaves an empty set — and two empty sets agree (§6 M87). One arm is
+    // enough: an empty `exempt` against a populated `wrappers` is caught below,
+    // and the pair only goes silent when this one is zero.
+    crate::census::graded(
+        exempt.len(),
+        "the rayon allowlist",
+        "determinism-allowlist.toml parsed to no rayon exemption, so both sides of this \
+         comparison are empty and agree for that reason",
+    )?;
     let unreviewed: Vec<&&str> = wrappers.iter().filter(|c| !exempt.contains(**c)).collect();
     anyhow::ensure!(
         unreviewed.is_empty(),
@@ -2944,8 +2965,23 @@ render graph
         root
     }
 
+    /// The scan's violations, with the assertion that makes the *forgiving*
+    /// half of this corpus mean anything (§6 M87).
+    ///
+    /// Every plant below in the innocent direction asserts `is_empty()`, and a
+    /// plant written to a path [`super::scan`] does not walk produces exactly
+    /// that — so a typo in a fixture path turned the test into a green check on
+    /// a directory nobody read. `walk_rs` returns silently on a missing
+    /// directory, which is what makes the mistake invisible rather than loud.
     fn violations(root: &Path) -> Vec<String> {
-        super::scan(root).unwrap().0
+        let (found, scanned) = super::scan(root).unwrap();
+        assert!(
+            scanned > 0,
+            "{} held no source file the scan walks — a plant that lands outside apps/, crates/, \
+             demos/, tools/ or xtask/ makes every `is_empty()` below pass over nothing",
+            root.display()
+        );
+        found
     }
 
     /// Gate 7's test-binary scan finds its targets by parsing cargo's JSON

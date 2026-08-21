@@ -473,7 +473,8 @@ pub fn check() -> anyhow::Result<()> {
     dependencies()?;
     unused_dependencies()?;
     game_crate_pin()?;
-    reference_images()
+    reference_images()?;
+    crate::census::check()
 }
 
 /// Where the other copy of [`GAME_CRATE_PIN`] lives.
@@ -524,10 +525,11 @@ fn imported_math_lists() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("no {FP_ISA}: {e}"))?;
     let mut instrument = crate::ci::names_in_list(&text, "IMPORTED_MATH");
     let mut gate: Vec<&str> = crate::ci::IMPORTED_MATH.to_vec();
-    anyhow::ensure!(
-        !instrument.is_empty(),
-        "{FP_ISA} declares no `IMPORTED_MATH` this gate can read — the scan found nothing"
-    );
+    crate::census::graded(
+        instrument.len(),
+        "the instrument's math-import list",
+        &format!("{FP_ISA} declares no `IMPORTED_MATH` this gate can read"),
+    )?;
     instrument.sort_unstable();
     gate.sort_unstable();
     anyhow::ensure!(
@@ -564,11 +566,11 @@ const HEADLESS_READ: &str = "var_os(\"GG_HEADLESS\")";
 /// precisely the drift that makes `GG_HEADLESS=0` mean headless-*on*.
 fn headless_parses() -> anyhow::Result<()> {
     let sites = headless_sites()?;
-    anyhow::ensure!(
-        !sites.is_empty(),
-        "no crate reads `{HEADLESS_READ}` — §1.5's law is enforced in three of them and the scan \
-         found none, so this gate is comparing nothing"
-    );
+    crate::census::graded(
+        sites.len(),
+        "§1.5's headless readers",
+        &format!("no crate reads `{HEADLESS_READ}`, and the law is enforced in three of them"),
+    )?;
     let (first_file, first) = &sites[0];
     for (at_file, parse) in &sites[1..] {
         anyhow::ensure!(
@@ -661,11 +663,11 @@ fn watched_shader_modules() -> anyhow::Result<()> {
     let text = std::fs::read_to_string(root.join(HOT_MODULE_TABLE))
         .map_err(|e| anyhow::anyhow!("no {HOT_MODULE_TABLE}: {e}"))?;
     let watched = watched_names(&text);
-    anyhow::ensure!(
-        !watched.is_empty(),
-        "{HOT_MODULE_TABLE} declares no `MODULES` table this gate can read — the scan found \
-         nothing, which is how a gate stops being one"
-    );
+    crate::census::graded(
+        watched.len(),
+        "the hot-reload module table",
+        &format!("{HOT_MODULE_TABLE} declares no `MODULES` this gate can read"),
+    )?;
     let mut unwatched = Vec::new();
     let mut modules = 0usize;
     for entry in std::fs::read_dir(root.join(SHADER_DIR))?.flatten() {
@@ -683,10 +685,11 @@ fn watched_shader_modules() -> anyhow::Result<()> {
             unwatched.push(stem);
         }
     }
-    anyhow::ensure!(
-        modules > 0,
-        "no `.slang` modules under {SHADER_DIR} — the scan found nothing to check"
-    );
+    crate::census::graded(
+        modules,
+        "the watched shader modules",
+        &format!("no `.slang` under {SHADER_DIR} for the table to be missing one of"),
+    )?;
     anyhow::ensure!(
         unwatched.is_empty(),
         "{unwatched:?} under {SHADER_DIR} have no hot-reload watcher in {HOT_MODULE_TABLE} — an \
@@ -775,11 +778,11 @@ fn widget_provenance() -> anyhow::Result<()> {
     let protocol = std::fs::read_to_string(root.join(WIDGET_PROTOCOL))?;
     let drawn = std::fs::read_to_string(root.join(WIDGET_DRAW))?;
     let kinds = widget_kinds(&protocol);
-    anyhow::ensure!(
-        !kinds.is_empty(),
-        "no widget kinds found in {WIDGET_PROTOCOL} — a check that finds nothing to check passes \
-         vacuously (§5.8's rule, applied to §3's `gg-ui` rule)"
-    );
+    crate::census::graded(
+        kinds.len(),
+        "§3's widget kinds",
+        &format!("the scan found none in {WIDGET_PROTOCOL} to demand a demo for"),
+    )?;
     let games: Vec<(String, String)> = game_crate_dirs()?
         .into_iter()
         .map(|(name, dir)| {
@@ -831,11 +834,11 @@ fn shader_block_loaders() -> anyhow::Result<()> {
     let text = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("no shader blocks at {}: {e}", path.display()))?;
     let blocks = shader_structs(&text);
-    anyhow::ensure!(
-        !blocks.is_empty(),
-        "no block structs found in {SHADER_BLOCKS} — a check that finds nothing to check passes \
-         vacuously (§5.8's rule)"
-    );
+    crate::census::graded(
+        blocks.len(),
+        "the shader's block structs",
+        &format!("the scan found none in {SHADER_BLOCKS} to demand a loader for"),
+    )?;
     let fields: usize = blocks.iter().map(|(_, f)| f.len()).sum();
     let offenders = judge_blocks(&text, &blocks);
     anyhow::ensure!(
@@ -1116,6 +1119,14 @@ fn unused_dependencies() -> anyhow::Result<()> {
             }
         }
     }
+    // `workspace_members` reads `Cargo.toml`'s member globs; a parse that lost
+    // them leaves this loop with nothing and the gate green (§6 M87).
+    crate::census::graded(
+        checked,
+        "the declared dependencies",
+        "no workspace member declared one this gate could reach for, so `unused` held over an \
+         empty set",
+    )?;
     anyhow::ensure!(
         offenders.is_empty(),
         "unused dependencies (§3):\n  {}\n\nDelete the line, or — if the use is real and \

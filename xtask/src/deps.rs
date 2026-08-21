@@ -588,9 +588,19 @@ pub fn check_folder(folder: &Path) -> anyhow::Result<()> {
             );
         }
     }
-    // The vacuity guard every "find and check" gate here carries: a folder whose
-    // executable was renamed past the extension filter would satisfy the loop
-    // above by holding nothing to check.
+    // The vacuity guard §6 M87 made a roster of — this comment used to claim
+    // *every* "find and check" gate here carried one, and nine did against seven
+    // that did not. Two rather than one: a folder whose executable was renamed
+    // past the extension filter satisfies the loop above by holding nothing to
+    // check, and a shipped folder holds at least the shell and the game dylib.
+    crate::census::graded(
+        read,
+        "the shipped folder's artifacts",
+        &format!(
+            "nothing in {} matched the extension filter, so no import table was read",
+            folder.display()
+        ),
+    )?;
     anyhow::ensure!(
         read >= 2,
         "xtask ship: only {read} artifact(s) in {} had a dependency surface — a shipped folder \

@@ -79,10 +79,15 @@ pub fn build_all(check: bool) -> anyhow::Result<()> {
     for base in ["crates", "demos"] {
         find_slang(&root.join(base), &mut modules);
     }
-    if modules.is_empty() {
-        println!("xtask shaders: no .slang modules in the tree");
-        return Ok(());
-    }
+    // Until §6 M87 this was an early `return Ok(())` with a friendly message, so
+    // gate 3 — the diff-clean check the whole codegen contract rests on — was one
+    // renamed directory away from being a green line that verified nothing.
+    crate::census::graded(
+        modules.len(),
+        "gate 3's shader modules",
+        "no `.slang` under crates/ or demos/, so the codegen diff-clean check has nothing to \
+         compare and the checked-in artifacts are unverified",
+    )?;
     modules.sort(); // deterministic order, deterministic logs
 
     // The `include/` trees first (§6 M86): their generated modules hold the

@@ -7,6 +7,7 @@ mod assets;
 mod backlog;
 mod bench;
 mod budgets;
+mod census;
 mod ci;
 mod deps;
 mod dist;

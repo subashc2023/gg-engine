@@ -6,71 +6,71 @@
 //! them gate: a number that hardens into a threshold moves to `xtask`, and this
 //! keeps the microscope.
 //!
-//! Usage:
-//!   gg-tools shadow-bias [--json]   sweep the §6 M11 acne knobs against an
-//!                                   8x-denser reference and print the plateau
-//!   gg-tools shadow-fit             what the single cascade's radius costs the
-//!                                   picture, per radius, against a tight leg
-//!   gg-tools shadow-flat            the flat camera's contact band (§6 M20):
-//!                                   band vs shade over bias and fit
-//!   gg-tools shadow-sweep           what a turning camera does to the shadows
-//!                                   in a room standing still around it
-//!   gg-tools shadow-edge            how straight a distant shadow's edge is,
-//!                                   against how soft the filter made it
-//!   gg-tools shadow-reach [--pack]  the blocker a cascade has no depth for
-//!                                   (§6 M60): dropped casters against reach
-//!   gg-tools lights                 what a light costs a frame, swept over
-//!                                   count and over `r.clusters` (§6 M30)
-//!   gg-tools lamps [--cost|--bias]  what a *casting* lamp costs, swept over
-//!                                   `r.lamps` and face size, and where its
-//!                                   bias belongs — lost against leaked (§6 M31)
-//!   gg-tools cull                  what giving a batch bounds bought the
-//!                                   shadow passes, over *pack* geometry (§6 M32)
-//!   gg-tools furnace                whether a white metal gives back what it
-//!                                   was given, and whether the lobe it gives it
-//!                                   back along points where the lobe is (§6 M33)
-//!   gg-tools split-sum              what [Laz13]'s fit costs where §6 M33 spends
-//!                                   it, and what a table buys back (§6 M34)
-//!   gg-tools ao                     how much occlusion a scene has, and how far
-//!                                   a depth buffer gets toward it (§6 M35)
-//!   gg-tools bounce [--slow]        how much of a room's light got there by
-//!                                   bouncing, against the volume somebody drew
-//!                                   by hand (§6 M36)
-//!   gg-tools facets                 how flat the field's answer is on a flat
-//!                                   wall — a second difference at a percentile,
-//!                                   which is a crease's own number (§6 M69)
-//!   gg-tools frame [--extent WxH]   where a frame's milliseconds go: the
-//!                                   per-pass device table against the host's
-//!                                   own zones (§6 M58). `--sweep` is the
-//!                                   ms/Mpx table `r.scale` is read off (M78);
-//!                                   `--attribute` grades this command's own
-//!                                   rows by switching each pass off, and
-//!                                   `--devices a,b` prices a pass on two
-//!                                   machines at once (M79)
-//!   gg-tools governor               does the automatic render scale settle:
-//!                                   the shipped controller and the obvious
-//!                                   one, over five traces (§6 M80)
-//!   gg-tools banding                what the 8-bit output does to a smooth
-//!                                   gradient, swept over `r.dither`
-//!   gg-tools pace [--editor]        what a display rate does to a turn the hand
-//!                                   made at a constant speed; `--editor` asks
-//!                                   the same of the editor's camera, which is a
-//!                                   second eye down a second composition
-//!   gg-tools hash-scale             what the per-tick full-world passes cost at
-//!                                   the scale §6 M38 brings — the contract's
-//!                                   sorted walk against a storage-order floor
-//!   gg-tools orbit                  whether §2's two regimes agree about the
-//!                                   same body — the orbit's shape against its
-//!                                   phase, which fail in opposite directions
-//!   gg-tools panorama [--out P]   write the synthetic equirectangular `.hdr`
-//!   gg-tools icon [--out P]       write demo 10's taskbar picture
-//!   gg-tools timbre [--out D]     write demo 10's clips, and grade what a tone cannot reach
-//!                                   demo 06's environment is compiled from
-//!   gg-tools fp-isa [--target T]    which floating-point instructions the
-//!                                   determinism path contains, by how much
-//!                                   freedom the ISA leaves them (§8's qemu row)
-//!   gg-tools mcp                    serve a running session's reload record to
-//!                                   an agent over MCP on stdio (§6 M16)
+//! Usage, in dispatch order. This list, `main`'s match arms and the
+//! unknown-subcommand message are one roster written three times, and `tests`
+//! holds them to each other — it carried 25 of 30 until §6 M88, which is how
+//! `map` and `transfer` were undocumented twice over (§6 M81 corrected
+//! CLAUDE.md's copy and walked past this one).
+//!
+//!   shadow-bias [--json]   the §6 M11 acne knobs against an 8x-denser
+//!                          reference — the plateau between them
+//!   shadow-fit             what a cascade's radius costs the picture
+//!   shadow-flat            demo 11's contact band: band against shade (§6 M20)
+//!   shadow-sweep           what a turning camera does to the shadows in a room
+//!                          standing still around it
+//!   shadow-edge            a distant edge's straightness against its softness
+//!   shadow-reach [--extent WxH]
+//!                          the blocker a cascade has no depth for: dropped
+//!                          casters against reach (§6 M60)
+//!   lights                 what a light costs, over count and `r.clusters`
+//!   lamps [--cost|--bias]  what a *casting* lamp costs, and where its bias
+//!                          belongs — lost against leaked (§6 M31)
+//!   cull                   what batch bounds bought the shadow passes, over
+//!                          *pack* geometry (§6 M32)
+//!   clicks                 the step across an audio event, over the step the
+//!                          same signal makes on its own (§6 M77)
+//!   furnace                whether a white metal gives back what it was given,
+//!                          and along the lobe it should (§6 M33)
+//!   split-sum              what [Laz13]'s fit costs and a table buys (§6 M34)
+//!   ao [--crease]          how much occlusion a scene has, how far the pass
+//!                          gets toward it, and whether a seam is a line (M71)
+//!   bounce [--energy|--slow]
+//!                          how much of a room's light bounced, against the
+//!                          volume somebody drew by hand (§6 M36)
+//!   field [--cost|--trace] the field's stability from a moving chair (§6 M57)
+//!   facets                 how flat the field is on a flat wall — a second
+//!                          difference, counted rather than averaged (§6 M69)
+//!   frame [--extent WxH|--sweep|--attribute|--devices a,b]
+//!                          where a frame's milliseconds go: per-pass device
+//!                          time against the host's own zones (§6 M58); the
+//!                          ms/Mpx table `r.scale` is read off (M78); each row
+//!                          falsified by switching its pass off (M79)
+//!   governor               does the automatic render scale settle — the
+//!                          shipped controller against the obvious one (§6 M80)
+//!   views [--pack P --scene N --eye x,y,z --yaw r --set k=v]
+//!                          one render per `r.debug_view` entry, and which
+//!                          views this frame had (§6 M59)
+//!   banding                what 8-bit output does to a gradient, over
+//!                          `r.dither`
+//!   pace [--editor]        what a display rate does to a turn the hand made at
+//!                          a constant speed; `--editor` asks it of the
+//!                          editor's camera, a second eye down a second
+//!                          composition (§6 M65)
+//!   hash-scale             what the per-tick full-world passes cost at the
+//!                          scale §6 M38 brings
+//!   orbit                  whether §2's two regimes agree about one body —
+//!                          shape against phase, failing opposite ways
+//!   map                    demo 13's schematic under one inverse-square lux:
+//!                          blown against crushed (§6 M38)
+//!   panorama [--out P]     write the synthetic equirectangular `.hdr`
+//!   icon [--game G]        write a demo's taskbar picture (§6 M46, M75)
+//!   timbre [--out D]       write demo 10's clips, and grade what one `Sound`
+//!                          cannot reach (§6 M43)
+//!   transfer               the burn a pilot cannot see (§6 M38 item 14)
+//!   fp-isa [--target T]    which floating-point instructions the determinism
+//!                          path holds, by how much freedom the ISA leaves them
+//!   mcp                    serve a session's reload record to an agent over
+//!                          MCP on stdio (§6 M16)
 
 mod ao;
 mod banding;
@@ -153,13 +153,16 @@ fn main() -> anyhow::Result<()> {
         "transfer" => transfer::run(rest),
         "fp-isa" => fp_isa::run(rest),
         "mcp" => mcp::run(rest),
+        // Dispatch order, held to the arms above and to the `//!` header by
+        // `tests` — three copies of one list is §6 M86's class, and the header
+        // was five names short of these two when M88 checked (§6 M87).
         other => {
             anyhow::bail!(
                 "unknown subcommand {other:?} — the roster is: shadow-bias, shadow-fit, \
-                 shadow-flat, shadow-sweep, shadow-edge, shadow-reach, lights, lamps, cull, furnace, \
-                 split-sum, ao, bounce, field, facets, frame, governor, views, banding, pace, hash-scale, orbit, map, \
-                 panorama, icon, timbre, clicks, transfer, fp-isa, mcp. A new instrument is a new \
-                 subcommand here, not a new crate"
+                 shadow-flat, shadow-sweep, shadow-edge, shadow-reach, lights, lamps, cull, \
+                 clicks, furnace, split-sum, ao, bounce, field, facets, frame, governor, views, \
+                 banding, pace, hash-scale, orbit, map, panorama, icon, timbre, transfer, fp-isa, \
+                 mcp. A new instrument is a new subcommand here, not a new crate"
             )
         }
     }
@@ -176,4 +179,79 @@ pub fn output_dir() -> anyhow::Result<std::path::PathBuf> {
         .join("target/gg-tools");
     std::fs::create_dir_all(&root)?;
     Ok(root)
+}
+
+/// The subcommands `main` dispatches, read out of this file's own source.
+///
+/// A text scan for the same reason `xtask`'s cross-file gates are one (§6 M87):
+/// the alternative is a table the match arms are generated from, which buys
+/// nothing a rename cannot break and costs the plainest `match` in the tree.
+#[cfg(test)]
+fn rosters() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let source = include_str!("main.rs");
+    let dispatched = source
+        .lines()
+        .filter_map(|l| l.trim().strip_suffix("::run(rest),"))
+        .filter_map(|l| l.split_once("\" => "))
+        .filter_map(|(name, _)| name.strip_prefix('"'))
+        .map(str::to_owned)
+        .collect();
+    // A header entry starts in the first text column; its continuations are
+    // indented past it, which is what keeps a wrapped description out of this.
+    let documented = source
+        .lines()
+        .filter_map(|l| l.strip_prefix("//!   "))
+        .filter(|l| !l.starts_with(' '))
+        .filter_map(|l| l.split_whitespace().next())
+        .map(str::to_owned)
+        .collect();
+    let named = source
+        .split_once("the roster is: ")
+        .and_then(|(_, tail)| tail.split_once(". A new instrument"))
+        .map(|(list, _)| {
+            list.split(',')
+                // `\` is the source's line continuation, not part of a name.
+                .map(|n| {
+                    n.split_whitespace()
+                        .filter(|t| *t != "\\")
+                        .collect::<String>()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (dispatched, documented, named)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    /// The `//!` header, `main`'s arms and the unknown-subcommand message are
+    /// one roster written three times. Ordered, not set-wise: three orderings
+    /// of one list is the drift §6 M86 deleted elsewhere.
+    #[test]
+    fn every_subcommand_is_dispatched_documented_and_named_in_the_same_order() {
+        let (dispatched, documented, named) = super::rosters();
+        // Each scan matches a shape this file could stop having (§6 M87) — a
+        // reformatted match, a rewrapped header, a reworded bail — and an empty
+        // population would make all three comparisons below hold vacuously.
+        assert!(
+            !dispatched.is_empty() && !documented.is_empty() && !named.is_empty(),
+            "a roster scan found nothing: {} dispatched, {} documented, {} named — the parse \
+             stopped matching this file rather than the file losing its subcommands",
+            dispatched.len(),
+            documented.len(),
+            named.len()
+        );
+        assert_eq!(
+            dispatched, documented,
+            "the `//!` usage header and `main`'s match arms disagree — a subcommand is only \
+             reachable by reading the source, which is how `map` and `transfer` went undocumented \
+             for a year (§6 M81, M88)"
+        );
+        assert_eq!(
+            dispatched, named,
+            "the unknown-subcommand message and `main`'s match arms disagree — a typo would be \
+             answered with a roster that does not name the command the user wanted"
+        );
+    }
 }

@@ -38,12 +38,14 @@ pub fn run(args: &[&str]) -> Result<()> {
     // Demos do ship `assets/` trees, so an empty set means the walk lost them
     // rather than that none exist — and a §4.6 gate that compiled nothing used
     // to report it as success (§5.8's rule: a vacuous pass is not a green one).
-    ensure!(
-        !sources.is_empty(),
-        "no demo declares an `assets/` source tree — §4.6's byte-reproducibility gate has nothing \
-         to compile, which is a broken walk and not a fact about the repository"
-    );
+    crate::census::graded(
+        sources.len(),
+        "§4.6's asset trees",
+        "no demo declares an `assets/` source tree, which is a broken walk and not a fact about \
+         the repository",
+    )?;
     let packs = workspace_root().join(OUT);
+    let mut clips_checked = false;
     for (demo, source) in sources {
         let out = packs.join(format!("{demo}.ggpack"));
         if check {
@@ -77,8 +79,19 @@ pub fn run(args: &[&str]) -> Result<()> {
         }
         if demo == "10-tetris" {
             clips_resolve(&out)?;
+            clips_checked = true;
         }
     }
+    // The selector is a demo's *directory name*, which nothing else in the tree
+    // holds this gate to — a rename walks straight past it and the one failure
+    // with no other witness goes unwatched, silently and in the passing
+    // direction (§6 M87).
+    crate::census::graded(
+        usize::from(clips_checked),
+        "the cue-resolution gate",
+        "no demo directory is named `10-tetris`, so the only check that a cue's clip is in the \
+         pack never ran",
+    )?;
     Ok(())
 }
 
@@ -115,6 +128,14 @@ fn clips_resolve(pack: &Path) -> Result<()> {
         );
         found += 1;
     }
+    // `voice.clip == 0` is the cue table's own "no clip", so a table that lost
+    // every one of them — a `CUES` gone to zero, a `Sound::clip` call swapped for
+    // a synthesized voice — reports success over an empty loop (§6 M87).
+    crate::census::graded(
+        found,
+        "demo 10's cues",
+        "the cue table names no clip at all, so nothing was resolved against the pack",
+    )?;
     println!("xtask assets: 10-tetris — {found} cue(s) resolve against the pack (§6 M43)");
     Ok(())
 }

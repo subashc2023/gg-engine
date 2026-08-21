@@ -20,8 +20,11 @@ use std::collections::BTreeMap;
 pub type DeviceAddress = u64;
 
 /// What a buffer is for. Deliberately not a usage mask: with all access by
-/// device address, the one distinction that survives is whether the
-/// fixed-function index stream reads it too.
+/// device address, two distinctions survive and nothing else does — whether a
+/// *fixed-function* consumer reads it ([`Index`](BufferKind::Index),
+/// [`Indirect`](BufferKind::Indirect), which is every one core Vulkan has), and
+/// where the memory *lives* ([`Readback`](BufferKind::Readback),
+/// [`Dynamic`](BufferKind::Dynamic)), which an address cannot express.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferKind {
     /// Shader-readable through its [`DeviceAddress`]. Vertices, materials,
@@ -49,8 +52,7 @@ pub enum BufferKind {
     /// As [`BufferKind::Dynamic`], and readable by an indirect draw as its
     /// parameters (§6 M10).
     ///
-    /// The enum's own doc says it records "only what the fixed-function index
-    /// stream also needs" — this is the second such consumer, and the last one
+    /// The second fixed-function consumer the enum records, and the last one
     /// core Vulkan has. It is `Dynamic` rather than `Storage` because a
     /// CPU-built draw list is rebuilt every frame, so **the caller owns the
     /// frames-in-flight hazard exactly as it does there**: one region per

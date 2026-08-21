@@ -6,17 +6,23 @@
 //! Vulkan half lives behind the §3 seam in `gg-rhi`; this side names no stage,
 //! no access mask and no layout.
 //!
-//! [`Renderer`] is the graph put to work for the shell: depth prepass → forward
-//! opaque → fullscreen post → present, the §4.5 v1 list minus the readback pass,
-//! which is a harness's business rather than a window's. The three calls the
-//! shell makes ([`Renderer::new`], [`Renderer::frame`], [`Renderer::shutdown`])
-//! are the same three it made at M5 — that was the part meant to survive.
+//! [`Renderer`] is the graph put to work for the shell. A frame declares up to
+//! nineteen passes and as few as five — the floor is depth prepass → forward
+//! opaque → post → present, and everything above it (cascades, lamp shadows,
+//! the probe trio, occlusion and its blur, debug, UI, luminance, readback) is
+//! declared only when something asks for it, so the graph a scene gets is a
+//! function of that scene. [`Renderer::new`], [`Renderer::frame`] and
+//! [`Renderer::shutdown`] are still the spine the shell was given at M5 — what
+//! grew around them is knobs, instrumentation and content, never a second way
+//! to draw a frame.
 //!
-//! It draws exactly one primitive — a box — because the game says where, how big
-//! and what colour, and nothing else (`gg_ecs::boundary::Renderable`). A
-//! renderer with more opinions than that would be a renderer the Ugly Game
-//! cannot restyle without rebuilding the engine, which is the wrong half of the
-//! cooperative loop to make expensive.
+//! What it draws is what the *game* declared: two primitives keyed off
+//! `gg_ecs::boundary::shape` (box and sphere, §6 M26) plus whatever meshes the
+//! pack holds ([`scene`], §4.6), positioned and coloured by
+//! `gg_ecs::boundary::Renderable` and by nothing this crate decides. A renderer
+//! with more opinions than that is one the Ugly Game cannot restyle without
+//! rebuilding the engine, which is the wrong half of the cooperative loop to
+//! make expensive.
 
 #![deny(missing_docs)]
 

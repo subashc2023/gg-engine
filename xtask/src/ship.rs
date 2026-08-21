@@ -84,6 +84,7 @@ pub fn run_cmd(args: &[&str]) -> Result<()> {
     // find its source, which is the manifest naming a file the demo does not
     // have.
     let dylib = dylib_name(&package.replace('-', "_"));
+    writable(&project)?;
     stage(&root.join("target/dist").join(&dylib), &folder.join(&dylib))?;
     std::fs::write(folder.join(MANIFEST), render(&project, &dylib))?;
     if let Some(input) = &project.input {
@@ -190,6 +191,38 @@ pub fn run_cmd(args: &[&str]) -> Result<()> {
         archive.display()
     );
     println!("xtask ship: launch it as a player does — {}", exe.display());
+    Ok(())
+}
+
+/// Every value [`render`] will write comes back out of the file unchanged
+/// (§6 M87).
+///
+/// The manifest format has no escaping and is not growing any: `#` opens a
+/// comment, a newline ends the line, and both sides of a value are trimmed. So
+/// a title holding one of those is a folder whose game is called something
+/// else — silently, since the reader's answer to a mangled value is a shorter
+/// name and not an error. Refused here, where the operator can still change it.
+fn writable(project: &Project) -> Result<()> {
+    let names: Vec<String> = [&project.input, &project.pack, &project.icon]
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    let version = project.version.as_ref().map(ToString::to_string);
+    for value in [&project.title, &project.slug]
+        .into_iter()
+        .cloned()
+        .chain(names)
+        .chain(version)
+    {
+        ensure!(
+            !value.contains('#') && !value.contains(['\n', '\r']) && value.trim() == value,
+            "`{value}` cannot be written to a {MANIFEST} and read back: the format is flat \
+             `name = value` with no escaping, so `#` opens a comment, a newline ends the line, \
+             and surrounding spaces are trimmed away. Rename it rather than teaching the format \
+             to quote (§6 M87)"
+        );
+    }
     Ok(())
 }
 
@@ -526,6 +559,67 @@ mod tests {
             checked > 0,
             "no demo declares a {MANIFEST} — the walk lost them"
         );
+    }
+
+    /// The folder's manifest is the demo's, and the shell reads it back whole
+    /// (§6 M87).
+    ///
+    /// The round trip was asserted for `version` and for nothing else, which is
+    /// one of eight keys — so a field [`render`] stopped writing, or wrote in a
+    /// spelling [`Project::parse`] does not accept, would reach a player as a
+    /// game that lost its icon, its pack or its window and said nothing. Graded
+    /// as **struct equality**, not field by field: a ninth key added to
+    /// `Project` and forgotten here fails this test rather than passing a list
+    /// nobody widened.
+    #[test]
+    fn every_key_the_writer_puts_in_a_folder_comes_back_out_of_it() {
+        let whole = Project::parse(
+            "game  = ignored.dll\n\
+             title = Falling Blocks\n\
+             slug  = tetris\n\
+             input = input.toml\n\
+             pack  = tetris.ggpack\n\
+             icon  = tetris.ggicon\n\
+             version = 0.9.0-rc2\n\
+             window  = 1280x720\n",
+        )
+        .expect("a manifest with every key set");
+        // `render` names the dylib itself, since `.dll` against `lib….so` is the
+        // shipping host's answer; everything else must survive untouched.
+        let round = Project::parse(&render(&whole, "tetris.dll")).expect("the folder's manifest");
+        assert_eq!(
+            round,
+            Project {
+                game: PathBuf::from("tetris.dll"),
+                ..whole
+            }
+        );
+    }
+
+    /// A value the format cannot carry is refused where it is written, not
+    /// discovered where it is read (§6 M87).
+    ///
+    /// The manifest has no escaping and is not growing any: `#` opens a comment
+    /// and a value is trimmed, so a title holding either is a folder whose game
+    /// is called something else. Round-tripping is the property this file can
+    /// actually promise, and the promise is kept by refusing rather than by
+    /// mangling.
+    #[test]
+    fn a_title_the_manifest_cannot_carry_is_refused_rather_than_truncated() {
+        for hostile in ["Hash # Run", "Two\nLines", "  padded  "] {
+            let project = Project::parse("title = X\nslug = x\n")
+                .map(|p| Project {
+                    title: hostile.to_owned(),
+                    ..p
+                })
+                .expect("a project");
+            assert!(
+                writable(&project).is_err(),
+                "`{hostile}` is not a title a manifest can hold, so `ship` must say so"
+            );
+        }
+        let fine = Project::parse("title = Falling Blocks").expect("a project");
+        assert!(writable(&fine).is_ok());
     }
 
     /// The version reaches the folder's own manifest and the archive's name

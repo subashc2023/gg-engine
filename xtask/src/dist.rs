@@ -139,10 +139,11 @@ pub fn gate() -> anyhow::Result<()> {
     // window when they run, so their runs stay in `xtask interactive` and they
     // stop at build + byte checks below.
     let games = game_dylibs()?;
-    anyhow::ensure!(
-        !games.is_empty(),
-        "no game dylib to run the dist shell over"
-    );
+    crate::census::graded(
+        games.len(),
+        "the dist gate's game dylibs",
+        "nothing built as a shipping game dylib, so every absence proof below held over no game",
+    )?;
     let mut packs_built = false;
     for (game, crate_dir, dylib) in &games {
         let mut run = std::process::Command::new(&exe);
