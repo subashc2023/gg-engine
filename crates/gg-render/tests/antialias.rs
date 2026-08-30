@@ -294,6 +294,7 @@ fn the_forward_pass_resolves_and_everything_after_it_reads_one_image() {
             shadow_draws: &[],
             lamp_draws: &[],
             forward_draws: &[],
+            glass_draws: &[],
             post_draws: &[],
             samples: &samples,
             forward_samples: &[],

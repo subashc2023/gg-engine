@@ -359,6 +359,10 @@ pub const TRACER_TICKS: u32 = 3;
 pub const TRACER_HALF: f32 = 0.012;
 /// See [`TRACER_HALF`].
 pub const TRACER_INK: u32 = 0x00ff_e8b0;
+/// A streak of light is not a solid (§6 M92): the room reads through it, and a
+/// tracer that writes no depth cannot occlude the target it points at for the
+/// three ticks it exists. Mild, because a tracer's job is to be *seen*.
+pub const TRACER_TRANSPARENCY: f32 = 0.45;
 /// Chips one impact throws.
 pub const SPARKS: u32 = 5;
 /// Ticks one lives, and the pull on it per tick.
@@ -2341,7 +2345,7 @@ fn tracer(
         life: TRACER_TICKS,
         kind: SPARK_TRACER,
     });
-    world.put(entity, shape.surfaced(0.9, 0.0));
+    world.put(entity, shape.surfaced(0.9, 0.0).glazed(TRACER_TRANSPARENCY));
 }
 
 /// The muzzle flash: a [`Light`] with a life counter and no geometry at all.

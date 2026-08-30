@@ -223,6 +223,7 @@ fn arm(
             push_constant_size: push_size,
             color: ColorTarget::Backbuffer,
             blend: gg_rhi::Blend::Off,
+            cull: gg_rhi::Cull::None,
             depth: DepthMode::Off,
             samples: gg_rhi::Samples::X1,
             depth_bias: false,

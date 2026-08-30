@@ -251,12 +251,15 @@ pub gg_ecs::boundary::Renderable::color: u32
 pub gg_ecs::boundary::Renderable::half_extent: gg_math::sim::Vec3
 pub gg_ecs::boundary::Renderable::metallic: f32
 pub gg_ecs::boundary::Renderable::position: gg_math::sim::DVec3
+pub gg_ecs::boundary::Renderable::reserved: u32
 pub gg_ecs::boundary::Renderable::rotation: gg_math::sim::DQuat
 pub gg_ecs::boundary::Renderable::shape: u64
 pub gg_ecs::boundary::Renderable::smoothness: f32
+pub gg_ecs::boundary::Renderable::transparency: f32
 impl gg_ecs::boundary::Renderable
 pub fn gg_ecs::boundary::Renderable::ball(gg_math::sim::DVec3, f32, u32) -> Self
 pub fn gg_ecs::boundary::Renderable::boxed(gg_math::sim::DVec3, gg_math::sim::Vec3, u32) -> Self
+pub fn gg_ecs::boundary::Renderable::glazed(self, f32) -> Self
 pub fn gg_ecs::boundary::Renderable::surfaced(self, f32, f32) -> Self
 impl bytemuck::pod::Pod for gg_ecs::boundary::Renderable
 impl bytemuck::zeroable::Zeroable for gg_ecs::boundary::Renderable

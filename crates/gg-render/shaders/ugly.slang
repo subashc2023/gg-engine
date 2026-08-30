@@ -27,7 +27,7 @@ struct UglyPush
 {
     uint64_t vertices; // device address of the vertex array
     uint64_t frame;    // device address of this frame's lighting environment
-    float4 tint;       // linear rgb; w unused
+    float4 tint;       // linear rgb; w alpha (1 - transparency, §6 M92), 1.0 on every opaque draw
     float4 rotation;   // the instance's orientation, xyzw
     float4 offset;     // xyz camera-relative centre; w unused
     float4 scale;      // xyz half-extent, applied before the rotation; w unused
@@ -132,9 +132,11 @@ float4 fs_main(VOut i, bool front: SV_IsFrontFace) : SV_Target
     // The footprint before anything else touches it: `pixel_footprint` takes
     // derivatives, so it has to be reached by every fragment of a quad.
     float footprint = pixel_footprint(i.world);
+    // `tint.w` is 1.0 on every opaque draw, and opaque pipelines blend `Off`,
+    // so only the transparent pass (§6 M92) ever reads this as coverage.
     return float4(shade_all(push.frame, frame, s, i.world, i.pos.xy, footprint, g_textures,
                             g_samplers),
-                  1.0);
+                  push.tint.w);
 }
 
 // The depth prepass (§4.5 v1). It shares `UglyPush` and `world_of` with the pass

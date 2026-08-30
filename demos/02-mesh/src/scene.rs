@@ -128,6 +128,7 @@ pub fn pipeline_desc() -> PipelineDesc<'static> {
         // rasterized and depth decides, which is exactly what makes this a
         // test of reverse-Z rather than of winding order.
         blend: gg_rhi::Blend::Off,
+        cull: gg_rhi::Cull::None,
         depth: gg_rhi::DepthMode::Write,
         samples: gg_rhi::Samples::X1,
         depth_bias: false,

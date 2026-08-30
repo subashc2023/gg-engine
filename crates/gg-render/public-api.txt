@@ -120,6 +120,7 @@ pub static gg_render::cvars::GI_PAINT: gg_core::cvar::CVar
 pub static gg_render::cvars::GI_RATE: gg_core::cvar::CVar
 pub static gg_render::cvars::GI_SPACING: gg_core::cvar::CVar
 pub static gg_render::cvars::GI_TERM: gg_core::cvar::CVar
+pub static gg_render::cvars::GLASS: gg_core::cvar::CVar
 pub static gg_render::cvars::HDR: gg_core::cvar::CVar
 pub static gg_render::cvars::HISTOGRAM: gg_core::cvar::CVar
 pub static gg_render::cvars::LAMPS: gg_core::cvar::CVar
@@ -320,6 +321,7 @@ pub gg_render::SceneFrame::field_moments: core::option::Option<gg_render::graph:
 pub gg_render::SceneFrame::field_sh: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::SceneFrame::forward_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::forward_samples: &'a [gg_render::graph::ResourceId]
+pub gg_render::SceneFrame::glass_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::lamp_draws: &'a [gg_rhi::DrawSpec<'a>]
 pub gg_render::SceneFrame::lamps: core::option::Option<gg_render::graph::ResourceId>
 pub gg_render::SceneFrame::post_draws: &'a [gg_rhi::DrawSpec<'a>]

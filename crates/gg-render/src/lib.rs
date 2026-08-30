@@ -96,7 +96,7 @@ pub use lighting::{CascadeReach, cascade_reach};
 use cvars::views;
 pub use gg_rhi::Samples;
 use gg_rhi::{
-    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthMode, DeviceAddress,
+    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, Cull, DepthMode, DeviceAddress,
     DeviceReport, DrawSpec, FrameOutcome, FrameStart, GpuClock, GraphContext, ImageDesc,
     ImageFormat, ImageHandle, MemoryUse, PassTiming, PipelineDesc, PipelineHandle, Rhi, RhiError,
     Sampler, ShutdownReport, TextureIndex,
@@ -832,7 +832,7 @@ impl Renderer {
         // Before the attachments, because the count sizes them — and before the
         // graph takes the RHI, because building a pipeline needs it back.
         let samples = self.granted(view.samples);
-        let (at, skybox) = {
+        let (at, skybox, glass_at) = {
             // A lookup after warm-up; a pipeline build on the frame an operator
             // first switches sample counts. Zoned so those two are telling apart.
             gg_core::zone!("render.pipelines");
@@ -841,7 +841,13 @@ impl Renderer {
                 self.scene.variant(&mut self.rhi, samples)?,
                 self.scene.masked_prepass(&mut self.rhi, samples)?,
             );
-            (at, self.pass.skybox(&mut self.rhi, samples)?)
+            let skybox = self.pass.skybox(&mut self.rhi, samples)?;
+            // Only a frame holding glass ever builds this one (§6 M92).
+            let glass_at = match self.pass.has_glass() {
+                true => Some(self.pass.glass(&mut self.rhi, samples)?),
+                false => None,
+            };
+            (at, skybox, glass_at)
         };
 
         // Asked once a frame and passed down, so the graph's allocation and the
@@ -905,6 +911,7 @@ impl Renderer {
                     debug: debug_push.as_ref(),
                 },
                 sky,
+                glass_at,
                 self.lighting.lamps(),
                 at,
                 (&self.integrate, &self.probes),
@@ -998,6 +1005,13 @@ impl Renderer {
             self.scene.masked_prepass(&mut self.rhi, samples)?,
         );
         let skybox = self.pass.skybox(&mut self.rhi, samples)?;
+        // The *last* frame's glass, the lamps' reason below: a dump holds no
+        // `Extracted`, and inventing an empty world would print a graph missing
+        // a pass the game is paying for.
+        let glass_at = match self.pass.has_glass() {
+            true => Some(self.pass.glass(&mut self.rhi, samples)?),
+            false => None,
+        };
         let mut frame = self.transients.frame(&mut self.rhi, extent)?;
         // The lamps the *last* frame planned, for the sun's reason above: this
         // holds no `Extracted`, and a dump that invented an empty light list
@@ -1060,6 +1074,7 @@ impl Renderer {
                 debug: debug_push.as_ref(),
             },
             sky,
+            glass_at,
             self.lighting.lamps(),
             at,
             (&self.integrate, &self.probes),
@@ -1506,14 +1521,20 @@ impl OffscreenRenderer {
         }
         let ui_push = self.ui.push(self.extent);
         let samples = self.granted(view.samples);
-        let (at, skybox) = {
+        let (at, skybox, glass_at) = {
             gg_core::zone!("render.pipelines");
             let at = (
                 self.pass.variant(&mut self.rhi, samples)?,
                 self.scene.variant(&mut self.rhi, samples)?,
                 self.scene.masked_prepass(&mut self.rhi, samples)?,
             );
-            (at, self.pass.skybox(&mut self.rhi, samples)?)
+            let skybox = self.pass.skybox(&mut self.rhi, samples)?;
+            // Only a frame holding glass ever builds this one (§6 M92).
+            let glass_at = match self.pass.has_glass() {
+                true => Some(self.pass.glass(&mut self.rhi, samples)?),
+                false => None,
+            };
+            (at, skybox, glass_at)
         };
         // Asked once a frame and passed down, so the graph's allocation and the
         // frame block's flag cannot disagree about whether AO ran (§6 M35).
@@ -1580,6 +1601,7 @@ impl OffscreenRenderer {
                     debug: debug_push.as_ref(),
                 },
                 sky,
+                glass_at,
                 self.lighting.lamps(),
                 at,
                 (&self.integrate, &self.probes),
@@ -2527,6 +2549,9 @@ struct SceneDraws<'a> {
     /// draw carries the tile it lands in (§6 M31).
     lamp: Vec<DrawSpec<'a>>,
     forward: Vec<DrawSpec<'a>>,
+    /// The transparent pass's, back-to-front (§6 M92). Empty declares no such
+    /// pass at all.
+    glass: Vec<DrawSpec<'a>>,
     /// The occlusion pass and its denoiser (§6 M35). Empty when `r.ao` is off,
     /// and the denoiser is empty on its own when `r.ao_blur` is.
     ao: Vec<DrawSpec<'a>>,
@@ -2567,6 +2592,7 @@ impl<'a> SceneDraws<'a> {
         att: &SceneAttachments,
         pushes: Pushes<'a>,
         sky: (PipelineHandle, &'a [skybox_shader::SkyPush]),
+        glass_at: Option<PipelineHandle>,
         lamps: &lamp::Lamps,
         at: Pipelines,
         field: (&'a probe::Integrate, &'a probe::Probes),
@@ -2600,6 +2626,7 @@ impl<'a> SceneDraws<'a> {
                 .map(|_| lamp_draws(pass, scene, lamps))
                 .unwrap_or_default(),
             forward: forward_draws(pass, scene, at, sky),
+            glass: pass.glass_draws(glass_at),
             post: [pass.post_draw(post_push)],
             downsample: [pass.downsample_draw(post_push)],
             samples: [att.scene],
@@ -2673,6 +2700,7 @@ fn declare_frame<'a>(
         shadow_draws: shadow_slices,
         lamp_draws: &draws.lamp,
         forward_draws: &draws.forward,
+        glass_draws: &draws.glass,
         post_draws: &draws.post,
         samples: &draws.samples,
         forward_samples: &att.forward_samples,
@@ -2806,6 +2834,9 @@ struct BoxPass {
     /// forward pass, so it is baked against that pass's count like anything
     /// else in it.
     skyboxes: Solo,
+    /// The transparent pass's (§6 M92) — the forward pipeline again with
+    /// `Alpha` blend and back faces culled, against the same sample counts.
+    glasses: Solo,
     shadow: PipelineHandle,
     post: PipelineHandle,
     /// The occlusion pass and its denoiser (§6 M35). Single-sample by
@@ -2827,6 +2858,10 @@ struct BoxPass {
     /// that borrow them, and extract already refuses to allocate per frame — a
     /// buffer beside it that did would undo that.
     pushes: Vec<Push>,
+    /// The glass bucket (§6 M92): visible instances with transparency, sorted
+    /// back-to-front. A second list rather than a filter so the prepass and
+    /// forward lists exclude glass by construction.
+    glass_pushes: Vec<Push>,
     /// One list per cascade, culled — see [`BoxPass::build_shadow`].
     shadow_pushes: Vec<Vec<Push>>,
     /// What this pass's per-instance cull came to (§6 M32). No `dropped`: a box
@@ -3004,6 +3039,10 @@ impl BoxPass {
 
         Ok(BoxPass {
             skyboxes,
+            // Lazy even at 1×, unlike the pair above: a session with no glass in
+            // it never draws this, so eager creation would put a pipeline in
+            // §6 M9's budget for a pass most scenes never declare.
+            glasses: Solo::default(),
             variants,
             shadow: rhi.create_pipeline(&shadow_desc())?,
             post: rhi.create_pipeline(&post_desc())?,
@@ -3013,6 +3052,7 @@ impl BoxPass {
             debug: rhi.create_pipeline(&debug_desc())?,
             geometry,
             pushes: Vec::new(),
+            glass_pushes: Vec::new(),
             shadow_pushes: Vec::new(),
             cull: cull::ShadowCull::default(),
             lamp_pushes: Vec::new(),
@@ -3057,17 +3097,53 @@ impl BoxPass {
         // the two of them accumulate into one frame's figure.
         self.cull = cull::ShadowCull::default();
         self.pushes.clear();
+        self.glass_pushes.clear();
         // `visible()` and not `instances`: the tail is what the swept caster
         // volume admitted and the view did not, so submitting it here is a draw
         // the rasterizer discards after transforming it (§6 M34). The shadow
         // builders below still walk the whole array — that tail is the reason it
         // exists.
-        self.pushes.extend(
-            extracted
-                .visible()
-                .iter()
-                .map(|instance| Push::new(geometry, frame, instance)),
-        );
+        //
+        for instance in extracted.visible() {
+            if is_glass(instance) {
+                self.glass_pushes.push(Push::new(geometry, frame, instance));
+            } else {
+                let mut push = Push::new(geometry, frame, instance);
+                // `r.glass 0` files glass under opaque, and the filing has to be
+                // whole: `Blend::Off` ignores the coverage but still writes it
+                // into the attachment's alpha, and "the world before §6 M92"
+                // is a claim a test holds byte-for-byte.
+                push.push.tint[3] = 1.0;
+                self.pushes.push(push);
+            }
+        }
+        // Back-to-front: straight-alpha `over` is order-dependent and the depth
+        // test cannot arbitrate between two surfaces neither of which writes it.
+        // Squared distance — monotonic in the distance `scene.rs`'s `sort_key`
+        // uses — and a *stable* sort, so ties keep extract order and two frames
+        // over one world draw identically.
+        self.glass_pushes.sort_by(|a, b| {
+            let d = |p: &Push| {
+                let o = p.push.offset;
+                o[0] * o[0] + o[1] * o[1] + o[2] * o[2]
+            };
+            d(b).total_cmp(&d(a))
+        });
+    }
+
+    /// Whether this frame holds any glass — what decides that the transparent
+    /// pass is declared at all (§6 M92).
+    fn has_glass(&self) -> bool {
+        !self.glass_pushes.is_empty()
+    }
+
+    /// The frame's glass, drawn by `pipeline` — already back-to-front. Empty
+    /// when the frame has none, whatever the handle says.
+    fn glass_draws(&self, pipeline: Option<PipelineHandle>) -> Vec<DrawSpec<'_>> {
+        match pipeline {
+            Some(pipeline) => self.draws_of(pipeline, &self.glass_pushes),
+            None => Vec::new(),
+        }
     }
 
     /// This frame's shadow pushes: one list per cascade, each holding only the
@@ -3095,6 +3171,9 @@ impl BoxPass {
                 extracted
                     .instances
                     .iter()
+                    // Glass casts nothing (§6 M92): a full-strength shadow from
+                    // a surface the light mostly crosses is worse than none.
+                    .filter(|instance| !is_glass(instance))
                     .filter(|instance| casts_into(instance, cascade, sun))
                     .map(|instance| {
                         let mut push = Push::new(geometry, frame, instance);
@@ -3138,6 +3217,8 @@ impl BoxPass {
                 extracted
                     .instances
                     .iter()
+                    // Glass casts nothing (§6 M92) — `build_shadow`'s reason.
+                    .filter(|instance| !is_glass(instance))
                     .filter(|instance| {
                         // `r.shadow_cull 0` lives inside `View::fit` since §6
                         // M32 — one switch for the whole shadow path rather than
@@ -3195,6 +3276,10 @@ impl BoxPass {
                 extracted
                     .instances
                     .iter()
+                    // No glass in a probe face (§6 M92): `fs_probe`'s signed
+                    // distance is the field's burial test, and a pane rendered
+                    // solid would read as a wall an arm's length away.
+                    .filter(|instance| !is_glass(instance))
                     .filter(|instance| {
                         let view = cull::View::Probe { gather, face };
                         view.fit(instance.offset, instance.radius) != cull::Fit::Outside
@@ -3226,6 +3311,16 @@ impl BoxPass {
         samples: Samples,
     ) -> Result<PipelineHandle, RhiError> {
         self.skyboxes.get(rhi, samples, skybox_desc)
+    }
+
+    /// The transparent pipeline for this sample count (§6 M92), built on first
+    /// ask — which a frame only makes when it holds glass.
+    fn glass(
+        &mut self,
+        rhi: &mut impl GpuHost,
+        samples: Samples,
+    ) -> Result<PipelineHandle, RhiError> {
+        self.glasses.get(rhi, samples, transparent_desc)
     }
 
     fn variant(&mut self, rhi: &mut impl GpuHost, samples: Samples) -> Result<Variant, RhiError> {
@@ -3482,6 +3577,7 @@ impl BoxPass {
         rhi.destroy_pipeline(self.downsample)?;
         self.variants.destroy(rhi)?;
         self.skyboxes.destroy(rhi)?;
+        self.glasses.destroy(rhi)?;
         rhi.destroy_pipeline(self.shadow)?;
         rhi.destroy_pipeline(self.probe)?;
         rhi.destroy_pipeline(self.post)?;
@@ -3643,6 +3739,9 @@ pub struct SceneFrame<'a> {
     pub ao_blur_draws: &'a [DrawSpec<'a>],
     /// Forward-pass draws.
     pub forward_draws: &'a [DrawSpec<'a>],
+    /// Transparent-pass draws, back-to-front (§6 M92). Empty declares no such
+    /// pass — a frame with no glass keeps the graph it had.
+    pub glass_draws: &'a [DrawSpec<'a>],
     /// The one fullscreen resolve.
     pub post_draws: &'a [DrawSpec<'a>],
     /// What the post pass samples.
@@ -3811,6 +3910,11 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
             });
         }
     }
+    // The resolve belongs to the last pass writing the multisampled attachment
+    // (§6 M92): with glass in the frame that is the transparent pass, without
+    // it this one — so what the post pass samples is one finished image under
+    // every combination.
+    let glass = !frame.glass_draws.is_empty();
     declared.push(Declared {
         name: "forward-opaque",
         body: Body::Draw {
@@ -3821,7 +3925,9 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
                 frame.scene_ms.unwrap_or(frame.scene),
                 Load::Clear(frame.clear),
             )),
-            resolve: frame.scene_ms.map(|_| frame.scene),
+            resolve: (!glass)
+                .then(|| frame.scene_ms.map(|_| frame.scene))
+                .flatten(),
             depth: Some((frame.depth, DepthUse::Test)),
             depth_resolve: None,
             viewport: None,
@@ -3833,6 +3939,28 @@ pub fn scene_graph<'a>(frame: &SceneFrame<'a>) -> Vec<Declared<'a>> {
             draws: frame.forward_draws,
         },
     });
+    // Glass, over the finished opaque frame (§6 M92). After the sky by
+    // construction — the sky is the last draw *inside* forward-opaque — and
+    // legal against the same depth because `DepthUse::Test` stores it
+    // (`StoreOp::NONE` is not a discard). Declared only when a frame holds
+    // glass, so every other frame keeps the graph, the dump and the pixels it
+    // had.
+    if glass {
+        declared.push(Declared {
+            name: "forward-transparent",
+            body: Body::Draw {
+                color: Some((frame.scene_ms.unwrap_or(frame.scene), Load::Keep)),
+                resolve: frame.scene_ms.map(|_| frame.scene),
+                depth: Some((frame.depth, DepthUse::Test)),
+                depth_resolve: None,
+                viewport: None,
+                // Glass shades like the forward pass it is — the same shadow,
+                // occlusion and field reads, so the same declared samples.
+                samples: frame.forward_samples,
+                draws: frame.glass_draws,
+            },
+        });
+    }
     declared.push(Declared {
         name: "post",
         body: Body::Draw {
@@ -3983,6 +4111,7 @@ fn prepass_desc(samples: Samples) -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<shader::UglyPush>() as u32,
         color: ColorTarget::None,
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Write,
         samples,
         depth_bias: false,
@@ -4003,9 +4132,27 @@ fn forward_desc(samples: Samples) -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<shader::UglyPush>() as u32,
         color: ColorTarget::Format(SCENE_FORMAT),
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::TestOnly,
         samples,
         depth_bias: false,
+    }
+}
+
+/// The transparent pass (§6 M92): the forward pipeline again — same shader,
+/// same push, same depth test — meeting the scene through straight-alpha `over`
+/// instead of a replace, with `tint.w` as the coverage.
+///
+/// `Cull::Back` is what makes a convex primitive *one* layer of glass: unculled,
+/// its back faces blend too, in index order — behind-over-front half the time,
+/// and lit from behind all of it. The prepass re-draw contract does not reach
+/// here (glass is in no prepass), so culling costs nothing it needed.
+fn transparent_desc(samples: Samples) -> PipelineDesc<'static> {
+    PipelineDesc {
+        name: "ugly.glass",
+        blend: Blend::Alpha,
+        cull: Cull::Back,
+        ..forward_desc(samples)
     }
 }
 
@@ -4031,6 +4178,7 @@ fn skybox_desc(samples: Samples) -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<skybox_shader::SkyPush>() as u32,
         color: ColorTarget::Format(SCENE_FORMAT),
         blend: Blend::Alpha,
+        cull: Cull::None,
         depth: DepthMode::TestOnly,
         samples,
         depth_bias: false,
@@ -4049,6 +4197,7 @@ fn shadow_desc() -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<shader::UglyPush>() as u32,
         color: ColorTarget::None,
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Write,
         samples: Samples::X1,
         depth_bias: false,
@@ -4073,6 +4222,7 @@ fn probe_desc() -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<shader::UglyPush>() as u32,
         color: ColorTarget::Format(SCENE_FORMAT),
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Write,
         samples: Samples::X1,
         depth_bias: false,
@@ -4090,6 +4240,7 @@ fn post_desc() -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<post_shader::PostPush>() as u32,
         color: ColorTarget::Backbuffer,
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Off,
         samples: Samples::X1,
         depth_bias: false,
@@ -4109,6 +4260,7 @@ fn downsample_desc() -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<post_shader::PostPush>() as u32,
         color: ColorTarget::Format(SCENE_FORMAT),
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Off,
         samples: Samples::X1,
         depth_bias: false,
@@ -4130,6 +4282,7 @@ fn ao_desc() -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<ao_shader::AoPush>() as u32,
         color: ColorTarget::Format(AO_FORMAT),
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Off,
         samples: Samples::X1,
         depth_bias: false,
@@ -4148,6 +4301,7 @@ fn debug_desc() -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<debug_shader::DebugPush>() as u32,
         color: ColorTarget::Backbuffer,
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Off,
         samples: Samples::X1,
         depth_bias: false,
@@ -4166,6 +4320,7 @@ fn ao_blur_desc() -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<ao_shader::AoPush>() as u32,
         color: ColorTarget::Format(AO_FORMAT),
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Off,
         samples: Samples::X1,
         depth_bias: false,
@@ -4189,6 +4344,14 @@ const AO_FORMAT: ImageFormat = ImageFormat::R8Unorm;
 /// vertices, no buffer.
 pub(crate) const FULLSCREEN_VERTICES: u32 = 3;
 
+/// Whether `instance` draws as glass this frame (§6 M92): the field says so and
+/// `r.glass` has not filed it back under opaque. One predicate, because four
+/// builders ask and a disagreement between them is a surface that casts a shadow
+/// it does not occlude.
+fn is_glass(instance: &Instance) -> bool {
+    instance.transparency > 0.0 && cvars::GLASS.bool()
+}
+
 /// Push constants for one box.
 ///
 /// No matrix: Vulkan guarantees 128 bytes of push and this pass has one push per
@@ -4200,10 +4363,15 @@ fn push_for(
     frame: DeviceAddress,
     instance: &Instance,
 ) -> shader::UglyPush {
+    // `w` is the coverage the transparent pass blends by (§6 M92). Every opaque
+    // pipeline blends `Off`, so the 1.0 an opaque instance lands on here is the
+    // bytes this block always pushed.
+    let mut tint = srgb_to_linear(instance.color);
+    tint[3] = 1.0 - instance.transparency.clamp(0.0, 1.0);
     shader::UglyPush::new(
         vertices,
         frame,
-        srgb_to_linear(instance.color),
+        tint,
         instance.rotation.to_array(),
         instance.offset.extend(0.0).to_array(),
         instance.half_extent.extend(0.0).to_array(),
@@ -5086,6 +5254,7 @@ mod tests {
             asset: 0,
             radius: 0.02,
             shape: gg_extract::shape::BOX,
+            transparency: 0.0,
         };
         // 0.9 of the way out along both axes: inside the square, and 1.27 radii
         // from the axis — which is what the old cylinder rejected.

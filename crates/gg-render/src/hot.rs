@@ -260,6 +260,20 @@ impl BoxPass {
                 },
             ));
         }
+        // The transparent pipelines share this module (§6 M92), so an edit that
+        // left them out would draw stale glass over fresh walls.
+        for (samples, handle) in self.glasses.each() {
+            swaps.push((
+                handle,
+                PipelineDesc {
+                    vs_spirv: &vs_main.spirv,
+                    vs_entry: &vs_main.spirv_entry,
+                    fs_spirv: &fs_main.spirv,
+                    fs_entry: &fs_main.spirv_entry,
+                    ..crate::transparent_desc(samples)
+                },
+            ));
+        }
         swaps.push((
             &mut self.shadow,
             PipelineDesc {

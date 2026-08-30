@@ -13,8 +13,12 @@ use crate::pack::AssetId;
 /// Bits in [`Material::flags`].
 pub mod flags {
     /// Alpha is a mask: a fragment below `alpha_cutoff` is discarded. Without
-    /// it a material is opaque and `alpha_cutoff` is not read — glTF's `BLEND`
-    /// mode is a sorting problem and arrives with the pass that can sort.
+    /// it a material is opaque and `alpha_cutoff` is not read. The pass that can
+    /// sort exists since §6 M92 — the primitive path's `forward-transparent` —
+    /// but no `BLEND` flag joins this module until an asset in the tree declares
+    /// the mode: import surface over an empty population is what §6 M87 refuses,
+    /// and the mesh path's half (a per-batch blended fork, a sorted bucket in
+    /// `scene.rs`'s `sort_key`) is priced there, not here.
     pub const ALPHA_MASK: u32 = 1 << 0;
     /// Draw both faces. Sponza's foliage needs it; most of Sponza does not,
     /// and it is per-material because that is where glTF puts it.

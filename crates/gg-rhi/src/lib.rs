@@ -49,7 +49,7 @@ pub use graph::{
 };
 use instance::validation_message_count;
 pub use offscreen::OffscreenRhi;
-pub use pipeline::{Blend, ColorTarget, DepthMode, PipelineDesc, PipelineHandle};
+pub use pipeline::{Blend, ColorTarget, Cull, DepthMode, PipelineDesc, PipelineHandle};
 pub use resource::{
     BufferDesc, BufferHandle, BufferKind, DeviceAddress, ImageDesc, ImageFormat, ImageHandle,
     ImageUse, MemoryUse, Sampler, Samples, full_mip_count, mip_extent,

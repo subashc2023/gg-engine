@@ -56,7 +56,7 @@ impl Game {
             let declared = world.adopt(&gg_game_components()).unwrap();
             (gg_game_systems(), declared)
         };
-        assert_eq!(declared, 4, "visitor, and the three protocol types");
+        assert_eq!(declared, 5, "visitor, and the four protocol types (§6 M92)");
         Game {
             world,
             table,

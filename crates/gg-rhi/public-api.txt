@@ -24,6 +24,9 @@ pub enum gg_rhi::ColorTarget
 pub gg_rhi::ColorTarget::Backbuffer
 pub gg_rhi::ColorTarget::Format(gg_rhi::ImageFormat)
 pub gg_rhi::ColorTarget::None
+pub enum gg_rhi::Cull
+pub gg_rhi::Cull::Back
+pub gg_rhi::Cull::None
 pub enum gg_rhi::DepthMode
 pub gg_rhi::DepthMode::Off
 pub gg_rhi::DepthMode::TestOnly
@@ -231,6 +234,7 @@ pub gg_rhi::PassTiming::name: alloc::string::String
 pub struct gg_rhi::PipelineDesc<'a>
 pub gg_rhi::PipelineDesc::blend: gg_rhi::Blend
 pub gg_rhi::PipelineDesc::color: gg_rhi::ColorTarget
+pub gg_rhi::PipelineDesc::cull: gg_rhi::Cull
 pub gg_rhi::PipelineDesc::depth: gg_rhi::DepthMode
 pub gg_rhi::PipelineDesc::depth_bias: bool
 pub gg_rhi::PipelineDesc::fs_entry: &'a str

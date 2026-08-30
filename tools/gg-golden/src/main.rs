@@ -171,6 +171,26 @@ const SCENES: &[Scene] = &[
         render: render_boxes_occluded,
     },
     Scene {
+        name: "glass",
+        // The transparent pass (§6 M92): two overlapping panes at different
+        // transparencies over three pillars, a glass ball, and an opaque box
+        // beside a glass twin so exactly one of the pair shadows the floor.
+        // What this reference holds that `gg-render`'s offscreen tests cannot:
+        // the *look* of the blend across a whole frame — a wrong alpha is a
+        // level shift, which DSSIM structurally forgives, so `max_bias` is
+        // tightened to `volumes`' 0.1 and is the gate actually watching.
+        // Tolerance is `mesh`'s: a blend is a smooth gradient over every pane
+        // pixel, not a hard silhouette.
+        policy: Policy {
+            tolerance: 3,
+            max_diff_pixels: 256,
+            benign_delta: 6,
+            max_dssim: 0.03,
+            max_bias: 0.1,
+        },
+        render: render_glass,
+    },
+    Scene {
         name: "corner-normals",
         // The debug pass, which no golden had ever rendered (§6 M86) — thirteen
         // views, one shader, and the only automated thing that ran it was
@@ -1814,6 +1834,7 @@ fn boot(pack: Option<&str>) -> anyhow::Result<()> {
                 asset: *asset,
                 // Unread on the model path: the mesh is the shape.
                 shape: gg_extract::shape::BOX,
+                transparency: 0.0,
             });
         }
     }
@@ -1946,6 +1967,7 @@ fn load(pack: Option<&str>) -> anyhow::Result<()> {
             radius: f32::INFINITY,
             // Unread on the model path: the mesh is the shape.
             shape: gg_extract::shape::BOX,
+            transparency: 0.0,
         });
     }
 
@@ -2188,13 +2210,14 @@ fn atrium_pack() -> anyhow::Result<std::path::PathBuf> {
 /// reference move when the sweep does.
 fn render_atrium_at(phase: u64) -> Render {
     use gg_ecs::World;
-    use gg_ecs::boundary::{Light, Model, Sky};
+    use gg_ecs::boundary::{Light, Model, Renderable, Sky};
     use gg_math::sim;
 
     let extent = BOXES_EXTENT;
     let pack = atrium_pack()?;
     let mut world = World::new();
     world.register::<Model>()?;
+    world.register::<Renderable>()?;
     world.register::<Light>()?;
     world.register::<Sky>()?;
     // The compiled panorama out of the same pack (§6 M27) — what the mirror in
@@ -2230,6 +2253,11 @@ fn render_atrium_at(phase: u64) -> Render {
             ),
         )?;
     }
+    // The glass screens (§6 M92), the demo's own constructor — one table.
+    for at in demo_06_lit::PANES {
+        let screen = world.spawn();
+        world.insert(screen, demo_06_lit::pane(at))?;
+    }
 
     let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
     tracing::info!(device = %renderer.device().chosen, "offscreen device");
@@ -2244,6 +2272,7 @@ fn render_atrium_at(phase: u64) -> Render {
     for _ in 0..HALL_FRAMES {
         extracted.clear(demo_06_lit::START_POSITION, view.frustum(extent));
         extracted.append_models::<Model>(&world, renderer.scenes())?;
+        extracted.append::<Renderable>(&world)?;
         extracted.append_lights(&world)?;
         let _capture = gg_debug::capture::frame();
         renderer.frame(&extracted, &view, [0.01, 0.012, 0.02, 1.0], &[])?;
@@ -2455,6 +2484,109 @@ fn boxes_world(frustum: gg_extract::Frustum) -> anyhow::Result<gg_extract::Extra
 
 fn render_boxes() -> Render {
     render_boxes_from(gg_render::View::default())
+}
+
+/// §6 M92's subject: glass over pillars, stacked glass, and the shadow only the
+/// opaque twin casts. Hand-built for `boxes_world`'s reason — the pass belongs
+/// to no demo, and a reference has to be able to fail without a game moving.
+fn render_glass() -> Render {
+    use gg_ecs::World;
+    use gg_ecs::boundary::{Light, Renderable};
+    use gg_math::sim;
+
+    let extent = BOXES_EXTENT;
+    let view = gg_render::View::default();
+    let mut world = World::new();
+    world.register::<Renderable>()?;
+    world.register::<Light>()?;
+    let sun = world.spawn();
+    // `boxes`' sun, so the pair of shadow-witness cubes reads against the floor.
+    world.insert(
+        sun,
+        Light::sun(sim::Vec3::new(-0.35, -0.86, -0.37), 0x00ff_f4e0, 3.2),
+    )?;
+    let mut spawn = |renderable: Renderable| -> anyhow::Result<()> {
+        let entity = world.spawn();
+        world.insert(entity, renderable)?;
+        Ok(())
+    };
+    // The opaque room: a floor for shadows and a wall so every blend has a lit
+    // surface behind it rather than the clear colour.
+    spawn(Renderable::boxed(
+        sim::DVec3::new(0.0, -1.6, -6.0),
+        sim::Vec3::new(8.0, 0.1, 6.0),
+        0x0090_9090,
+    ))?;
+    spawn(Renderable::boxed(
+        sim::DVec3::new(0.0, 1.0, -11.0),
+        sim::Vec3::new(8.0, 3.0, 0.3),
+        0x00b0_a898,
+    ))?;
+    // Three pillars the panes are judged against: what glass is *for* is that
+    // these read through it, colour-shifted by an amount the reference pins.
+    for (x, color) in [(-2.2, 0x0030_a0ff), (0.0, 0x0060_ff60), (2.2, 0x00ff_a030)] {
+        spawn(Renderable::boxed(
+            sim::DVec3::new(x, -0.6, -8.0),
+            sim::Vec3::new(0.6, 0.9, 0.6),
+            color,
+        ))?;
+    }
+    // Two panes at different depths and transparencies, overlapping from the
+    // eye — the stacked region is the back-to-front sort as a picture.
+    spawn(
+        Renderable::boxed(
+            sim::DVec3::new(-1.1, -0.3, -5.0),
+            sim::Vec3::new(1.8, 1.2, 0.06),
+            0x00dc_e8ff,
+        )
+        .glazed(0.55),
+    )?;
+    spawn(
+        Renderable::boxed(
+            sim::DVec3::new(1.1, -0.5, -4.0),
+            sim::Vec3::new(1.6, 1.0, 0.06),
+            0x00ff_e8c8,
+        )
+        .glazed(0.75),
+    )?;
+    // A glass ball: the curved case `Cull::Back` exists for — unculled, its far
+    // hemisphere would blend over its near one in index order.
+    spawn(
+        Renderable::ball(sim::DVec3::new(0.0, -0.9, -3.2), 0.5, 0x00e0_f0ff)
+            .surfaced(0.8, 0.0)
+            .glazed(0.65),
+    )?;
+    // The shadow witnesses: one cube casts onto the floor, its glazed twin must
+    // not (§6 M92's caster exclusion, held as pixels).
+    spawn(Renderable::boxed(
+        sim::DVec3::new(-3.2, -1.0, -5.5),
+        sim::Vec3::splat(0.5),
+        0x00e8_e8e8,
+    ))?;
+    spawn(
+        Renderable::boxed(
+            sim::DVec3::new(3.2, -1.0, -5.5),
+            sim::Vec3::splat(0.5),
+            0x00e8_e8e8,
+        )
+        .glazed(0.5),
+    )?;
+
+    let mut extracted = gg_extract::Extracted::default();
+    extracted.transforms::<Renderable>(&world, sim::DVec3::ZERO, view.frustum(extent))?;
+    extracted.append_lights(&world)?;
+    let mut renderer = gg_render::OffscreenRenderer::new(extent)?;
+    tracing::info!(device = %renderer.device().chosen, "offscreen device");
+    let frame = gathered(&mut renderer, |r| {
+        let _capture = gg_debug::capture::frame();
+        Ok(r.frame(&extracted, &view, [0.02, 0.02, 0.03, 1.0], &[])?)
+    })?;
+    ensure_clean(&renderer.shutdown())?;
+    Ok(Capture {
+        pixels: frame.pixels,
+        extent,
+        graph: frame.dump,
+    })
 }
 
 fn render_boxes_occluded() -> Render {

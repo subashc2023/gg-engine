@@ -93,6 +93,7 @@ fn pipeline(rhi: &mut OffscreenRhi) -> PipelineHandle {
             .unwrap_or(0),
         color: gg_rhi::ColorTarget::Backbuffer,
         blend: gg_rhi::Blend::Off,
+        cull: gg_rhi::Cull::None,
         depth: gg_rhi::DepthMode::Off,
         samples: gg_rhi::Samples::X1,
         depth_bias: false,

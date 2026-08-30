@@ -61,7 +61,7 @@
 
 use gg_math::{render, sim};
 use gg_rhi::{
-    Blend, BufferDesc, BufferHandle, ColorTarget, DepthMode, DeviceAddress, DrawSpec,
+    Blend, BufferDesc, BufferHandle, ColorTarget, Cull, DepthMode, DeviceAddress, DrawSpec,
     FRAMES_IN_FLIGHT, ImageFormat, PipelineDesc, PipelineHandle, RhiError, Samples, TextureIndex,
 };
 
@@ -1381,6 +1381,7 @@ fn record_desc(
         push_constant_size: core::mem::size_of::<probe_shader::ProbePush>() as u32,
         color: ColorTarget::Format(FIELD_FORMAT),
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Off,
         samples: Samples::X1,
         depth_bias: false,

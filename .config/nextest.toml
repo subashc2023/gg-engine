@@ -1,0 +1,30 @@
+# The fast tier is judged against a 30 s wall budget (§5), and a nextest run's
+# wall is set by whatever finishes last. `gg-render::hot` recompiles Slang
+# in-process for ~12 s; left to default order it starts near the end of the
+# 1400-test run and serializes almost whole after everything else (§6 M92 found
+# the tier ~5 s over budget on exactly this). Highest priority starts it first,
+# so the wall is max(one slow test, everything else) rather than the sum.
+# Scheduling only — no test's outcome may depend on order, and the determinism
+# suites hold that themselves.
+[[profile.default.overrides]]
+filter = 'test(a_shader_edit_lands_without_a_rebuild)'
+priority = 100
+
+# The rest of the multi-second tail — offscreen device bring-ups and long
+# sessions, each 2–6 s. Started first they overlap each other and the
+# thousand sub-100 ms tests instead of trickling out at the end of the run.
+[[profile.default.overrides]]
+filter = '''
+test(the_knob_rounds_and_clamps)
+| test(a_stretched_instance_shades)
+| test(a_field_walked_along_a_corridor)
+| test(the_frame_is_composed_for_the_viewport)
+| test(an_orthographic_view)
+| test(a_render_scale_is_a_smaller_window)
+| test(a_session_that_does_not_end)
+| test(the_first_load_waits_for_the_artifact)
+| test(the_same_session_leaves_the_same_world)
+| test(churn_hash_sequence_matches)
+| test(the_occlusion_pass_agrees_with_the_integral)
+'''
+priority = 90

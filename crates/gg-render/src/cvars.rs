@@ -746,6 +746,15 @@ pub static SCALE: CVar = CVar::new_float(
     "scene resolution, as a fraction of the window",
 );
 
+/// Whether a `transparency` above zero draws as glass (§6 M92) — the
+/// transparent pass, the missing shadow, the missing prepass entry, all of it.
+/// Off files every such surface back under opaque, which is the world before
+/// the field existed, not a world with holes in it: the switch exists so
+/// `gg-tools frame --attribute` can price the pass and an operator can ask
+/// whether an artefact is the blend or the surface, and a surface that
+/// *vanished* would answer neither question.
+pub static GLASS: CVar = CVar::new_bool("r.glass", true, "draw transparency as glass");
+
 /// Shadow map edge in texels, clamped to `[256, 4096]`. A quality knob and a
 /// memory one at once: 2048² of `D32_SFLOAT` is 16 MiB.
 pub static SHADOW_SIZE: CVar = CVar::new_int("r.shadow_size", 2048, "shadow map edge, texels");
@@ -1104,6 +1113,7 @@ pub fn register() -> Result<(), CVarError> {
         &AA,
         &MSAA,
         &SCALE,
+        &GLASS,
         &SHADOW_SIZE,
         &SHADOW_DISTANCE,
         &SHADOW_CASCADES,

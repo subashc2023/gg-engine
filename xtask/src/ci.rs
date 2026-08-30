@@ -1988,6 +1988,23 @@ const SEPARATE: &[&str] = &["gg-golden", "gg-tools", "xtask"];
 fn tests(crates: &dyn CrateSet) -> anyhow::Result<()> {
     for args in crates.test_runs() {
         let mut cmd = cargo();
+        // Each linked-game invocation builds in a target directory of its own
+        // (§6 M92). The three unify features differently for the same shared
+        // crates, so in one directory every alternation re-fingerprinted ~9 of
+        // them and `--fast` paid ~10 s a run recompiling code nobody edited —
+        // measured as golden → tools → golden rebuilding five crates each way
+        // while golden → golden rebuilt none. Disk bought back as time: the
+        // dirs live under `target/` so a `cargo clean` takes them with it, and
+        // no gate's meaning moves — same tests, same features, same profiles.
+        if let [flag, name] = &args[..]
+            && flag == "-p"
+            && SEPARATE.contains(&name.as_str())
+        {
+            cmd.env(
+                "CARGO_TARGET_DIR",
+                workspace_root().join("target/linked").join(name),
+            );
+        }
         cmd.args(["nextest", "run", "--no-tests=pass"]).args(args);
         exec(&mut cmd, "cargo nextest run")?;
     }

@@ -117,6 +117,14 @@ pub trait SimTransform: Component {
     fn shape(&self) -> u64 {
         gg_ecs::boundary::shape::BOX
     }
+
+    /// How much of what stands behind the surface reads through it, `0.0..=1.0`
+    /// (§6 M92). Zero — opaque — by default, for
+    /// [`shape`](SimTransform::shape)'s reason: a component that has never
+    /// heard the question is the opaque world it always was.
+    fn transparency(&self) -> f32 {
+        0.0
+    }
 }
 
 /// The bounding radius of a box of `half_extent` — its corner distance, which
@@ -188,6 +196,11 @@ pub struct Instance {
     /// asset — a pack's content is whatever mesh it holds, and a shape field
     /// over it would be a second opinion about the same geometry.
     pub shape: u64,
+    /// How much of what is behind reads through, `0.0..=1.0`, zero opaque
+    /// (§6 M92). Nonzero routes a primitive to the transparent pass and out of
+    /// the prepass and every caster list; unread for an instance naming an
+    /// asset, [`surface`](Instance::surface)'s reason.
+    pub transparency: f32,
 }
 
 /// Directional lights one frame may carry. Small on purpose: a scene has a sun,
@@ -1417,6 +1430,7 @@ fn place<T: SimTransform>(
         asset: transform.asset(),
         radius,
         shape: transform.shape(),
+        transparency: transform.transparency(),
     }
 }
 
@@ -1458,6 +1472,7 @@ fn compose<T: SimTransform>(
         // Carried rather than set: a node draws a mesh, so nothing reads this,
         // and inheriting it beats inventing a second answer.
         shape: placed.shape,
+        transparency: placed.transparency,
     }
 }
 
@@ -1490,6 +1505,10 @@ impl SimTransform for gg_ecs::boundary::Renderable {
 
     fn shape(&self) -> u64 {
         self.shape
+    }
+
+    fn transparency(&self) -> f32 {
+        self.transparency
     }
 }
 

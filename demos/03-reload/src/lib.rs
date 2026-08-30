@@ -401,6 +401,10 @@ fn beam(shot: &Shot) -> Renderable {
         color: (fade << 16) | (fade << 8) | 0x40,
         smoothness: gg_ecs::boundary::DEFAULT_SMOOTHNESS,
         metallic: 0.0,
+        // Opaque on purpose: the fade above is the look every recorded session
+        // was authored against, and glass would re-record them all (§6 M92).
+        transparency: 0.0,
+        reserved: 0,
         shape: gg_ecs::boundary::shape::BOX,
     }
 }

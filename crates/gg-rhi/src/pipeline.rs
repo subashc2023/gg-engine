@@ -72,6 +72,19 @@ pub enum Blend {
     Alpha,
 }
 
+/// Which faces the rasterizer keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cull {
+    /// Both faces. Every opaque pass: the prepass re-draw contract wants the
+    /// same fragments both times, and two-sided pack content is legal (§4.6).
+    None,
+    /// Front faces only (counter-clockwise winding, the one §6 M64 gates
+    /// against authored normals). What a translucent pass wants: an unculled
+    /// convex primitive blends its own back faces in index order — wrong half
+    /// the time and lit from behind all of it — so glass is one layer.
+    Back,
+}
+
 /// What a graphics pipeline is made of: one vertex + one fragment entry point,
 /// a push-constant block, and how it meets its pass's attachments.
 pub struct PipelineDesc<'a> {
@@ -93,6 +106,9 @@ pub struct PipelineDesc<'a> {
     /// How it combines with what is there. Ignored when there is no color
     /// attachment to combine with.
     pub blend: Blend,
+    /// Which faces survive rasterization. [`Cull::None`] everywhere but the
+    /// translucent pipelines — see the variant docs.
+    pub cull: Cull,
     /// What it does with depth. [`DepthMode::Off`] declares *no* depth
     /// attachment: dynamic rendering makes the pipeline and the pass agree on
     /// formats, so a pipeline that ignores depth cannot run in a pass that has
@@ -328,7 +344,10 @@ impl PipelineStore {
             .scissor_count(1);
         let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
-            .cull_mode(vk::CullModeFlags::NONE)
+            .cull_mode(match desc.cull {
+                Cull::None => vk::CullModeFlags::NONE,
+                Cull::Back => vk::CullModeFlags::BACK,
+            })
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .depth_bias_enable(desc.depth_bias)
             .line_width(1.0);

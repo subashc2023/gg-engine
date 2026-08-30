@@ -40,9 +40,10 @@
 use gg_extract::Extracted;
 use gg_math::render;
 use gg_rhi::{
-    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthMode, DeviceAddress, DrawSpec,
-    FRAMES_IN_FLIGHT, ImageDesc, ImageFormat, ImageHandle, ImageUse, Indirect, IndirectCommand,
-    PipelineDesc, PipelineHandle, RhiError, Sampler, Samples, TextureIndex, Viewport,
+    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, Cull, DepthMode, DeviceAddress,
+    DrawSpec, FRAMES_IN_FLIGHT, ImageDesc, ImageFormat, ImageHandle, ImageUse, Indirect,
+    IndirectCommand, PipelineDesc, PipelineHandle, RhiError, Sampler, Samples, TextureIndex,
+    Viewport,
 };
 
 use crate::content::Content;
@@ -1043,6 +1044,7 @@ fn prepass_desc(samples: Samples) -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<shader::ScenePush>() as u32,
         color: ColorTarget::None,
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Write,
         samples,
         depth_bias: false,
@@ -1061,6 +1063,7 @@ fn forward_desc(samples: Samples) -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<shader::ScenePush>() as u32,
         color: ColorTarget::Format(SCENE_FORMAT),
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::TestOnly,
         samples,
         depth_bias: false,
@@ -1161,6 +1164,7 @@ fn probe_desc() -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<shader::ScenePush>() as u32,
         color: ColorTarget::Format(crate::SCENE_FORMAT),
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Write,
         samples: Samples::X1,
         depth_bias: false,
@@ -1209,6 +1213,7 @@ fn shadow_desc() -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<shader::ScenePush>() as u32,
         color: ColorTarget::None,
         blend: Blend::Off,
+        cull: Cull::None,
         depth: DepthMode::Write,
         samples: Samples::X1,
         depth_bias: false,

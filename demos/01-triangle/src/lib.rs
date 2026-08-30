@@ -37,6 +37,7 @@ pub fn pipeline_desc() -> gg_rhi::PipelineDesc<'static> {
         // attachment at all, which under dynamic rendering is what a pipeline
         // that ignores depth has to say.
         blend: gg_rhi::Blend::Off,
+        cull: gg_rhi::Cull::None,
         depth: gg_rhi::DepthMode::Off,
         samples: gg_rhi::Samples::X1,
         depth_bias: false,

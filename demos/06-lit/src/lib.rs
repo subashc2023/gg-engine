@@ -39,7 +39,9 @@
 //! to the game (§4.8). The sun below sweeps because a static sun makes a shadow
 //! look like a texture; the lamps flicker on a schedule for the same reason.
 
-use gg_ecs::boundary::{ActionId, AxisId, Eye, GameWorld, Light, Model, Sky, log_level};
+use gg_ecs::boundary::{
+    ActionId, AxisId, Eye, GameWorld, Light, Model, Renderable, Sky, log_level,
+};
 use gg_ecs::{Component, Entity};
 use gg_math::sim;
 
@@ -109,6 +111,30 @@ pub const LAMP_COLOR: u32 = 0x00ff_b060;
 /// Radiance multiplier for a lamp. Larger than the sun's because inverse-square
 /// falloff has already divided it by the square of a few metres.
 pub const LAMP_INTENSITY: f32 = 18.0;
+
+/// Where the two glass screens stand, x then z (§6 M92) — flanking the walk to
+/// the sphere rows, so the sweeping sun crosses them all session and the floor
+/// behind each conspicuously fails to darken. Glass casts nothing, and this
+/// room is where that is *watched*: the sweep drags every opaque shadow across
+/// the same floor.
+pub const PANES: [(f64, f64); 2] = [(-2.2, 2.0), (2.2, 2.0)];
+/// The panes' tint — cold against the room's warm stone, so the transmission
+/// reads as a colour shift and not only as a dimming.
+pub const PANE_INK: u32 = 0x00d6_e6f2;
+/// How much of the room reads through a pane.
+pub const PANE_TRANSPARENCY: f32 = 0.6;
+
+/// One glass screen, shared with the golden harness so the demo and its
+/// reference read one table (§4.10's "no second table").
+#[must_use]
+pub fn pane(at: (f64, f64)) -> Renderable {
+    Renderable::boxed(
+        sim::DVec3::new(at.0, 1.15, at.1),
+        sim::Vec3::new(1.1, 1.1, 0.05),
+        PANE_INK,
+    )
+    .glazed(PANE_TRANSPARENCY)
+}
 
 /// Freeze and unfreeze the sun.
 pub const HOLD: ActionId = ActionId::new(0);
@@ -230,6 +256,13 @@ pub fn bootstrap(world: &mut GameWorld) {
             ),
         );
     }
+
+    // The glass screens (§6 M92), after the lights so the light entity order
+    // the cascade relies on is untouched.
+    for at in PANES {
+        let screen = world.spawn();
+        world.put(screen, pane(at));
+    }
     world.log(log_level::INFO, "the atrium is lit");
 }
 
@@ -316,7 +349,7 @@ pub fn present(world: &mut GameWorld) {
 // execution order (§4.1). Neither is alphabetical and neither may drift.
 #[cfg(feature = "game")]
 gg_ecs::gg_game! {
-    components: [Visitor, Model, Light, Eye],
+    components: [Visitor, Model, Renderable, Light, Eye],
     actions: ["hold", "lamps"],
     axes: ["move_right", "move_up", "move_forward", "aim_x", "aim_y"],
     systems: [bootstrap, aim, walk, sky, present],

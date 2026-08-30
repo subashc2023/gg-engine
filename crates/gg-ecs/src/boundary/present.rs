@@ -75,6 +75,25 @@ pub struct Renderable {
     /// Zero is a dielectric, which is both the common case and the safe
     /// migration, for [`smoothness`](Renderable::smoothness)'s reason.
     pub metallic: f32,
+    /// How much of what stands behind the surface reads through it,
+    /// `0.0..=1.0` — 0 is opaque, 1 is invisible.
+    ///
+    /// **Transparency and not alpha**, [`smoothness`](Renderable::smoothness)'s
+    /// inversion a third time: the zero every migration writes must be the
+    /// opaque world that was already there, and a zeroed *alpha* is a world
+    /// that vanished. Not the top byte of [`color`](Renderable::color), whose
+    /// own doc says it is not a value anything computes with — a blend factor
+    /// is, and a packed byte has no row in the inspector.
+    ///
+    /// A surface with any transparency is glass (§6 M92): it neither writes
+    /// depth nor casts a shadow, and it is drawn back-to-front after the
+    /// opaque world and the sky. At exactly zero it is the opaque surface it
+    /// always was, prepass and shadows included.
+    pub transparency: f32,
+    /// Named padding, [`Eye::reserved`]'s spelling — `transparency` is four
+    /// bytes against an alignment of eight, and `bytemuck::Pod` refuses the
+    /// implicit kind.
+    pub reserved: u32,
     /// Which primitive this draws — [`shape::BOX`] or [`shape::SPHERE`].
     ///
     /// A number with associated constants rather than an `enum`, for
@@ -87,7 +106,7 @@ pub struct Renderable {
     /// `u64` rather than `u32`, and that is arithmetic and not ambition: `f64`
     /// puts this struct's alignment at 8, so a trailing `u32` would be followed
     /// by four bytes of implicit padding — which `bytemuck::Pod` refuses. Both
-    /// spellings cost the same 88 bytes; only the narrow one needs a `_pad`
+    /// spellings cost the same bytes; only the narrow one needs a `_pad`
     /// beside it in the schema, in the inspector, and in every struct literal.
     pub shape: u64,
 }
@@ -124,6 +143,8 @@ impl Renderable {
             color,
             smoothness: DEFAULT_SMOOTHNESS,
             metallic: 0.0,
+            transparency: 0.0,
+            reserved: 0,
             shape: shape::BOX,
         }
     }
@@ -148,6 +169,15 @@ impl Renderable {
     pub fn surfaced(mut self, smoothness: f32, metallic: f32) -> Self {
         self.smoothness = smoothness;
         self.metallic = metallic;
+        self
+    }
+
+    /// The same primitive as glass — see
+    /// [`transparency`](Renderable::transparency) for what the number means
+    /// and what glass gives up.
+    #[must_use]
+    pub fn glazed(mut self, transparency: f32) -> Self {
+        self.transparency = transparency;
         self
     }
 }
@@ -650,10 +680,11 @@ mod tests {
     fn the_protocol_types_are_flat_and_padding_free() {
         // `Pod` already refuses padding; these pin the numbers so a field added
         // to either one is a visible edit rather than a silent layout move.
-        // 88 since §6 M26's `shape`, and the eight is the whole argument for
-        // spelling it `u64`: at align 8 a trailing `u32` would have cost the
-        // same eight bytes and a `_pad` field beside it.
-        assert_eq!(size_of::<Renderable>(), 88);
+        // 96 since §6 M92's `transparency` + `reserved` pair (88 from §6 M26's
+        // `shape` to M91 — the eight there was the whole argument for spelling
+        // it `u64`: at align 8 a trailing `u32` would have cost the same eight
+        // bytes and a `_pad` field beside it).
+        assert_eq!(size_of::<Renderable>(), 96);
         assert_eq!(align_of::<Renderable>(), 8);
         assert_eq!(size_of::<Eye>(), 40);
         assert_eq!(align_of::<Eye>(), 8);
@@ -710,6 +741,10 @@ mod tests {
             zeroed.shape,
             shape::BOX,
             "a world that lost this field on a reload comes back the boxes it was"
+        );
+        assert_eq!(
+            zeroed.transparency, 0.0,
+            "opaque — a zeroed alpha would be a world that vanished (§6 M92)"
         );
     }
 

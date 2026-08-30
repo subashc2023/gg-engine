@@ -10,9 +10,9 @@
 
 use crate::shaders_gen::ui as shader;
 use gg_rhi::{
-    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, DepthMode, DeviceAddress, DrawSpec,
-    FRAMES_IN_FLIGHT, ImageDesc, ImageFormat, ImageHandle, ImageUse, PipelineDesc, PipelineHandle,
-    RhiError, Sampler, TextureIndex,
+    Blend, BufferDesc, BufferHandle, BufferKind, ColorTarget, Cull, DepthMode, DeviceAddress,
+    DrawSpec, FRAMES_IN_FLIGHT, ImageDesc, ImageFormat, ImageHandle, ImageUse, PipelineDesc,
+    PipelineHandle, RhiError, Sampler, TextureIndex,
 };
 
 /// One UI vertex: a position in pixels, a coverage-atlas coordinate, and a
@@ -237,6 +237,7 @@ fn pipeline_desc() -> PipelineDesc<'static> {
         push_constant_size: core::mem::size_of::<shader::UiPush>() as u32,
         color: ColorTarget::Backbuffer,
         blend: Blend::Alpha,
+        cull: Cull::None,
         depth: DepthMode::Off,
         samples: gg_rhi::Samples::X1,
         depth_bias: false,
